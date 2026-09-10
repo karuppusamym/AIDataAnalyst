@@ -28,6 +28,7 @@ from aida.connectors.base import (
     QueryLogEntry,
     QueryResult,
     TableProfileSnapshot,
+    rows_to_dicts,
 )
 from aida.connectors.discovery import (
     TableMap,
@@ -217,15 +218,6 @@ _CONSTRAINT_TYPE_MAP = {
     "UNIQUE": "UNIQUE",
     "PRIMARY_KEY": "PRIMARY_KEY",
 }
-
-
-def _rows_to_dicts(cursor: Any, rows: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
-    if not rows:
-        return []
-    if isinstance(rows[0], dict):
-        return [dict(r) for r in rows]
-    col_names = [desc[0].lower() for desc in cursor.description] if cursor.description else []
-    return [dict(zip(col_names, row, strict=False)) for row in rows]
 
 
 # --- Envelope 1.1 (gap/02 N1) ------------------------------------------------
@@ -484,7 +476,7 @@ def _fetch_optional_rows(cursor: Any, sql: str) -> tuple[tuple[dict[str, Any], .
     """Run one supplementary metadata query, turning a refusal into a reason."""
     try:
         cursor.execute(sql)
-        return tuple(_rows_to_dicts(cursor, cursor.fetchall())), None
+        return tuple(rows_to_dicts(cursor, cursor.fetchall())), None
     except Exception as exc:
         return (), f"{type(exc).__name__}: {exc}"
 
@@ -880,7 +872,7 @@ class SnowflakeConnector(SqlExecutor):
                         ORDER BY c.table_schema, c.table_name, c.ordinal_position
                         """
                     )
-                    column_rows = _rows_to_dicts(cur, cur.fetchall())
+                    column_rows = rows_to_dicts(cur, cur.fetchall())
 
                     # Discover Primary Keys & Unique Constraints
                     cur.execute(
@@ -903,7 +895,7 @@ class SnowflakeConnector(SqlExecutor):
                             tc.constraint_name, kcu.ordinal_position
                         """
                     )
-                    pk_rows = _rows_to_dicts(cur, cur.fetchall())
+                    pk_rows = rows_to_dicts(cur, cur.fetchall())
 
                     # Discover Foreign Keys
                     cur.execute(
@@ -936,7 +928,7 @@ class SnowflakeConnector(SqlExecutor):
                             tc.constraint_name, kcu.ordinal_position
                         """
                     )
-                    fk_rows = _rows_to_dicts(cur, cur.fetchall())
+                    fk_rows = rows_to_dicts(cur, cur.fetchall())
 
                     # Envelope 1.1 (gap/02 N1): view text, routines with bodies,
                     # object comments and source grants.
@@ -1135,7 +1127,7 @@ class SnowflakeConnector(SqlExecutor):
                         """,
                         {"since": since, "database": database, "limit": limit},
                     )
-                    rows = _rows_to_dicts(cur, cur.fetchall())
+                    rows = rows_to_dicts(cur, cur.fetchall())
                 finally:
                     cur.close()
             finally:

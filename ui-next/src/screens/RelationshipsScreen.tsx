@@ -16,7 +16,7 @@ import {
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./RelationshipsScreen.css";
 
@@ -291,17 +291,22 @@ export function RelationshipsScreen() {
     });
   }, [items]);
 
+  /* A rejection carries a written reason -- the endpoint requires one. Both
+     the single and the bulk path collected it with `window.prompt`, which is
+     unlabelled, unvalidated, and returns `null` both when the user cancels
+     and when the browser refuses to show it at all (review 2026-09-05, F21).
+     `rejecting` names which of the two transactions is awaiting a rationale. */
+  const [rejecting, setRejecting] = useState<
+    { kind: "one"; candidateId: string } | { kind: "bulk"; count: number } | null
+  >(null);
+
   const decide = useCallback(
-    async (candidateId: string, decision: "APPROVE" | "REJECT") => {
-      let reason: string | null = null;
-      if (decision === "REJECT") {
-        reason = window.prompt("A reason is required to reject this relationship:");
-        if (!reason) return; // the endpoint itself requires a non-empty reason on REJECT
-      }
+    async (candidateId: string, decision: "APPROVE" | "REJECT", reason: string | null) => {
       setDeciding(candidateId);
       setDecisionError(null);
       try {
         await decideRelationshipCandidate(candidateId, { decision, reason });
+        setRejecting(null);
         await load();
       } catch (e) {
         setDecisionError(e instanceof ApiError ? e.detail : (e as Error).message);
@@ -313,14 +318,9 @@ export function RelationshipsScreen() {
   );
 
   const bulkDecide = useCallback(
-    async (decision: "APPROVE" | "REJECT") => {
+    async (decision: "APPROVE" | "REJECT", reason: string | null) => {
       const ids = [...checked];
       if (ids.length === 0) return;
-      let reason: string | null = null;
-      if (decision === "REJECT") {
-        reason = window.prompt(`A reason is required to reject these ${ids.length} relationships:`);
-        if (!reason) return;
-      }
       setBulkDeciding(true);
       setDecisionError(null);
       try {
@@ -385,10 +385,17 @@ export function RelationshipsScreen() {
         {checked.size > 0 ? (
           <div className="rel__bulk" role="status">
             <Pill tone="accent">{checked.size} selected</Pill>
-            <Button variant="primary" disabled={bulkDeciding} onClick={() => void bulkDecide("APPROVE")}>
+            <Button
+              variant="primary"
+              disabled={bulkDeciding}
+              onClick={() => void bulkDecide("APPROVE", null)}
+            >
               Approve selected
             </Button>
-            <Button disabled={bulkDeciding} onClick={() => void bulkDecide("REJECT")}>
+            <Button
+              disabled={bulkDeciding}
+              onClick={() => setRejecting({ kind: "bulk", count: checked.size })}
+            >
               Reject selected
             </Button>
             <Button onClick={() => setChecked(new Set())}>Clear</Button>
@@ -465,7 +472,11 @@ export function RelationshipsScreen() {
                   focused={item.candidate.id === focusedId}
                   onFocus={() => setParams({ candidate: item.candidate.id })}
                   deciding={deciding === item.candidate.id}
-                  onDecide={(decision) => void decide(item.candidate.id, decision)}
+                  onDecide={(decision) =>
+                    decision === "REJECT"
+                      ? setRejecting({ kind: "one", candidateId: item.candidate.id })
+                      : void decide(item.candidate.id, "APPROVE", null)
+                  }
                 />
               )}
             />
@@ -571,16 +582,38 @@ export function RelationshipsScreen() {
             </ol>
           </div>
           <footer className="evp__foot">
-            <Button
-              onClick={() => {
-                const permalink = `${location.origin}${location.pathname}?ds=${ds}&candidate=${focused.candidate.id}`;
-                void navigator.clipboard?.writeText(permalink);
-              }}
-            >
-              Copy permalink
-            </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/relationships`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+            <CopyLinkButton
+              target={{ screen: "relationships", params: { ds, candidate: focused.candidate.id } }}
+              label="Copy permalink"
+            />
           </footer>
         </aside>
+      ) : null}
+
+      {rejecting ? (
+        <ConfirmDialog
+          title={
+            rejecting.kind === "one"
+              ? "Reject this relationship"
+              : `Reject ${rejecting.count} relationships`
+          }
+          description="The rationale is recorded against the candidate so the next reviewer can see why it was not accepted."
+          reasonLabel="Why is this not a real relationship?"
+          requireReason
+          destructive
+          confirmLabel={rejecting.kind === "one" ? "Reject" : "Reject selected"}
+          busy={rejecting.kind === "one" ? deciding === rejecting.candidateId : bulkDeciding}
+          error={decisionError}
+          onCancel={() => setRejecting(null)}
+          onConfirm={(reason) => {
+            if (rejecting.kind === "one") void decide(rejecting.candidateId, "REJECT", reason);
+            else void bulkDecide("REJECT", reason);
+          }}
+        />
       ) : null}
 
       {datasourcesError ? <p className="rel__dserr" role="alert">{datasourcesError}</p> : null}

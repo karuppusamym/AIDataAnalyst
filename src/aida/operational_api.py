@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.connector_health import ConnectorHealthScore
@@ -23,6 +23,7 @@ from aida.models import (
     Project,
     ScanPolicy,
 )
+from aida.resource_scope import load_datasource_in_scope, load_project_in_scope
 from aida.schemas import (
     AnalysisRunRead,
     AuditEventRead,
@@ -33,6 +34,7 @@ from aida.schemas import (
     Page,
     ProjectRead,
 )
+from aida.scope_search import search_predicate
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.tool_first_rate import DEFAULT_WINDOW_DAYS, ToolFirstRate
 
@@ -118,6 +120,15 @@ class ToolFirstRateRead(ApiModel):
         )
 
 
+# F15: the picker search parameter's contract, stated once so both routes that
+# take it describe it identically in `openapi.json`.
+_SEARCH_DESCRIPTION = (
+    "Optional case-insensitive substring filter, applied within the rows this "
+    "caller is already entitled to see. Absent, empty, or whitespace-only means "
+    "no filter."
+)
+
+
 async def _require_organization(
     session: AsyncSession, context: SecurityContext, organization_id: UUID
 ) -> Organization:
@@ -175,6 +186,7 @@ async def list_organization_data_domains(
 @router.get("/organizations/{organization_id}/projects", response_model=Page)
 async def list_organization_projects(
     organization_id: UUID,
+    q: str | None = Query(default=None, max_length=200, description=_SEARCH_DESCRIPTION),
     line_of_business_id: UUID | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -190,11 +202,19 @@ async def list_organization_projects(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    """List a tenant's projects without an N+1 traversal through every LOB."""
+    """List a tenant's projects without an N+1 traversal through every LOB.
+
+    F15: `q` searches name and slug server-side, so a project beyond the
+    picker's first page is still reachable in one request rather than only by
+    paging the whole estate.
+    """
     await _require_organization(session, context, organization_id)
-    filters = [Project.organization_id == organization_id]
+    filters: list[ColumnElement[bool]] = [Project.organization_id == organization_id]
     if line_of_business_id:
         filters.append(Project.line_of_business_id == line_of_business_id)
+    search = search_predicate(q, Project.name, Project.slug)
+    if search is not None:
+        filters.append(search)
     total = await session.scalar(select(func.count()).select_from(Project).where(*filters))
     rows = (
         await session.scalars(
@@ -213,9 +233,40 @@ async def list_organization_projects(
     )
 
 
+@router.get("/projects/{project_id}", response_model=ProjectRead)
+async def get_project(
+    project_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin",
+            "OrganizationAdmin",
+            "ProjectAdmin",
+            "DataAdmin",
+            "Operations",
+            "Viewer",
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ProjectRead:
+    """F15: resolve one project by id, for a deep link or a remembered selection.
+
+    The picker's fallback before this route existed was to page the list route
+    until the id turned up -- one request per page, bounded only by how deep the
+    project happens to sit. This is that scan collapsed into one request.
+
+    Tenant boundary and 404-vs-403 behaviour are `aida.resource_scope`'s, not a
+    fourth copy of them: missing is 404, and whether another organization's
+    project is 403 or 404 is `enforce_organization`'s decision for every caller
+    of that helper at once.
+    """
+    project = await load_project_in_scope(session, project_id, context)
+    return ProjectRead.model_validate(project)
+
+
 @router.get("/organizations/{organization_id}/datasources", response_model=Page)
 async def list_organization_datasources(
     organization_id: UUID,
+    q: str | None = Query(default=None, max_length=200, description=_SEARCH_DESCRIPTION),
     project_id: UUID | None = None,
     datasource_status: str | None = Query(default=None, alias="status", max_length=30),
     limit: int = Query(default=100, ge=1, le=500),
@@ -234,13 +285,21 @@ async def list_organization_datasources(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    """List source summaries directly at tenant scope for large fleet consoles."""
+    """List source summaries directly at tenant scope for large fleet consoles.
+
+    F15: `q` searches the source name server-side (a datasource has no slug or
+    key, so name is the only thing a person types), keeping a source beyond the
+    picker's first page selectable in one request.
+    """
     await _require_organization(session, context, organization_id)
-    filters = [DataSource.organization_id == organization_id]
+    filters: list[ColumnElement[bool]] = [DataSource.organization_id == organization_id]
     if project_id:
         filters.append(DataSource.project_id == project_id)
     if datasource_status:
         filters.append(DataSource.status == datasource_status.upper())
+    search = search_predicate(q, DataSource.name)
+    if search is not None:
+        filters.append(search)
     total = await session.scalar(select(func.count()).select_from(DataSource).where(*filters))
     rows = (
         await session.scalars(
@@ -257,6 +316,42 @@ async def list_organization_datasources(
         offset=offset,
         total=total or 0,
     )
+
+
+@router.get("/datasources/{datasource_id}", response_model=DataSourceSummaryRead)
+async def get_datasource(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin",
+            "OrganizationAdmin",
+            "ProjectAdmin",
+            "MetadataAdmin",
+            "DataAdmin",
+            "Operations",
+            "Analyst",
+            "Viewer",
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DataSourceSummaryRead:
+    """F15: resolve one datasource by id, for a deep link or a remembered selection.
+
+    Same summary projection the list route returns, so a picker showing a
+    resolved-by-id source and a picker showing a listed one render identically.
+    Roles mirror `list_organization_datasources` exactly: a caller who can find
+    a source by paging can find it by id, and no caller gains reach by using
+    this route instead.
+
+    Deliberately `DataSourceSummaryRead` and deliberately here rather than
+    beside `PATCH /v1/datasources/{id}` in `atlas.modules.connectivity.router`:
+    that route answers with `DataSourceRead`, which carries
+    `credential_reference`, and is gated to DataAdmin/PlatformAdmin. This route
+    is readable down to Viewer, so it must not be able to return that field --
+    pairing it with the list route's projection is what guarantees it cannot.
+    """
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    return DataSourceSummaryRead.model_validate(datasource)
 
 
 @router.get(

@@ -76,6 +76,28 @@ async def generate_semantic_inference(
     ).all()
     if not table_rows:
         raise HTTPException(status_code=409, detail="no active tables are available for inference")
+    # A table already carrying an undecided proposal must not get a second
+    # one: the auto-enqueue-on-ingest drafter (`_emit_newly_created_table_events`
+    # -> `newly_created_table_drafter.enqueue_semantics_for_source`) already
+    # calls this same function per newly-discovered table, so an explicit
+    # `POST .../semantic-inference-runs` covering the whole datasource right
+    # after a scan would otherwise propose every table a second time -- the
+    # same duplicate-candidate problem `discover_relationship_candidates`
+    # (intelligence_api.py) avoids via its own `existing_candidate_pairs` set.
+    already_proposed_table_ids = set(
+        await session.scalars(
+            select(MetadataEnrichmentProposal.table_id).where(
+                MetadataEnrichmentProposal.datasource_id == datasource.id,
+                MetadataEnrichmentProposal.table_id.in_(
+                    [table.id for table, _schema in table_rows]
+                ),
+                MetadataEnrichmentProposal.status == "PENDING_REVIEW",
+            )
+        )
+    )
+    table_rows = [
+        row for row in table_rows if row[0].id not in already_proposed_table_ids
+    ]
     table_ids = [table.id for table, _schema in table_rows]
     columns = list(
         await session.scalars(

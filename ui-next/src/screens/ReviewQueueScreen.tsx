@@ -1,10 +1,40 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* Filters and selection live in the URL so a filtered view is shareable and
+   survives Back/Forward. This screen carried a verbatim copy of the old hook
+   -- a `useState` seeded once from `location.search`, subscribed to nothing --
+   so its idea of the selection and the address bar drifted apart the first
+   time either the Back button or a same-screen link was used (review
+   2026-09-05, F09 - R07). The shared hook reads one location store. */
+import { useUrlState } from "../lib/useUrlState";
 import type { ReviewQueueProposalRead } from "../lib/types";
 import { ApiError, decideGovernanceReview, fetchReviewQueue } from "../lib/api";
+import { useSession } from "../lib/session";
 import { VirtualList } from "../components/VirtualList";
 import { PropagationLog } from "../components/PropagationLog";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
-import "../components/ProposalCard.css";
+import {
+  Button,
+  ConfirmDialog,
+  CopyLinkButton,
+  Empty,
+  ErrorState,
+  Field,
+  Pill,
+  useToast,
+} from "../components/primitives";
+/* T18: the detail pane is the shared review shell. This screen keeps its own
+   route, its own queue, its own filters and its own per-object-type diff and
+   evidence renderers -- what it stopped owning is the *shape* of a review
+   detail, and in particular what a reviewer is shown when another decision
+   won the race (F05). */
+import {
+  ReviewDetailShell,
+  conflictFromError,
+  type ReviewConflict,
+} from "../components/ReviewDetail";
+/* The .prop/.conf/.dl classes `ProposalRow` below renders. The file kept
+ * its name from a fixture-era `ProposalCard` component that no longer exists
+ * (D01): the component was dead, these styles were not. */
+import "../components/ProposalRow.css";
 import "../components/EvidencePane.css";
 import "./ReviewQueueScreen.css";
 
@@ -65,22 +95,6 @@ const OBJECT_TYPES = [
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
-function useUrlState() {
-  const [params, setParams] = useState(() => new URLSearchParams(location.search));
-  const update = useCallback((patch: Record<string, string | null>) => {
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null || v === "") next.delete(k);
-        else next.set(k, v);
-      }
-      const query = next.toString();
-      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
-      return next;
-    });
-  }, []);
-  return [params, update] as const;
-}
 
 /** P1-03: per-object-type row-detail renderers. The queue already ships
  *  every object_type through the same generic ProposalRow; this map only
@@ -184,12 +198,16 @@ function ProposalRow({
   onFocus,
   onDecide,
   deciding,
+  ownProposal,
+  decisionError,
 }: {
   proposal: ReviewQueueProposalRead;
   focused: boolean;
   onFocus: () => void;
   onDecide: (decision: "APPROVE" | "REJECT") => void;
   deciding: boolean;
+  ownProposal: boolean;
+  decisionError?: string;
 }) {
   const decided = proposal.status !== "PENDING";
   const extras = renderRowExtras(proposal);
@@ -258,6 +276,10 @@ function ProposalRow({
             {proposal.decided_by ? ` by ${proposal.decided_by}` : ""}
             {proposal.decision_reason ? ` — ${proposal.decision_reason}` : ""}
           </span>
+        ) : ownProposal ? (
+          <span className="prop__own-review">
+            You proposed this change. Another reviewer must approve or reject it.
+          </span>
         ) : (
           <>
             <Button variant="primary" disabled={deciding} onClick={() => onDecide("APPROVE")}>
@@ -268,6 +290,9 @@ function ProposalRow({
             </Button>
           </>
         )}
+        {decisionError ? (
+          <span className="prop__decision-error" role="alert">{decisionError}</span>
+        ) : null}
       </div>
     </article>
   );
@@ -275,6 +300,7 @@ function ProposalRow({
 
 export function ReviewQueueScreen() {
   const [params, setParams] = useUrlState();
+  const principalId = useSession().me?.principal_id ?? null;
   // "ALL" in the URL is this screen's own spelling for "every status" — the
   // API's spelling is an explicit empty string (see `fetchReviewQueue`'s own
   // comment on why `null` there is distinct from omitting the param), which
@@ -287,7 +313,27 @@ export function ReviewQueueScreen() {
   const [data, setData] = useState<{ proposals: ReviewQueueProposalRead[]; byStatus: Record<string, number> } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
   const [deciding, setDeciding] = useState<string | null>(null);
+  /* Rejection needs a written rationale -- the endpoint refuses REJECT without
+     one. That was collected with `window.prompt`, which cannot be labelled or
+     validated, is blocked outright by some browsers (returning `null`, which
+     this screen read as "cancelled", so the reviewer's decision vanished), and
+     leaves no accessible name on anything. `ConfirmDialog` is the same
+     transaction with a real focus-trapped dialog, a required field, and the
+     server's own error shown in place (review 2026-09-05, F21). */
+  const [rejecting, setRejecting] = useState<string | null>(null);
+  const [decideError, setDecideError] = useState<string | null>(null);
+  const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
+  /* A 409 is not an error message. The decision service answers a lost claim
+     with the review's refreshed state (F05), so the reviewer who lost is shown
+     WHICH decision won rather than "409 Conflict" -- which is what the old
+     error slot said, because the structured detail was discarded by the
+     decoder before it ever reached here. Keyed by review so a conflict
+     survives the reload that follows it. */
+  const [conflicts, setConflicts] = useState<Record<string, ReviewConflict>>({});
+  const rejectingRef = useRef<string | null>(null);
+  rejectingRef.current = rejecting;
 
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
@@ -324,23 +370,49 @@ export function ReviewQueueScreen() {
   const proposals = data?.proposals ?? [];
 
   const decide = useCallback(
-    async (reviewId: string, decision: "APPROVE" | "REJECT") => {
-      let reason: string | null = null;
-      if (decision === "REJECT") {
-        reason = window.prompt("A reason is required to reject this proposal:");
-        if (!reason) return; // the endpoint itself requires a non-empty reason on REJECT
-      }
+    async (reviewId: string, decision: "APPROVE" | "REJECT", reason: string | null) => {
       setDeciding(reviewId);
+      setDecideError(null);
+      setDecisionErrors((current) => {
+        if (!(reviewId in current)) return current;
+        const next = { ...current };
+        delete next[reviewId];
+        return next;
+      });
       try {
         await decideGovernanceReview(reviewId, { decision, reason });
+        setRejecting(null);
+        // The list refetches underneath, which on its own looks like nothing
+        // happened. Say what was recorded.
+        toast.show(
+          decision === "APPROVE" ? "Approval recorded." : "Rejection recorded with your rationale.",
+        );
         await load();
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        const message = e instanceof ApiError ? e.detail : (e as Error).message;
+        // A failed decision belongs next to that decision, not in the screen's
+        // load-error slot. A maker-checker refusal (or an already-decided race)
+        // must never replace the successfully loaded queue with "could not be
+        // loaded". Rejections keep the dialog and rationale; direct approvals
+        // keep the row and put the server's refusal beside its controls.
+        const conflict = conflictFromError(e);
+        if (conflict) {
+          /* A refusal about this review's own state is not a message beside a
+             button: the reviewer needs to see what the review now IS. Close
+             the rationale dialog, open the detail on this review, and re-read
+             the queue so the row underneath stops claiming PENDING. */
+          setConflicts((current) => ({ ...current, [reviewId]: conflict }));
+          setRejecting(null);
+          setDecideError(null);
+          setParams({ review: reviewId });
+          await load();
+        } else if (rejectingRef.current) setDecideError(message);
+        else setDecisionErrors((current) => ({ ...current, [reviewId]: message }));
       } finally {
         setDeciding(null);
       }
     },
-    [load],
+    [load, setParams],
   );
 
   const totalPending = data?.byStatus["PENDING"] ?? 0;
@@ -354,6 +426,7 @@ export function ReviewQueueScreen() {
 
   return (
     <div className="rq">
+      {toast.node}
       <header className="rq__head">
         <div>
           <h1 className="rq__h1">Review queue</h1>
@@ -396,7 +469,7 @@ export function ReviewQueueScreen() {
       <div className="rq__tiles">
         <div className="tile tile--warn">
           <div className="tile__n tnum">{totalPending}</div>
-          <div className="tile__l">pending your judgment</div>
+          <div className="tile__l">pending review</div>
         </div>
         <div className="tile tile--ok">
           <div className="tile__n tnum">{totalApproved}</div>
@@ -432,7 +505,13 @@ export function ReviewQueueScreen() {
                 focused={p.review_id === focusedId}
                 onFocus={() => setParams({ review: p.review_id })}
                 deciding={deciding === p.review_id}
-                onDecide={(decision) => void decide(p.review_id, decision)}
+                ownProposal={principalId !== null && p.requested_by === principalId}
+                decisionError={decisionErrors[p.review_id]}
+                onDecide={(decision) =>
+                  decision === "REJECT"
+                    ? setRejecting(p.review_id)
+                    : void decide(p.review_id, "APPROVE", null)
+                }
               />
             )}
           />
@@ -440,46 +519,105 @@ export function ReviewQueueScreen() {
       </div>
 
       {focused ? (
-        <aside className="evp rq__evidence" aria-label="Proposal detail">
-          <header className="evp__head">
-            <div className="evp__title">
-              <div className="evp__name">{renderRowExtras(focused).subject}</div>
-              <div className="evp__path">{focused.object_type} · {focused.requested_action}</div>
-            </div>
-            <button className="evp__x" onClick={() => setParams({ review: null })} aria-label="Close">
-              ×
-            </button>
-          </header>
-          <div className="evp__body">
-            <DiffEntries proposal={focused} />
-            <ol className="evl">
-              {(focused.evidence ?? []).map((e, i) => (
-                <li key={i} className="evi evi--info">
-                  <div className="evi__label">{e.category.replace(/_/g, " ")}</div>
-                  <div className="evi__value">{e.claim}</div>
-                  <div className="evi__source">{e.source}</div>
-                </li>
-              ))}
-            </ol>
-          </div>
-          <footer className="evp__foot">
-            <Button
-              onClick={() => {
-                const permalink = `${location.origin}${location.pathname}?review=${focused.review_id}`;
-                void navigator.clipboard?.writeText(permalink);
-              }}
-            >
-              Copy permalink
-            </Button>
-          </footer>
-        </aside>
+        <ReviewDetailShell
+          label="Proposal detail"
+          className="rq__evidence"
+          identity={{
+            subject: renderRowExtras(focused).subject,
+            target: `${focused.object_type} · ${focused.requested_action}`,
+            status: focused.status,
+            raisedBy: focused.requested_by,
+            raisedAt: focused.created_at,
+            confidence: focused.confidence ?? null,
+          }}
+          assignment={{
+            decidedBy: focused.decided_by,
+            decidedAt: focused.decided_at,
+            decisionReason: focused.decision_reason,
+            blockedReason:
+              focused.status !== "PENDING"
+                ? `This review is already ${focused.status.toLowerCase()}.`
+                : principalId !== null && focused.requested_by === principalId
+                  ? "You proposed this change. Another reviewer must approve or reject it."
+                  : null,
+          }}
+          diff={<DiffEntries proposal={focused} />}
+          /* Impact: this queue composes no consumer/impact set today. Saying so
+             is the honest state -- an empty "affects nothing" would be a claim
+             the read model never made. */
+          evidence={
+            (focused.evidence ?? []).length > 0 ? (
+              <ol className="evl">
+                {(focused.evidence ?? []).map((e, i) => (
+                  <li key={i} className="evi evi--info">
+                    <div className="evi__label">{e.category.replace(/_/g, " ")}</div>
+                    <div className="evi__value">{e.claim}</div>
+                    <div className="evi__source">{e.source}</div>
+                  </li>
+                ))}
+              </ol>
+            ) : undefined
+          }
+          decision={{
+            busy: deciding === focused.review_id,
+            error: decisionErrors[focused.review_id] ?? null,
+            /* The endpoint refuses a REJECT without a rationale and accepts an
+               APPROVE without one. Stated, not assumed. */
+            reasonRequiredFor: ["REJECT"],
+            onDecide: (verdict, reason) =>
+              void decide(focused.review_id, verdict, reason),
+          }}
+          conflict={conflicts[focused.review_id] ?? null}
+          onRefresh={() => void load()}
+          onDismissConflict={() =>
+            setConflicts((current) => {
+              const next = { ...current };
+              delete next[focused.review_id];
+              return next;
+            })
+          }
+          onClose={() => setParams({ review: null })}
+          footer={
+            /* The copied link names the screen that resolves this selection.
+               Built as `origin + pathname + '?' + id` it carried no
+               `#/governance`, so a fresh tab landed on the persona default and
+               the id was read by nobody (review 2026-09-05, F08). */
+            <CopyLinkButton
+              target={{ screen: "governance", params: { review: focused.review_id } }}
+              label="Copy permalink"
+            />
+          }
+        />
+      ) : null}
+
+      {rejecting ? (
+        <ConfirmDialog
+          title="Reject this proposal"
+          description="The rationale is recorded on the review and is visible to whoever raised it."
+          reasonLabel="Why is this being rejected?"
+          requireReason
+          destructive
+          confirmLabel="Reject proposal"
+          busy={deciding === rejecting}
+          error={decideError}
+          onCancel={() => {
+            setRejecting(null);
+            setDecideError(null);
+          }}
+          onConfirm={(reason) => void decide(rejecting, "REJECT", reason)}
+        />
       ) : null}
 
       {PROPAGATION_LOG_ENABLED ? (
         <section className="rq__sec">
-          <h2 className="rq__h2">Why orders_raw is currently blocked</h2>
+          <h2 className="rq__h2">How a quality incident propagates (worked example)</h2>
+          {/* D02: kept, and labelled. The gate below being on is not evidence
+              that a traversal happened -- so the section says whose data this
+              is not, in the heading, in the pill and in the accessible name. */}
           <PropagationLog
             title="Quality propagation · ADR-0016 fails closed"
+            illustrative
+            illustrativeNote="A hard-coded four-step story about a sample table. No lineage walk produced it: `quality_coupling.check_tool_gate` gates only on a tool's own declared dependencies, and no classification-propagation mechanism exists yet (AT-11). It is here to show the shape of the explanation a real traversal will render."
             steps={[
               {
                 kind: "origin",

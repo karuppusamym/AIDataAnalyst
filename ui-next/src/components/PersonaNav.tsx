@@ -47,7 +47,11 @@ export function PersonaNav({ identityProvider, persona, onPersonaChange }: Perso
         <span className="snav__pvalue" data-testid="persona-value" aria-labelledby="persona-label">
           {persona ?? "No persona mapped for your groups"}
         </span>
-        <span className="snav__pnote">Derived from your OIDC groups</span>
+        <span className="snav__pnote">
+          Who you are, from your OIDC groups. What you can open is every work
+          area in the sidebar; what you may do is decided by the backend on
+          every request.
+        </span>
       </div>
     );
   }
@@ -69,7 +73,15 @@ export function PersonaNav({ identityProvider, persona, onPersonaChange }: Perso
           </option>
         ))}
       </select>
-      <span className="snav__pnote">Dev only — derived from OIDC in production</span>
+      {/* F22: say what this control does and, more importantly, what it does
+          not. Switching here changes which work area the shell lands in and
+          which checklist Overview shows. It does NOT change the identity sent
+          with requests: in development mode that is the configured dev
+          principal with its full role list, whatever this dropdown says. */}
+      <span className="snav__pnote">
+        Dev only — changes this shell's presentation, not the identity or roles
+        sent with requests. Derived from OIDC in production.
+      </span>
     </div>
   );
 }

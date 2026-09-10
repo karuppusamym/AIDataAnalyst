@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { postJson, putJson } from "../lib/api";
 import type { AssetDescriptionDraftRead } from "../lib/types";
-import { Button, Field } from "./primitives";
+import { Button, Field, useUnsavedChanges } from "./primitives";
 
 export function DescriptionEditor({ tableId, currentText = "", draft, onSaved }: {
   tableId: string; currentText?: string; draft?: AssetDescriptionDraftRead; onSaved?: () => void;
@@ -12,15 +12,23 @@ export function DescriptionEditor({ tableId, currentText = "", draft, onSaved }:
   const [message, setMessage] = useState("");
   const [versionId, setVersionId] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  /* A half-written description died on a stray click or a tab close, with no
+     warning at all (review 2026-09-05, F21). `dirty` is "typed something that
+     is not what the server has", which stops being true the moment a save
+     succeeds. */
+  const [savedText, setSavedText] = useState(original);
+  useUnsavedChanges(text.trim() !== savedText.trim());
   const save = async () => {
     setBusy(true); setMessage("");
     try {
       if (draft) {
         await putJson(`/v1/asset-description-drafts/${draft.id}`, { drafted_text: text, expected_text: original });
+        setSavedText(text);
         setMessage("Edits saved. Submit the draft for independent review when ready.");
       } else {
         const version = await postJson<{ id: string }>(`/v1/metadata/tables/${tableId}/documentation-versions`, { readme: text, aliases: [] });
         setVersionId(version.id);
+        setSavedText(text);
         setMessage("Revision saved. Submit it for independent review.");
       }
       onSaved?.();

@@ -19,11 +19,40 @@ In deployments that require every ownership flip to be a governed decision,
 the flag turns the handler into a no-op and operators fall back to the GL-7
 ``REASSIGN_LEAVER`` operator flow.
 
-The handler is called both by the outbox worker that consumes the two
-event types AND directly by ``identity_events.emit_principal_deleted`` /
-``emit_principal_merged`` (see that module for the emission side) so a
-same-transaction delete gets same-transaction reassignment without a wait
-for the outbox to drain -- the P2-08 pattern.
+The handler has exactly two callers, and F19
+(``Docs/review-2026-09-05/REVIEW.md``) is the record of what happened when
+the docstring claimed a third that did not exist:
+
+* ``identity_events.emit_principal_deleted`` / ``emit_principal_merged`` --
+  the same-transaction path, so a delete performed through an identity
+  workflow gets its reassignment in the same transaction rather than waiting
+  for the outbox to drain (the P2-08 pattern);
+* ``principal_reconciliation.run_principal_reconciliation_pass`` -- the
+  scheduled replay of those same outbox events, which is what makes this
+  module reachable from a running process at all. It is off by default.
+
+Both handlers are idempotent by construction, which is what lets the second
+caller replay an event the first already applied: each selects only ACTIVE
+assignments still held by the departed principal, and applying the same
+event twice finds an empty set the second time -- no second audit row, no
+second outbox row, no mutation. See ``principal_reconciliation`` for why
+that, rather than a processed-event watermark, is the replay-safety
+guarantee.
+
+Ownership record (D02; F19)
+---------------------------
+:Owner: platform governance -- ownership and identity lifecycle.
+:Default: gated OFF twice over -- ``ownership_leaver_auto_reassign`` turns
+    both handlers into no-ops, and the only scheduled caller is itself
+    disabled by default (``principal_reconciliation_enabled``).
+:Production eligibility: eligible in deployments that want a leaver's
+    ownership reconciled automatically. Deployments requiring every
+    ownership flip to be a governed decision leave
+    ``ownership_leaver_auto_reassign`` off and use the GL-7
+    ``REASSIGN_LEAVER`` operator flow instead.
+:Retirement condition: retire together with ``identity_events`` if principal
+    lifecycle moves to an external identity service that reassigns ownership
+    itself.
 """
 
 from __future__ import annotations

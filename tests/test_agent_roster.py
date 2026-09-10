@@ -40,8 +40,10 @@ from sqlalchemy.pool import StaticPool
 
 from aida.agent_roster import compose_agent_roster
 from aida.agent_roster_api import get_agent_roster
+from aida.config import Settings
 from aida.db import Base
 from aida.models import (
+    AgentContract,
     AgentRun,
     AiAsset,
     AiAssetVersion,
@@ -166,6 +168,7 @@ def _agent_run(
     confidence: float | None = None,
     created_at: datetime,
     failure_reason: str | None = None,
+    ai_asset_version_id: UUID | None = None,
 ) -> AgentRun:
     plan_evidence: dict[str, object] = {}
     if strategy is not None:
@@ -182,6 +185,7 @@ def _agent_run(
         generation_source=generation_source,
         plan_evidence=plan_evidence,
         failure_reason=failure_reason,
+        ai_asset_version_id=ai_asset_version_id,
     )
     run.created_at = created_at
     return run
@@ -206,6 +210,7 @@ async def test_compose_agent_roster_assembles_purpose_method_and_results(
             strategy="GOVERNED_TOOL",
             confidence=0.95,
             created_at=_NOW - timedelta(hours=1),
+            ai_asset_version_id=version.id,
         ),
         _agent_run(
             organization_id=org.id,
@@ -214,6 +219,7 @@ async def test_compose_agent_roster_assembles_purpose_method_and_results(
             strategy="GOVERNED_TOOL",
             confidence=0.9,
             created_at=_NOW - timedelta(hours=2),
+            ai_asset_version_id=version.id,
         ),
         _agent_run(
             organization_id=org.id,
@@ -222,6 +228,7 @@ async def test_compose_agent_roster_assembles_purpose_method_and_results(
             strategy="MODEL_GENERATION",
             confidence=0.6,
             created_at=_NOW - timedelta(hours=3),
+            ai_asset_version_id=version.id,
         ),
         # A failed run should surface in recent_results but is excluded from
         # the COMPLETED-only method aggregation (mirrors TL-6's own rule).
@@ -234,6 +241,7 @@ async def test_compose_agent_roster_assembles_purpose_method_and_results(
             confidence=0.4,
             created_at=_NOW - timedelta(hours=4),
             failure_reason="SQL_GUARD_REJECTED",
+            ai_asset_version_id=version.id,
         ),
     ]
     session.add_all(runs)
@@ -256,7 +264,7 @@ async def test_compose_agent_roster_assembles_purpose_method_and_results(
     # Method: aggregated from plan_evidence/generation_source over COMPLETED
     # runs only -- 2 GOVERNED_TOOL + 1 MODEL_GENERATION, the FAILED run
     # excluded.
-    assert entry.method.scope == "ORGANIZATION_WIDE"
+    assert entry.method.scope == "AGENT_VERSION"
     assert entry.method.sampled_runs == 3
     assert entry.method.by_strategy == {"GOVERNED_TOOL": 2, "MODEL_GENERATION": 1}
     assert entry.method.average_confidence == pytest.approx(round((0.95 + 0.9 + 0.6) / 3, 4))
@@ -392,3 +400,221 @@ async def test_the_wired_in_route_returns_the_composed_roster(session: AsyncSess
 
     assert roster.organization_id == org.id
     assert roster.total_agents == 1
+
+
+# ---------------------------------------------------------------------------
+# 4. AR-07: runs are attributed through the link, or to nobody.
+# ---------------------------------------------------------------------------
+
+
+async def test_ar07_a_run_with_no_agent_identity_is_attributed_to_nobody(
+    session: AsyncSession,
+) -> None:
+    """AR-07. A person asking the runtime a question produces an `AgentRun`
+    with no `ai_asset_version_id`. It used to be counted against every
+    registered agent in the organization."""
+    org, datasource = await _seed_org_and_datasource(session)
+    _asset, _version = await _seed_agent_asset(session, organization_id=org.id)
+    session.add(
+        _agent_run(
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            generation_source="GOVERNED_TOOL",
+            strategy="GOVERNED_TOOL",
+            confidence=0.9,
+            created_at=_NOW - timedelta(hours=1),
+        )
+    )
+    await session.flush()
+
+    roster = await compose_agent_roster(session, organization_id=org.id, now=_NOW)
+
+    entry = roster.agents[0]
+    assert entry.method.sampled_runs == 0
+    assert entry.recent_results_total == 0
+    assert entry.method.tool_first.total_executions == 0
+
+    assert roster.unattributed.method.scope == "ORGANIZATION_WIDE"
+    assert roster.unattributed.recent_results_total == 1
+    assert roster.unattributed.method.sampled_runs == 1
+
+
+async def test_ar07_two_agents_do_not_share_each_others_runs(
+    session: AsyncSession,
+) -> None:
+    """The previous shape gave both agents the same organization-wide totals,
+    so two registered agents were indistinguishable however differently they
+    behaved."""
+    org, datasource = await _seed_org_and_datasource(session)
+    _first_asset, first = await _seed_agent_asset(
+        session, organization_id=org.id, asset_key="agent-one"
+    )
+    _second_asset, second = await _seed_agent_asset(
+        session, organization_id=org.id, asset_key="agent-two"
+    )
+    session.add_all(
+        [
+            _agent_run(
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                generation_source="GOVERNED_TOOL",
+                strategy="GOVERNED_TOOL",
+                confidence=0.9,
+                created_at=_NOW - timedelta(hours=1),
+                ai_asset_version_id=first.id,
+            ),
+            _agent_run(
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                generation_source="MODEL_GATEWAY",
+                strategy="MODEL_GENERATION",
+                confidence=0.5,
+                created_at=_NOW - timedelta(hours=2),
+                ai_asset_version_id=second.id,
+            ),
+            _agent_run(
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                generation_source="MODEL_GATEWAY",
+                strategy="MODEL_GENERATION",
+                confidence=0.5,
+                created_at=_NOW - timedelta(hours=3),
+                ai_asset_version_id=second.id,
+            ),
+        ]
+    )
+    await session.flush()
+
+    roster = await compose_agent_roster(session, organization_id=org.id, now=_NOW)
+    by_key = {entry.purpose.asset_key: entry for entry in roster.agents}
+
+    assert by_key["agent-one"].method.by_strategy == {"GOVERNED_TOOL": 1}
+    assert by_key["agent-one"].method.tool_first.rate == 1.0
+    assert by_key["agent-two"].method.by_strategy == {"MODEL_GENERATION": 2}
+    assert by_key["agent-two"].method.tool_first.rate == 0.0
+    assert roster.unattributed.recent_results_total == 0
+
+
+async def test_ar07_a_registered_agent_the_platform_never_runs_reports_zero(
+    session: AsyncSession,
+) -> None:
+    """The governance-dossier case: a registration for something no code path
+    in this platform executes. It reports zero, not the organization's."""
+    org, datasource = await _seed_org_and_datasource(session)
+    _asset, dossier = await _seed_agent_asset(
+        session, organization_id=org.id, asset_key="fraud-triage-agent"
+    )
+    _other_asset, executed = await _seed_agent_asset(
+        session, organization_id=org.id, asset_key="governed-answer-agent-2"
+    )
+    session.add(
+        _agent_run(
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            generation_source="GOVERNED_TOOL",
+            strategy="GOVERNED_TOOL",
+            confidence=0.9,
+            created_at=_NOW - timedelta(hours=1),
+            ai_asset_version_id=executed.id,
+        )
+    )
+    await session.flush()
+    assert dossier.id != executed.id
+
+    roster = await compose_agent_roster(session, organization_id=org.id, now=_NOW)
+    by_key = {entry.purpose.asset_key: entry for entry in roster.agents}
+
+    assert by_key["fraud-triage-agent"].method.sampled_runs == 0
+    assert by_key["fraud-triage-agent"].recent_results == []
+    assert by_key["governed-answer-agent-2"].method.sampled_runs == 1
+
+
+async def test_ar07_the_reviewer_agent_reports_its_real_auto_apply_branch(
+    session: AsyncSession,
+) -> None:
+    """The blanket "no agent auto-applies" text was false once ADR-0027
+    shipped. An agent whose contract carries the reviewer principal reports
+    the branch and the threshold that governs it."""
+    org, _datasource = await _seed_org_and_datasource(session)
+    _asset, version = await _seed_agent_asset(
+        session, organization_id=org.id, asset_key="reviewer-agent"
+    )
+    session.add(
+        AgentContract(
+            organization_id=org.id,
+            ai_asset_version_id=version.id,
+            agent_principal_id="agent:reviewer",
+            capability_envelope={
+                "tool_slugs": [],
+                "context_product_ids": [],
+                "write_lanes": [],
+            },
+            autonomy_tier="T1",
+            supervisor_persona="REVIEWER",
+            kill_scope="AGENT",
+            sampling_rate=0.05,
+            created_by="risk-officer",
+        )
+    )
+    await session.flush()
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        reviewer_agent_enabled=True,
+        reviewer_agent_principal_id="agent:reviewer",
+        reviewer_agent_approve_confidence=0.8,
+    )
+
+    roster = await compose_agent_roster(
+        session, organization_id=org.id, settings=settings, now=_NOW
+    )
+    auto_apply = roster.agents[0].auto_apply
+
+    assert auto_apply.has_auto_apply_branch is True
+    assert auto_apply.threshold == 0.8
+    assert auto_apply.threshold_source == "Settings.reviewer_agent_approve_confidence"
+    assert auto_apply.enabled is True
+    assert "HARD_MAX_AGENT_TIER" in auto_apply.evidence
+
+
+async def test_ar07_a_disabled_reviewer_agent_reports_the_branch_as_off(
+    session: AsyncSession,
+) -> None:
+    """A branch that exists and is switched off is a different answer from a
+    branch that does not exist. Collapsing them would misreport both."""
+    org, _datasource = await _seed_org_and_datasource(session)
+    _asset, version = await _seed_agent_asset(
+        session, organization_id=org.id, asset_key="reviewer-agent"
+    )
+    session.add(
+        AgentContract(
+            organization_id=org.id,
+            ai_asset_version_id=version.id,
+            agent_principal_id="agent:reviewer",
+            capability_envelope={
+                "tool_slugs": [],
+                "context_product_ids": [],
+                "write_lanes": [],
+            },
+            autonomy_tier="T1",
+            supervisor_persona="REVIEWER",
+            kill_scope="AGENT",
+            sampling_rate=0.05,
+            created_by="risk-officer",
+        )
+    )
+    await session.flush()
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        reviewer_agent_enabled=False,
+        reviewer_agent_principal_id="agent:reviewer",
+    )
+
+    roster = await compose_agent_roster(
+        session, organization_id=org.id, settings=settings, now=_NOW
+    )
+    auto_apply = roster.agents[0].auto_apply
+
+    assert auto_apply.has_auto_apply_branch is True
+    assert auto_apply.enabled is False

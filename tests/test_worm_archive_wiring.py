@@ -1,39 +1,45 @@
-"""OB-3: the audit's finding was "Zero call sites. Nothing writes
-`AuditArchiveRecord`, yet `GET /observability/archive/status` reads it -- so
-it returns zeros forever while looking healthy."
+"""OB-3: the sweep has a caller, and the endpoint stops reporting zeros.
+
+The original audit finding was "zero call sites -- nothing writes
+`AuditArchiveRecord`, yet `GET /observability/archive/status` reads it, so it
+returns zeros forever while looking healthy"
 (`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` Sec.2).
 
-`aida.worm_archive.archive_pending_audit_events` is the real trigger that
-was missing: it reads real `AuditEvent` rows, calls the (already-correct,
-already-tested) pure `archive_audit_events`, and persists the result as a
-real `AuditArchiveRecord`. This module proves the full loop end to end,
-including the observability API endpoint that reads it back.
+The 2026-09-05 review then found the caller that was added was not enough:
+it wrote a record describing an archive that had never been stored anywhere
+(F01). So this file now asserts the wiring *and* what the wiring is allowed
+to claim -- a status endpoint that counts only VERIFIED archives, and a
+sweep that reaches VERIFIED only through a destination that took the bytes.
+
+The lifecycle itself (states, membership, leases, late arrivals, crash
+recovery) is covered in `tests/test_worm_archive_lifecycle.py`; this file
+stays focused on the wiring the audit named.
 """
 
-import itertools
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
-from sqlalchemy import event, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import aida.models  # noqa: F401  -- registers every table on the metadata
+from aida.audit_archive_storage import FilesystemArchiveStorage, NullArchiveStorage
 from aida.db import Base
 from aida.models import AuditArchiveRecord, AuditEvent, Organization
 from aida.observability_api import get_archive_status
 from aida.security_types import SecurityContext
-from aida.worm_archive import ArchiveConfig, archive_pending_audit_events
-
-_audit_event_ids = itertools.count(1)
-
-
-@event.listens_for(AuditEvent, "before_insert")
-def _assign_audit_event_id(mapper: object, connection: object, target: AuditEvent) -> None:
-    if target.id is None:
-        target.id = next(_audit_event_ids)
+from aida.worm_archive import (
+    STATE_FAILED,
+    STATE_VERIFIED,
+    ArchiveConfig,
+    archive_pending_audit_events,
+    storage_for,
+)
 
 
 @pytest_asyncio.fixture
@@ -47,10 +53,23 @@ async def session() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
+@pytest.fixture
+def storage(tmp_path: Path) -> FilesystemArchiveStorage:
+    return FilesystemArchiveStorage(tmp_path / "worm")
+
+
+def _config(tmp_path: Path) -> ArchiveConfig:
+    return ArchiveConfig(
+        retention_days=2555,
+        storage_backend="filesystem",
+        filesystem_root=str(tmp_path / "worm"),
+    )
+
+
 async def _seed_organization(session: AsyncSession) -> Organization:
     org = Organization(id=uuid4(), name="Test Bank", slug=f"test-bank-{uuid4().hex[:8]}")
     session.add(org)
-    await session.flush()
+    await session.commit()
     return org
 
 
@@ -58,6 +77,7 @@ async def _seed_audit_events(session: AsyncSession, org: Organization, count: in
     for i in range(count):
         session.add(
             AuditEvent(
+                id=i + 1,
                 organization_id=org.id,
                 principal_id="analyst-1",
                 principal_type="USER",
@@ -70,22 +90,31 @@ async def _seed_audit_events(session: AsyncSession, org: Organization, count: in
                 occurred_at=datetime(2026, 8, 30, 12, i, tzinfo=UTC),
             )
         )
-    await session.flush()
+    await session.commit()
 
 
-async def test_archive_pending_audit_events_persists_a_real_archive_record(
-    session: AsyncSession,
+def _context(org: Organization) -> SecurityContext:
+    return SecurityContext(
+        principal_id="ops-1",
+        principal_type="USER",
+        organization_id=org.id,
+        roles=frozenset({"Operations"}),
+    )
+
+
+async def test_sweep_persists_a_record_backed_by_a_stored_object(
+    session: AsyncSession, storage: FilesystemArchiveStorage
 ) -> None:
     org = await _seed_organization(session)
     await _seed_audit_events(session, org, count=3)
 
-    config = ArchiveConfig(retention_days=2555, storage_backend="s3")
-    result = await archive_pending_audit_events(session, org.id, config)
-    await session.commit()
+    result = await archive_pending_audit_events(
+        session, org.id, ArchiveConfig(storage_backend="filesystem"), storage=storage
+    )
 
     assert result is not None
+    assert result.state == STATE_VERIFIED
     assert result.archived_count == 3
-    assert result.archive_id.startswith("archive-")
 
     stored = (
         await session.scalars(
@@ -96,69 +125,47 @@ async def test_archive_pending_audit_events_persists_a_real_archive_record(
     assert stored[0].event_count == 3
     assert stored[0].archive_id == result.archive_id
     assert stored[0].checksum == result.checksum
-    assert stored[0].legal_hold is False
+    assert stored[0].storage_uri == result.storage_uri
+    assert storage.read(str(stored[0].storage_uri))
 
 
-async def test_archive_pending_audit_events_is_incremental(session: AsyncSession) -> None:
-    """A second cycle only picks up events newer than the last archive's
-    `event_range_end` -- it never re-archives the same rows.
-    """
+async def test_second_sweep_with_nothing_new_is_a_no_op(
+    session: AsyncSession, storage: FilesystemArchiveStorage
+) -> None:
     org = await _seed_organization(session)
     await _seed_audit_events(session, org, count=2)
+    config = ArchiveConfig(storage_backend="filesystem")
 
-    config = ArchiveConfig()
-    first = await archive_pending_audit_events(session, org.id, config)
-    await session.commit()
+    first = await archive_pending_audit_events(session, org.id, config, storage=storage)
     assert first is not None
     assert first.archived_count == 2
 
-    # Nothing new yet -- the sweep is a genuine no-op, not a re-archive.
-    second = await archive_pending_audit_events(session, org.id, config)
-    assert second is None
-
-    # A fresh event after the first batch is picked up on the next cycle.
-    session.add(
-        AuditEvent(
-            organization_id=org.id,
-            principal_id="analyst-1",
-            principal_type="USER",
-            action="data_access",
-            resource_type="table",
-            resource_id="tbl-new",
-            outcome="SUCCESS",
-            correlation_id="corr-new",
-            details={},
-            occurred_at=datetime(2026, 8, 30, 13, 0, tzinfo=UTC),
-        )
-    )
-    await session.flush()
-
-    third = await archive_pending_audit_events(session, org.id, config)
-    await session.commit()
-    assert third is not None
-    assert third.archived_count == 1
+    assert await archive_pending_audit_events(session, org.id, config, storage=storage) is None
 
 
-async def test_archive_pending_audit_events_returns_none_with_nothing_to_archive(
-    session: AsyncSession,
+async def test_sweep_returns_none_with_nothing_to_archive(
+    session: AsyncSession, storage: FilesystemArchiveStorage
 ) -> None:
     org = await _seed_organization(session)
-    result = await archive_pending_audit_events(session, org.id, ArchiveConfig())
+    result = await archive_pending_audit_events(
+        session, org.id, ArchiveConfig(storage_backend="filesystem"), storage=storage
+    )
     assert result is None
 
 
-async def test_legal_hold_config_is_reflected_on_the_persisted_record(
-    session: AsyncSession,
+async def test_configured_legal_hold_reaches_the_record_and_the_object(
+    session: AsyncSession, storage: FilesystemArchiveStorage
 ) -> None:
     org = await _seed_organization(session)
     await _seed_audit_events(session, org, count=1)
 
-    config = ArchiveConfig(legal_hold_enabled=True)
-    result = await archive_pending_audit_events(session, org.id, config)
-    await session.commit()
+    config = ArchiveConfig(storage_backend="filesystem", legal_hold_enabled=True)
+    result = await archive_pending_audit_events(session, org.id, config, storage=storage)
 
     assert result is not None
     assert result.legal_hold is True
+    assert storage.manifest(str(result.storage_uri))["legal_hold"] is True
+
     stored = await session.scalar(
         select(AuditArchiveRecord).where(AuditArchiveRecord.organization_id == org.id)
     )
@@ -166,25 +173,14 @@ async def test_legal_hold_config_is_reflected_on_the_persisted_record(
     assert stored.legal_hold is True
 
 
-# --- the endpoint the audit flagged: it must stop returning zeros ----------
+# --- the endpoint the audit flagged ---------------------------------------
 
 
 async def test_archive_status_endpoint_reflects_a_real_non_zero_count(
-    session: AsyncSession,
+    session: AsyncSession, storage: FilesystemArchiveStorage
 ) -> None:
-    """This is the exact endpoint the audit named: `GET
-    /observability/archive/status` reading `AuditArchiveRecord` while
-    nothing ever wrote to it, so it silently reported zeros forever. After a
-    real archive cycle, it must report a real, non-zero count.
-    """
     org = await _seed_organization(session)
-
-    context = SecurityContext(
-        principal_id="ops-1",
-        principal_type="USER",
-        organization_id=org.id,
-        roles=frozenset({"Operations"}),
-    )
+    context = _context(org)
 
     before = await get_archive_status(context=context, session=session)
     assert before.total_archives == 0
@@ -192,7 +188,9 @@ async def test_archive_status_endpoint_reflects_a_real_non_zero_count(
     assert before.status == "NO_ARCHIVES"
 
     await _seed_audit_events(session, org, count=5)
-    result = await archive_pending_audit_events(session, org.id, ArchiveConfig())
+    result = await archive_pending_audit_events(
+        session, org.id, ArchiveConfig(storage_backend="filesystem"), storage=storage
+    )
     await session.commit()
     assert result is not None
 
@@ -202,3 +200,31 @@ async def test_archive_status_endpoint_reflects_a_real_non_zero_count(
     assert after.status == "HEALTHY"
     assert after.latest_archive_id == result.archive_id
     assert after.latest_checksum == result.checksum
+
+
+async def test_archive_status_stays_at_zero_when_the_destination_refuses(
+    session: AsyncSession,
+) -> None:
+    """The regression the review found: metadata without an archive behind it."""
+    org = await _seed_organization(session)
+    await _seed_audit_events(session, org, count=4)
+
+    result = await archive_pending_audit_events(
+        session, org.id, ArchiveConfig(), storage=NullArchiveStorage()
+    )
+    assert result is not None
+    assert result.state == STATE_FAILED
+
+    status = await get_archive_status(context=_context(org), session=session)
+    assert status.total_archives == 0
+    assert status.total_events_archived == 0
+    assert status.status == "NO_ARCHIVES"
+
+
+def test_the_loop_resolves_a_provider_that_matches_its_configuration(
+    tmp_path: Path,
+) -> None:
+    """`main._audit_archive_loop` resolves its provider through `storage_for`."""
+    assert storage_for(ArchiveConfig()).available is False
+    assert storage_for(ArchiveConfig(storage_backend="s3")).available is False
+    assert storage_for(_config(tmp_path)).available is True

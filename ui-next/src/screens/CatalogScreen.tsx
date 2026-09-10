@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* Filters and selection live in the URL so a filtered view is shareable and
+   survives Back/Forward. This screen carried a verbatim copy of the old hook
+   -- a `useState` seeded once from `location.search`, subscribed to nothing --
+   so its idea of the selection and the address bar drifted apart the first
+   time either the Back button or a same-screen link was used (review
+   2026-09-05, F09 - R07). The shared hook reads one location store. */
+import { useUrlState } from "../lib/useUrlState";
 import { DescriptionEditor } from "../components/DescriptionEditor";
 import type { CatalogRowRead } from "../lib/ui-types";
 import {
@@ -15,30 +22,13 @@ import "./CatalogScreen.css";
 import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
 
-/** Filters live in the URL so a filtered catalog view is shareable — the same
- *  reason the evidence pane is permalinkable (UX-7). */
-function useUrlState() {
-  const [params, setParams] = useState(() => new URLSearchParams(location.search));
-  const update = useCallback((patch: Record<string, string | null>) => {
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null || v === "") next.delete(k);
-        else next.set(k, v);
-      }
-      const query = next.toString();
-      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
-      return next;
-    });
-  }, []);
-  return [params, update] as const;
-}
 
 export function CatalogScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
 
   const q = params.get("q") ?? "";
+  const datasourceId = params.get("ds") ?? "";
   const objectType = params.get("type") ?? "ALL";
   const certification = params.get("cert") ?? "ALL";
   const selectedId = params.get("asset");
@@ -73,7 +63,7 @@ export function CatalogScreen() {
     setError(null);
     try {
       const page = await fetchCatalogRows(
-        { organizationId: ORG, q, objectType, certification, limit: 100 },
+        { organizationId: ORG, datasourceId, q, objectType, certification, limit: 100 },
         ac.signal,
       );
       if (seq !== reqSeq.current) return;
@@ -87,7 +77,7 @@ export function CatalogScreen() {
     } finally {
       if (seq === reqSeq.current) setLoading(false);
     }
-  }, [q, objectType, certification]);
+  }, [datasourceId, q, objectType, certification]);
 
   useEffect(() => {
     void loadFirstPage();
@@ -100,6 +90,7 @@ export function CatalogScreen() {
     try {
       const page = await fetchCatalogRows({
         organizationId: ORG,
+        datasourceId,
         q,
         objectType,
         certification,
@@ -113,7 +104,7 @@ export function CatalogScreen() {
     } finally {
       setLoadingMore(false);
     }
-  }, [cursor, loadingMore, loading, q, objectType, certification]);
+  }, [cursor, loadingMore, loading, datasourceId, q, objectType, certification]);
 
   // Debounce typing so each keystroke does not become a request.
   useEffect(() => {
@@ -202,6 +193,13 @@ export function CatalogScreen() {
         </div>
       </header>
 
+      {datasourceId ? (
+        <div className="cat__scope" role="status">
+          <span>Showing tables from the selected source.</span>
+          <Button onClick={() => setParams({ ds: null, asset: null })}>Show all sources</Button>
+        </div>
+      ) : null}
+
       <div className="cat__filters">
         <Field label="Search">
           <input
@@ -248,7 +246,7 @@ export function CatalogScreen() {
                   : "Generate a metadata-drafted description for each selected asset."
               }
             >
-              {draftBusy ? "Generating…" : "Generate description drafts"}
+              {draftBusy ? "Generating…" : "Generate table description drafts"}
             </Button>
             <Button
               disabled
@@ -267,7 +265,7 @@ export function CatalogScreen() {
               disabled={draftBusy}
               title="Generate a metadata-drafted description for this asset. Submit it for review from the Description drafts screen."
             >
-              {draftBusy ? "Generating…" : "Generate description draft"}
+              {draftBusy ? "Generating…" : "Generate table description draft"}
             </Button>
           </div>
         ) : null}

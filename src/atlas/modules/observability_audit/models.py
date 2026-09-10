@@ -26,6 +26,12 @@ metrics, SLO state, compliance packs"):
 
 * `AuditEvent`, `AuditArchiveRecord` -- the audit ledger and its WORM
   archive batches.
+* `AuditArchiveMembership`, `AuditArchiveLease` -- which events belong to
+  which archive batch, and which replica currently owns an organization's
+  archive sweep. Both exist because archive progress used to be *inferred*
+  from a timestamp range with no ownership claim at all
+  (`Docs/review-2026-09-05/REVIEW.md` F03); each class's own docstring
+  explains the invariant it holds.
 * `OutboxEvent` -- the transactional outbox. "Dead letters" is not a
   separate table: a dead-lettered event is `status == "DEAD_LETTER"` on
   this same row, not a distinct record.
@@ -133,9 +139,7 @@ class SloMeasurement(Base):
     """Point-in-time SLO measurement."""
 
     __tablename__ = "slo_measurement"
-    __table_args__ = (
-        Index("ix_slo_measurement_slo_time", "slo_id", "measured_at"),
-    )
+    __table_args__ = (Index("ix_slo_measurement_slo_time", "slo_id", "measured_at"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
@@ -152,11 +156,27 @@ class SloMeasurement(Base):
 
 
 class AuditArchiveRecord(Base, TimestampMixin):
-    """Immutable record of an audit archive batch."""
+    """Immutable record of an audit archive batch.
+
+    `state` is the whole point of this row and is not decoration: an archive
+    is PREPARED (this row and its membership rows exist, nothing has been
+    sent), UPLOADED (a destination acknowledged the bytes), VERIFIED (the
+    bytes were read back and re-checksummed) or FAILED (terminal for this
+    attempt, retried on the next sweep). Only VERIFIED means an archive
+    exists. `LEGACY_UNVERIFIED` marks rows written before the lifecycle
+    existed, when the code returned a success object without storing
+    anything -- they are evidence of an attempt, not of an archive.
+
+    `serialization_version` selects the checksum algorithm on read-back
+    (`aida.audit_envelope`). Legacy rows are version 1, which covers only
+    event id, action and timestamp; version 2 covers the whole envelope.
+    Verification must never guess this.
+    """
 
     __tablename__ = "audit_archive_record"
     __table_args__ = (
         Index("ix_audit_archive_org_created", "organization_id", "created_at"),
+        Index("ix_audit_archive_org_state", "organization_id", "state"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -172,6 +192,102 @@ class AuditArchiveRecord(Base, TimestampMixin):
     retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # --- two-phase lifecycle (review F01) ---------------------------------
+    state: Mapped[str] = mapped_column(String(24), default="PREPARED", nullable=False)
+    storage_uri: Mapped[str | None] = mapped_column(String(1000))
+    serialization_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    checksum_algorithm: Mapped[str] = mapped_column(String(30), default="sha256", nullable=False)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retention_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    legal_hold_reason: Mapped[str | None] = mapped_column(String(500))
+    legal_hold_applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    legal_hold_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Composite `(occurred_at, id)` cursor bounds of the batch. The id half
+    # is what stops equal-timestamp events from being split across a batch
+    # boundary and never selected again (review F03).
+    event_range_start_id: Mapped[int | None] = mapped_column(BigInteger)
+    event_range_end_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class AuditArchiveMembership(Base):
+    """The fact that one audit event belongs to one archive.
+
+    Archive progress used to be *inferred* from a timestamp range, which is
+    why equal-timestamp boundaries and late commits could drop events
+    permanently (review F03). Membership replaces inference: an event is
+    claimed by an archive if and only if a row exists here, and the batch
+    query excludes claimed events by `NOT EXISTS` rather than by comparing
+    against a high-water mark.
+
+    A row is written when the archive is PREPARED, not when it is VERIFIED,
+    so a crash between upload and verification resumes the *same* batch
+    instead of assembling a different one -- which is what makes retry
+    idempotent. Whether the claimed archive is durable is the archive row's
+    `state`, not this table's business.
+
+    The unique constraint on `(organization_id, audit_event_id)` is the
+    backstop: two workers racing past the lease can still not double-archive
+    an event, because the second insert fails.
+    """
+
+    __tablename__ = "audit_archive_membership"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "audit_event_id",
+            name="uq_audit_archive_membership_event",
+        ),
+        Index("ix_audit_archive_membership_record", "archive_record_id"),
+        Index("ix_audit_archive_membership_cursor", "organization_id", "occurred_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False
+    )
+    audit_event_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    archive_record_id: Mapped[UUID] = mapped_column(
+        ForeignKey("audit_archive_record.id", ondelete="RESTRICT"), nullable=False
+    )
+    archive_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class AuditArchiveLease(Base):
+    """Per-organization ownership claim over the archive sweep.
+
+    Every API replica runs the same sweep loop. Without a claim they all
+    select the same batch at the same moment; the membership unique
+    constraint would catch the collision, but only after both had uploaded.
+    One row per organization, held by `owner` until `expires_at`, is enough
+    to make that the rare case rather than the normal one.
+
+    A lease row rather than a Postgres advisory lock, deliberately: the
+    advisory lock is tied to a session and vanishes on connection loss,
+    which is right for a lock and wrong for a claim that must survive the
+    seconds between an upload and its verification. It also has no SQLite
+    equivalent, and the test suite builds its schema from this ORM against
+    in-memory SQLite. Expiry is what breaks a lease held by a dead replica.
+    """
+
+    __tablename__ = "audit_archive_lease"
+
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), primary_key=True
+    )
+    owner: Mapped[str] = mapped_column(String(200), nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AuditEvent(Base):
@@ -271,3 +387,127 @@ class AccessReviewReportRecord(Base, TimestampMixin):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class DeliveryIntent(Base, TimestampMixin):
+    """One thing that must reach one destination, and what happened to it.
+
+    **Invariant this table exists to hold:** nothing is reported as sent
+    unless a destination acknowledged it, and nothing that was accepted for
+    sending can be forgotten because a destination was down.
+
+    Two defects share this shape (`Docs/review-2026-09-05/REVIEW.md`).
+    F04: SIEM routing formatted a message, logged it and returned ``True``
+    without opening a socket. F12: a governance notification whose webhook
+    failed was still stamped as processed, and the sweep that would have
+    retried it selects only unstamped rows. Both were the same mistake --
+    treating "we tried" as "it arrived" -- so both are fixed by the same
+    table rather than by two parallel ledgers.
+
+    ``kind`` discriminates: ``SIEM_SECURITY_EVENT`` rows come from
+    ``aida.siem_routing``, ``GOVERNANCE_NOTIFICATION`` rows from
+    ``aida.governance_notifications``. One worker
+    (``aida.delivery_intents.run_delivery_worker_pass``) drains both.
+
+    **Three timestamps, because one cannot mean three things.**
+    ``requested_at`` is when the business transaction created the intent --
+    the only thing a watermark may be tied to, since it is the only one that
+    commits atomically with the decision it describes. ``attempted_at`` is
+    the most recent transport attempt. ``delivered_at`` is set if and only if
+    a destination acknowledged, and is the sole basis for claiming delivery.
+
+    **State machine** (``state``), terminal states marked *:
+
+        PENDING     created; no transport has been touched
+        DELIVERING  claimed by one worker for the current attempt
+        RETRYING    attempt failed retryably; next_attempt_at holds the backoff
+        DELIVERED*  the destination acknowledged
+        DEAD_LETTER* permanent failure, or the retry budget is exhausted
+        DISCARDED*  never sendable as configured (channel disabled, or no
+                    destination) -- recorded, never sent, never retried
+        DUPLICATE*  an equivalent intent for the same destination was already
+                    delivered; suppressed rather than sent twice
+
+    **Deduplication is enforced at delivery, not by a unique constraint**, and
+    that is deliberate. ``dedup_key`` is indexed but not unique: a uniqueness
+    violation here would abort the *business* transaction that staged the
+    intent, which would make a chat integration able to fail a governance
+    decision -- exactly the coupling this whole change exists to remove. The
+    worker instead refuses to send when an equivalent intent is already
+    DELIVERED, or is DELIVERING with an earlier ``requested_at``; the earlier
+    row wins deterministically, so two workers racing cannot both send.
+
+    ``organization_id`` is nullable because a rejected bearer token produces a
+    SOC-notable AUTH_FAILURE before any organization is known, and refusing to
+    record that event would be a worse answer than a null column.
+    """
+
+    __tablename__ = "delivery_intent"
+    __table_args__ = (
+        Index("ix_delivery_intent_due", "state", "next_attempt_at"),
+        Index("ix_delivery_intent_dedup", "organization_id", "kind", "channel", "dedup_key"),
+        Index("ix_delivery_intent_org_state", "organization_id", "state"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    #: Human-readable destination label. Never a credentialed URL: see
+    #: `aida.delivery_intents.destination_label`.
+    destination: Mapped[str] = mapped_column(String(500), nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: Already minimised at enqueue time. When `siem_include_details` is off,
+    #: details are absent from this dict, so every transport rendered from it
+    #: suppresses them -- there is no second place to forget.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    correlation_id: Mapped[str | None] = mapped_column(String(100))
+
+    state: Mapped[str] = mapped_column(String(24), default="PENDING", nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_outcome: Mapped[str | None] = mapped_column(String(30))
+    last_error: Mapped[str | None] = mapped_column(String(1000))
+    claimed_by: Mapped[str | None] = mapped_column(String(200))
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DeliveryAttempt(Base):
+    """One transport attempt against one destination. Append-only.
+
+    The intent row carries current state; this table carries the history that
+    makes an outage legible after the fact -- how many times, how far apart,
+    with what error, and whether the destination ever answered. Written in the
+    same transaction that advances the intent, so "attempts are durable across
+    a restart" is a property of the commit, not of a retry counter in memory.
+    """
+
+    __tablename__ = "delivery_attempt"
+    __table_args__ = (Index("ix_delivery_attempt_intent", "intent_id", "attempt_number"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    intent_id: Mapped[UUID] = mapped_column(
+        ForeignKey("delivery_intent.id", ondelete="CASCADE"), nullable=False
+    )
+    organization_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT")
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(30), nullable=False)
+    transport: Mapped[str] = mapped_column(String(30), nullable=False)
+    destination: Mapped[str] = mapped_column(String(500), nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    detail: Mapped[str | None] = mapped_column(String(1000))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

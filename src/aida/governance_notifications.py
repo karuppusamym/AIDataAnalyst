@@ -11,37 +11,69 @@ back into the portal. It is not a chat integration and deliberately not a
 second control surface -- every message is a notification plus a link, never
 an action, so nothing here can approve, publish, or grant.
 
-**Reuses the existing delivery mechanism.** `quality_service.emit_itsm_webhook`
-already POSTs to a configured webhook and persists a `NotificationEventRecord`
-per attempt; this follows that shape rather than building a second one.
+**Nothing is sent from here.** A hook point stages a `DeliveryIntent`
+(`aida.delivery_intents`) inside its own transaction and returns; the fleet
+scheduler's delivery worker attempts it, retries with backoff, and records
+each attempt. This module used to POST inline with a two-shot retry and no
+durable record of failure, which is how a failed notification became
+permanently indistinguishable from a delivered one
+(`Docs/review-2026-09-05/REVIEW.md` F12).
 
 **Value-free (INV-6).** A message carries object type, id, principal, risk
 tier and a link. Never a row, never SQL, never a description's text -- a
 governance notification that leaked a column value into a Slack channel would
 be the most public possible breach of the control plane's core property.
 
-**Fail closed and silent.** Disabled or unconfigured means nothing is sent and
-the reason is persisted as its own status, so an operator can tell "not
-configured" from "delivered". Delivery never raises into the caller's
-transaction: a downed Slack must not roll back a governance decision.
+**Fail closed and silent.** Disabled or unconfigured means nothing is queued
+and the reason is persisted as its own status, so an operator can tell "not
+configured" from "queued" from "delivered". Delivery never raises into the
+caller's transaction: a downed Slack must not roll back a governance
+decision -- and now cannot even be reached from one.
+
+**The commit lifecycle, which was the other half of F12.** Two hook points
+(`semantic_api.decide_governance_review`, `agent_contract_api`'s kill switch)
+commit their business transaction and *then* call in here; the FastAPI
+session dependency yields and closes rather than committing, so rows staged
+after that commit were discarded. Two others (`quality_service`,
+`certification_expiry_warning`) call mid-transaction and must not have their
+business writes committed out from under them. `session.in_transaction()`,
+sampled before anything is staged, distinguishes the two cases exactly: a
+caller that owns an open transaction keeps the commit, a caller that has
+none gets its notification evidence committed here. Either way the intent
+and the decision it describes commit together or not at all.
+
+That discrimination relies on `atlas.platform.db` building sessions with
+`expire_on_commit=False`. Otherwise reading an attribute off the row a caller
+just committed would autobegin a new transaction, and a post-commit caller
+would be indistinguishable from a mid-transaction one. It does; this
+paragraph exists so that changing it is a decision somebody makes on purpose.
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 from uuid import UUID
 
-import httpx
 import structlog
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
 from aida.context import get_correlation_id
+from aida.delivery_intents import (
+    KIND_NOTIFICATION,
+    STATE_DEAD_LETTER,
+    STATE_DELIVERED,
+    STATE_DISCARDED,
+    STATE_DUPLICATE,
+    dedup_key_for,
+    destination_label,
+    enqueue_intent,
+)
 from aida.events import record_audit
-from aida.models import NotificationEventRecord
+from aida.models import DeliveryIntent, NotificationEventRecord
 from aida.security import SecurityContext
 
 logger = structlog.get_logger(__name__)
@@ -96,8 +128,19 @@ STATUS_SKIPPED_DISABLED = "SKIPPED_DISABLED"
 STATUS_SKIPPED_NO_URL = "SKIPPED_NO_URL"
 STATUS_SKIPPED_EVENT_KIND = "SKIPPED_EVENT_KIND"
 STATUS_FAILED = "FAILED"
+#: Durably recorded and owed to a destination, but not yet attempted. This is
+#: the status a hook point now produces: it is the truthful one at the moment
+#: the business transaction commits, and the worker replaces it with SENT or
+#: FAILED once a destination has actually answered.
+STATUS_QUEUED = "QUEUED"
 
-_MAX_ATTEMPTS = 2
+#: How a finished delivery intent reads in the notification ledger.
+_LEDGER_STATUS_BY_STATE: Final[dict[str, str]] = {
+    STATE_DELIVERED: STATUS_SENT,
+    STATE_DEAD_LETTER: STATUS_FAILED,
+    STATE_DISCARDED: STATUS_SKIPPED_NO_URL,
+    STATE_DUPLICATE: STATUS_SENT,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,9 +213,13 @@ def render_message(
 
 def _dedup_key(kind: str, payload: dict[str, Any], channel: str) -> str:
     """Stable per (kind, object, channel) so a retry or a double-emit at the
-    same hook point does not produce two rows for one event."""
-    raw = f"{kind}|{payload.get('object_id')}|{payload.get('occurred_at')}|{channel}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:64]
+    same hook point does not produce two deliveries for one event.
+
+    Shared by the notification ledger row and its delivery intent, which is
+    what lets the worker's outcome be reflected back onto the ledger without a
+    foreign key between a governance concern and a transport one.
+    """
+    return dedup_key_for(kind, payload.get("object_id"), payload.get("occurred_at"), channel)
 
 
 def _system_context(organization_id: UUID) -> SecurityContext:
@@ -191,22 +238,6 @@ def _configured_channels(settings: Settings) -> list[tuple[str, str | None]]:
     ]
 
 
-async def _post(
-    url: str, body: dict[str, Any], *, timeout_seconds: float
-) -> tuple[str, str | None]:
-    """POST with a bounded retry. Never raises: see the module docstring."""
-    last_error: str | None = None
-    for _attempt in range(_MAX_ATTEMPTS):
-        try:
-            async with httpx.AsyncClient(
-                timeout=timeout_seconds, follow_redirects=False
-            ) as client:
-                response = await client.post(url, json=body)
-                response.raise_for_status()
-            return STATUS_SENT, None
-        except httpx.HTTPError as exc:
-            last_error = str(exc)[:1000]
-    return STATUS_FAILED, last_error
 
 
 async def notify_governance_event(
@@ -217,37 +248,53 @@ async def notify_governance_event(
     *,
     settings: Settings,
 ) -> list[NotificationOutcome]:
-    """Deliver one governance event to every configured channel.
+    """Record one governance event as owed to every configured channel.
 
-    Persists one `NotificationEventRecord` per channel per attempt so an
-    operator can tell, from the ledger alone, whether a message was sent,
-    skipped, or failed -- and why. Returns the outcomes rather than raising,
-    because the caller is in the middle of a governance transaction that must
-    not be rolled back by a chat outage.
+    Stages a `DeliveryIntent` per channel plus the `NotificationEventRecord`
+    an operator reads, so the ledger and the obligation to deliver commit
+    together. Nothing is sent here: no socket is opened on the caller's
+    thread, so a chat outage cannot delay, fail or roll back the governance
+    write that triggered this.
+
+    `STATUS_QUEUED` is deliberately not `STATUS_SENT`. The previous
+    implementation POSTed inline and wrote SENT or FAILED, then discarded the
+    FAILED row's meaning by never retrying it; a status that says "queued"
+    until a destination answers is the only one true at this point.
     """
     if event_kind not in EVENT_KINDS:
         logger.warning("governance_notification_unknown_kind", event_kind=event_kind)
         return [NotificationOutcome("NONE", STATUS_SKIPPED_EVENT_KIND, event_kind)]
 
-    outcomes: list[NotificationOutcome] = []
     enabled = settings.governance_notifications_enabled
     selected = settings.governance_notification_events
 
     if enabled and event_kind not in selected:
         return [NotificationOutcome("NONE", STATUS_SKIPPED_EVENT_KIND, "not selected")]
 
+    # Sampled before anything is staged: afterwards SQLAlchemy has autobegun
+    # and every caller would look identical. See the module docstring.
+    caller_owns_transaction = session.in_transaction()
+
     payload = {**payload, "occurred_at": payload.get("occurred_at") or ""}
+    outcomes: list[NotificationOutcome] = []
 
     for channel, url in _configured_channels(settings):
+        dedup_key = _dedup_key(event_kind, payload, channel)
         if not enabled:
             status, error = STATUS_SKIPPED_DISABLED, None
         elif not url:
             status, error = STATUS_SKIPPED_NO_URL, None
         else:
-            status, error = await _post(
-                url,
-                render_message(settings, event_kind, payload, channel=channel),
-                timeout_seconds=settings.governance_notification_timeout_seconds,
+            status, error = STATUS_QUEUED, None
+            enqueue_intent(
+                session,
+                organization_id=organization_id,
+                kind=KIND_NOTIFICATION,
+                channel=channel,
+                destination=destination_label(url),
+                dedup_key=dedup_key,
+                payload=render_message(settings, event_kind, payload, channel=channel),
+                correlation_id=get_correlation_id(),
             )
         session.add(
             NotificationEventRecord(
@@ -257,8 +304,8 @@ async def notify_governance_event(
                 channel=channel,
                 recipients=[],
                 status=status,
-                dedup_key=_dedup_key(event_kind, payload, channel),
-                sent_at=datetime.now(UTC) if status == STATUS_SENT else None,
+                dedup_key=dedup_key,
+                sent_at=None,
             )
         )
         outcomes.append(NotificationOutcome(channel, status, error))
@@ -269,7 +316,10 @@ async def notify_governance_event(
         action="governance.notification.dispatch",
         resource_type="notification_event",
         resource_id=str(payload.get("object_id") or ""),
-        outcome="SUCCESS" if any(o.status == STATUS_SENT for o in outcomes) else "DENIED",
+        # A queued intent is a successful dispatch: the platform has durably
+        # accepted the obligation. Whether a destination accepted it is the
+        # delivery worker's audit trail, not this one's.
+        outcome="SUCCESS" if any(o.status == STATUS_QUEUED for o in outcomes) else "DENIED",
         correlation_id=get_correlation_id(),
         details={
             "event_kind": event_kind,
@@ -277,7 +327,62 @@ async def notify_governance_event(
             "channels": {o.channel: o.status for o in outcomes},
         },
     )
+    if not caller_owns_transaction:
+        await session.commit()
     return outcomes
+
+
+async def sync_notification_ledger(
+    session: AsyncSession, *, now: datetime | None = None, limit: int = 500
+) -> int:
+    """Reflect finished delivery intents back onto the notification ledger.
+
+    `NotificationEventRecord` is what the notifications API and the portal
+    read, and it is written by the business transaction, which cannot know
+    whether Slack later answered. This closes that loop from the other side: a
+    QUEUED ledger row whose intent has reached a terminal state becomes SENT
+    or FAILED, matched on the `dedup_key` both rows were given.
+
+    Called from the scheduler's notification pass, so it converges every tick
+    without pushing a governance concern into the generic delivery worker.
+    """
+    moment = now or datetime.now(UTC)
+    finished = (
+        await session.execute(
+            select(
+                DeliveryIntent.dedup_key,
+                DeliveryIntent.channel,
+                DeliveryIntent.organization_id,
+                DeliveryIntent.state,
+                DeliveryIntent.delivered_at,
+            )
+            .where(
+                DeliveryIntent.kind == KIND_NOTIFICATION,
+                DeliveryIntent.state.in_(tuple(_LEDGER_STATUS_BY_STATE)),
+            )
+            .order_by(DeliveryIntent.requested_at.desc())
+            .limit(limit)
+        )
+    ).all()
+
+    updated = 0
+    for dedup_key, channel, organization_id, state, delivered_at in finished:
+        status = _LEDGER_STATUS_BY_STATE[state]
+        result = await session.execute(
+            update(NotificationEventRecord)
+            .where(
+                NotificationEventRecord.dedup_key == dedup_key,
+                NotificationEventRecord.channel == channel,
+                NotificationEventRecord.organization_id == organization_id,
+                NotificationEventRecord.status == STATUS_QUEUED,
+            )
+            .values(
+                status=status,
+                sent_at=(delivered_at or moment) if status == STATUS_SENT else None,
+            )
+        )
+        updated += int(getattr(result, "rowcount", 0) or 0)
+    return updated
 
 
 async def notify_safely(
@@ -289,9 +394,15 @@ async def notify_safely(
     settings: Settings,
 ) -> None:
     """The form every hook point calls: one line, and it cannot break the
-    caller. A notification failure is logged and dropped, never raised --
-    the governance write that triggered it has already happened and is the
-    thing that matters."""
+    caller.
+
+    What it swallows has narrowed, and that narrowing is the point of F12. It
+    used to swallow *delivery* failures, which is how a message nobody
+    received became indistinguishable from one that arrived. There is no
+    delivery here any more -- only staging -- so the only thing left to
+    swallow is a programming error while composing an intent, and that
+    genuinely must not roll back a governance decision that already
+    happened."""
     if not settings.governance_notifications_enabled:
         return
     try:
@@ -300,5 +411,7 @@ async def notify_safely(
         )
     except Exception as exc:  # noqa: BLE001 -- see docstring
         logger.warning(
-            "governance_notification_failed", event_kind=event_kind, error=str(exc)[:500]
+            "governance_notification_enqueue_failed",
+            event_kind=event_kind,
+            error=str(exc)[:500],
         )

@@ -2,6 +2,15 @@
 
 **Status:** Accepted | **Date:** 2026-08-30 | **Owner:** Product Engineering
 
+> **Implementation status — 2026-09-06.** The migration this ADR describes is **complete**. The
+> legacy `ui/` portal was deleted from the tree on 2026-09-05 by an explicit scope decision
+> (finding D05 of `../../review-2026-09-05/REVIEW.md`, removed outright rather than retired behind
+> the parity gate that finding originally recommended). `ui-next` is the only portal, served at
+> `:3001` in Compose. The decision and its reasoning below are unchanged and kept as the record of
+> why the shell looks the way it does; the present-tense passages about `ui/` still serving screens
+> describe 2026-08-30, not the current tree. Current state:
+> [`../../60-delivery/20-capability-register.md`](../../60-delivery/20-capability-register.md).
+
 ## Context
 
 Module 21 specifies the experience shell: persona routing derived from OIDC claims,

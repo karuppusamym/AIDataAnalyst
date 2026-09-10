@@ -9,7 +9,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from sqlalchemy import select, text
+from sqlalchemy import select
 from temporalio.client import Client
 
 from aida import __version__
@@ -23,6 +23,8 @@ from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.asset_description_api import router as asset_description_router
 from aida.asset_evidence_api import router as asset_evidence_router
+from aida.audit_archive_s3 import S3ArchiveStorage
+from aida.authorization_posture import assert_startup_posture
 from aida.bi_api import router as bi_router
 from aida.column_documentation_api import router as column_documentation_router
 from aida.compliance_api import router as compliance_router
@@ -71,6 +73,13 @@ from aida.procedure_lineage_api import router as procedure_lineage_router
 from aida.procedure_tool_api import router as procedure_tool_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
+from aida.readiness import (
+    AUDIT_ARCHIVE_TASK,
+    TEMPORAL_RECONNECT_TASK,
+    ReadinessResponse,
+    evaluate_readiness,
+    probe_workspace_authorization_posture,
+)
 from aida.retrieval_ops_api import router as retrieval_ops_router
 from aida.review_queue_api import router as review_queue_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
@@ -88,13 +97,24 @@ from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
 from aida.view_lineage_api import router as view_lineage_router
 from aida.workspace_api import router as workspace_router
-from aida.worm_archive import ArchiveConfig, archive_pending_audit_events
+from aida.worm_archive import (
+    ArchiveConfig,
+    archive_pending_audit_events,
+    default_worker_identity,
+    storage_for,
+)
 from atlas.modules.catalog.api import router as catalog_router
 from atlas.modules.connectivity.api import router as connectivity_router
 
 settings = get_settings()
 configure_logging(settings.log_level)
 logger = structlog.get_logger(__name__)
+
+# F17: the single `path` label every request that matched no route is counted
+# under. Deliberately not a valid route template, so it cannot collide with a
+# real one, and deliberately a constant, so 404 traffic contributes exactly two
+# series (one per method actually used) instead of one per distinct URL tried.
+UNMATCHED_PATH_LABEL = "__unmatched__"
 
 REQUEST_COUNT = Counter(
     "aida_http_requests_total",
@@ -122,27 +142,82 @@ async def _audit_archive_loop(loop_settings: Settings) -> None:
     config = ArchiveConfig(
         retention_days=loop_settings.audit_archive_retention_days,
         storage_backend=loop_settings.audit_archive_storage_backend,
+        filesystem_root=loop_settings.audit_archive_filesystem_root,
         bucket_name=loop_settings.audit_archive_bucket_name,
         legal_hold_enabled=loop_settings.audit_archive_legal_hold_enabled,
         classification=loop_settings.audit_archive_classification,
+        lease_seconds=loop_settings.audit_archive_lease_seconds,
+        late_arrival_overlap_seconds=(loop_settings.audit_archive_late_arrival_overlap_seconds),
+        # The object store is one destination per deployment, so the `s3`
+        # provider reads the existing `object_store_*` settings rather than
+        # growing a parallel set. These are only ever *used* when the
+        # backend is `s3`; at the `none` default they are carried and
+        # ignored, and no connection is opened.
+        s3_endpoint=loop_settings.object_store_endpoint,
+        s3_region=loop_settings.audit_archive_s3_region,
+        s3_access_key=loop_settings.object_store_access_key,
+        s3_secret_key=loop_settings.object_store_secret_key,
+        s3_retention_mode=loop_settings.audit_archive_s3_retention_mode,
+    )
+    # Resolved once, at loop start, and logged: an operator reading the logs
+    # must be able to tell a running archive from one whose destination
+    # refuses every write. `storage_for` never returns a silent no-op --
+    # an unconfigured backend resolves to a provider that refuses, and each
+    # cycle then records a FAILED attempt rather than a fabricated archive.
+    storage = storage_for(config)
+    owner = default_worker_identity()
+    object_lock: bool | None = None
+    if isinstance(storage, S3ArchiveStorage) and loop_settings.audit_archive_s3_create_bucket:
+        # Object Lock can only be enabled when a bucket is created, so this
+        # is the one moment a correctly-locked bucket can come into
+        # existence. A failure here is logged and not raised: the sweep then
+        # records FAILED attempts against an unusable destination, which is
+        # the honest outcome, rather than the process refusing to start.
+        try:
+            created = await asyncio.to_thread(storage.ensure_bucket)
+            object_lock = await asyncio.to_thread(storage.bucket_has_object_lock)
+            if not object_lock:
+                logger.error(
+                    "audit_archive_bucket_without_object_lock",
+                    bucket=storage.bucket,
+                    created=created,
+                    detail=(
+                        "the bucket exists but does not enforce Object Lock; lock cannot "
+                        "be enabled after creation, so archives written here would not be "
+                        "retained immutably"
+                    ),
+                )
+        except Exception as error:  # noqa: BLE001 -- destination-specific, never fatal
+            logger.warning(
+                "audit_archive_bucket_preflight_failed",
+                bucket=storage.bucket,
+                error=f"{type(error).__name__}: {error}",
+            )
+    logger.info(
+        "audit_archive_loop_started",
+        storage_backend=storage.name,
+        storage_available=storage.available,
+        object_lock_enforced=object_lock,
+        owner=owner,
+        interval_seconds=loop_settings.audit_archive_interval_seconds,
     )
     while True:
         await asyncio.sleep(loop_settings.audit_archive_interval_seconds)
         try:
             async with session_factory() as session:
                 org_ids = (await session.scalars(select(Organization.id))).all()
-                archived_any = False
                 for org_id in org_ids:
-                    result = await archive_pending_audit_events(
+                    # Each call owns its own transaction boundary: the
+                    # PREPARED -> UPLOADED -> VERIFIED transitions are only
+                    # crash-recoverable if each one is durable on its own.
+                    await archive_pending_audit_events(
                         session,
                         org_id,
                         config,
+                        storage=storage,
                         batch_size=loop_settings.audit_archive_batch_size,
+                        owner=owner,
                     )
-                    if result is not None:
-                        archived_any = True
-                if archived_any:
-                    await session.commit()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -241,9 +316,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 temporal_address=settings.temporal_address,
                 retry_interval_seconds=settings.temporal_reconnect_interval_seconds,
             )
-            temporal_reconnect_task = asyncio.create_task(
-                _temporal_reconnect_loop(app, settings)
-            )
+            temporal_reconnect_task = asyncio.create_task(_temporal_reconnect_loop(app, settings))
         else:
             logger.info("temporal_connected", temporal_address=settings.temporal_address)
     app.state.temporal_reconnect_task = temporal_reconnect_task
@@ -278,6 +351,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.audit_archive_enabled:
         archive_task = asyncio.create_task(_audit_archive_loop(settings))
     app.state.audit_archive_task = archive_task
+
+    # F11: an enforcement claim is verified at startup, not merely configured.
+    # `assert_startup_posture` raises only when the deployment declares ENFORCING
+    # *and* the inspected workspace inventory contradicts it -- a claim nobody
+    # made cannot fail here, and an inventory that could not be read is
+    # SCOPE_UNRESOLVED (a readiness signal), never a crash-loop. The log line is
+    # emitted in every case, so "which posture did this process start in" is
+    # answerable from the logs alone.
+    posture = await probe_workspace_authorization_posture(
+        settings, timeout_seconds=settings.readiness_probe_timeout_seconds
+    )
+    logger.info(
+        "workspace_authorization_posture",
+        state=posture.state,
+        declared=posture.declared_posture,
+        signals=posture.as_signals(),
+    )
+    assert_startup_posture(posture)
 
     logger.info(
         "service_started",
@@ -401,7 +492,23 @@ async def request_context(
         correlation_id_var.reset(token)
     elapsed = perf_counter() - started
     route = request.scope.get("route")
-    path_template = getattr(route, "path", request.url.path)
+    # F17: a request that matched no route has no path template, and the raw URL
+    # is caller-chosen. Labelling the series with it means anyone who can reach
+    # the port can mint an unbounded number of Prometheus series (each one a
+    # permanent in-process allocation) by walking distinct 404 URLs. Every
+    # unmatched request therefore collapses onto ONE constant label; the actual
+    # path is kept in the log line below, whose growth is bounded by a different
+    # mechanism (rotation/retention) than a metric registry's, which is bounded
+    # by nothing.
+    path_template = getattr(route, "path", None) or UNMATCHED_PATH_LABEL
+    if path_template == UNMATCHED_PATH_LABEL:
+        logger.info(
+            "http_request_unmatched_path",
+            correlation_id=correlation_id,
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+        )
     REQUEST_COUNT.labels(request.method, path_template, str(response.status_code)).inc()
     REQUEST_LATENCY.labels(request.method, path_template).observe(elapsed)
     # OB-1: OTEL-native counterpart to REQUEST_COUNT above -- a no-op unless
@@ -419,30 +526,38 @@ async def request_context(
 
 @app.get("/health/live", response_model=HealthResponse, tags=["health"])
 async def liveness() -> HealthResponse:
+    """F18: deliberately trivial and dependency-free. Liveness answers "should
+    this process be restarted", and a liveness check that consults a database
+    turns a database outage into a rolling restart of every replica.
+    """
     return HealthResponse(status="UP", service=settings.service_name, version=__version__)
 
 
-@app.get("/health/ready", response_model=HealthResponse, tags=["health"])
-async def readiness(request: Request, response: Response) -> HealthResponse:
-    dependencies: dict[str, str] = {}
-    try:
-        async with session_factory() as session:
-            await session.execute(text("SELECT 1"))
-        dependencies["postgresql"] = "UP"
-    except Exception:
-        dependencies["postgresql"] = "DOWN"
-    dependencies["temporal"] = (
-        "UP" if not settings.temporal_enabled or request.app.state.temporal_client else "DOWN"
+@app.get("/health/ready", response_model=ReadinessResponse, tags=["health"])
+async def readiness(request: Request, response: Response) -> ReadinessResponse:
+    """F18/F11: bounded probes, a required/optional contract, and control posture.
+
+    `dependencies` keeps its previous meaning (name -> UP/DOWN for every probe).
+    What is new: `required` vs `optional` (only `required` gates the 503, so a
+    Temporal outage no longer reports a universal outage -- AU-12 already made
+    the app serve through one), `signals` (per-probe staleness, timing and the
+    outbox backlog depth/age this deployment uses as its projection-lag signal),
+    and `controls`, which reports whether workspace authorization is ENFORCING,
+    OBSERVING or SCOPE_UNRESOLVED -- the distinction F11 found was impossible to
+    make without reading source. Every probe is timeout-bounded by
+    `settings.readiness_probe_timeout_seconds`; see `aida.readiness`.
+    """
+    report = await evaluate_readiness(
+        settings,
+        temporal_client=request.app.state.temporal_client,
+        background_tasks={
+            AUDIT_ARCHIVE_TASK: getattr(request.app.state, "audit_archive_task", None),
+            TEMPORAL_RECONNECT_TASK: getattr(request.app.state, "temporal_reconnect_task", None),
+        },
     )
-    ready = all(value == "UP" for value in dependencies.values())
-    if not ready:
+    if report.status != "UP":
         response.status_code = 503
-    return HealthResponse(
-        status="UP" if ready else "DOWN",
-        service=settings.service_name,
-        version=__version__,
-        dependencies=dependencies,
-    )
+    return report
 
 
 @app.get("/metrics", include_in_schema=False)

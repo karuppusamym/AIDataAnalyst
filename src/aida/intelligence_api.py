@@ -9,12 +9,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
-from aida.authorization_gate import AuthorizationDenied, gate
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -22,10 +22,11 @@ from aida.domain_service import check_cross_boundary_grant
 from aida.events import record_audit, record_outbox
 from aida.identity_merge import merge_table_identity
 from aida.identity_resolution import IdentityMatch, score_cross_source_match
-from aida.knowledge_graph import (
-    GraphDirection,
-    GraphLink,
-    expand_cross_source_frontier,
+from aida.knowledge_graph import GraphDirection
+from aida.knowledge_graph_neighborhood import (
+    NeighborhoodRequest,
+    bounds_policy_violation,
+    build_knowledge_graph_neighborhood,
 )
 from aida.models import (
     AgentRun,
@@ -114,7 +115,11 @@ GRAPH_READER_ROLES = (
     "Auditor",
     "Viewer",
 )
-SENSITIVE_CLASSIFICATIONS = {"PII", "PCI", "PHI", "SECRET", "CONFIDENTIAL"}
+#: R07: the same vocabulary `aida.classification.SENSITIVE_CLASSES` already
+#: defines, aliased rather than restated so a classification added to one is
+#: never missing from the other. Kept under this name because it is what the
+#: three graph projections in this module read.
+SENSITIVE_CLASSIFICATIONS = SENSITIVE_CLASSES
 
 
 def _is_positive(rating: str) -> bool:
@@ -459,432 +464,40 @@ async def get_knowledge_graph_neighborhood(
     distinguishable signal names it, matching `AuthorizationDenied`'s INV-6 contract
     of carrying no resource detail.
     """
-
+    # R02: resolving the datasource and focus table, refusing with the right HTTP
+    # status, and returning the read model is all this handler does. The traversal,
+    # the KG-2 crossing decision described above and the projection live in
+    # `aida.knowledge_graph_neighborhood`, where that policy has one authoritative
+    # implementation shared by both halves. This docstring stays the published
+    # endpoint description (it is what `openapi.json` carries), so it describes the
+    # contract rather than where the code moved to.
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
-    if depth > settings.knowledge_graph_max_depth:
-        raise HTTPException(status_code=400, detail="requested graph depth exceeds policy")
-    if node_limit > settings.knowledge_graph_max_nodes:
-        raise HTTPException(status_code=400, detail="requested graph node limit exceeds policy")
-    if edge_limit > settings.knowledge_graph_max_edges:
-        raise HTTPException(status_code=400, detail="requested graph edge limit exceeds policy")
+    violation = bounds_policy_violation(
+        settings, depth=depth, node_limit=node_limit, edge_limit=edge_limit
+    )
+    if violation is not None:
+        raise HTTPException(status_code=400, detail=violation)
 
     focus = await session.get(MetadataTable, focus_table_id)
     if focus is None or focus.datasource_id != datasource.id or focus.status != "ACTIVE":
         raise HTTPException(status_code=404, detail="active graph focus table not found")
 
-    visited: set[UUID] = {focus.id}
-    frontier: set[UUID] = {focus.id}
-    node_depths: dict[UUID, int] = {focus.id: 0}
-    truncation_reasons: set[str] = set()
-    encountered_links: dict[str, GraphLink] = {}
-
-    # KG-2: the seed datasource is already authorized by the role check plus
-    # `enforce_organization` above (unchanged from before this row) -- everything
-    # else in these three dicts is *additional* state for crossing further.
-    seed_domain_id = datasource.data_domain_id
-    touched_datasource_ids: set[UUID] = {datasource.id}
-    datasource_allowed: dict[UUID, bool] = {datasource.id: True}
-    datasources_by_id: dict[UUID, DataSource] = {datasource.id: datasource}
-    node_datasource_id: dict[UUID, UUID] = {focus.id: datasource.id}
-
-    for current_depth in range(1, depth + 1):
-        if not frontier or len(visited) >= node_limit or len(encountered_links) >= edge_limit:
-            if frontier and len(visited) >= node_limit:
-                truncation_reasons.add("NODE_LIMIT")
-            if frontier and len(encountered_links) >= edge_limit:
-                truncation_reasons.add("EDGE_LIMIT")
-            break
-
-        constraint_frontier: ColumnElement[bool]
-        candidate_frontier: ColumnElement[bool]
-        if direction == "REFERENCES":
-            constraint_frontier = MetadataConstraint.table_id.in_(frontier)
-            candidate_frontier = RelationshipCandidate.source_table_id.in_(frontier)
-        elif direction == "REFERENCED_BY":
-            constraint_frontier = MetadataConstraint.referenced_table_id.in_(frontier)
-            candidate_frontier = RelationshipCandidate.target_table_id.in_(frontier)
-        else:
-            constraint_frontier = or_(
-                MetadataConstraint.table_id.in_(frontier),
-                MetadataConstraint.referenced_table_id.in_(frontier),
-            )
-            candidate_frontier = or_(
-                RelationshipCandidate.source_table_id.in_(frontier),
-                RelationshipCandidate.target_table_id.in_(frontier),
-            )
-
-        probe_limit = edge_limit - len(encountered_links) + 1
-        constraints = (
-            await session.scalars(
-                select(MetadataConstraint)
-                .where(
-                    MetadataConstraint.datasource_id.in_(touched_datasource_ids),
-                    MetadataConstraint.status == "ACTIVE",
-                    MetadataConstraint.constraint_type == "FOREIGN_KEY",
-                    MetadataConstraint.referenced_table_id.is_not(None),
-                    constraint_frontier,
-                )
-                .order_by(MetadataConstraint.id)
-                .limit(probe_limit)
-            )
-        ).all()
-        # Same-source (or already-crossed-and-authorized-on-both-ends) candidates --
-        # both `datasource_id` and `target_datasource_id` already sit in
-        # `touched_datasource_ids`, so no new authorization decision is needed here.
-        candidate_filters = [
-            RelationshipCandidate.datasource_id.in_(touched_datasource_ids),
-            RelationshipCandidate.target_datasource_id.in_(touched_datasource_ids),
-            candidate_frontier,
-        ]
-        if suggestion_status != "ALL":
-            candidate_filters.append(RelationshipCandidate.status == suggestion_status)
-        candidates = (
-            await session.scalars(
-                select(RelationshipCandidate)
-                .where(*candidate_filters)
-                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
-                .limit(probe_limit)
-            )
-        ).all()
-
-        # KG-2: candidates that would cross into a datasource not yet touched --
-        # probed separately because whether one may join `links` at all depends on
-        # a per-datasource policy decision below, not on row-level fields alone.
-        boundary_filters = [
-            RelationshipCandidate.organization_id == datasource.organization_id,
-            or_(
-                and_(
-                    RelationshipCandidate.datasource_id.in_(touched_datasource_ids),
-                    RelationshipCandidate.target_datasource_id.notin_(touched_datasource_ids),
-                ),
-                and_(
-                    RelationshipCandidate.target_datasource_id.in_(touched_datasource_ids),
-                    RelationshipCandidate.datasource_id.notin_(touched_datasource_ids),
-                ),
-            ),
-            candidate_frontier,
-        ]
-        if suggestion_status != "ALL":
-            boundary_filters.append(RelationshipCandidate.status == suggestion_status)
-        boundary_candidates = (
-            await session.scalars(
-                select(RelationshipCandidate)
-                .where(*boundary_filters)
-                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
-                .limit(probe_limit)
-            )
-        ).all()
-
-        if (
-            len(constraints) == probe_limit
-            or len(candidates) == probe_limit
-            or len(boundary_candidates) == probe_limit
-        ):
-            truncation_reasons.add("EDGE_SCAN_LIMIT")
-
-        # Resolve authorization for every datasource `boundary_candidates` would
-        # newly cross into. One `gate()` (plus `check_cross_boundary_grant` when the
-        # data_domain also differs) per newly-discovered datasource, cached in
-        # `datasource_allowed` for the rest of this request -- not one per candidate
-        # row, mirroring the per-distinct-datasource `gate()` cost in
-        # `list_tables_composed` (api.py).
-        newly_seen_datasource_ids = {
-            other_id
-            for candidate in boundary_candidates
-            for other_id in (candidate.datasource_id, candidate.target_datasource_id)
-            if other_id not in touched_datasource_ids and other_id not in datasource_allowed
-        }
-        if newly_seen_datasource_ids:
-            loaded_datasources = (
-                await session.scalars(
-                    select(DataSource).where(DataSource.id.in_(newly_seen_datasource_ids))
-                )
-            ).all()
-            for other_datasource in loaded_datasources:
-                datasources_by_id[other_datasource.id] = other_datasource
-            for other_id in newly_seen_datasource_ids:
-                resolved_datasource = datasources_by_id.get(other_id)
-                if (
-                    resolved_datasource is None
-                    or resolved_datasource.organization_id != datasource.organization_id
-                ):
-                    # Fails closed: an unresolvable or foreign-org datasource is
-                    # never a valid crossing target (INV-4/INV-5), regardless of
-                    # what a stray candidate row claims.
-                    datasource_allowed[other_id] = False
-                    continue
-                allowed = True
-                if resolved_datasource.data_domain_id != seed_domain_id:
-                    allowed = await check_cross_boundary_grant(
-                        session,
-                        datasource.organization_id,
-                        resolved_datasource.data_domain_id,
-                        seed_domain_id,
-                        edge_kind="SUGGESTED_RELATIONSHIP",
-                    )
-                if allowed:
-                    try:
-                        await gate(
-                            session,
-                            context,
-                            settings=settings,
-                            action="READ_METADATA",
-                            resource_type="datasource",
-                            resource_id=str(resolved_datasource.id),
-                            datasource_id=resolved_datasource.id,
-                        )
-                    except AuthorizationDenied:
-                        allowed = False
-                datasource_allowed[other_id] = allowed
-                if allowed:
-                    touched_datasource_ids.add(other_id)
-
-        allowed_boundary_candidates = [
-            candidate
-            for candidate in boundary_candidates
-            if datasource_allowed.get(candidate.datasource_id, False)
-            and datasource_allowed.get(candidate.target_datasource_id, False)
-        ]
-
-        for constraint in constraints:
-            node_datasource_id[constraint.table_id] = constraint.datasource_id
-            if constraint.referenced_table_id is not None:
-                node_datasource_id[constraint.referenced_table_id] = constraint.datasource_id
-        for candidate in (*candidates, *allowed_boundary_candidates):
-            node_datasource_id[candidate.source_table_id] = candidate.datasource_id
-            node_datasource_id[candidate.target_table_id] = candidate.target_datasource_id
-
-        links = [
-            GraphLink(
-                edge_id=f"constraint:{constraint.id}",
-                source_node_id=constraint.table_id,
-                target_node_id=constraint.referenced_table_id,
-            )
-            for constraint in constraints
-            if constraint.referenced_table_id is not None
-        ]
-        links.extend(
-            GraphLink(
-                edge_id=f"candidate:{candidate.id}",
-                source_node_id=candidate.source_table_id,
-                target_node_id=candidate.target_table_id,
-            )
-            for candidate in (*candidates, *allowed_boundary_candidates)
-        )
-        remaining_edge_capacity = edge_limit - len(encountered_links)
-        for link in sorted(links, key=lambda item: item.edge_id)[:remaining_edge_capacity]:
-            encountered_links.setdefault(link.edge_id, link)
-        if len(links) > remaining_edge_capacity:
-            truncation_reasons.add("EDGE_LIMIT")
-
-        expansion = expand_cross_source_frontier(
-            frontier=frontier,
-            visited=visited,
-            links=list(encountered_links.values()),
+    return await build_knowledge_graph_neighborhood(
+        session,
+        context,
+        settings,
+        NeighborhoodRequest(
+            datasource=datasource,
+            focus=focus,
+            depth=depth,
             direction=direction,
-            depth=current_depth,
+            suggestion_status=suggestion_status,
             node_limit=node_limit,
-            node_datasource_id=node_datasource_id,
-            is_datasource_authorized=lambda ds_id: datasource_allowed.get(ds_id, False),
-        )
-        if expansion.truncated:
-            truncation_reasons.add("NODE_LIMIT")
-        frontier = set(expansion.node_ids)
-        visited.update(frontier)
-        node_depths.update(expansion.node_depths)
-
-    # KG-2: `touched_datasource_ids` only ever grew by an already-authorized crossing
-    # above, so this is belt-and-braces re-enforcement, not the primary check -- a
-    # table from a datasource that never cleared `gate()`/`check_cross_boundary_grant`
-    # cannot appear in the response even if something upstream had a bug.
-    table_rows = (
-        await session.execute(
-            select(MetadataTable, MetadataSchema, MetadataCatalog)
-            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
-            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
-            .where(
-                MetadataTable.id.in_(visited),
-                MetadataTable.datasource_id.in_(touched_datasource_ids),
-                MetadataTable.status == "ACTIVE",
-            )
-        )
-    ).all()
-    active_table_ids = {table.id for table, _, _ in table_rows}
-    table_labels = {
-        table.id: f"{catalog.name}.{schema.name}.{table.name}"
-        for table, schema, catalog in table_rows
-    }
-    columns = (
-        await session.scalars(
-            select(MetadataColumn).where(
-                MetadataColumn.table_id.in_(active_table_ids),
-                MetadataColumn.status == "ACTIVE",
-            )
-        )
-    ).all()
-    columns_by_table: dict[UUID, list[MetadataColumn]] = {}
-    columns_by_id: dict[UUID, MetadataColumn] = {}
-    for column in columns:
-        columns_by_table.setdefault(column.table_id, []).append(column)
-        columns_by_id[column.id] = column
-
-    final_constraints = (
-        await session.scalars(
-            select(MetadataConstraint)
-            .where(
-                MetadataConstraint.datasource_id.in_(touched_datasource_ids),
-                MetadataConstraint.status == "ACTIVE",
-                MetadataConstraint.constraint_type == "FOREIGN_KEY",
-                MetadataConstraint.table_id.in_(active_table_ids),
-                MetadataConstraint.referenced_table_id.in_(active_table_ids),
-            )
-            .order_by(MetadataConstraint.id)
-            .limit(edge_limit + 1)
-        )
-    ).all()
-    final_candidate_filters: list[ColumnElement[bool]] = [
-        RelationshipCandidate.datasource_id.in_(touched_datasource_ids),
-        RelationshipCandidate.target_datasource_id.in_(touched_datasource_ids),
-        RelationshipCandidate.source_table_id.in_(active_table_ids),
-        RelationshipCandidate.target_table_id.in_(active_table_ids),
-    ]
-    if suggestion_status != "ALL":
-        final_candidate_filters.append(RelationshipCandidate.status == suggestion_status)
-    final_candidates = (
-        await session.scalars(
-            select(RelationshipCandidate)
-            .where(*final_candidate_filters)
-            .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
-            .limit(edge_limit + 1)
-        )
-    ).all()
-    edge_records: list[GraphEdgeRead] = [
-        GraphEdgeRead(
-            id=f"constraint:{constraint.id}",
-            edge_type="DECLARED_FOREIGN_KEY",
-            source_node_id=constraint.table_id,
-            target_node_id=constraint.referenced_table_id,
-            source_label=table_labels[constraint.table_id],
-            target_label=table_labels[constraint.referenced_table_id],
-            source_columns=constraint.columns,
-            target_columns=constraint.referenced_columns,
-            status="DECLARED",
-            confidence=1.0,
-            evidence={"source": "DATABASE_CONSTRAINT", "source_values_inspected": False},
-        )
-        for constraint in final_constraints
-        if constraint.referenced_table_id is not None
-    ]
-    edge_records.extend(
-        GraphEdgeRead(
-            id=f"candidate:{candidate.id}",
-            edge_type="SUGGESTED_RELATIONSHIP",
-            source_node_id=candidate.source_table_id,
-            target_node_id=candidate.target_table_id,
-            source_label=table_labels[candidate.source_table_id],
-            target_label=table_labels[candidate.target_table_id],
-            source_columns=[columns_by_id[candidate.source_column_id].name],
-            target_columns=[columns_by_id[candidate.target_column_id].name],
-            status=candidate.status,
-            confidence=candidate.confidence,
-            evidence=candidate.evidence,
-            candidate_id=candidate.id,
-        )
-        for candidate in final_candidates
-        if candidate.source_column_id in columns_by_id
-        and candidate.target_column_id in columns_by_id
-    )
-    if len(edge_records) > edge_limit:
-        truncation_reasons.add("EDGE_LIMIT")
-        edge_records = edge_records[:edge_limit]
-
-    inbound = Counter(edge.target_node_id for edge in edge_records)
-    outbound = Counter(edge.source_node_id for edge in edge_records)
-    nodes = sorted(
-        (
-            GraphNodeRead(
-                id=table.id,
-                node_type="TABLE",
-                label=table.name,
-                qualified_name=table_labels[table.id],
-                object_type=table.object_type,
-                status=table.status,
-                column_count=len(columns_by_table.get(table.id, [])),
-                sensitive_column_count=sum(
-                    column.classification in SENSITIVE_CLASSIFICATIONS
-                    for column in columns_by_table.get(table.id, [])
-                ),
-                depth=node_depths.get(table.id, depth),
-                inbound_edge_count=inbound[table.id],
-                outbound_edge_count=outbound[table.id],
-            )
-            for table, _, _ in table_rows
+            edge_limit=edge_limit,
         ),
-        key=lambda node: (node.depth, node.qualified_name),
-    )
-
-    total_tables = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(MetadataTable)
-            .where(
-                MetadataTable.datasource_id == datasource.id,
-                MetadataTable.status == "ACTIVE",
-            )
-        )
-        or 0
-    )
-    declared_total = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(MetadataConstraint)
-            .where(
-                MetadataConstraint.datasource_id == datasource.id,
-                MetadataConstraint.status == "ACTIVE",
-                MetadataConstraint.constraint_type == "FOREIGN_KEY",
-            )
-        )
-        or 0
-    )
-    suggested_total = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(RelationshipCandidate)
-            .where(RelationshipCandidate.datasource_id == datasource.id)
-        )
-        or 0
-    )
-    pending_suggestions = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(RelationshipCandidate)
-            .where(
-                RelationshipCandidate.datasource_id == datasource.id,
-                RelationshipCandidate.status == "PENDING",
-            )
-        )
-        or 0
-    )
-    return KnowledgeGraphRead(
-        datasource_id=datasource.id,
-        nodes=nodes,
-        edges=edge_records,
-        total_tables=total_tables,
-        total_declared_edges=declared_total,
-        total_suggested_edges=suggested_total,
-        pending_suggestions=pending_suggestions,
-        truncated=bool(truncation_reasons),
-        focus_node_id=focus.id,
-        direction=direction,
-        requested_depth=depth,
-        returned_node_count=len(nodes),
-        returned_edge_count=len(edge_records),
-        node_limit=node_limit,
-        edge_limit=edge_limit,
-        truncation_reasons=sorted(truncation_reasons),
     )
 
 
@@ -1519,9 +1132,7 @@ async def discover_cross_source_relationship_candidates(
                         confidence=candidate_score.confidence,
                         evidence={
                             "column_name_match": "EXACT" if name_is_literal_exact else "CANONICAL",
-                            "physical_type_match": (
-                                "EXACT" if type_is_literal_exact else "FAMILY"
-                            ),
+                            "physical_type_match": ("EXACT" if type_is_literal_exact else "FAMILY"),
                             "physical_type_family": target_type_family,
                             "target_is_primary_key": True,
                             "source_values_inspected": False,
@@ -2015,8 +1626,7 @@ async def discover_cross_source_object_resolution_candidates(
         ]
 
     profiles = {
-        datasource.id: await _load_table_profiles(datasource)
-        for datasource in profile_datasources
+        datasource.id: await _load_table_profiles(datasource) for datasource in profile_datasources
     }
     existing_candidate_pairs = {
         (source_table_id, target_table_id)
@@ -2466,9 +2076,7 @@ async def get_relationship_candidate_confidence_calibration(
                 )
             )
         ).all()
-        ground_truth_by_candidate = {
-            row.candidate_id: row.label for row in ground_truth_rows
-        }
+        ground_truth_by_candidate = {row.candidate_id: row.label for row in ground_truth_rows}
 
     bucket_count = max(1, math.ceil(1.0 / bucket_width))
     bucket_totals = [0] * bucket_count
@@ -2494,9 +2102,7 @@ async def get_relationship_candidate_confidence_calibration(
             approved_count=bucket_approved[index],
             rejected_count=bucket_totals[index] - bucket_approved[index],
             observed_approval_rate=(
-                bucket_approved[index] / bucket_totals[index]
-                if bucket_totals[index]
-                else None
+                bucket_approved[index] / bucket_totals[index] if bucket_totals[index] else None
             ),
         )
         for index in range(bucket_count)
@@ -2640,8 +2246,9 @@ async def _build_composite_read(
         member.target_column_id for member in members
     }
     columns = (
-        (await session.scalars(select(MetadataColumn).where(MetadataColumn.id.in_(column_ids))))
-        .all()
+        (
+            await session.scalars(select(MetadataColumn).where(MetadataColumn.id.in_(column_ids)))
+        ).all()
         if column_ids
         else []
     )
@@ -2740,9 +2347,7 @@ async def resolve_canonical_table(
     if family is None:
         return None
     mapping = await session.scalar(
-        select(CanonicalTableMapping).where(
-            CanonicalTableMapping.family_candidate_id == family.id
-        )
+        select(CanonicalTableMapping).where(CanonicalTableMapping.family_candidate_id == family.id)
     )
     effective_id = resolve_canonical_table_id(
         base_table_id=family.base_table_id,
@@ -2834,9 +2439,7 @@ async def override_canonical_table(
             event_type="canonical_table.resolved.v1",
             payload={
                 "family_candidate_id": str(family.id),
-                "canonical_table_id": (
-                    str(family.base_table_id) if family.base_table_id else None
-                ),
+                "canonical_table_id": (str(family.base_table_id) if family.base_table_id else None),
                 "steward_override": False,
             },
         )
@@ -2891,6 +2494,7 @@ async def override_canonical_table(
     result = await _build_canonical_read(session, mapping)
     await session.commit()
     return result
+
 
 # --------------------------------------------------------------------------
 # RL-3 -- composite (multi-column) relationship candidates

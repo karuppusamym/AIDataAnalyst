@@ -94,13 +94,63 @@
 #                    new regressions without retroactively red-lining every push on
 #                    pre-existing, out-of-file-scope dependency debt. A CycloneDX SBOM is
 #                    generated and uploaded alongside the full (unbaselined) report.
+#   frontend-dependency-scan -- review-2026-09-05 §7: the backend had pip-audit against
+#                    the locked non-dev set; `ui-next` had no dependency scan at all,
+#                    231 resolved packages and a committed lockfile that nothing looked
+#                    at. `scripts/check_npm_audit.py` runs `npm audit --json
+#                    --package-lock-only` against `ui-next/package-lock.json` (no
+#                    `npm ci` needed) and fails on any *unbaselined* advisory -- same
+#                    design as the pip-audit gate, with a small, dated, named baseline
+#                    in that script for what is already present today. Two deliberate
+#                    differences, both stated in the script: it scans the whole lockfile
+#                    rather than the non-dev set, because vite/esbuild/vitest are what
+#                    *build* the artifact the browser runs; and a baselined dev-only
+#                    advisory that later reaches a runtime dependency fails anyway.
+#   frontend-reachability -- review-2026-09-05 §7 asked for a reachability review across
+#                    BOTH namespaces. The backend half is `reachability` above; this is
+#                    the missing half. `scripts/check_frontend_reachability.py` walks a
+#                    static import graph over `ui-next/src` from the entry points it
+#                    derives (index.html's module script, vitest's setupFiles), follows
+#                    `React.lazy(() => import(...))` -- without which all 45 lazy screens
+#                    read as dead -- and fails on any module reachable from nothing.
+#                    Statement-level `import type` is tracked but does NOT confer
+#                    reachability: TypeScript erases it, and that is exactly how
+#                    `ProposalCard.tsx` (D01) looked alive while shipping in no bundle.
+#   destination-inventory -- review-2026-09-05 §6 item 7: no unified inventory of
+#                    external destinations and credential references existed.
+#                    `scripts/generate_destination_inventory.py` derives one from
+#                    `atlas.platform.config.Settings` and from how `src/` reads it, with
+#                    configured / approved / active / healthy / verified as five separate
+#                    columns, and `--check` fails when the committed document drifts. It
+#                    never prints a setting's value -- names, characterizations and hosts
+#                    only -- because the generated file is committed and several of those
+#                    settings are credentials.
 #   secret-scan   -- tracker AU-13: gitleaks scans the full git history. `.gitleaks.toml`
 #                    extends gitleaks' default ruleset with one narrow, path-based allowlist
 #                    for three test files' synthetic connector-auth fixtures (fake tokens
 #                    used to test DSN parsing); nothing else is excluded.
 #   docker-build  -- tracker AU-13: the audit found the Dockerfile was never built in CI, so
 #                    a broken image was only ever found at deploy. This job runs a real
-#                    `docker build` and a smoke import inside the built image.
+#                    `docker build` and a smoke import inside the built image. Since
+#                    review-2026-09-05 §7 it also proves the image ships every package the
+#                    wheel manifest declares -- `pyproject.toml` listed `sdk/aida_tool_sdk`
+#                    while the Dockerfile copied only `src`, and hatchling's editable install
+#                    silently skipped the missing root, so the build went green and
+#                    `import aida_tool_sdk` failed at runtime.
+#   ui-proxy      -- review-2026-09-05 F07: `AgentGatewayScreen` advertises
+#                    `${location.origin}/mcp`, vite proxied `/mcp` in dev, and production
+#                    nginx proxied only `/v1/` -- so the URL an engineer copied out of the
+#                    deployed UI returned the SPA's index.html instead of the MCP server. No
+#                    gate could see it, because both files were individually valid. This job
+#                    runs the REAL built ui-next image (nginx + the built SPA) in front of a
+#                    stub upstream and asserts each API prefix reaches the upstream while
+#                    everything else gets the SPA. `scripts/check_proxy_contract.py` in the
+#                    `quality` job is its fast static half; this one is the live test.
+#   docs          -- review-2026-09-05 D06: README linked a status matrix and a competitor
+#                    planning document that did not exist. Every relative link in every
+#                    tracked Markdown file must resolve, headings included. External URLs are
+#                    never fetched -- a doc gate that flakes on someone else's outage gets
+#                    disabled, and a disabled gate proves nothing.
 #
 # A change that breaks any of these does not merge.
 
@@ -152,6 +202,16 @@ jobs:
 
       - name: import-linter (architecture contracts)
         run: uv run lint-imports
+
+      # The three stdlib-only configuration gates from review-2026-09-05. They
+      # need no dependencies at all, so they run here rather than in a job of
+      # their own, and they fail fast: each one guards a mismatch between two
+      # files that are individually valid.
+      - name: Dev/production proxy contract (F07, static)
+        run: uv run python scripts/check_proxy_contract.py
+
+      - name: Backend image ships every declared wheel package (REVIEW §7)
+        run: uv run python scripts/check_image_packaging.py
 
   migrations:
     name: Migrations
@@ -534,6 +594,105 @@ jobs:
             sbom.cdx.json
           retention-days: 90
 
+  frontend-dependency-scan:
+    name: ui-next dependency vulnerability scan (REVIEW §7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Deliberately no `npm ci`: `npm audit --package-lock-only` resolves
+      # straight from the committed lockfile, so this gate is fast and cannot be
+      # blocked by an install problem it has nothing to do with. It is also the
+      # set `npm ci` would install, so the two cannot drift.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # THE BASELINE, as measured on 2026-09-06 and recorded in full in
+      # `scripts/check_npm_audit.py`: 14 advisories across esbuild 0.21.5, vite
+      # 5.4.11 and vitest 2.1.9, every one of them reached only through
+      # devDependencies. The runtime scan (react, react-dom,
+      # @tanstack/react-virtual) returns zero, so nothing baselined here is in
+      # the bundle a browser loads. Thirteen are Vite dev-server defects
+      # (`server.fs.deny` bypasses, dev-server request forgery, a path
+      # traversal); this repository never runs Vite's dev server in a deployed
+      # configuration -- production serves the built SPA from nginx, which the
+      # `ui-proxy` job exercises. The fourteenth is the Vitest UI server, which
+      # is never started (`npm run test` is `vitest run`, headless, no --ui).
+      # They are baselined rather than fixed because the fixes are vite 5 -> 7
+      # and vitest 2 -> 3 major bumps -- a change with its own build and review,
+      # not a side effect of adding the gate that found them. Exactly the
+      # reasoning of the 2026-08-31 pip-audit baseline above.
+      #
+      # A NEW advisory, a new vulnerable package, an advisory that reaches a
+      # runtime dependency, or a baseline entry that no longer applies all fail
+      # this job.
+      - name: npm audit -- fail on any unbaselined advisory
+        run: python scripts/check_npm_audit.py --check --report npm-audit-report.json
+
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report-${{ github.sha }}
+          path: npm-audit-report.json
+          retention-days: 90
+
+  frontend-reachability:
+    name: ui-next reachability gate (REVIEW §7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Standard library only and no `npm ci` -- same reasoning as the `docs`
+      # job below. The walker reads TypeScript as text; it needs no toolchain.
+      - name: Every ui-next/src module reachable from a real entry point
+        run: python scripts/check_frontend_reachability.py --check
+
+  destination-inventory:
+    name: Destination and credential inventory (REVIEW §6.7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Same reason as openapi-diff: this job imports `atlas.platform.config`
+    # outside pytest and needs the scoped, job-level env var rather than a
+    # workflow-level one, which would defeat AU-3's own "unset outside tests"
+    # coverage in the `tests` job.
+    env:
+      AIDA_ENVIRONMENT: "development"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # Only the inventory is gated here. `generate_surface_control_matrix.py`
+      # has a `--check` mode too and is not wired into CI; adding it is a
+      # separate decision (it derives from the live FastAPI app, so it drifts
+      # whenever a route changes) and belongs to whoever owns that document.
+      - name: Docs/50-security inventory matches Settings
+        run: uv run python scripts/generate_destination_inventory.py --check
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
@@ -576,3 +735,144 @@ jobs:
 
       - name: Smoke check -- the built image can actually import the app
         run: docker run --rm -e AIDA_ENVIRONMENT=development aida:${{ github.sha }} python -c "import aida.main; print('aida.main import OK:', aida.main.app)"
+
+      # review-2026-09-05 §7. `scripts/check_image_packaging.py` (quality job)
+      # proves the Dockerfile COPYs every declared wheel package; this proves the
+      # resulting image can import them. Both are needed: the manifest mismatch
+      # that started this did not fail the build, it produced a green image whose
+      # `import aida_tool_sdk` raised ModuleNotFoundError.
+      - name: Smoke check -- every declared wheel package imports from the image
+        run: |
+          docker run --rm -e AIDA_ENVIRONMENT=development aida:${{ github.sha }} python -c "
+          import aida, atlas, aida_tool_sdk
+          for module in (aida, atlas, aida_tool_sdk):
+              print(f'{module.__name__} import OK: {module.__file__}')
+          "
+
+  ui-proxy:
+    name: Production proxy contract, live (F07)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The real image: nginx serving the real built SPA with the real
+      # ui-next/nginx.conf. Not a hand-written nginx config for the test -- that
+      # would prove something about a file nobody deploys.
+      - name: Build the ui-next image
+        run: docker build --tag ui-next:${{ github.sha }} ./ui-next
+
+      - name: Create an isolated network
+        run: docker network create atlas-proxy-ci
+
+      # nginx.conf resolves the upstream by the name `api` through Docker's
+      # embedded DNS (resolver 127.0.0.11), which only exists on a user-defined
+      # network -- hence the alias rather than a container name.
+      - name: Start the stub upstream as `api`
+        run: |
+          docker run -d --name atlas-stub-api \
+            --network atlas-proxy-ci --network-alias api \
+            -v "$PWD/scripts:/srv:ro" \
+            python:3.13-slim python /srv/proxy_contract_stub_api.py 8000
+
+      - name: Start the ui-next image in front of it
+        run: |
+          docker run -d --name atlas-ui-next \
+            --network atlas-proxy-ci -p 8099:80 \
+            ui-next:${{ github.sha }}
+
+      - name: Wait for nginx
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8099/health >/dev/null 2>&1; then
+              echo "nginx is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "nginx did not become healthy"; docker logs atlas-ui-next; exit 1
+
+      # THE ASSERTION F07 IS ABOUT. Before the fix, `/mcp` returned the SPA
+      # shell -- a 200, valid HTML, and completely wrong. A status-code check
+      # would have passed. So each case asserts on the body.
+      - name: '/mcp reaches the API, not the SPA'
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS -X POST \
+            -H 'Authorization: Bearer ci-smoke-token' \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
+            http://localhost:8099/mcp)
+          echo "$body"
+          case "$body" in
+            *ATLAS-STUB-UPSTREAM*path=/mcp*) ;;
+            *) echo "FAIL: /mcp did not reach the upstream"; exit 1 ;;
+          esac
+          # The bearer token the MCP server requires must survive the proxy hop.
+          case "$body" in
+            *authorization=present*) ;;
+            *) echo "FAIL: nginx dropped the Authorization header"; exit 1 ;;
+          esac
+
+      - name: '/v1/ reaches the API'
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS http://localhost:8099/v1/health)
+          echo "$body"
+          case "$body" in
+            *ATLAS-STUB-UPSTREAM*path=/v1/health*) ;;
+            *) echo "FAIL: /v1/ did not reach the upstream"; exit 1 ;;
+          esac
+
+      # The other direction: over-proxying would break client-side routing, so a
+      # deep link must still get the SPA shell.
+      - name: 'an SPA route still gets index.html'
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS http://localhost:8099/some/deep/spa/route)
+          case "$body" in
+            *ATLAS-STUB-UPSTREAM*) echo "FAIL: an SPA route was proxied to the API"; exit 1 ;;
+          esac
+          case "$body" in
+            *"<!doctype html"*|*"<!DOCTYPE html"*) ;;
+            *) echo "FAIL: an SPA route did not return the SPA shell"; exit 1 ;;
+          esac
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs atlas-ui-next; docker logs atlas-stub-api
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker rm -f atlas-ui-next atlas-stub-api || true
+          docker network rm atlas-proxy-ci || true
+
+  docs:
+    name: Documentation links (D06)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Standard library only -- deliberately no `uv sync`, so a broken link is
+      # reported in seconds and this gate cannot be blocked by a dependency
+      # resolution problem it has nothing to do with.
+      - name: Every relative Markdown link resolves
+        run: python scripts/check_docs_links.py
+
+      # D03 and §7 of review-2026-09-05: two documents that are derived from the
+      # source tree rather than typed. Both are stdlib-only static analysis for
+      # the same reason as the link checker -- they must not be blocked by a
+      # dependency resolution problem they have nothing to do with. A failure
+      # here means the committed file no longer matches the code; regenerate it
+      # by running the same script without `--check`.
+      - name: Compatibility-shim register matches the source tree (D03)
+        run: python scripts/shim_register.py --check
+
+      - name: Architecture map matches the source tree
+        run: python scripts/generate_architecture_map.py --check

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { NegativeAssertionRead } from "../lib/types";
 import { ApiError } from "../lib/api";
 
@@ -160,7 +160,17 @@ describe("NegativeKnowledgeScreen against the real EE.3 endpoints", () => {
     await waitFor(() => expect(screen.getByText("t_customer_master")).toBeInTheDocument());
   });
 
-  it("lifting suppression prompts for a reason, calls the endpoint, and updates the row in place", async () => {
+  /* The reason is collected in a real dialog, not `window.prompt`
+     (review 2026-09-05, F21). */
+  async function openLiftDialog() {
+    const NegativeKnowledgeScreen = await loadScreen();
+    render(<NegativeKnowledgeScreen />);
+    await waitFor(() => expect(screen.getByText("t_customer_master")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Lift suppression" }));
+    return await screen.findByRole("dialog");
+  }
+
+  it("lifting suppression asks for a reason, calls the endpoint, and updates the row in place", async () => {
     searchNegativeKnowledge.mockResolvedValue({ items: [ASSERTION], limit: 50, offset: 0, total: 1 });
     liftNegativeAssertionSuppression.mockResolvedValue({
       ...ASSERTION,
@@ -169,13 +179,12 @@ describe("NegativeKnowledgeScreen against the real EE.3 endpoints", () => {
       suppression_lifted_by: "dev-fixture-user",
       lift_reason: "False positive, table was renamed.",
     });
-    vi.spyOn(window, "prompt").mockReturnValue("False positive, table was renamed.");
 
-    const NegativeKnowledgeScreen = await loadScreen();
-    render(<NegativeKnowledgeScreen />);
-    await waitFor(() => expect(screen.getByText("t_customer_master")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: "Lift suppression" }));
+    const dialog = await openLiftDialog();
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), {
+      target: { value: "False positive, table was renamed." },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Lift suppression" }));
 
     await waitFor(() =>
       expect(liftNegativeAssertionSuppression).toHaveBeenCalledWith(
@@ -185,20 +194,34 @@ describe("NegativeKnowledgeScreen against the real EE.3 endpoints", () => {
       ),
     );
     await waitFor(() => expect(screen.getByText("suppression lifted")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("requires a reason before lifting suppression, and skips the call if none is given", async () => {
+  it("blocks the lift until a reason is written, and never calls the endpoint without one", async () => {
     searchNegativeKnowledge.mockResolvedValue({ items: [ASSERTION], limit: 50, offset: 0, total: 1 });
-    vi.spyOn(window, "prompt").mockReturnValue(null);
 
-    const NegativeKnowledgeScreen = await loadScreen();
-    render(<NegativeKnowledgeScreen />);
-    await waitFor(() => expect(screen.getByText("t_customer_master")).toBeInTheDocument());
+    const dialog = await openLiftDialog();
+    const confirm = within(dialog).getByRole("button", { name: "Lift suppression" });
+    expect(confirm).toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Lift suppression" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
-    expect(window.prompt).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(liftNegativeAssertionSuppression).not.toHaveBeenCalled();
+  });
+
+  it("keeps the lift dialog open and shows the server's refusal verbatim", async () => {
+    searchNegativeKnowledge.mockResolvedValue({ items: [ASSERTION], limit: 50, offset: 0, total: 1 });
+    liftNegativeAssertionSuppression.mockRejectedValue(
+      new ApiError(409, "the material change hash has not moved"),
+    );
+
+    const dialog = await openLiftDialog();
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), { target: { value: "renamed upstream" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Lift suppression" }));
+
+    expect(await screen.findByText("the material change hash has not moved")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("surfaces a fetch error with a retry action", async () => {

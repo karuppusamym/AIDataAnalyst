@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* Filters and selection live in the URL so a filtered view is shareable and
+   survives Back/Forward. This screen carried a verbatim copy of the old hook
+   -- a `useState` seeded once from `location.search`, subscribed to nothing --
+   so its idea of the selection and the address bar drifted apart the first
+   time either the Back button or a same-screen link was used (review
+   2026-09-05, F09 - R07). The shared hook reads one location store. */
+import { useUrlState } from "../lib/useUrlState";
 import type { MarketplaceProductRead } from "../lib/ui-types";
 import { ApiError, fetchMarketplaceProducts, requestMarketplaceAccess } from "../lib/api";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./MarketplaceScreen.css";
@@ -43,22 +50,6 @@ const accessLabel = (s: MarketplaceProductRead["access_status"]): string =>
         ? "request pending"
         : "not requested";
 
-function useUrlState() {
-  const [params, setParams] = useState(() => new URLSearchParams(location.search));
-  const update = useCallback((patch: Record<string, string | null>) => {
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null || v === "") next.delete(k);
-        else next.set(k, v);
-      }
-      const query = next.toString();
-      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
-      return next;
-    });
-  }, []);
-  return [params, update] as const;
-}
 
 function ProductCard({
   product,
@@ -132,7 +123,7 @@ function ProductDetail({
     }
   }, [product.id, purpose, onRequested]);
 
-  const permalink = `${location.origin}${location.pathname}?product=${product.id}`;
+
 
   return (
     <aside className="evp" aria-label={`Detail for ${product.name}`}>
@@ -195,13 +186,11 @@ function ProductDetail({
         />
       </div>
       <footer className="evp__foot">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(permalink);
-          }}
-        >
-          Copy link
-        </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/marketplace`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton target={{ screen: "marketplace", params: { product: product.id } }} />
         <span className="evp__hint">Governed · CX-9</span>
       </footer>
     </aside>

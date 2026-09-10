@@ -4,7 +4,7 @@ import type { DelegationCreate, DelegationRead } from "../lib/types";
 import { ApiError, fetchDelegations, grantDelegation, revokeDelegation } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/workflow-author.css";
 import "./DelegationsScreen.css";
@@ -281,22 +281,38 @@ export function DelegationsScreen() {
     return items;
   }, [data, statusFilter]);
 
+  /* Revoking takes a role away from a named colleague. `window.confirm`
+     could not name which delegation was about to be revoked, could not be
+     reached by a keyboard user trapped elsewhere on the page, blocked the
+     event loop while it was open, and reported nothing when the revoke then
+     failed -- the row simply stayed as it was (review 2026-09-05, F21). */
+  const [revokeTarget, setRevokeTarget] = useState<DelegationRead | null>(null);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
+
   const onRevoke = useCallback((delegation: DelegationRead) => {
-    if (!window.confirm("Revoke this delegation?")) return;
-    void (async () => {
-      try {
-        const updated = await revokeDelegation(delegation.id);
-        setData((prev) =>
-          prev
-            ? { ...prev, items: prev.items.map((item) => (item.id === updated.id ? updated : item)) }
-            : prev,
-        );
-        setNotice("Delegation revoked.");
-      } catch (err) {
-        setNotice(err instanceof ApiError ? err.message : String(err));
-      }
-    })();
+    setRevokeError(null);
+    setRevokeTarget(delegation);
   }, []);
+
+  const confirmRevoke = useCallback(async () => {
+    const delegation = revokeTarget;
+    if (!delegation) return;
+    setRevoking(true);
+    setRevokeError(null);
+    try {
+      const updated = await revokeDelegation(delegation.id);
+      setData((prev) =>
+        prev ? { ...prev, items: prev.items.map((item) => (item.id === updated.id ? updated : item)) } : prev,
+      );
+      setNotice("Delegation revoked.");
+      setRevokeTarget(null);
+    } catch (err) {
+      setRevokeError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setRevoking(false);
+    }
+  }, [revokeTarget]);
 
   const onGranted = useCallback((delegation: DelegationRead) => {
     setData((prev) => (prev ? { ...prev, items: [delegation, ...prev.items] } : { items: [delegation] }));
@@ -376,6 +392,19 @@ export function DelegationsScreen() {
           hint="Grant one above, or clear the filters to see every delegation in this organization."
         />
       )}
+
+      {revokeTarget ? (
+        <ConfirmDialog
+          title="Revoke this delegation?"
+          description={`${revokeTarget.delegate_principal_id} loses ${revokeTarget.delegated_roles.join(", ")} immediately. Granting it again is a new delegation.`}
+          confirmLabel="Revoke delegation"
+          destructive
+          busy={revoking}
+          error={revokeError}
+          onConfirm={() => void confirmRevoke()}
+          onCancel={() => setRevokeTarget(null)}
+        />
+      ) : null}
     </section>
   );
 }

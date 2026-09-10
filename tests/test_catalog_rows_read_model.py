@@ -165,6 +165,33 @@ def _context(datasource: DataSource, **overrides: object) -> object:
 # ---------------------------------------------------------------------------
 
 
+async def test_datasource_filter_returns_only_that_sources_tables(session) -> None:
+    datasource_a = await _seed_datasource(session)
+    org = await session.get(Organization, datasource_a.organization_id)
+    datasource_b = await _seed_datasource(session, org=org)
+    await _seed_table(session, datasource_a, name="accounts_a")
+    await _seed_table(session, datasource_b, name="accounts_b")
+    await session.commit()
+
+    page = await list_catalog_rows(
+        org.id,
+        datasource_id=datasource_b.id,
+        q=None,
+        object_type=None,
+        table_status="ACTIVE",
+        certification=None,
+        limit=100,
+        offset=0,
+        cursor=None,
+        context=_context(datasource_a),
+        session=session,
+        settings=_SETTINGS,
+    )
+
+    assert [row.name for row in page.items] == ["accounts_b"]
+    assert page.total == 1
+
+
 async def test_composed_row_carries_every_field_the_exit_criterion_names(session) -> None:
     datasource = await _seed_datasource(session)
     table = await _seed_table(session, datasource, name="accounts")

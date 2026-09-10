@@ -191,28 +191,44 @@ describe("PlaybooksScreen (AT-1)", () => {
     await waitFor(() => expect(updatePlaybook).toHaveBeenCalledWith(PLAYBOOK_TAG.id, { enabled: false }));
   });
 
-  it("asks for confirmation before deleting and skips the call when declined", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  /* The confirmation is a real dialog, not `window.confirm`
+     (review 2026-09-05, F21): it names the playbook, is dismissible with
+     Escape, and stays open to report a delete the server refused. */
+  async function openDeleteDialog() {
     render(<PlaybooksScreen />);
     await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
-
     fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+    return await screen.findByRole("dialog");
+  }
 
-    expect(confirmSpy).toHaveBeenCalled();
+  it("asks for confirmation before deleting and skips the call when declined", async () => {
+    const dialog = await openDeleteDialog();
+
+    expect(within(dialog).getByText(/Tag staging tables/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(deletePlaybook).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    expect(screen.getByText("Tag staging tables")).toBeInTheDocument();
   });
 
   it("deletes a playbook after confirmation and removes it from the list", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     deletePlaybook.mockResolvedValue(undefined);
-    render(<PlaybooksScreen />);
-    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+    const dialog = await openDeleteDialog();
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]!);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete playbook" }));
 
     await waitFor(() => expect(deletePlaybook).toHaveBeenCalledWith(PLAYBOOK_TAG.id));
     await waitFor(() => expect(screen.queryByText("Tag staging tables")).not.toBeInTheDocument());
-    confirmSpy.mockRestore();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("does not dismiss on a backdrop click, because the action is destructive", async () => {
+    const dialog = await openDeleteDialog();
+
+    fireEvent.mouseDown(dialog.parentElement!);
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(deletePlaybook).not.toHaveBeenCalled();
   });
 });

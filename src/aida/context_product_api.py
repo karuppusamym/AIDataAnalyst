@@ -39,6 +39,7 @@ from aida.models import (
     Project,
     SemanticModelVersion,
 )
+from aida.resource_scope import load_project_in_scope
 from aida.schemas import (
     ContextProductConsumerBindingCreate,
     ContextProductConsumerBindingRead,
@@ -200,16 +201,6 @@ def _product_read(
     )
 
 
-async def _project_scope(
-    session: AsyncSession, project_id: UUID, context: SecurityContext
-) -> Project:
-    project = await session.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    enforce_organization(context, project.organization_id)
-    return project
-
-
 async def _product_scope(
     session: AsyncSession, product_id: UUID, context: SecurityContext
 ) -> ContextProduct:
@@ -316,7 +307,7 @@ async def create_context_product(
     context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_AUTHORS)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextProductRead:
-    project = await _project_scope(session, project_id, context)
+    project = await load_project_in_scope(session, project_id, context)
     await validate_context_product_references(session, project, body)
     existing = await session.scalar(
         select(ContextProduct.id).where(
@@ -386,7 +377,7 @@ async def list_context_products(
     context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    project = await _project_scope(session, project_id, context)
+    project = await load_project_in_scope(session, project_id, context)
     filters = (
         ContextProduct.organization_id == project.organization_id,
         ContextProduct.project_id == project.id,
@@ -739,7 +730,7 @@ async def create_context_product_version(
     product = await _product_scope(session, product_id, context)
     if product.lifecycle_status != "ACTIVE":
         raise HTTPException(status_code=409, detail="context product is not active")
-    project = await _project_scope(session, product.project_id, context)
+    project = await load_project_in_scope(session, product.project_id, context)
     await validate_context_product_references(session, project, body)
     if body.based_on_version_id is not None:
         base = await session.get(ContextProductVersion, body.based_on_version_id)
@@ -805,7 +796,7 @@ async def update_context_product_version(
     product, version = await _version_scope(session, version_id, context)
     if version.status != "DRAFT":
         raise HTTPException(status_code=409, detail="only draft context products can be changed")
-    project = await _project_scope(session, product.project_id, context)
+    project = await load_project_in_scope(session, product.project_id, context)
     await validate_context_product_references(session, project, body)
     apply_context_product_definition(version, body)
     await replace_context_product_role_bindings(session, version)
@@ -846,7 +837,7 @@ async def submit_context_product_version(
             return existing
     if version.status != "DRAFT":
         raise HTTPException(status_code=409, detail="only a draft context product can be submitted")
-    project = await _project_scope(session, product.project_id, context)
+    project = await load_project_in_scope(session, product.project_id, context)
     await validate_context_product_references(session, project, _definition_from_version(version))
     review = GovernanceReview(
         organization_id=product.organization_id,

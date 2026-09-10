@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from aida.models import (
 from aida.parsed_lineage_review_service import (
     resolve_review_status_for_new_edge,
 )
+from aida.resource_scope import load_datasource_in_scope
 from aida.schemas import (
     LineageEdgeRead,
     ProcedureLineageEdgeRead,
@@ -34,7 +35,7 @@ from aida.schemas import (
     ViewLineageParseRequest,
     ViewLineageParseResponse,
 )
-from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.security import SecurityContext, require_roles
 from aida.sql_lineage_parser import (
     PROCEDURE_RESULT_TARGET,
     LineageEdge,
@@ -62,16 +63,6 @@ _LINEAGE_READER_ROLES = (
     "Auditor",
     "Viewer",
 )
-
-
-async def _load_datasource(
-    session: AsyncSession, context: SecurityContext, datasource_id: UUID
-) -> DataSource:
-    datasource = await session.get(DataSource, datasource_id)
-    if datasource is None:
-        raise HTTPException(status_code=404, detail="datasource not found")
-    enforce_organization(context, datasource.organization_id)
-    return datasource
 
 
 async def _resolve_table_ids(
@@ -277,7 +268,7 @@ async def parse_view_lineage_endpoint(
     The SQL is never executed.  Literal values are redacted.  Extracted edges
     are persisted for the datasource.
     """
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     result = parse_view_lineage(body.sql, body.dialect)
 
     persisted = await _persist_edges(
@@ -335,7 +326,7 @@ async def parse_procedure_lineage_endpoint(
     The SQL is never executed.  Literal values are redacted.  Extracted edges
     are persisted for the datasource.
     """
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     result = parse_procedure_lineage(body.sql, body.dialect)
 
     persisted = await _persist_edges(
@@ -386,7 +377,7 @@ async def list_view_lineage(
     session: AsyncSession = Depends(get_session),
 ) -> list[ViewLineageEdgeRead]:
     """List all view lineage edges for a datasource."""
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     rows = (
         await session.scalars(
             select(ViewLineageEdge)
@@ -411,7 +402,7 @@ async def list_procedure_lineage(
     session: AsyncSession = Depends(get_session),
 ) -> list[ProcedureLineageEdgeRead]:
     """List all procedure lineage edges for a datasource."""
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     rows = (
         await session.scalars(
             select(ProcedureLineageEdge)

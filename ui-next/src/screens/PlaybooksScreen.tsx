@@ -15,7 +15,7 @@ import {
   updatePlaybook,
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/workflow-author.css";
 import "./PlaybooksScreen.css";
@@ -411,13 +411,37 @@ export function PlaybooksScreen() {
       setNotice(`"${playbook.name}" is now ${updated.enabled ? "enabled" : "disabled"}.`);
     });
 
+  /* Deleting a playbook is irreversible. `window.confirm` could not be
+     styled, trapped or reached by a keyboard user, blocked the event loop
+     while it was open, and left the failure of the delete itself to a notice
+     the user had already looked away from (review 2026-09-05, F21). */
+  const [deleteTarget, setDeleteTarget] = useState<PlaybookRead | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   const handleDelete = (playbook: PlaybookRead) => {
-    if (!window.confirm(`Delete playbook "${playbook.name}"? This cannot be undone.`)) return;
-    void withBusy(playbook.id, async () => {
+    setDeleteError(null);
+    setDeleteTarget(playbook);
+  };
+
+  const confirmDelete = async () => {
+    const playbook = deleteTarget;
+    if (!playbook) return;
+    setDeleteError(null);
+    setBusyIds((prev) => new Set(prev).add(playbook.id));
+    try {
       await deletePlaybook(playbook.id);
       setPlaybooks((prev) => prev?.filter((p) => p.id !== playbook.id) ?? prev);
       setNotice(`"${playbook.name}" deleted.`);
-    });
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(playbook.id);
+        return next;
+      });
+    }
   };
 
   const handleCreated = (playbook: PlaybookRead) => {
@@ -469,6 +493,19 @@ export function PlaybooksScreen() {
           hint="Create one above to automate a bulk metadata action on a schedule."
         />
       )}
+
+      {deleteTarget ? (
+        <ConfirmDialog
+          title={`Delete playbook "${deleteTarget.name}"?`}
+          description="This cannot be undone. Its schedule stops and its run history is no longer reachable from here."
+          confirmLabel="Delete playbook"
+          destructive
+          busy={busyIds.has(deleteTarget.id)}
+          error={deleteError}
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      ) : null}
     </section>
   );
 }

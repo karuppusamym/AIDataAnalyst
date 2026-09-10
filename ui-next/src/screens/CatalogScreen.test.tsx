@@ -150,6 +150,23 @@ afterEach(() => {
 });
 
 describe("CatalogScreen -- P1-04 draft generation wiring", () => {
+  it("honors a source-scoped link and lets the user return to the whole catalog", async () => {
+    history.replaceState(null, "", "/?ds=ds_snowflake_prod#/catalog");
+    const { CatalogScreen } = await import("./CatalogScreen");
+    render(<CatalogScreen />);
+
+    await waitFor(() =>
+      expect(fetchCatalogRows).toHaveBeenCalledWith(
+        expect.objectContaining({ datasourceId: "ds_snowflake_prod" }),
+        expect.anything(),
+      ),
+    );
+    expect(screen.getByText("Showing tables from the selected source.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all sources" }));
+    expect(new URLSearchParams(location.search).has("ds")).toBe(false);
+  });
+
   it("single-asset 'Generate description draft' action calls the API with just that table id", async () => {
     const { CatalogScreen } = await import("./CatalogScreen");
     render(<CatalogScreen />);
@@ -157,7 +174,7 @@ describe("CatalogScreen -- P1-04 draft generation wiring", () => {
     // Select a row -- opens the EvidencePane and reveals the per-row action.
     fireEvent.click(await screen.findByTestId("select-t1"));
 
-    const btn = await screen.findByRole("button", { name: /generate description draft$/i });
+    const btn = await screen.findByRole("button", { name: /generate table description draft$/i });
     fireEvent.click(btn);
 
     await waitFor(() =>
@@ -178,7 +195,7 @@ describe("CatalogScreen -- P1-04 draft generation wiring", () => {
     fireEvent.click(await screen.findByTestId("check-t1"));
     fireEvent.click(await screen.findByTestId("check-t2"));
 
-    fireEvent.click(await screen.findByRole("button", { name: /generate description drafts$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /generate table description drafts$/i }));
 
     await waitFor(() =>
       expect(generateAssetDescriptionDrafts).toHaveBeenCalledWith(

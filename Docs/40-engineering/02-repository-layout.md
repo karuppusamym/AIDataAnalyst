@@ -87,7 +87,8 @@ atlas/
 │       ├── worker.py               # atlas-worker
 │       ├── projector.py            # atlas-projector
 │       └── scheduler.py            # atlas-scheduler
-├── ui/                             # Atlas portal
+├── ui-next/                        # Atlas portal (React + TypeScript SPA; the only frontend)
+├── sdk/aida_tool_sdk/              # Public Tool SDK, shipped in the backend image
 └── tests/
     ├── invariants/                 # INV-1..INV-9 — the safety net
     ├── integration/                # cross-module, real database

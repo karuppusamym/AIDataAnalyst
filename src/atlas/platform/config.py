@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # loop (`temporal_reconnect_interval_seconds`) instead of crashing.
     temporal_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     temporal_reconnect_interval_seconds: float = Field(default=30.0, gt=0, le=3600)
+    # F18: the bound on every individual `/health/ready` probe (`aida.readiness`).
+    # Probes run concurrently, so this is also the bound on the endpoint itself.
+    # It is deliberately short: a readiness probe exists to be answered before an
+    # orchestrator's own liveness/readiness timeout fires, and an unanswered
+    # readiness check is strictly less informative than a fast DOWN.
+    readiness_probe_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     metadata_batch_max_chunks: int = Field(default=1_000, ge=1, le=10_000)
     metadata_batch_max_tables: int = Field(default=1_000_000, ge=1_000, le=10_000_000)
     metadata_batch_max_columns: int = Field(default=5_000_000, ge=10_000, le=50_000_000)
@@ -152,6 +158,15 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     kafka_bootstrap_servers: str = "localhost:19092"
+    # Object store (S3-compatible). Read by `aida.main._audit_archive_loop`,
+    # which passes them to `aida.worm_archive.storage_for` ->
+    # `aida.audit_archive_s3.S3ArchiveStorage` when
+    # `audit_archive_storage_backend == "s3"`. That is the only consumer;
+    # with the backend at its `none` default nothing opens a connection, so
+    # a set credential here is not by itself an active destination.
+    # `object_store_secret_key` ships empty and its value is never logged,
+    # never placed in a dataclass `repr`, and never emitted into a
+    # generated document (see `scripts/generate_destination_inventory.py`).
     object_store_endpoint: str = "http://localhost:9000"
     object_store_access_key: str = "aida"
     object_store_secret_key: str = ""
@@ -227,9 +242,7 @@ class Settings(BaseSettings):
     cross_source_candidate_max_datasource_pairs: int = Field(default=50, ge=1, le=2_000)
     rename_candidate_scan_max_tables: int = Field(default=200, ge=10, le=5_000)
     rename_candidate_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    object_resolution_scan_max_tables_per_datasource: int = Field(
-        default=300, ge=10, le=5_000
-    )
+    object_resolution_scan_max_tables_per_datasource: int = Field(default=300, ge=10, le=5_000)
     object_resolution_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     relationship_candidate_composite_max_columns: int = Field(default=4, ge=2, le=8)
     relationship_candidate_composite_max_per_table: int = Field(default=25, ge=1, le=500)
@@ -305,9 +318,13 @@ class Settings(BaseSettings):
     #: proposed, and `agent_contracts.validate_contract_definition` refuses a
     #: contract whose principal collides with its author.
     reviewer_agent_principal_id: str = "agent:reviewer"
-    #: The tier ceiling. Never widens what the agent may touch beyond what
-    #: `review_risk_tiers` classifies -- the allowlist is derived from the
-    #: tier table, not from this value (ADR-0027 condition (a)).
+    #: The tier ceiling. Clamped to `review_risk_tiers.HARD_MAX_AGENT_TIER`
+    #: (T1) by `effective_agent_ceiling` before anything derives from it, so
+    #: T2 and T3 are accepted here and then refused in force -- narrowing
+    #: works, widening does not (ADR-0027 condition (a), AR-01). Accepted
+    #: rather than rejected at startup so a misconfiguration cannot take down
+    #: a process over a feature that is off by default; the clamp is recorded
+    #: in every pre-review's evidence as `max_tier_clamped`.
     reviewer_agent_max_tier: Literal["T0", "T1", "T2", "T3"] = "T1"
     #: ADR-0027 condition (b): a hard 5% floor, re-applied at the point of
     #: use and not only here.
@@ -316,9 +333,27 @@ class Settings(BaseSettings):
     #: This is the process-wide switch; the per-organization one lives in
     #: `reviewer_agent_state`.
     reviewer_agent_suspended: bool = False
-    #: Confidence at or above which the agent recommends APPROVE for a
-    #: tier-eligible item that carries a confidence at all.
+    #: Confidence at or above which the agent recommends APPROVE. A proposal
+    #: that carries no confidence of its own is abstained on, never approved
+    #: (AR-03) -- until 2026-09-09 the absence of a confidence was the rule's
+    #: most permissive input, which made this threshold unreachable in
+    #: practice and therefore dead configuration.
     reviewer_agent_approve_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    #: AR-11: how many sampled decisions may sit unresolved before the agent
+    #: stops deciding. ADR-0027's condition (b) argues that a 5% sample makes
+    #: unattended decisions safe -- but a sample nobody resolves is not
+    #: oversight, it is a queue, and the argument fails silently as the queue
+    #: grows. This turns the assumption into an enforced precondition: the
+    #: agent's licence to decide is contingent on humans keeping up with what
+    #: it already decided. Set to 0 to disable the check (and to accept that
+    #: the oversight claim is then unbacked).
+    reviewer_agent_max_unresolved_samples: int = Field(default=50, ge=0, le=100_000)
+    #: AR-04: how old a pre-review may be and still be acted on. Beyond this
+    #: the item is left for the next pre-review pass to re-derive rather than
+    #: decided on evidence gathered before the world moved. The decision path
+    #: re-derives evidence anyway; this bounds how far back a *selected*
+    #: recommendation may have come from.
+    reviewer_agent_evidence_max_age_minutes: int = Field(default=60, ge=1, le=10_080)
 
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to
@@ -456,9 +491,7 @@ class Settings(BaseSettings):
     # they themselves granted), off-switchable for single-steward
     # deployments where maker-checker would deadlock every revoke.
     certification_expiry_warn_days: int = Field(default=7, ge=1, le=90)
-    certification_expiry_warn_interval_seconds: int = Field(
-        default=86_400, ge=900, le=604_800
-    )
+    certification_expiry_warn_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     certification_revoke_enforce_maker_checker: bool = True
     # P3-09: OFF by default. `backfill_certification_evidence_v1` is a best-
     # effort backfill of the new `AssetCertification.evidence` blob for
@@ -501,11 +534,28 @@ class Settings(BaseSettings):
     # GL-7 `REASSIGN_LEAVER` operator flow instead.
     ownership_reaffirm_days: int = Field(default=180, ge=30, le=730)
     ownership_expiry_warn_days: int = Field(default=14, ge=1, le=90)
-    ownership_expiry_warn_interval_seconds: int = Field(
-        default=86_400, ge=900, le=604_800
-    )
+    ownership_expiry_warn_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     ownership_expiry_grace_days: int = Field(default=30, ge=0, le=180)
     ownership_leaver_auto_reassign: bool = True
+    # F19: the scheduled trigger for principal-leaver reconciliation
+    # (`aida.principal_reconciliation`). OFF by default, deliberately: the
+    # handlers it drives mutate ownership, and wiring a previously-unreachable
+    # module into the scheduler must not start rewriting ownership rows in an
+    # existing deployment on upgrade. Turning it on is the operator's decision,
+    # and `ownership_leaver_auto_reassign` above remains an independent second
+    # gate on the handlers themselves.
+    #
+    # `interval_seconds` is the cadence (hourly by default -- a leaver's
+    # ownership is not an emergency, and the same-transaction path in
+    # `identity_events` already handles the urgent case). `lookback_seconds`
+    # bounds how far back into the outbox one pass reads; it is an efficiency
+    # bound, not a correctness one, because replaying an already-reconciled
+    # event is a no-op (see the module docstring). It defaults to comfortably
+    # more than a day so a scheduler outage over a weekend still catches up.
+    principal_reconciliation_enabled: bool = False
+    principal_reconciliation_interval_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    principal_reconciliation_lookback_seconds: int = Field(default=259_200, ge=3_600, le=2_592_000)
+    principal_reconciliation_batch_size: int = Field(default=500, ge=1, le=5_000)
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids
@@ -516,9 +566,9 @@ class Settings(BaseSettings):
     #   pgvector           -- only selectable where the extension is actually
     #                          installed; refused at startup otherwise (INV-4, INV-9)
     #   disabled           -- semantic retrieval off; lexical only, honestly reported
-    vector_index_backend: Literal[
-        "disabled", "postgres_bruteforce", "external", "pgvector"
-    ] = "postgres_bruteforce"
+    vector_index_backend: Literal["disabled", "postgres_bruteforce", "external", "pgvector"] = (
+        "postgres_bruteforce"
+    )
     vector_index_url: str | None = None
     vector_index_credential_reference: str | None = Field(default=None, max_length=500)
     vector_index_collection: str = Field(default="atlas-metadata", max_length=200)
@@ -563,6 +613,35 @@ class Settings(BaseSettings):
     # when it reaches zero for an environment, this flips there. That flip is the actual
     # completion of the rollout, and until it happens the platform should say so (INV-9).
     unresolved_workspace_posture: Literal["SHADOW", "DENY"] = "SHADOW"
+
+    # F11: what this deployment CLAIMS about workspace authorization, as opposed to
+    # what any individual workspace happens to be set to. Before this setting existed,
+    # `unresolved_workspace_posture=SHADOW` plus a workspace inventory nobody inspected
+    # meant a deployment could pass every production settings check while enforcing
+    # nothing at the workspace level -- and no signal anywhere said so. The two values:
+    #
+    #   OBSERVING  the ADR-0018 rollout is still in migration. Unresolved-workspace
+    #              requests proceed undecided, workspaces may sit in SHADOW, and
+    #              `/health/ready` reports the control as OBSERVING. This is today's
+    #              behaviour and remains the default -- tightening it is an intentional
+    #              migration (see `Docs/review-2026-09-05/REVIEW.md` F11), not a
+    #              side effect of upgrading.
+    #   ENFORCING  this release claims workspace authorization actually denies. The
+    #              claim is checked, not trusted: `reject_insecure_production_configuration`
+    #              below refuses to construct Settings unless unresolved workspaces are
+    #              DENIED, and `aida.authorization_posture.assert_startup_posture`
+    #              refuses to start the API unless every ACTIVE workspace is in ENFORCE.
+    #
+    # Migration path from OBSERVING to ENFORCING, in order:
+    #   1. drive `authorization.workspace_unresolved` (the gate's warning log) to zero
+    #      for the environment -- that is the count of callers not yet passing a
+    #      workspace id;
+    #   2. flip each workspace SHADOW -> ENFORCE once `enforcement_readiness`
+    #      (`aida.workspace_access`) shows no would-be denials in the window;
+    #   3. set `unresolved_workspace_posture=DENY`;
+    #   4. set this to ENFORCING, which makes 1-3 permanently checked rather than
+    #      remembered.
+    workspace_authorization_posture: Literal["OBSERVING", "ENFORCING"] = "OBSERVING"
 
     # PG-5: which product edition this deployment is licensed for
     # (`Docs/00-product/07-packaging-and-editions.md` §3's capability matrix).
@@ -654,6 +733,7 @@ class Settings(BaseSettings):
             seen.add(key)
             keys.append(key)
         return keys
+
     model_timeout_seconds: int = Field(default=30, ge=1, le=300)
     model_max_input_tokens: int = Field(default=8_000, ge=100, le=1_000_000)
     model_max_output_tokens: int = Field(default=2_000, ge=100, le=100_000)
@@ -719,11 +799,15 @@ class Settings(BaseSettings):
     otel_metrics_export_interval_millis: int = Field(default=60_000, ge=1_000, le=600_000)
 
     # --- OB-2: SIEM routing (aida.siem_routing) ------------------------------
-    # `route_to_siem` formats and logs a structured event (see its docstring)
-    # rather than opening a network connection itself, so enabling it by
-    # default carries no network risk -- the existing structlog pipeline is
-    # its transport to a log-shipping SOC integration. Point `siem_endpoint`
-    # at a real webhook/syslog collector to layer an actual transport on top.
+    # `route_to_siem` records a durable delivery intent in the caller's own
+    # transaction and opens no connection itself (review F04); the scheduler's
+    # delivery worker is the only thing that talks to a collector, and it is
+    # off by default -- see `delivery_worker_enabled` below.
+    # `siem_endpoint` shipping as `internal://security-log-pipeline` names no
+    # destination: `aida.siem_routing.parse_siem_endpoint` resolves that scheme
+    # to NOT_CONFIGURED, so `siem_enabled: True` here queues nothing and sends
+    # nothing until the endpoint is pointed at a real collector -- an https://
+    # webhook, or syslog+udp:// / syslog+tcp:// for RFC 5424 over a socket.
     siem_enabled: bool = True
     siem_transport: Literal["syslog", "webhook"] = "webhook"
     siem_endpoint: str = "internal://security-log-pipeline"
@@ -734,12 +818,83 @@ class Settings(BaseSettings):
     audit_archive_interval_seconds: int = Field(default=3600, ge=60, le=86_400)
     audit_archive_batch_size: int = Field(default=1_000, ge=1, le=10_000)
     audit_archive_retention_days: int = Field(default=2555, ge=1, le=10_950)
-    audit_archive_storage_backend: Literal["s3", "gcs", "azure_blob"] = "s3"
+    # `none` is the default because a deployment that has not named a
+    # destination does not have an archive (review F01). It resolves to
+    # `aida.audit_archive_storage.NullArchiveStorage`, which refuses every
+    # operation, so the sweep records a FAILED attempt instead of a
+    # fabricated success. Selecting `s3` is therefore an explicit
+    # deployment decision, never something a default drifts into.
+    #
+    # Two complete providers: `filesystem` (a durable root, immutability by
+    # mode bit -- a guard rail) and `s3` (S3 Object Lock, immutability
+    # enforced by the service -- a boundary). `gcs`/`azure_blob` remain
+    # accepted names but resolve to a provider that refuses and says so;
+    # they are deliberately not faked to match `s3`, because no SDK for
+    # them is a dependency of this project and pretending otherwise is the
+    # exact defect F01 records.
+    audit_archive_storage_backend: Literal["none", "filesystem", "s3", "gcs", "azure_blob"] = "none"
     audit_archive_bucket_name: str = "audit-archive"
+    # The `s3` provider's destination and credential. Endpoint and keys are
+    # the existing `object_store_*` settings (below), read here rather than
+    # duplicated: one object store per deployment, one place to configure
+    # it. Region matters even against an S3-compatible service, because it
+    # is part of the SigV4 credential scope the service verifies.
+    audit_archive_s3_region: str = "us-east-1"
+    # COMPLIANCE cannot be bypassed or shortened by any principal, including
+    # the account root; GOVERNANCE can be waived by anyone holding
+    # `s3:BypassGovernanceRetention`. An audit archive whose deletion
+    # protection the audited operator can waive is not WORM, so COMPLIANCE
+    # is the default and GOVERNANCE exists only for a deployment that has
+    # consciously chosen a weaker guarantee (e.g. a staging bucket it needs
+    # to be able to empty).
+    audit_archive_s3_retention_mode: Literal["COMPLIANCE", "GOVERNANCE"] = "COMPLIANCE"
+    # Whether the archive worker may create the bucket when it is missing.
+    # Object Lock can only be enabled at bucket-creation time, so a bucket
+    # made any other way may silently not enforce retention; leaving this
+    # True lets the worker create a correctly-locked one, and a deployment
+    # that provisions buckets out of band should set it False.
+    audit_archive_s3_create_bucket: bool = True
     audit_archive_legal_hold_enabled: bool = False
-    audit_archive_classification: Literal[
-        "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"
-    ] = "CONFIDENTIAL"
+    audit_archive_classification: Literal["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] = (
+        "CONFIDENTIAL"
+    )
+    # Durable root for the `filesystem` provider. Empty means "not
+    # configured", which the provider factory turns into a refusal rather
+    # than a default path nobody chose.
+    audit_archive_filesystem_root: str = ""
+    # How long one replica holds the per-organization sweep claim. Expiry,
+    # not release, is what recovers a lease from a replica that died.
+    audit_archive_lease_seconds: int = Field(default=900, ge=60, le=86_400)
+    # How far behind the keyset cursor each sweep re-scans for commits that
+    # became visible after the sweep had already passed their timestamp.
+    audit_archive_late_arrival_overlap_seconds: int = Field(default=86_400, ge=0, le=2_592_000)
+
+    # --- F04/F12: durable outbound delivery (aida.delivery_intents) ----------
+    # One worker drains both SIEM security events and governance
+    # notifications; see `aida.delivery_intents` for why they share a ledger.
+    #
+    # `delivery_worker_enabled` is False by default and is the only switch
+    # that can make this process open a socket to a destination. Everything
+    # queued while it is off stays queued, so turning it on later delivers the
+    # backlog rather than discovering a silent gap -- and an existing
+    # deployment that picks up this code starts no traffic by surprise.
+    #
+    # `siem_enabled`/`siem_endpoint` above keep their values deliberately: the
+    # shipped default endpoint `internal://security-log-pipeline` names no
+    # destination, and `aida.siem_routing.parse_siem_endpoint` resolves it to
+    # NOT_CONFIGURED rather than to a transport. Point `siem_endpoint` at an
+    # https:// collector or a syslog+tcp:// / syslog+udp:// address to make it
+    # a real destination.
+    delivery_worker_enabled: bool = False
+    delivery_worker_batch_size: int = Field(default=100, ge=1, le=1_000)
+    delivery_max_attempts: int = Field(default=6, ge=1, le=50)
+    delivery_backoff_base_seconds: float = Field(default=5.0, gt=0.0, le=3_600.0)
+    delivery_backoff_max_seconds: float = Field(default=900.0, gt=0.0, le=86_400.0)
+    # How long one worker holds a claim on an intent. Expiry, not release, is
+    # what recovers work from a worker that died mid-attempt.
+    delivery_claim_seconds: int = Field(default=300, ge=10, le=86_400)
+    delivery_webhook_verify_tls: bool = True
+    siem_delivery_timeout_seconds: float = Field(default=5.0, gt=0.0, le=120.0)
 
     @property
     def max_query_estimate_cost(self) -> float:
@@ -869,6 +1024,23 @@ class Settings(BaseSettings):
             raise ValueError(
                 "an application-managed local tokenization provider is forbidden in "
                 "production; configure a KMS-backed tokenization_provider (QG-6)"
+            )
+        # F11: a deployment that claims to enforce workspace authorization must not
+        # also let a request whose workspace could not be resolved through undecided.
+        # Checked in every environment, not only production: the claim is either true
+        # or it is not, and a development environment that claims ENFORCING while
+        # proceeding on unresolved scope is exactly the configuration that gets
+        # promoted. The default (OBSERVING) is untouched by this check, so it fires
+        # only for a deployment that deliberately made the claim.
+        if (
+            self.workspace_authorization_posture == "ENFORCING"
+            and self.unresolved_workspace_posture != "DENY"
+        ):
+            raise ValueError(
+                "workspace_authorization_posture=ENFORCING requires "
+                "unresolved_workspace_posture=DENY; with SHADOW, a request whose "
+                "workspace cannot be resolved proceeds undecided, so the deployment "
+                "does not enforce workspace authorization (F11)"
             )
         return self
 

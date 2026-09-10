@@ -9,11 +9,13 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.sql.expression import UpdateBase
 
 from aida.models import AuditEvent, GovernanceReview, GovernedToolVersion, OutboxEvent
 from aida.schemas import GovernanceDecisionRequest
 from aida.security import SecurityContext
 from aida.semantic_api import decide_governance_review
+from tests.support.doubles import ScriptedDmlResult
 
 
 class _GovernanceDecisionSession:
@@ -36,9 +38,49 @@ class _GovernanceDecisionSession:
     async def scalar(self, _statement: object) -> object:
         return self._get_queue.pop(0)
 
-    async def execute(self, statement: object) -> None:
+    async def execute(self, statement: object) -> object:
+        """Record the statement, and answer DML the way a real session does.
+
+        `governance_decision_service.claim_review` decides whether it won the
+        review by reading `rowcount` off this result (review-2026-09-05 F05).
+        Returning None modelled a session that no longer exists: every write
+        path through the decision service now issues a compare-and-set UPDATE
+        first. `rowcount = 1` is the honest answer for this double, which holds
+        exactly the one review the claim targets and is not simulating
+        contention -- the concurrency behaviour itself is proven against real
+        connections in `tests/test_governance_decision_concurrency.py`.
+        """
         self.executed_statements.append(statement)
+        if isinstance(statement, UpdateBase):
+            return ScriptedDmlResult(rowcount=1)
         return None
+
+
+    @property
+    def target_statements(self) -> list[object]:
+        """Statements other than the decision service's compare-and-set claim.
+
+        Every decision now issues one `UPDATE governance_review SET status=...
+        WHERE id=... AND status='PENDING'` before any target work runs
+        (review-2026-09-05 F05). That claim is not what these assertions are
+        about -- they are about what the *target adapter* did -- so it is
+        excluded here rather than by loosening `== []` into `<= 1`, which
+        would stop the assertions catching a stray supersede.
+        """
+        return [
+            statement
+            for statement in self.executed_statements
+            if getattr(getattr(statement, "table", None), "name", None) != "governance_review"
+        ]
+
+    @property
+    def claim_statements(self) -> list[object]:
+        """The compare-and-set claims, so a test can assert one was issued."""
+        return [
+            statement
+            for statement in self.executed_statements
+            if getattr(getattr(statement, "table", None), "name", None) == "governance_review"
+        ]
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -122,9 +164,9 @@ async def test_approving_publish_promotes_the_version_and_supersedes_the_prior_p
 
     # The prior published version for this same tool must be superseded --
     # verify the actual UPDATE statement issued, not just the end state.
-    assert len(session.executed_statements) == 1
+    assert len(session.target_statements) == 1
     compiled = str(
-        session.executed_statements[0].compile(compile_kwargs={"literal_binds": True})
+        session.target_statements[0].compile(compile_kwargs={"literal_binds": True})
     )
     assert "governed_tool_version" in compiled
     assert "SUPERSEDED" in compiled
@@ -164,7 +206,10 @@ async def test_rejecting_publish_marks_the_version_rejected_without_superseding_
     assert candidate.approved_by is None
     assert result.status == "REJECTED"
     # A rejection never touches any other version's status.
-    assert session.executed_statements == []
+    assert session.target_statements == []
+    # The decision still claimed the review exactly once: a decision that
+    # supersedes nothing is not a decision that skipped the F05 guard.
+    assert len(session.claim_statements) == 1
     assert any(
         isinstance(value, OutboxEvent) and value.event_type == "tool.version.rejected.v1"
         for value in session.added
@@ -191,7 +236,10 @@ async def test_approving_deprecation_moves_a_published_version_to_deprecated() -
 
     assert published.status == "DEPRECATED"
     # Deprecation never runs the supersede-prior-published-version update.
-    assert session.executed_statements == []
+    assert session.target_statements == []
+    # The decision still claimed the review exactly once: a decision that
+    # supersedes nothing is not a decision that skipped the F05 guard.
+    assert len(session.claim_statements) == 1
     assert any(
         isinstance(value, OutboxEvent) and value.event_type == "tool.version.deprecated.v1"
         for value in session.added

@@ -112,7 +112,7 @@ def test_unrelated_aida_prefixed_credential_reference_vars_are_not_rejected(
     even though they are, strictly, "unrecognized AIDA_* env vars": only a
     *close match* of a real setting name is a likely typo worth failing on."""
     monkeypatch.setenv("AIDA_SAMPLE_SOURCE_DSN", "postgresql://source@localhost/bank_demo")
-    monkeypatch.setenv("AIDA_SAMPLE_ORACLE_SOURCE_DSN", "oracle://source@localhost/FREEPDB1")
+    monkeypatch.setenv("AIDA_SAMPLE_RISK_SOURCE_DSN", "postgresql://source@localhost/risk_demo")
     monkeypatch.setenv("AIDA_SAMPLE_MSSQL_SOURCE_DSN", "mssql://source@localhost/bank_demo_mssql")
     monkeypatch.setenv("AIDA_TEST_SECRET", "shh")
     Settings(_env_file=None)  # must not raise

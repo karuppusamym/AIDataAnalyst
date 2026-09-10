@@ -16,8 +16,6 @@
 .adminpanel__eyebrow{margin:0;font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
 .adminpanel__h2{margin:2px 0 0;font-size:14.5px;letter-spacing:-.008em}
 .adminpanel__note{margin:0;font-size:11.5px;color:var(--ink-3);line-height:1.5}
-.adminpanel__err{margin:0;font-size:12.5px;color:var(--bad);background:var(--bad-soft);border-radius:var(--radius-sm);padding:7px 9px}
-.adminpanel__ok{margin:0;font-size:12.5px;color:var(--ok);background:var(--ok-soft);border-radius:var(--radius-sm);padding:7px 9px}
 
 .adminpanel__grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 14px}
 

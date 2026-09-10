@@ -1,4 +1,6 @@
 import type {
+  ParsedLineageEdgeReviewQueueItemRead,
+  ParsedLineageEdgeReviewQueueRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
   AgentEvaluationRunRead,
@@ -6,6 +8,7 @@ import type {
   AgentRunRead,
   AiDecisionRead,
   AiRuntimeStatusRead,
+  AnalysisRunCreate,
   AnalysisRunRead,
   AssetEvidenceRead,
   BusinessMapEdgeRead,
@@ -203,6 +206,7 @@ function rowAt(i: number): CatalogRowRead {
 }
 
 function matches(row: CatalogRowRead, q: CatalogQuery): boolean {
+  if (q.datasourceId && row.datasource_id !== q.datasourceId) return false;
   if (q.q) {
     const needle = q.q.toLowerCase();
     const hay = `${row.name} ${row.description ?? ""} ${row.schema_name}`.toLowerCase();
@@ -221,7 +225,7 @@ export async function makeFixtureCatalog(
 ): Promise<CursorPage<CatalogRowRead>> {
   const limit = q.limit ?? 100;
   const start = q.cursor ? Number(atob(q.cursor)) : 0;
-  const filtered = Boolean(q.q || (q.objectType && q.objectType !== "ALL") ||
+  const filtered = Boolean(q.datasourceId || q.q || (q.objectType && q.objectType !== "ALL") ||
     (q.certification && q.certification !== "ALL"));
 
   const items: CatalogRowRead[] = [];
@@ -332,93 +336,6 @@ export async function makeFixtureEvidence(tableId: string): Promise<AssetEvidenc
    each proposal (tracker UX-17).
 --------------------------------------------------------------------------- */
 
-import type { Proposal } from "../components/ProposalCard";
-
-export interface ReviewBatch {
-  /** The agent run these proposals came out of. */
-  runLabel: string;
-  finishedAgo: string;
-  passed: number;
-  /** Counts of proposals are DERIVED from `proposals` in the screen, never
-   *  carried alongside it — a summary that can disagree with the list it
-   *  summarises is worse than no summary. */
-  threshold: number;
-  proposals: Proposal[];
-}
-
-export async function fetchReviewBatch(): Promise<ReviewBatch> {
-  await new Promise((r) => setTimeout(r, 110));
-  return {
-    runLabel: "finance-revenue · semantic validation",
-    finishedAgo: "9 minutes ago",
-    passed: 44,
-    threshold: 0.9,
-    proposals: [
-      {
-        id: "p_4181",
-        title: "Exclude intercompany transfers from net revenue",
-        subject: "metric revenue · v3.1.1 → v3.1.2 · module 18",
-        proposedBy: { kind: "agent", name: "semantic inference" },
-        confidence: 0.87,
-        state: "needs_review",
-        diff: [
-          { kind: "context", text: "metric: revenue" },
-          { kind: "remove", text: "  filter: status != 'void'" },
-          { kind: "add", text: "  filter: status NOT IN ('void','reversed')" },
-          { kind: "add", text: "  exclude: [intercompany_transfers]" },
-        ],
-        rationale:
-          "Three regression tests fail on the current filter: intercompany transfers inflate Q4 revenue by about 4%. The proposed filter matches how Finance actually closed Q3.",
-        evidence:
-          "tests ST-A2/q4-intercompany, q4-close-parity, revenue-grain · Q3 close workpaper referenced by 9 of 12 revenue queries",
-      },
-      {
-        id: "p_4182",
-        title: "Two definitions of MRR are both live",
-        subject: "metric mrr · finance vs sales · module 18",
-        proposedBy: { kind: "agent", name: "semantic inference" },
-        confidence: 0.71,
-        state: "needs_review",
-        diff: [
-          { kind: "context", text: "finance.mrr = SUM(net_new_arr) WHERE contract_type='new'" },
-          { kind: "context", text: "sales.mrr   = SUM(new_bookings) + SUM(committed_arr)" },
-          { kind: "add", text: "  → proposal: scope both, block the unqualified name 'mrr'" },
-        ],
-        rationale:
-          "Same name, different formula. A tool resolving an unqualified 'mrr' returns a different number depending on which definition it reaches. Scoping both and refusing the bare name is the only resolution that cannot silently pick a winner.",
-        evidence:
-          "detected across 2 domains · 14 tools would resolve ambiguously · needs sign-off from both domain owners",
-      },
-      {
-        id: "p_4183",
-        title: "Certify orders_raw as Gold",
-        subject: "table analytics.orders_raw · module 08",
-        proposedBy: { kind: "human", name: "@priya" },
-        confidence: 0.94,
-        state: "needs_review",
-        diff: [
-          { kind: "remove", text: "certification: NONE" },
-          { kind: "add", text: "certification: CERTIFIED  expires: 2027-02-28" },
-        ],
-        rationale:
-          "Maker-checker requires a second approver. The asset passes all 15 quality checks and has a named owner, so the certification lifecycle can accept it once a checker other than the maker signs.",
-        evidence: "GL-5 certification lifecycle · maker @priya · checker must differ",
-      },
-      {
-        id: "p_4179",
-        title: "Add synonym “topline” to net revenue",
-        subject: "metric revenue · module 18",
-        proposedBy: { kind: "agent", name: "semantic inference" },
-        confidence: 0.96,
-        state: "auto_applied",
-        diff: [{ kind: "add", text: "  synonyms: [net sales, topline]" }],
-        rationale:
-          "Above this tenant's auto-apply threshold, so it was applied and recorded rather than queued. A synonym cannot change what a metric computes — only what resolves to it.",
-        evidence: "term appears in 23 queries and 4 dashboards · no conflicting binding",
-      },
-    ],
-  };
-}
 
 /**
  * UX-1: fixture mode has no backend behind it, so it can only ever stand in for
@@ -1683,6 +1600,63 @@ export async function makeFixtureAnalysisRuns(
   const offset = query.offset ?? 0;
   const limit = query.limit ?? 100;
   return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `GET /v1/datasources/{datasource_id}/analysis-runs` (T15).
+ *
+ *  Deliberately answers an unknown datasource with an EMPTY page rather than
+ *  the whole fixture list: "this source has never been scanned" is the state
+ *  a first-source setup has to be able to show, and a fixture that always
+ *  returns a successful run would make that state unreachable in demo mode. */
+export async function makeFixtureDatasourceAnalysisRuns(
+  datasourceId: string,
+  query: { limit?: number; offset?: number },
+): Promise<PageOf<AnalysisRunRead>> {
+  await wait(70);
+  const items = ANALYSIS_RUN_FIXTURES.filter((run) => run.datasource_id === datasourceId);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 20;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `POST /v1/datasources/{datasource_id}/analysis-runs` (T15). Mutates the
+ *  same in-memory array the reads above see -- the convention
+ *  `makeFixtureRequeueOutboxEvent` already sets -- and returns a QUEUED run,
+ *  because that is what the real 202 returns: an accepted request, never a
+ *  finished scan. */
+export async function makeFixtureCreateAnalysisRun(
+  datasourceId: string,
+  body: AnalysisRunCreate,
+): Promise<AnalysisRunRead> {
+  await wait(90);
+  const now = new Date().toISOString();
+  const run: AnalysisRunRead = {
+    id: `run_${Math.random().toString(36).slice(2, 8)}`,
+    organization_id: OPS_ORG,
+    datasource_id: datasourceId,
+    resumed_from_run_id: null,
+    mode: body.mode ?? "INCREMENTAL",
+    trigger_type: "MANUAL",
+    priority: 50,
+    status: "QUEUED",
+    temporal_workflow_id: null,
+    discovered_catalogs: 0,
+    discovered_schemas: 0,
+    discovered_tables: 0,
+    discovered_columns: 0,
+    discovered_constraints: 0,
+    created_objects: 0,
+    changed_objects: 0,
+    deprecated_objects: 0,
+    profiled_tables: 0,
+    profiled_columns: 0,
+    error_class: null,
+    error_message: null,
+    created_at: now,
+    updated_at: now,
+  };
+  ANALYSIS_RUN_FIXTURES.unshift(run);
+  return run;
 }
 
 const OUTBOX_EVENT_FIXTURES: OutboxEventRead[] = [
@@ -6308,18 +6282,19 @@ export function makeFixtureAgentInbox(organizationId: string, persona: string): 
 /** UX-19: `GET /v1/organizations/{org}/ai-agents/roster` fixture. Mirrors
  *  `aida.agent_roster.compose_agent_roster` — every registered `AGENT`-kind
  *  asset alongside the *same* organization-wide method summary and recent
- *  results window (the honesty note the real endpoint's docstring makes:
- *  `AgentRun` carries no per-agent identity today). */
+ *  results window scoped to each agent version through
+ *  `AgentRun.ai_asset_version_id`, plus the `unattributed` block for runs no
+ *  registered agent owns (AR-07). */
 export function makeFixtureAgentRoster(organizationId: string, windowDays = 30): AgentRosterRead {
   const now = new Date();
   const iso = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 3_600_000).toISOString();
 
   const method = {
-    scope: "ORGANIZATION_WIDE" as const,
+    scope: "AGENT_VERSION" as const,
     note:
-      "AgentRun carries no per-registered-agent identity today -- this summarizes this " +
-      "organization's actual governed-agent run activity as a whole, not this specific " +
-      "registered entity's own isolated execution history.",
+      "Runs linked to this agent version by AgentRun.ai_asset_version_id, which the " +
+      "orchestrator sets when a run executes under this version's contract. A registered " +
+      "agent this platform does not execute reports zero runs rather than the organization's.",
     window_days: windowDays,
     sampled_runs: 214,
     by_strategy: {
@@ -6378,10 +6353,12 @@ export function makeFixtureAgentRoster(organizationId: string, windowDays = 30):
     has_auto_apply_branch: false,
     threshold: null,
     threshold_source: null,
+    enabled: null,
     evidence:
-      "No agent plan in this codebase reaches a branch that applies an AI-authored action " +
-      "without a human decision. Every proposal-shaped output routes through the shared " +
-      "GovernanceReview maker-checker queue.",
+      "This agent has no branch that applies its own output without a human decision. Its " +
+      "proposal-shaped output routes through the shared GovernanceReview maker-checker " +
+      "queue. The platform's one unattended-decision branch belongs to the ADR-0027 " +
+      "reviewer agent, which is a different registered identity.",
   };
 
   return {
@@ -6428,6 +6405,20 @@ export function makeFixtureAgentRoster(organizationId: string, windowDays = 30):
         auto_apply: autoApply,
       },
     ],
+    // AR-07: governed runs no registered agent owns -- the ordinary case of a
+    // person asking the runtime a question. Reported once, credited to nobody.
+    unattributed: {
+      method: {
+        ...method,
+        scope: "ORGANIZATION_WIDE" as const,
+        note:
+          "Governed runs in this organization that carry no registered-agent identity -- " +
+          "typically a person asking the runtime a question. Attributed to no agent.",
+        sampled_runs: 96,
+      },
+      recent_results: recentResults,
+      recent_results_total: 96,
+    },
     total_agents: 2,
   };
 }
@@ -6439,9 +6430,15 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
     organization_id: organizationId,
     enabled: true,
     suspended: false,
+    // AR-01: `max_tier` is the ceiling in force, which is the configured value
+    // clamped to the hard T1 limit; `configured_max_tier` is what was asked
+    // for, so an operator who set T3 can see that it was refused.
     max_tier: "T1",
+    configured_max_tier: "T1",
+    max_tier_clamped: false,
     sampling_rate: 0.1,
     agent_principal_id: "agent:reviewer",
+    evidence_max_age_minutes: 60,
   };
 }
 
@@ -7376,4 +7373,86 @@ export async function makeFixtureAssetTermLinks(
   const offset = query.offset ?? 0;
   const limit = query.limit ?? 100;
   return { items: matching.slice(offset, offset + limit), limit, offset, total: matching.length };
+}
+
+/* ---------------------------------------------------------------------------
+   Parsed lineage review queue.
+
+   THE DEFECT this removes: `listParsedLineageReviewQueue` was the one review
+   client with no demo branch, so in the default `VITE_USE_FIXTURES` build the
+   Parsed lineage review screen issued a live request, the backend answered
+   "X-Principal-Id is required in development mode", and the screen rendered a
+   load failure. A demo build that cannot open one of its own navigation
+   entries is exactly the "demo mode must be unmistakable, and must work"
+   property F13 is about -- a broken screen is not an honest demo state, it is
+   an error the viewer has to diagnose.
+
+   The three edges below are the three shapes the screen renders differently:
+   a column-level DBT edge with a transformation, a table-level VIEW edge with
+   none, and an OpenLineage column edge whose confidence arrives as a string
+   (the backend serialises `Numeric` that way, and the screen coerces it).
+--------------------------------------------------------------------------- */
+export async function makeFixtureParsedLineageReviewQueue(query: {
+  edgeType?: string | null;
+  minConfidence?: number | null;
+  limit?: number;
+  offset?: number;
+}): Promise<ParsedLineageEdgeReviewQueueRead> {
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  const all: ParsedLineageEdgeReviewQueueItemRead[] = [
+    {
+      edge_id: "ple_dbt_1",
+      edge_type: "DBT",
+      organization_id: ORG_ID,
+      created_at: "2026-09-04T09:12:00Z",
+      created_by: "dbt-artifact-import",
+      confidence: 0.92,
+      source_label: "analytics.core.orders_raw.amount",
+      target_label: "analytics.marts.revenue.net_amount",
+      transformation_type: "SUM",
+      source_sql_reference: { model: "revenue", path: "models/marts/revenue.sql" },
+    },
+    {
+      edge_id: "ple_view_1",
+      edge_type: "VIEW",
+      organization_id: ORG_ID,
+      created_at: "2026-09-04T10:41:00Z",
+      created_by: "view-lineage-parser",
+      confidence: 0.74,
+      source_label: "analytics.core.customers",
+      target_label: "analytics.core.v_active_customers",
+      transformation_type: null,
+      source_sql_reference: { view: "v_active_customers" },
+    },
+    {
+      edge_id: "ple_ol_col_1",
+      edge_type: "OPENLINEAGE_COLUMN",
+      organization_id: ORG_ID,
+      created_at: "2026-09-05T06:03:00Z",
+      created_by: "openlineage-ingest",
+      // A string on purpose: the backend serialises Numeric as a string and
+      // the screen must coerce it. A fixture that only ever produced numbers
+      // would let that coercion rot unnoticed.
+      confidence: "0.58",
+      source_label: "warehouse.raw.payments.customer_id",
+      target_label: "warehouse.marts.customer_ltv.customer_id",
+      transformation_type: "IDENTITY",
+      source_sql_reference: { run: "ol-run-4412", job: "payments_ltv" },
+    },
+  ];
+  const filtered = all.filter((edge) => {
+    if (query.edgeType && edge.edge_type !== query.edgeType) return false;
+    if (query.minConfidence != null && Number(edge.confidence ?? 0) < query.minConfidence) {
+      return false;
+    }
+    return true;
+  });
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return {
+    items: filtered.slice(offset, offset + limit),
+    limit,
+    offset,
+    total: filtered.length,
+  };
 }

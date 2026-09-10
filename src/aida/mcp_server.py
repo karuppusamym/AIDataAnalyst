@@ -61,6 +61,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.agent_contracts import (
+    context_product_violation,
+    load_contract_for_principal,
+)
 from aida.agent_orchestrator import (
     AgentClarificationRequired,
     AgentOrchestrationResult,
@@ -482,6 +486,30 @@ async def _resolve_context_product_scope(
     if not can_serve_pinned_version(product_version):
         return None
     if not _context_product_role_eligible(context.roles, product_version.allowed_consumer_roles):
+        return None
+    # AG-10 / AR-06: the capability envelope, enforced at the boundary where a
+    # contracted agent actually consumes a context product. Until 2026-09-09
+    # `capability_envelope.context_product_ids` was parsed, validated and
+    # stored, and read by nothing -- an agent whose contract named one product
+    # could read every product its *roles* allowed. The role check above is
+    # about who the caller is; this is about what its contract says it may
+    # touch, and both have to pass.
+    #
+    # Ordered after the role and support-window checks and before the quality
+    # evaluation deliberately: an envelope violation should not depend on, or
+    # pay for, a quality query.
+    contract = await load_contract_for_principal(
+        session,
+        # The product row was already selected with
+        # `ContextProduct.organization_id == context.organization_id`, so this
+        # is the caller's organization and is non-null, which
+        # `context.organization_id` is not.
+        organization_id=product_version.organization_id,
+        agent_principal_id=context.principal_id,
+    )
+    if contract is not None and context_product_violation(
+        contract, product_key=product.product_key, product_id=str(product.id)
+    ):
         return None
     quality = await evaluate_context_product_quality_from_db(
         session,

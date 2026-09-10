@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* Filters and selection live in the URL so a filtered view is shareable and
+   survives Back/Forward. This screen carried a verbatim copy of the old hook
+   -- a `useState` seeded once from `location.search`, subscribed to nothing --
+   so its idea of the selection and the address bar drifted apart the first
+   time either the Back button or a same-screen link was used (review
+   2026-09-05, F09 - R07). The shared hook reads one location store. */
+import { useUrlState } from "../lib/useUrlState";
 import type { UnifiedLineageGraphRead, UnifiedLineageImpactNodeRead, UnifiedLineageImpactRead } from "../lib/types";
 import type { CatalogRowRead } from "../lib/ui-types";
 import {
@@ -60,22 +67,6 @@ function humanizeSources(sources: readonly string[]): string {
 
 const kindTone = (k: string): Tone => (k === "UNRESOLVED_DATASET" ? "mute" : "info");
 
-function useUrlState() {
-  const [params, setParams] = useState(() => new URLSearchParams(location.search));
-  const update = useCallback((patch: Record<string, string | null>) => {
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null || v === "") next.delete(k);
-        else next.set(k, v);
-      }
-      const query = next.toString();
-      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
-      return next;
-    });
-  }, []);
-  return [params, update] as const;
-}
 
 interface Hop {
   direction: "upstream" | "downstream";

@@ -29,8 +29,6 @@ it (see `mcp_server.py::_view_definition_transformation_detail`).
 """
 
 from collections import Counter
-from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
@@ -43,7 +41,6 @@ from aida.catalog_read_model import _latest_observation_at, _open_incident_table
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
-from aida.envelope_models import MetadataViewDefinition
 from aida.graph_store import (
     GraphStoreUnavailable,
     PostgresGraphStore,
@@ -55,21 +52,13 @@ from aida.lineage_cache import get_lineage_cache
 from aida.models import (
     DataDomain,
     DataSource,
-    DbtArtifactImport,
-    DbtLineageEdge,
-    DbtProject,
-    DbtResource,
     MetadataCatalog,
     MetadataColumn,
-    MetadataConstraint,
     MetadataSchema,
     MetadataTable,
-    OpenLineageRunEvent,
-    OpenLineageTableEdge,
-    ProcedureLineageEdge,
     RelationshipCandidate,
-    ViewLineageEdge,
 )
+from aida.resource_scope import load_datasource_in_scope
 from aida.schemas import (
     DomainLineageGraphRead,
     UnifiedLineageEdgeRead,
@@ -79,7 +68,7 @@ from aida.schemas import (
     UnifiedLineageNodeRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
-from aida.unified_lineage import UnifiedLink
+from aida.unified_lineage_builder import build_unified_graph
 
 router = APIRouter(prefix="/v1", tags=["unified-lineage"])
 
@@ -104,514 +93,17 @@ UNIFIED_LINEAGE_READER_ROLES = (
     "Viewer",
 )
 
-_DBT_NODE_KIND_BY_RESOURCE_TYPE = {
-    "MODEL": "DBT_MODEL",
-    "SOURCE": "DBT_SOURCE",
-    "SEED": "DBT_SEED",
-    "SNAPSHOT": "DBT_SNAPSHOT",
-}
-
-# `ViewLineageEdge.confidence` / `ProcedureLineageEdge.confidence` store
-# `aida.sql_lineage_parser.Confidence`'s string value (FULL/PARTIAL/LOW), not
-# a float -- map it onto the same 0..1 scale every other unified-lineage edge
-# kind reports confidence on. An unrecognised value degrades to LOW rather
-# than raising, matching the parser's own fail-open posture.
-_DEFINITION_LINEAGE_CONFIDENCE = {"FULL": 1.0, "PARTIAL": 0.6, "LOW": 0.3}
-
-
-@dataclass(slots=True)
-class _NodeInfo:
-    id: str
-    node_kind: str
-    label: str
-    qualified_name: str
-    matched_table_id: UUID | None
-    resolved: bool
-
-
-@dataclass(slots=True)
-class _UnifiedGraph:
-    nodes: dict[str, _NodeInfo]
-    links: list[UnifiedLink]
-    counts_by_source: dict[str, int]
-    truncation_reasons: list[str]
-
-
-async def _build_unified_graph(
-    session: AsyncSession,
-    datasource: DataSource,
-    *,
-    node_limit: int,
-    edge_limit: int,
-    suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"],
-    include_pending_edges: bool = False,
-) -> _UnifiedGraph:
-    truncation_reasons: list[str] = []
-    nodes: dict[str, _NodeInfo] = {}
-    links: list[UnifiedLink] = []
-    counts_by_source: dict[str, int] = {
-        "FOREIGN_KEY": 0,
-        "SUGGESTED_RELATIONSHIP": 0,
-        "DBT_DEPENDENCY": 0,
-        "OPENLINEAGE_ETL": 0,
-        "VIEW_DEFINITION": 0,
-        "PROCEDURE_DEFINITION": 0,
-    }
-
-    def register_node(info: _NodeInfo) -> bool:
-        if info.id in nodes:
-            return True
-        if len(nodes) >= node_limit:
-            truncation_reasons.append("NODE_LIMIT")
-            return False
-        nodes[info.id] = info
-        return True
-
-    def register_link(link: UnifiedLink) -> bool:
-        if link.source_id not in nodes or link.target_id not in nodes:
-            return False
-        if len(links) >= edge_limit:
-            truncation_reasons.append("EDGE_LIMIT")
-            return False
-        links.append(link)
-        counts_by_source[link.edge_source] += 1
-        return True
-
-    table_rows = (
-        await session.execute(
-            select(MetadataTable, MetadataSchema, MetadataCatalog)
-            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
-            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
-            .where(
-                MetadataTable.datasource_id == datasource.id,
-                MetadataTable.status == "ACTIVE",
-            )
-            .order_by(MetadataCatalog.name, MetadataSchema.name, MetadataTable.name)
-            .limit(node_limit)
-        )
-    ).all()
-    if len(table_rows) == node_limit:
-        truncation_reasons.append("NODE_LIMIT")
-    table_ids: set[UUID] = set()
-    for table, schema, catalog in table_rows:
-        node_id = str(table.id)
-        table_ids.add(table.id)
-        register_node(
-            _NodeInfo(
-                id=node_id,
-                node_kind="TABLE",
-                label=table.name,
-                qualified_name=f"{catalog.name}.{schema.name}.{table.name}",
-                matched_table_id=table.id,
-                resolved=True,
-            )
-        )
-
-    # --- Declared foreign keys ---
-    constraints = (
-        (
-            await session.scalars(
-                select(MetadataConstraint)
-                .where(
-                    MetadataConstraint.datasource_id == datasource.id,
-                    MetadataConstraint.status == "ACTIVE",
-                    MetadataConstraint.constraint_type == "FOREIGN_KEY",
-                    MetadataConstraint.table_id.in_(table_ids),
-                    MetadataConstraint.referenced_table_id.in_(table_ids),
-                )
-                .limit(edge_limit)
-            )
-        ).all()
-        if table_ids
-        else []
-    )
-    for constraint in constraints:
-        if constraint.referenced_table_id is None:
-            continue
-        register_link(
-            UnifiedLink(
-                edge_id=f"fk:{constraint.id}",
-                source_id=str(constraint.table_id),
-                target_id=str(constraint.referenced_table_id),
-                edge_source="FOREIGN_KEY",
-                status="DECLARED",
-                confidence=1.0,
-                source_columns=tuple(constraint.columns),
-                target_columns=tuple(constraint.referenced_columns),
-                evidence={"source": "DATABASE_CONSTRAINT", "source_values_inspected": False},
-            )
-        )
-    if len(constraints) >= edge_limit:
-        truncation_reasons.append("EDGE_LIMIT")
-
-    # --- View and stored-procedure SQL-parsed lineage (LN-2) ---
-    # `view_lineage_api.py` persists one row per *column* pair
-    # (source_table/source_column -> target_table/target_column, where target
-    # is the view or procedure output). Only rows the parser matched to a
-    # real catalog table on both ends are foldable into this table-level
-    # graph -- an unmatched free-text table name (source_table_id is NULL)
-    # cannot be safely deduplicated against a real MetadataTable without
-    # risking a false merge across schemas that share a table name, so those
-    # rows are left for the dedicated `/view-lineage` / `/procedure-lineage`
-    # list endpoints instead of silently guessed here. Multiple column-level
-    # rows between the same two tables collapse into one edge, exactly like
-    # the dbt COLUMN_DEPENDS_ON rows above. `register_definition_edges` takes
-    # each model concretely (rather than as a `type[X | Y]` parameter) so the
-    # ORM row type stays precise for the type checker.
-    def register_definition_edges(
-        rows: Sequence[ViewLineageEdge] | Sequence[ProcedureLineageEdge],
-        edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION"],
-        view_definitions_by_table_id: dict[UUID, tuple[str, str]] | None = None,
-    ) -> None:
-        grouped: dict[tuple[UUID, UUID], list[ViewLineageEdge | ProcedureLineageEdge]] = {}
-        for row in rows:
-            if row.source_table_id is None or row.target_table_id is None:
-                continue
-            if row.source_table_id == row.target_table_id:
-                continue
-            grouped.setdefault((row.source_table_id, row.target_table_id), []).append(row)
-        for (source_table_id, target_table_id), edges in grouped.items():
-            # The view/procedure (target_table_id) is the dependent node; the
-            # base table it selects from (source_table_id) is what it depends
-            # on -- same source-depends-on-target convention as FOREIGN_KEY
-            # and DBT_DEPENDENCY above.
-            evidence: dict[str, object] = {
-                "source": edge_source,
-                "dialect": edges[0].dialect,
-                "sql_hash": edges[0].sql_hash,
-                "column_edge_count": len(edges),
-            }
-            # AT-19: a VIEW_DEFINITION edge's target_table_id IS the view's own
-            # MetadataTable.id, and MetadataViewDefinition.table_id is unique
-            # per table (envelope 1.1) -- a genuine 1:1 lookup, so the edge can
-            # carry a reference the caller can actually resolve via the
-            # get_transformation_detail MCP tool, plus redaction status
-            # in-line so "does this edge have code, and is it redacted" never
-            # needs a round trip on its own. PROCEDURE_DEFINITION edges get
-            # neither: ProcedureLineageEdge carries no identity back to a
-            # specific MetadataRoutine row (no FK, no specific_name -- see
-            # `mcp_server.py::_view_definition_transformation_detail`'s
-            # docstring), so no reference is fabricated here.
-            if view_definitions_by_table_id is not None:
-                found = view_definitions_by_table_id.get(target_table_id)
-                if found is not None:
-                    redaction_status, availability = found
-                    evidence["transformation_reference"] = {
-                        "tool": "get_transformation_detail",
-                        "entity_id": str(target_table_id),
-                        "kind": "VIEW_DEFINITION",
-                    }
-                    evidence["redaction_status"] = redaction_status
-                    evidence["availability"] = availability
-            register_link(
-                UnifiedLink(
-                    edge_id=f"{edge_source.lower()}:{edges[0].id}",
-                    source_id=str(target_table_id),
-                    target_id=str(source_table_id),
-                    edge_source=edge_source,
-                    status="ACTIVE",
-                    confidence=min(
-                        _DEFINITION_LINEAGE_CONFIDENCE.get(edge.confidence, 0.3)
-                        for edge in edges
-                    ),
-                    source_columns=tuple(sorted({edge.target_column for edge in edges})),
-                    target_columns=tuple(sorted({edge.source_column for edge in edges})),
-                    evidence=evidence,
-                )
-            )
-
-    if table_ids:
-        view_stmt = (
-            select(ViewLineageEdge)
-            .where(
-                ViewLineageEdge.datasource_id == datasource.id,
-                ViewLineageEdge.source_table_id.in_(table_ids),
-                ViewLineageEdge.target_table_id.in_(table_ids),
-            )
-            .order_by(ViewLineageEdge.id)
-            .limit(edge_limit)
-        )
-        # P1-05: PROPOSED edges (parser-produced, unreviewed) belong in
-        # the review queue, not the shared unified-lineage graph. An
-        # explicit `include_pending_edges=True` caller opts in.
-        if not include_pending_edges:
-            view_stmt = view_stmt.where(ViewLineageEdge.review_status == "ACTIVE")
-        view_rows = (await session.scalars(view_stmt)).all()
-        if len(view_rows) >= edge_limit:
-            truncation_reasons.append("EDGE_LIMIT")
-
-        # AT-19: fetch only the three narrow columns needed to build
-        # `transformation_reference`/`redaction_status` above -- never the
-        # `definition_sql_redacted` text itself, so this stays a bounded
-        # reference lookup (ADR-0010) and not a way to smuggle DDL text into
-        # an already-bounded graph payload.
-        view_target_ids = {row.target_table_id for row in view_rows if row.target_table_id}
-        view_definitions_by_table_id: dict[UUID, tuple[str, str]] = {}
-        if view_target_ids:
-            definition_rows = (
-                await session.execute(
-                    select(
-                        MetadataViewDefinition.table_id,
-                        MetadataViewDefinition.redaction_status,
-                        MetadataViewDefinition.availability,
-                    ).where(
-                        MetadataViewDefinition.datasource_id == datasource.id,
-                        MetadataViewDefinition.table_id.in_(view_target_ids),
-                    )
-                )
-            ).all()
-            view_definitions_by_table_id = {
-                table_id: (redaction_status, availability)
-                for table_id, redaction_status, availability in definition_rows
-            }
-        register_definition_edges(
-            view_rows, "VIEW_DEFINITION", view_definitions_by_table_id
-        )
-
-        procedure_stmt = (
-            select(ProcedureLineageEdge)
-            .where(
-                ProcedureLineageEdge.datasource_id == datasource.id,
-                ProcedureLineageEdge.source_table_id.in_(table_ids),
-                ProcedureLineageEdge.target_table_id.in_(table_ids),
-            )
-            .order_by(ProcedureLineageEdge.id)
-            .limit(edge_limit)
-        )
-        # P1-05: see the same guard on view_rows above.
-        if not include_pending_edges:
-            procedure_stmt = procedure_stmt.where(
-                ProcedureLineageEdge.review_status == "ACTIVE"
-            )
-        procedure_rows = (await session.scalars(procedure_stmt)).all()
-        if len(procedure_rows) >= edge_limit:
-            truncation_reasons.append("EDGE_LIMIT")
-        register_definition_edges(procedure_rows, "PROCEDURE_DEFINITION")
-
-    # --- Suggested / approved column relationships ---
-    candidates: Sequence[RelationshipCandidate] = []
-    if table_ids:
-        candidate_filters = [
-            RelationshipCandidate.datasource_id == datasource.id,
-            RelationshipCandidate.source_table_id.in_(table_ids),
-            RelationshipCandidate.target_table_id.in_(table_ids),
-        ]
-        if suggestion_status != "ALL":
-            candidate_filters.append(RelationshipCandidate.status == suggestion_status)
-        candidates = (
-            await session.scalars(
-                select(RelationshipCandidate)
-                .where(*candidate_filters)
-                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
-                .limit(edge_limit)
-            )
-        ).all()
-    column_ids = {candidate.source_column_id for candidate in candidates} | {
-        candidate.target_column_id for candidate in candidates
-    }
-    columns_by_id = (
-        {
-            column.id: column.name
-            for column in (
-                await session.scalars(
-                    select(MetadataColumn).where(MetadataColumn.id.in_(column_ids))
-                )
-            ).all()
-        }
-        if column_ids
-        else {}
-    )
-    for candidate in candidates:
-        source_column = columns_by_id.get(candidate.source_column_id)
-        target_column = columns_by_id.get(candidate.target_column_id)
-        register_link(
-            UnifiedLink(
-                edge_id=f"candidate:{candidate.id}",
-                source_id=str(candidate.source_table_id),
-                target_id=str(candidate.target_table_id),
-                edge_source="SUGGESTED_RELATIONSHIP",
-                status=candidate.status,
-                confidence=candidate.confidence,
-                source_columns=(source_column,) if source_column else (),
-                target_columns=(target_column,) if target_column else (),
-                evidence=dict(candidate.evidence),
-            )
-        )
-    if len(candidates) >= edge_limit:
-        truncation_reasons.append("EDGE_LIMIT")
-
-    # --- dbt manifest dependency edges (latest imported snapshot per project) ---
-    dbt_projects = (
-        await session.scalars(
-            select(DbtProject).where(
-                DbtProject.datasource_id == datasource.id, DbtProject.status == "ACTIVE"
-            )
-        )
-    ).all()
-    resource_node_id: dict[UUID, str] = {}
-    dbt_edge_total = 0
-    for project in dbt_projects:
-        latest_import = (
-            await session.scalars(
-                select(DbtArtifactImport)
-                .where(
-                    DbtArtifactImport.dbt_project_id == project.id,
-                    DbtArtifactImport.status == "IMPORTED",
-                )
-                .order_by(DbtArtifactImport.created_at.desc())
-                .limit(1)
-            )
-        ).first()
-        if latest_import is None:
-            continue
-        resources = (
-            await session.scalars(
-                select(DbtResource)
-                .where(DbtResource.artifact_import_id == latest_import.id)
-                .limit(node_limit + 1)
-            )
-        ).all()
-        if len(resources) > node_limit:
-            truncation_reasons.append("NODE_LIMIT")
-        for resource in resources:
-            if resource.matched_table_id is not None and resource.matched_table_id in table_ids:
-                resource_node_id[resource.id] = str(resource.matched_table_id)
-                continue
-            node_kind = _DBT_NODE_KIND_BY_RESOURCE_TYPE.get(resource.resource_type)
-            if node_kind is None:
-                continue
-            node_id = f"dbt:{resource.id}"
-            info = _NodeInfo(
-                id=node_id,
-                node_kind=node_kind,
-                label=resource.name,
-                qualified_name=resource.relation_name or resource.unique_id,
-                matched_table_id=None,
-                resolved=False,
-            )
-            if register_node(info):
-                resource_node_id[resource.id] = node_id
-        dbt_stmt = (
-            select(DbtLineageEdge)
-            .where(
-                DbtLineageEdge.artifact_import_id == latest_import.id,
-                # Column-level (LN-5) edges are consumed via the dedicated
-                # dbt lineage read surface, not folded into this
-                # table/resource-level graph -- without this filter, one
-                # column edge per column pair would render as a redundant
-                # parallel link between the same two dbt-resource nodes.
-                DbtLineageEdge.edge_type == "DEPENDS_ON",
-            )
-            .limit(edge_limit + 1)
-        )
-        # P1-05: see the same guard on view_rows above.
-        if not include_pending_edges:
-            dbt_stmt = dbt_stmt.where(DbtLineageEdge.review_status == "ACTIVE")
-        edges = (await session.scalars(dbt_stmt)).all()
-        if len(edges) > edge_limit:
-            truncation_reasons.append("EDGE_LIMIT")
-        for edge in edges:
-            source_node = resource_node_id.get(edge.source_resource_id)
-            target_node = resource_node_id.get(edge.target_resource_id)
-            if source_node is None or target_node is None or source_node == target_node:
-                continue
-            if register_link(
-                UnifiedLink(
-                    edge_id=f"dbt:{edge.id}",
-                    source_id=source_node,
-                    target_id=target_node,
-                    edge_source="DBT_DEPENDENCY",
-                    status="ACTIVE",
-                    confidence=1.0,
-                    evidence={"source": "DBT_MANIFEST", "edge_type": edge.edge_type},
-                )
-            ):
-                dbt_edge_total += 1
-    if dbt_edge_total >= edge_limit:
-        truncation_reasons.append("EDGE_LIMIT")
-
-    # --- OpenLineage table edges ---
-    ol_stmt = (
-        select(OpenLineageTableEdge)
-        .join(
-            OpenLineageRunEvent,
-            OpenLineageRunEvent.id == OpenLineageTableEdge.run_event_id,
-        )
-        .where(OpenLineageRunEvent.datasource_id == datasource.id)
-        .order_by(OpenLineageTableEdge.created_at.desc())
-        .limit(edge_limit)
-    )
-    # P1-05: see the same guard on view_rows above.
-    if not include_pending_edges:
-        ol_stmt = ol_stmt.where(OpenLineageTableEdge.review_status == "ACTIVE")
-    ol_rows = (await session.scalars(ol_stmt)).all()
-    ol_edge_total = 0
-    for ol_edge in ol_rows:
-        input_node_id = (
-            str(ol_edge.input_table_id)
-            if ol_edge.input_table_id is not None and ol_edge.input_table_id in table_ids
-            else f"openlineage:{ol_edge.input_dataset_namespace}:{ol_edge.input_dataset_name}"
-        )
-        output_node_id = (
-            str(ol_edge.output_table_id)
-            if ol_edge.output_table_id is not None and ol_edge.output_table_id in table_ids
-            else f"openlineage:{ol_edge.output_dataset_namespace}:{ol_edge.output_dataset_name}"
-        )
-        if input_node_id == output_node_id:
-            continue
-        input_registered = register_node(
-            _NodeInfo(
-                id=input_node_id,
-                node_kind="UNRESOLVED_DATASET",
-                label=ol_edge.input_dataset_name,
-                qualified_name=f"{ol_edge.input_dataset_namespace}.{ol_edge.input_dataset_name}",
-                matched_table_id=ol_edge.input_table_id,
-                resolved=ol_edge.input_table_id is not None,
-            )
-        )
-        output_registered = register_node(
-            _NodeInfo(
-                id=output_node_id,
-                node_kind="UNRESOLVED_DATASET",
-                label=ol_edge.output_dataset_name,
-                qualified_name=f"{ol_edge.output_dataset_namespace}.{ol_edge.output_dataset_name}",
-                matched_table_id=ol_edge.output_table_id,
-                resolved=ol_edge.output_table_id is not None,
-            )
-        )
-        if not input_registered or not output_registered:
-            continue
-        if register_link(
-            UnifiedLink(
-                edge_id=f"openlineage:{ol_edge.id}",
-                source_id=output_node_id,
-                target_id=input_node_id,
-                edge_source="OPENLINEAGE_ETL",
-                status="ACTIVE",
-                confidence=1.0,
-                evidence={"source": "OPENLINEAGE", "edge_kind": ol_edge.edge_kind},
-            )
-        ):
-            ol_edge_total += 1
-    if len(ol_rows) >= edge_limit:
-        truncation_reasons.append("EDGE_LIMIT")
-
-    return _UnifiedGraph(
-        nodes=nodes,
-        links=links,
-        counts_by_source=counts_by_source,
-        truncation_reasons=sorted(set(truncation_reasons)),
-    )
-
-
-async def _load_datasource(
-    session: AsyncSession, context: SecurityContext, datasource_id: UUID
-) -> DataSource:
-    datasource = await session.get(DataSource, datasource_id)
-    if datasource is None:
-        raise HTTPException(status_code=404, detail="datasource not found")
-    enforce_organization(context, datasource.organization_id)
-    return datasource
+# R02: the merge itself -- bounds, per-edge-kind providers and the review-state
+# filters -- lives in `aida.unified_lineage_builder`. This alias keeps the one
+# name that has callers outside this module: `graph_store.PostgresGraphStore`
+# is constructed with `build_snapshot=_build_unified_graph` (its
+# `SnapshotBuilder` protocol is written against that exact signature), and
+# `tests/test_graph_store*.py` import it by name to prove the Postgres graph
+# store and the relational builder cannot drift apart. `graph_store`'s two
+# structural protocols name `_NodeInfo`/`_UnifiedGraph` in their docstrings;
+# those types are now `UnifiedGraphNode`/`UnifiedGraph` and still satisfy them
+# field for field.
+_build_unified_graph = build_unified_graph
 
 
 async def _load_domain(
@@ -892,9 +384,7 @@ async def build_domain_unified_lineage_graph_payload(
             or_(
                 and_(
                     RelationshipCandidate.datasource_id.in_(contributing_datasource_ids),
-                    RelationshipCandidate.target_datasource_id.notin_(
-                        contributing_datasource_ids
-                    ),
+                    RelationshipCandidate.target_datasource_id.notin_(contributing_datasource_ids),
                 ),
                 and_(
                     RelationshipCandidate.target_datasource_id.in_(contributing_datasource_ids),
@@ -1045,9 +535,7 @@ async def build_domain_unified_lineage_graph_payload(
         edge_limit=edge_limit,
         truncated=bool(truncation_reasons),
         truncation_reasons=truncation_reasons,
-        withheld_cross_boundary_domain_ids=sorted(
-            withheld_cross_boundary_domain_ids, key=str
-        ),
+        withheld_cross_boundary_domain_ids=sorted(withheld_cross_boundary_domain_ids, key=str),
     )
 
 
@@ -1172,16 +660,14 @@ async def build_unified_lineage_impact_payload(
                     )
                 return projected
 
-    # `_build_unified_graph`'s return type (`_UnifiedGraph`) structurally satisfies
+    # `_build_unified_graph`'s return type (`UnifiedGraph`) structurally satisfies
     # `graph_store.LineageGraphSnapshot` -- proven directly in
     # `tests/test_graph_store.py` -- but mypy does not resolve that through a
     # Callable-to-Protocol return-type check when the Protocol's own members are
     # themselves generic (`Mapping[str, GraphNodeInfo]`); a plain value of the same
     # type checks fine, only the *function type* comparison does not. The `cast` is
     # exactly that known gap, not a real type hole.
-    postgres_store = PostgresGraphStore(
-        build_snapshot=cast(SnapshotBuilder, _build_unified_graph)
-    )
+    postgres_store = PostgresGraphStore(build_snapshot=cast(SnapshotBuilder, _build_unified_graph))
     result = await postgres_store.lineage_impact(
         session, datasource, node_id, depth=depth, node_limit=node_limit
     )
@@ -1231,7 +717,7 @@ async def get_unified_lineage_graph(
     `atlas__get_lineage_graph` (`mcp_server.py`).
     """
 
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     return await build_unified_lineage_graph_payload(
         session,
         datasource,
@@ -1265,7 +751,7 @@ async def get_unified_lineage_impact(
     `atlas__get_lineage_impact` (`mcp_server.py`).
     """
 
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     try:
         return await build_unified_lineage_impact_payload(
             session,

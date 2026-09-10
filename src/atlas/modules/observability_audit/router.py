@@ -42,6 +42,7 @@ from aida.schemas import (
     SloDefinitionRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.worm_archive import STATE_VERIFIED
 
 router = APIRouter(prefix="/v1", tags=["observability"])
 
@@ -49,9 +50,7 @@ router = APIRouter(prefix="/v1", tags=["observability"])
 @router.post("/observability/slo", response_model=SloDefinitionRead, status_code=201)
 async def create_slo_definition(
     body: SloDefinitionCreate,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataAdmin", "Operations")
-    ),
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin", "Operations")),
     session: AsyncSession = Depends(get_session),
 ) -> SloDefinitionRead:
     org_id = context.require_organization()
@@ -110,9 +109,7 @@ async def list_slo_definitions(
 ) -> Page:
     org_id = context.require_organization()
     filters = [SloDefinition.organization_id == org_id]
-    total = await session.scalar(
-        select(func.count()).select_from(SloDefinition).where(*filters)
-    )
+    total = await session.scalar(select(func.count()).select_from(SloDefinition).where(*filters))
     rows = (
         await session.scalars(
             select(SloDefinition)
@@ -182,7 +179,16 @@ async def get_archive_status(
     session: AsyncSession = Depends(get_session),
 ) -> ArchiveStatusRead:
     org_id = context.require_organization()
-    filters = [AuditArchiveRecord.organization_id == org_id]
+    # VERIFIED only (review F01). A PREPARED, UPLOADED or FAILED row is an
+    # attempt, not an archive; counting them here is exactly how this
+    # endpoint came to report archive evidence for events nothing had
+    # stored. LEGACY_UNVERIFIED rows -- written when the archiver returned a
+    # success object without writing anything -- are excluded for the same
+    # reason.
+    filters = [
+        AuditArchiveRecord.organization_id == org_id,
+        AuditArchiveRecord.state == STATE_VERIFIED,
+    ]
 
     stats = (
         await session.execute(
@@ -244,9 +250,7 @@ async def get_cost_showback(
     """
     org_id = context.require_organization()
     if period_end <= period_start:
-        raise HTTPException(
-            status_code=422, detail="period_end must be after period_start"
-        )
+        raise HTTPException(status_code=422, detail="period_end must be after period_start")
 
     report = await build_cost_showback_report(
         session,

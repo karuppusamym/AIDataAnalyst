@@ -89,6 +89,12 @@ RAW_SQL_ONLY_INDEXES = frozenset(
         "ix_metadata_table_catalog_page",
         "ix_metadata_table_name_trgm",
         "ix_metadata_table_description_trgm",
+        # F15 picker search -- c3f0a71d5e94_picker_search_trgm_indexes.py.
+        "ix_project_name_trgm",
+        "ix_project_slug_trgm",
+        "ix_workspace_name_trgm",
+        "ix_workspace_slug_trgm",
+        "ix_datasource_name_trgm",
     }
 )
 

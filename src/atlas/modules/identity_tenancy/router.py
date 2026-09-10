@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.api import _commit_or_conflict
@@ -97,6 +97,7 @@ from aida.schemas import (
     WorkspaceMembershipRead,
     WorkspaceRead,
 )
+from aida.scope_search import search_predicate
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.workspace_service import (
     BindingApprovalError,
@@ -110,6 +111,14 @@ router = APIRouter(prefix="/v1", tags=["workspaces"])
 
 _ADMIN = ("PlatformAdmin", "OrganizationAdmin", "DataAdmin")
 _ANY_MEMBER = ("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Steward", "Analyst", "Reviewer")
+
+# F15: the picker search parameter's contract, stated once so both routes in
+# this file that take it describe it identically in `openapi.json`.
+_SEARCH_DESCRIPTION = (
+    "Optional case-insensitive substring filter, applied within the rows this "
+    "caller is already entitled to see. Absent, empty, or whitespace-only means "
+    "no filter."
+)
 
 
 async def _load_workspace(session: AsyncSession, workspace_id: UUID) -> Workspace:
@@ -178,17 +187,49 @@ async def create_workspace_route(
 @router.get("/organizations/{organization_id}/workspaces", response_model=Page)
 async def list_workspaces(
     organization_id: UUID,
+    q: str | None = Query(default=None, max_length=200, description=_SEARCH_DESCRIPTION),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(require_roles(*_ANY_MEMBER)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
+    """F15: `q` searches workspace name and slug server-side.
+
+    The filter is appended to the tenant filter, never substituted for it, so a
+    search can only narrow the page this caller already had.
+    """
     enforce_organization(context, organization_id)
-    statement = select(Workspace).where(Workspace.organization_id == organization_id)
+    filters: list[ColumnElement[bool]] = [Workspace.organization_id == organization_id]
+    search = search_predicate(q, Workspace.name, Workspace.slug)
+    if search is not None:
+        filters.append(search)
+    statement = select(Workspace).where(*filters)
     rows = await session.scalars(statement.order_by(Workspace.slug).limit(limit).offset(offset))
     items = [WorkspaceRead.model_validate(row) for row in rows.all()]
-    total = len((await session.scalars(statement)).all())
-    return Page(items=list(items), limit=limit, offset=offset, total=total)
+    # `total` was previously the length of a fully-materialised result set. With
+    # a `q` filter that would load every match just to count it; a COUNT(*) is
+    # the same number without the rows, and is what every sibling list route in
+    # this file already does.
+    total = await session.scalar(select(func.count()).select_from(Workspace).where(*filters))
+    return Page(items=list(items), limit=limit, offset=offset, total=total or 0)
+
+
+@router.get("/workspaces/{workspace_id}", response_model=WorkspaceRead)
+async def get_workspace(
+    workspace_id: UUID,
+    context: SecurityContext = Depends(require_roles(*_ANY_MEMBER)),
+    session: AsyncSession = Depends(get_session),
+) -> Workspace:
+    """F15: resolve one workspace by id, for a deep link or a remembered selection.
+
+    `_load_workspace` (404 when missing) then `enforce_organization` -- the same
+    two steps, in the same order, as every other by-id workspace route in this
+    file, so this route cannot answer for a workspace the caller's organization
+    does not own.
+    """
+    workspace = await _load_workspace(session, workspace_id)
+    enforce_organization(context, workspace.organization_id)
+    return workspace
 
 
 # --- membership -------------------------------------------------------------
@@ -801,6 +842,7 @@ async def list_agent_evaluations(
 
 @router.get("/organizations", response_model=Page)
 async def list_organizations(
+    q: str | None = Query(default=None, max_length=200, description=_SEARCH_DESCRIPTION),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
@@ -808,9 +850,18 @@ async def list_organizations(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    filters = []
+    """F15: `q` searches organization name and slug server-side.
+
+    The tenant restriction below is applied first and independently of `q`: a
+    non-PlatformAdmin caller is pinned to their own organization's row, so a
+    search term matching some other tenant's name matches nothing for them.
+    """
+    filters: list[ColumnElement[bool]] = []
     if "PlatformAdmin" not in context.roles:
         filters.append(Organization.id == context.require_organization())
+    search = search_predicate(q, Organization.name, Organization.slug)
+    if search is not None:
+        filters.append(search)
     total = await session.scalar(select(func.count()).select_from(Organization).where(*filters))
     rows = (
         await session.scalars(
@@ -827,6 +878,28 @@ async def list_organizations(
         offset=offset,
         total=total or 0,
     )
+
+@router.get("/organizations/{organization_id}", response_model=OrganizationRead)
+async def get_organization(
+    organization_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "Auditor", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Organization:
+    """F15: resolve one organization by id, for a deep link or a remembered selection.
+
+    `enforce_organization` first, then the row: the organization id *is* the
+    tenant boundary here, so there is nothing to load before deciding whether
+    this caller may ask. Same order as `list_lines_of_business` and
+    `aida.operational_api._require_organization`.
+    """
+    enforce_organization(context, organization_id)
+    organization = await session.get(Organization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    return organization
+
 
 @router.get("/organizations/{organization_id}/lines-of-business", response_model=Page)
 async def list_lines_of_business(

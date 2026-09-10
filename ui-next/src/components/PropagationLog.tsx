@@ -1,3 +1,4 @@
+import { Pill } from "./primitives";
 import "./PropagationLog.css";
 
 /* ---------------------------------------------------------------------------
@@ -11,6 +12,17 @@ import "./PropagationLog.css";
    the MECHANISM that carried it ("via column lineage", "reads from"), not just
    that it happened. "Affected" is a claim; "affected via column lineage from
    raw_sales" is an argument.
+
+   PROVENANCE IS PART OF THE ARGUMENT (review 2026-09-05, D02). The only
+   caller today passes a hand-written four-step story about `orders_raw`; no
+   endpoint, fixture generator or lineage walk produces it, and none exists
+   (see `ReviewQueueScreen`'s AT-D4 note). It is gated off by default, but a
+   build that turns the gate on must not be able to render it as though the
+   platform had traversed anything. `illustrative` is therefore not
+   decoration: it labels the steps on screen and in the accessible name, so a
+   steward reading it knows it is an example of the mechanism rather than
+   evidence about their estate. A real, evidence-backed propagation read model
+   renders the same component with the flag off.
 --------------------------------------------------------------------------- */
 
 export interface PropagationStep {
@@ -25,13 +37,31 @@ export interface PropagationStep {
 export function PropagationLog({
   title,
   steps,
+  illustrative = false,
+  illustrativeNote,
 }: {
   title: string;
   steps: PropagationStep[];
+  /** True when these steps are a worked example, not traversed evidence. */
+  illustrative?: boolean;
+  /** What is missing, so the reader knows what would replace it. */
+  illustrativeNote?: string;
 }) {
   return (
-    <section className="plog" aria-label={title}>
-      <h4 className="plog__h">{title}</h4>
+    <section
+      className={`plog${illustrative ? " plog--demo" : ""}`}
+      aria-label={illustrative ? `${title} (worked example, not live evidence)` : title}
+    >
+      <h4 className="plog__h">
+        {title}
+        {illustrative ? <Pill tone="warn">worked example · not your data</Pill> : null}
+      </h4>
+      {illustrative ? (
+        <p className="plog__demo">
+          {illustrativeNote ??
+            "These steps are hard-coded to show how propagation is reported. Nothing here was traversed against your estate."}
+        </p>
+      ) : null}
       <ol className="plog__l">
         {steps.map((s, i) => (
           <li key={i} className={`ps ps--${s.kind}`}>

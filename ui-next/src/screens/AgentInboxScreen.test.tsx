@@ -122,28 +122,43 @@ describe("AgentInboxScreen (UX-21)", () => {
     expect(within(killed).getByText("kill engaged")).toBeInTheDocument();
   });
 
-  it("requires a reason before engaging a kill switch", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("   ");
+  /* The rationale is collected in a real dialog, not `window.prompt`
+     (review 2026-09-05, F21). These assert the behaviour that moved: the
+     confirm button is blocked until a reason is written, the reason reaches
+     the endpoint, and a failing request is reported inside the dialog
+     instead of dismissing it as though the agent had been stopped. */
+  async function openKillDialog() {
     render(<AgentInboxScreen persona="STEWARD" />);
-
     await waitFor(() =>
       expect(screen.getAllByRole("button", { name: /engage kill switch/i }).length).toBe(2),
     );
-    fireEvent.click(screen.getAllByRole("button", { name: /engage kill switch/i })[0]!);
+    // jsdom does not focus a button on click the way a browser does, and
+    // focus restore is only meaningful relative to whatever had focus.
+    const trigger = screen.getAllByRole("button", { name: /engage kill switch/i })[0]!;
+    trigger.focus();
+    fireEvent.click(trigger);
+    return await screen.findByRole("dialog");
+  }
 
+  it("requires a reason before engaging a kill switch", async () => {
+    const dialog = await openKillDialog();
+
+    const confirm = within(dialog).getByRole("button", { name: /engage kill switch/i });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), { target: { value: "   " } });
+    expect(confirm).toBeDisabled();
     expect(engageAgentKillSwitch).not.toHaveBeenCalled();
-    promptSpy.mockRestore();
   });
 
   it("engages the kill switch with the reason the human gave", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("drift on descriptions");
     engageAgentKillSwitch.mockResolvedValue(undefined);
-    render(<AgentInboxScreen persona="STEWARD" />);
+    const dialog = await openKillDialog();
 
-    await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: /engage kill switch/i }).length).toBe(2),
-    );
-    fireEvent.click(screen.getAllByRole("button", { name: /engage kill switch/i })[0]!);
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), {
+      target: { value: "drift on descriptions" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /engage kill switch/i }));
 
     await waitFor(() =>
       expect(engageAgentKillSwitch).toHaveBeenCalledWith(
@@ -152,7 +167,32 @@ describe("AgentInboxScreen (UX-21)", () => {
         "drift on descriptions",
       ),
     );
-    promptSpy.mockRestore();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps the kill dialog open and shows why, when the request is refused", async () => {
+    engageAgentKillSwitch.mockRejectedValue(new Error("kill switch requires an owner"));
+    const dialog = await openKillDialog();
+
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), { target: { value: "runaway cost" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /engage kill switch/i }));
+
+    expect(await screen.findByText("kill switch requires an owner")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("traps focus inside the kill dialog and restores it to the opener on cancel", async () => {
+    const dialog = await openKillDialog();
+    // The reason field is focused on open, not left to the browser: the
+    // whole point of the dialog is the sentence it collects.
+    expect(document.activeElement).toBe(within(dialog).getByLabelText(/reason/i));
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(
+      screen.getAllByRole("button", { name: /engage kill switch/i })[0]!,
+    );
   });
 
   it("renders an error state rather than a blank screen", async () => {

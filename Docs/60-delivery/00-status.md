@@ -17,13 +17,32 @@ was found and fixed as part of this pass. See `06-accomplishment-log.md` for wha
 checks, and `03-tracker.md`'s §K for the current item-level DONE/TODO/IN-PROGRESS/BLOCKED count
 (267 tracked items, 177 DONE as of the same commit).
 
-> **Scope of this pass.** This refresh corrects §1 ("At a glance") against live tooling output and
-> fixes the two things that were unambiguously wrong (stale counts, a real static-analysis
-> regression). It does **not** re-verify every row of §4's capability matrix, §3's invariant table,
-> or §7's gap register against current code — those were largely kept current by the sessions that
-> did the underlying work (most §4 rows already cite specific recent tracker IDs), but nobody has
-> done a dedicated line-by-line audit of the whole document since 2026-08-30. Treat prose beyond §1
-> as directionally reliable, not independently re-verified today.
+> **Scope of the 2026-09-02 pass.** That refresh corrected §1 ("At a glance") against live tooling
+> output and fixed the two things that were unambiguously wrong (stale counts, a real
+> static-analysis regression). It did **not** re-verify every row of §4's capability matrix, §3's
+> invariant table, or §7's gap register against current code.
+
+> **2026-09-06 correction (review-2026-09-05 finding D06, lane G).** Three claims on this page had
+> gone false and were corrected against the code, not against other documents:
+>
+> * The ADR count (§1, §10) said 22 and 20; `Docs/10-architecture/adr/` holds **28** ADR files.
+> * §4 described an "Agentic product portal" at port 3000 and `ui-next` as a partial strangle
+>   migration with a "virtualized Catalog reference screen". The legacy `ui/` portal has been
+>   **deleted** (`ls ui` returns nothing; no compose service, Dockerfile, CI job or script
+>   references it) and `ui-next` is the only portal, with 40 screens in `SCREEN_IDS` and 80 screen
+>   components. Both rows were rewritten.
+> * The `VITE_USE_FIXTURES` note claimed fixtures were on by default in the deployed image;
+>   `compose.yaml` passes `UI_NEXT_USE_FIXTURES:-0`.
+>
+> **What this correction did NOT do:** re-derive the test/mypy/coverage counts in §1. Seven
+> remediation lanes are editing `src/` and `ui-next/src/` concurrently as this is written, so any
+> number measured today would be stale before it was committed and would look more authoritative
+> than it is. Those rows remain "true as of `fd70428`, 2026-09-02" and should be re-derived by the
+> lane that closes the remediation pass. §3, §5, §6, §7 and §8 were not re-audited either.
+>
+> For the four-column implemented / reachable / configured / verified view that D06 asked for, see
+> [`20-capability-register.md`](20-capability-register.md). That register is the current-state
+> document; this page remains the narrative summary.
 
 ## 1. At a glance
 
@@ -32,7 +51,7 @@ checks, and `03-tracker.md`'s §K for the current item-level DONE/TODO/IN-PROGRE
 | Test suite | **6,497 passing, 11 skipped, 1 expected failure** (6,509 collected; the xfail is INV-9's known gap, §3), no unexpected failures, no external service required |
 | Static quality | `mypy --strict` clean on **283** files · **8** import-linter contracts kept. `ruff` clean except **1** pre-existing, unrelated `E501` (an overlong test function name, out of scope to rename) |
 | Migrations | **1** Alembic head, `ca56d6ce3f18` |
-| Architecture decisions | **22** recorded, 1 superseded (ADR-0017 → ADR-0018) |
+| Architecture decisions | **28** recorded (`ls Docs/10-architecture/adr/ADR-*.md`, re-counted 2026-09-06), including the ADR-0017 → ADR-0018 supersession |
 | Invariants | **9 of 9** have an automated test; 3 carry a named limit (see §3) |
 | Authorization | Wired into the execution path and 5 read surfaces; **enforcing nothing** (shadow mode, §3 INV-4) — unverified this pass whether more read surfaces have been wired since 2026-08-30 |
 | Open decisions | **4** — two were answered on 2026-08-30 (the embedding model, and Neo4j) (§6) — not re-audited this pass |
@@ -133,8 +152,8 @@ named rather than rounded up to a tick.
 | Audit and event delivery | 20 | Implemented | Attributable audit ledger, transactional outbox, idempotent publication, retry/backoff, dead-letter, authorized requeue | WORM archive; retention; SIEM/SOC routing; OpenTelemetry; access review |
 | Context products and MCP | 19 | Partial | JSON-RPC 2.0 MCP endpoint (`POST /mcp`); immutable Context Products with maker-checker publication/deprecation; policy-gated REST/MCP reads; role-filtered tools; Redis budgets; marketplace request/approve/provision-pending lifecycle; deterministic compiler; AI registry/trust; and tenant-scoped portfolio analytics summary/trend APIs, all with local end-to-end evidence | Million-node lineage/load certification; authoritative BI/procedure lineage; privacy operations; workflow templates; workload identity; external provider certification; browser/accessibility and bank-scale security certification |
 | Studio | 18 | Partial | Change-set lifecycle (DRAFT→TESTING→SUBMITTED→MERGED/REJECTED) with base-version conflict detection; synthetic-fixture test harness gating submission; field-level semantic diff view; impact preview; typed, enum-bound parameter-contract designer reusing the module-14 tool-registry contract and SQL renderer, wired into the test gate and exposed standalone at `POST /v1/studio/parameter-contracts/validate` (`studio.py`, `studio_api.py`, `studio_test_harness.py`) | Git binding (Atlas authoritative); usage-derived eval suite is a separate change-set gate (ST-A8, delivered); systemic no-DB-test-harness gap shared with CT-1/TL-1/LN-4 |
-| Agentic product portal | 21 | Implemented for current API scope | Role-oriented product at port 3000: asset-first shell and explorer; tabbed asset workspace; glossary term authoring/review; versioned aliases/README ownership and approved term linking; analyst workflow, catalog/impact, dbt transformations, business meaning, semantics, tools, graph, model routes, sources, quality, operations, governance and audit; ARIA roles/labels, roving-tabindex tab/command-palette keyboard navigation, focus management and restoration, live-region status/error announcements, `prefers-reduced-motion` support and a verified body-text contrast fix | Persona bound to OIDC groups; interactive screen-reader/axe-core WCAG AA accessibility certification; million-node visual certification |
-| ui-next shell rebuild (strangle migration) | 21 | Partial | React 18 + TypeScript strict shell (UX-10); virtualized Catalog reference screen (UX-11); its one backend gap closed — `CatalogRowRead` read-model endpoint (UX-12, `GET /v1/organizations/{org}/catalog/rows`), CT-2 keyset shape, permission-filtered, no writes; `ui-next/src/lib/api.ts`'s `VITE_USE_FIXTURES` flag left at its default (fixtures on) because it also gates the not-yet-built UX-13 evidence endpoint — flipping it now would 404 that call, not just switch data sources; see `03-tracker.md` UX-12 | Set `VITE_USE_FIXTURES=0` once UX-13 lands too, or split the flag per-endpoint sooner; UX-13 evidence endpoint; migrate remaining screens (UX-15); generated API types (UX-14); retire legacy `ui/` (UX-16) |
+| Atlas portal (`ui-next`) | 21 | Implemented for current API scope | The **only** portal. React 18 + TypeScript strict SPA, served by nginx at `http://localhost:3001` in Compose (`ui-next/Dockerfile`, `ui-next/nginx.conf`) and by Vite at `:5174` under the development overlay. 40 screens declared in `ui-next/src/lib/routes.ts`'s `SCREEN_IDS`, 80 screen components under `ui-next/src/screens/`, lazily routed. Compose builds it with `VITE_USE_FIXTURES` defaulting to `0` (`compose.yaml`'s `UI_NEXT_USE_FIXTURES:-0`), so the deployed image talks to the live API rather than fixtures. nginx proxies `/v1/` and (since F07, 2026-09-06) `/mcp` to the API on the same origin | Interactive screen-reader/axe-core WCAG AA certification; million-node visual certification; persona bound to OIDC groups is server-derived but the full browser OIDC sign-in flow is not complete (F06); the correctness findings F08-F22 of `review-2026-09-05/REVIEW.md` are being remediated and are **not** claimed complete here |
+| Legacy `ui/` portal (retired) | 21 | **Removed** | Deleted from the tree; `ls ui` returns nothing and no compose service, Dockerfile, CI job or script references it. The strangle migration is finished: there is no second frontend and no port 3000 service. Docs/60-delivery/06-accomplishment-log.md still describes work done on it — that is history, and correct as history | Nothing. This row exists so the removal is not mistaken for an omission |
 | Production platform / network | — | **Bank decision** | Reproducible local Docker engineering topology | Kubernetes/managed services, regions, private endpoints, mTLS, egress, residency |
 | DR and continuity | — | **Bank decision** | Durable local service volumes | Approved RPO/RTO, backup/restore, failover, regional recovery exercises |
 | Performance / security / recovery certification | — | **Retest required** | Unit, strict type, migration drift, and local end-to-end suites pass | Load, soak, chaos, penetration, SAST/DAST, restore, connector certification |
@@ -206,7 +225,7 @@ A gap with a documented safe default is a managed risk; a gap without one is an 
 | P1 | Operations and compliance | Structured logs, metrics, audit/outbox, fleet evidence, retry/backoff, dead-letter visibility, requeue control | OpenTelemetry export; SIEM/SOC integration; SLO alerts; WORM audit retention; compliance packs |
 | P1 | Software supply chain | Pinned dependencies, non-root image | SBOM; signing; vulnerability policy; SAST/DAST; admission controls; patch SLAs |
 | P1 | Studio | Change sets with conflict detection, test harness, diff view, impact preview, typed/enum-bound parameter-contract designer | Git binding |
-| P2 | User experience | Atlas covers implemented workflows with accessible command palette, table virtualization, and responsive stewardship control center; **persona navigation is bound to the bank OIDC group contract (UX-1, delivered 2026-08-31)** — `GET /v1/me` derives persona server-side from the verified groups claim via the same configurable claim-path mechanism used for role mapping, and the manual persona switcher is genuinely absent from the rendered ui-next shell whenever `identity_provider=oidc`, surviving only under the development identity provider it is explicitly labelled for; **the separate `ui/` legacy shell (2026-09-02, Group F) now carries the same OIDC-derived persona (`persona-nav.js`, dev selector as fallback only), a Cmd/Ctrl+K command palette (pre-existing, verified), graph level-of-detail rendering (pre-existing KG-3 clustering, verified), a lazily-paged/windowed remote virtual-table mode proven bounded at a synthetic 1,000,000-row scale (UX-3, wired into the Audit evidence screen), a 10,000-item bulk selection with chunked/cancellable client-orchestrated execution over the real synchronous CT-1 bulk endpoints (UX-4, no async backend exists to wire to — see 03-tracker.md's own note), and asset evidence permalinks + a governed export download (UX-7)** | Complete interactive WCAG/usability, very-large bulk-selection, and million-node visual certification; a real async bulk-operation backend (persisted progress/cancellation state) if UX-4's stated 10,000-item *server-side* background execution is required rather than the client-orchestrated form delivered |
+| P2 | User experience | Atlas covers implemented workflows with accessible command palette, table virtualization, and responsive stewardship control center; **persona navigation is bound to the bank OIDC group contract (UX-1, delivered 2026-08-31)** — `GET /v1/me` derives persona server-side from the verified groups claim via the same configurable claim-path mechanism used for role mapping, and the manual persona switcher is genuinely absent from the rendered ui-next shell whenever `identity_provider=oidc`, surviving only under the development identity provider it is explicitly labelled for; **the parallel `ui/` legacy shell that once carried the same features (UX-3/UX-4/UX-7, Group F, 2026-09-02) has since been deleted outright — see the retired-portal row in §4; those capabilities now exist only where `ui-next` implements them, which is not everywhere the legacy shell did** | Complete interactive WCAG/usability, very-large bulk-selection, and million-node visual certification; a real async bulk-operation backend (persisted progress/cancellation state) if UX-4's stated 10,000-item *server-side* background execution is required rather than the client-orchestrated form delivered |
 | P2 | Chargeback and quotas | Per-source query limits | LOB budgets; tenant quotas; showback; anomalous-spend controls |
 ### Still-open gaps identified during the 2026-08 review
 
@@ -252,7 +271,7 @@ Everything below is a *different question* rather than a second copy of this one
 | What did we build, when, and what did it cost us to learn? | `60-delivery/06-accomplishment-log.md` — append-only; corrections are new entries, never edits |
 | What is planned, in what order, and why that order? | `60-delivery/01-roadmap.md` (phases) · `60-delivery/02-epic-backlog.md` (epics with acceptance criteria) |
 | What still has to happen per connector? | `60-delivery/07-connector-implementation-backlog.md` |
-| Why is it built this way? | `10-architecture/adr/` — 20 records; `10-architecture/adr/README.md` is the register |
+| Why is it built this way? | `10-architecture/adr/` — 28 records; `10-architecture/adr/README.md` is the register |
 | What must always be true? | `10-architecture/01-principles-and-invariants.md` |
 | What does the API/event/envelope contract say? | `30-contracts/` |
 | What does each module own? | `20-modules/` |

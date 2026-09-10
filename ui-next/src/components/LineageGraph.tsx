@@ -2,6 +2,24 @@ import { useMemo, useState } from "react";
 import type { UnifiedLineageEdgeRead, UnifiedLineageGraphRead, UnifiedLineageNodeRead } from "../lib/types";
 import "./LineageGraph.css";
 
+/* ---------------------------------------------------------------------------
+   Lineage, twice (review 2026-09-05, F21 / UX section 7).
+
+   THE DEFECT this removes: lineage existed ONLY as an SVG. The nodes were
+   focusable, but the edges -- which are the entire content of a lineage view,
+   the claim that A feeds B and on what evidence -- were `path` elements with a
+   `title`, reachable by a mouse pointer and by nothing else. A screen reader
+   user, and anyone on a narrow window where a 760px-minimum canvas cannot be
+   read, had no way to learn what the graph said. The SVG also carried
+   `role="img"`, which tells assistive technology to treat its contents as one
+   flat image -- including the buttons inside it.
+
+   THE INVARIANT: every relationship shown in the diagram is also available as
+   a row. The table is not a summary or a fallback stub; it is the same edges
+   and the same evidence, in a form that can be read linearly, searched by the
+   browser, and operated by a keyboard.
+--------------------------------------------------------------------------- */
+
 const EDGE_LABELS: Record<string, string> = {
   FOREIGN_KEY: "Foreign key",
   SUGGESTED_RELATIONSHIP: "Inferred / approved",
@@ -61,11 +79,107 @@ function edgeTitle(edge: UnifiedLineageEdgeRead): string {
   return `${EDGE_LABELS[edge.edge_source] ?? edge.edge_source} · ${edge.status.toLowerCase()}${confidence}`;
 }
 
+type LineageView = "graph" | "table";
+
+/** The same edges as the diagram, as rows. */
+function LineageTable({
+  graph,
+  focusNodeId,
+  onSelectNode,
+}: {
+  graph: UnifiedLineageGraphRead;
+  focusNodeId?: string | null;
+  onSelectNode: (nodeId: string) => void;
+}) {
+  const byId = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
+  const connected = useMemo(() => {
+    const seen = new Set<string>();
+    for (const edge of graph.edges) {
+      seen.add(edge.source_node_id);
+      seen.add(edge.target_node_id);
+    }
+    return seen;
+  }, [graph.edges]);
+  const isolated = graph.nodes.filter((node) => !connected.has(node.id));
+
+  return (
+    <div className="lgtable">
+      <div className="lgtable__scroll">
+        <table>
+          <caption className="sr-only">
+            Every relationship in this lineage view: what feeds what, on which evidence, and
+            whether that evidence is active or still proposed.
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Upstream</th>
+              <th scope="col">Downstream</th>
+              <th scope="col">Evidence</th>
+              <th scope="col">Status</th>
+              <th scope="col">Confidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {graph.edges.map((edge) => {
+              const source = byId.get(edge.source_node_id);
+              const target = byId.get(edge.target_node_id);
+              if (!source || !target) return null;
+              return (
+                <tr key={edge.id}>
+                  <td>
+                    <button
+                      type="button"
+                      className={`lgtable__node${source.id === focusNodeId ? " is-focus" : ""}`}
+                      onClick={() => onSelectNode(source.id)}
+                      title={source.qualified_name}
+                    >
+                      {source.label}
+                    </button>
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className={`lgtable__node${target.id === focusNodeId ? " is-focus" : ""}`}
+                      onClick={() => onSelectNode(target.id)}
+                      title={target.qualified_name}
+                    >
+                      {target.label}
+                    </button>
+                  </td>
+                  <td>{EDGE_LABELS[edge.edge_source] ?? edge.edge_source}</td>
+                  <td>{edge.status.toLowerCase()}</td>
+                  <td className="lgtable__num">
+                    {Number.isFinite(edge.confidence) ? `${Math.round(edge.confidence * 100)}%` : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+            {graph.edges.length === 0 ? (
+              <tr>
+                <td colSpan={5}>No relationships in this view.</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      {isolated.length > 0 ? (
+        <p className="lgtable__isolated">
+          {/* An asset with no edges is invisible in a table of edges. Saying so
+              is the difference between "no lineage" and "not listed". */}
+          {isolated.length} asset{isolated.length === 1 ? "" : "s"} in this view have no recorded
+          relationship: {isolated.map((node) => node.label).join(", ")}.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function LineageGraph({ graph, focusNodeId, onSelectNode }: {
   graph: UnifiedLineageGraphRead;
   focusNodeId?: string | null;
   onSelectNode: (nodeId: string) => void;
 }) {
+  const [view, setView] = useState<LineageView>("graph");
   const [zoom, setZoom] = useState(1);
   const placed = useMemo(() => placeNodes(graph), [graph]);
   const byId = useMemo(() => new Map(placed.nodes.map((node) => [node.id, node])), [placed.nodes]);
@@ -78,7 +192,15 @@ export function LineageGraph({ graph, focusNodeId, onSelectNode }: {
           <strong>{graph.nodes.length} assets</strong>
           <span>{graph.edges.length} evidence-backed links</span>
         </div>
-        <div className="lgraph__zoom" aria-label="Graph zoom">
+        <div className="lgraph__views" role="group" aria-label="Lineage view">
+          <button type="button" aria-pressed={view === "graph"} onClick={() => setView("graph")}>
+            Diagram
+          </button>
+          <button type="button" aria-pressed={view === "table"} onClick={() => setView("table")}>
+            Table
+          </button>
+        </div>
+        <div className="lgraph__zoom" aria-label="Graph zoom" hidden={view !== "graph"}>
           <button onClick={() => setZoom((value) => Math.max(.7, value - .15))} aria-label="Zoom out">−</button>
           <output>{Math.round(zoom * 100)}%</output>
           <button onClick={() => setZoom((value) => Math.min(1.8, value + .15))} aria-label="Zoom in">+</button>
@@ -90,13 +212,18 @@ export function LineageGraph({ graph, focusNodeId, onSelectNode }: {
           <span key={source} data-edge={source}><i />{EDGE_LABELS[source] ?? source} <b>{count}</b></span>
         ))}
       </div>
+      {view === "table" ? (
+        <LineageTable graph={graph} focusNodeId={focusNodeId} onSelectNode={onSelectNode} />
+      ) : (
       <div className="lgraph__viewport">
         <svg
           className="lgraph__svg"
           style={{ width: `${zoom * 100}%` }}
           viewBox={`0 0 ${placed.width} ${placed.height}`}
-          role="img"
-          aria-label="Lineage graph grouped by hop distance and evidence"
+          /* Not an image role: the nodes inside are real buttons, and role="img"
+             would hide every one of them from assistive technology. */
+          role="group"
+          aria-label="Lineage diagram grouped by hop distance and evidence. The Table view lists the same relationships as rows."
         >
           <defs>
             {Object.keys(EDGE_LABELS).map((source) => (
@@ -148,8 +275,14 @@ export function LineageGraph({ graph, focusNodeId, onSelectNode }: {
           </g>
         </svg>
       </div>
+      )}
       {graph.truncated ? <p className="lgraph__truncated">The server bounded this view. Narrow the source or inspect a selected asset for its local impact.</p> : null}
-      <p className="lgraph__hint">Select any asset to focus its narrated upstream and downstream impact.</p>
+      <p className="lgraph__hint">
+        Select any asset to focus its narrated upstream and downstream impact.
+        {view === "graph"
+          ? " Switch to Table for the same relationships as rows."
+          : " Switch to Diagram for the same relationships as a picture."}
+      </p>
     </section>
   );
 }

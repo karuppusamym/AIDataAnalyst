@@ -34,10 +34,21 @@
 .src__computed{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
 .src__blockers{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px}
 .evp__notice{flex:none;margin:0;padding:8px 14px;font-size:12px;color:var(--ink-2);background:var(--sunk);border-top:1px solid var(--line)}
+.src__model{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-soft)}
+.src__modellede,.src__modelreadonly{margin:10px 0 0;font-size:12px;line-height:1.5;color:var(--ink-2)}
+.src__modelsteps{margin:9px 0;padding-left:20px;font-size:12px;line-height:1.5;color:var(--ink-2)}
+.src__modelaction{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.src__modelaction>span{font-size:11px;line-height:1.4;color:var(--ink-3);flex:1 1 180px}
+.src__modelreadonly{margin-top:11px;padding:9px 10px;border-left:2px solid var(--info);background:var(--sunk)}
+.src__model .wbi{margin-top:13px}
+.src__factors{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-soft)}
+
+/* Keep the hint on its own row in this action-heavy pane. */
+.srcscreen__main .evp__hint{margin-left:0;flex-basis:100%}
 
 @media (max-width:1100px){
   .srcscreen{height:auto;min-height:100%}
   .srcscreen__main{flex-direction:column;min-height:0}
   .srcscreen__main .vlist{height:62vh;flex:none}
-  .evp{width:auto;max-height:none}
+  .srcscreen__main .evp{width:auto;max-height:none}
 }

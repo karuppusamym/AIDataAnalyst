@@ -21,17 +21,46 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    docker compose -f compose.yaml -f compose.dev.yaml up --build -d
    ```
 
-   The complete legacy portal remains at `http://localhost:3000`. The React
-   rebuild is also deployed by the default Compose file at
-   `http://localhost:3001`; both use the same API service. With the development
-   overlay, the React rebuild is available at `http://localhost:5174` with
-   hot-module reload, and API changes under `src/` reload automatically.
+   The Atlas portal (`ui-next`, React) is deployed by the default Compose file
+   at `http://localhost:3001`. With the development overlay it is available at
+   `http://localhost:5174` with hot-module reload, and API changes under
+   `src/` reload automatically.
+
+   Both of the above run the **development identity provider**: the browser
+   sends `X-Principal-Id`/`X-Roles` headers and the API trusts them. That is
+   the default and it stays the default. To run the stack the way a deployment
+   runs it — the API verifying a signed bearer token, the browser obtaining one
+   through an authorization-code + PKCE redirect — add the OIDC overlay, which
+   also starts a local development issuer:
+
+   ```powershell
+   docker compose -f compose.yaml -f compose.oidc.yaml up --build -d
+   ```
+
+   Then open <http://localhost:3001>, press **Sign in**, and enter any subject
+   plus a claims document that names the caller's roles, groups and
+   organization, for example:
+
+   ```json
+   {"roles":["atlas-admin"],"groups":["atlas-stewards"],
+    "organization_id":"<an organization id from /v1/organizations>"}
+   ```
+
+   `atlas-viewer` in place of `atlas-admin` produces a least-privilege
+   principal. The issuer is `ghcr.io/navikt/mock-oauth2-server`: a real OIDC
+   provider (RS256, JWKS, discovery, real expiry) with **no user directory,
+   password, MFA or revocation** — it mints a token for whoever asks. It
+   exercises the protocol integration; it is not a stand-in for a corporate
+   IdP, and `compose.oidc.yaml` must never be deployed.
 
 3. Open:
 
    - API documentation: <http://localhost:8000/docs>
-   - Legacy Atlas portal: <http://localhost:3000>
-   - React Atlas portal: <http://localhost:3001> (or <http://localhost:5174> with the development overlay)
+   - Atlas portal: <http://localhost:3001> (or <http://localhost:5174> with the development overlay)
+   - MCP endpoint for external agents: `POST http://localhost:3001/mcp` — the same origin as the
+     portal, which is what the **Agent gateway** screen copies. nginx proxies it to the API
+     (`ui-next/nginx.conf`), so the URL the screen shows is the URL that works. It requires the
+     same bearer token as the REST API.
    - Temporal UI: <http://localhost:8080>
    - Neo4j browser: <http://localhost:7474>
    - MinIO console: <http://localhost:9001>
@@ -45,10 +74,17 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    ./scripts/verify-local.ps1
    ```
 
-5. Load a sample estate (optional, recommended for a first look). A fresh
+5. Load the sample estate (optional, recommended for a first look). A fresh
    install has no metadata, so the catalog, knowledge graph and unified lineage
-   render empty. Populate a value-free retail-and-risk estate — structure and
-   keys only, never row values — through the governed API:
+   render empty. The `sample-source` container runs two Postgres databases
+   (`bank_demo` for Customer, `risk_demo` for Risk) and `sample-mssql-source`
+   runs SQL Server (`bank_demo_mssql` for Payments) — three real business
+   domains, each registered as its own datasource so cross-source lineage
+   stays genuine, with overlapping `customer_id`/`account_id` values across
+   all three. The seed script registers all three as real datasources, runs
+   live discovery against each (not a pushed fixture), and requests/approves
+   the cross-boundary grants and cross-source relationship candidates that
+   connect them:
 
    ```powershell
    docker compose --profile seed run --rm seed
@@ -61,11 +97,16 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    ```
 
    The seed is idempotent and safe to re-run. It creates a demonstration
-   organization, registers a canonical-push datasource, ingests the estate,
-   discovers relationship candidates from the declared foreign keys, and
-   approves them so **Knowledge graph** and **Unified lineage** render a
-   populated, connected estate. Point it only at a development or demonstration
-   environment.
+   organization with one Customer, one Payments, and one Risk data domain;
+   registers and discovers each domain's real datasource; approves the
+   same-source relationship candidates FK introspection finds; grants
+   Customer↔Payments and Customer↔Risk cross-boundary visibility (deliberately
+   leaving Payments↔Risk ungranted, so **Unified lineage** shows a real
+   `withheld_cross_boundary_domain_ids` case); and approves the resulting
+   cross-source relationship and object-resolution candidates so **Knowledge
+   graph**, **Cross-source**, and **Unified lineage** all render a populated,
+   genuinely cross-database estate. Point it only at a development or
+   demonstration environment.
 
 Development authentication is deliberately explicit. API examples must include identity headers documented in the generated OpenAPI specification. Production requires configured OIDC issuer/audience/JWKS verification and a registered non-environment credential provider; it refuses development authentication and `env` secret resolution.
 
@@ -79,7 +120,20 @@ Use **Knowledge graph** to search tables, schemas and catalogs, inspect classifi
 
 Use **Data quality** to configure source or table baseline thresholds, inspect immutable profile comparisons, and acknowledge or resolve durable incidents. The first profile establishes a baseline; later scans compare volume, null-rate and schema fingerprints without retaining source values. Metadata scan age is reported separately. Source-row freshness remains `NOT_CONFIGURED` until a connector receives an approved watermark contract, so the portal never misrepresents scan time as business-data freshness.
 
-Use **Source fleet** to inspect the honest connector matrix, run conformance certification, deliver envelope `1.0` synchronously or as a resumable manifest with numbered checksum-addressed chunks, inspect workflow/progress/change evidence, and configure durable pull schedules. Incremental delivery is the safe default. A full batch reconciles omissions only after every chunk succeeds and requires confirmation. PostgreSQL and Microsoft SQL Server pull are `BETA`; remaining database types are visibly planned rather than represented as complete.
+Use **Source fleet** to inspect the honest connector matrix, run conformance certification, deliver envelope `1.0` synchronously or as a resumable manifest with numbered checksum-addressed chunks, inspect workflow/progress/change evidence, and configure durable pull schedules. Incremental delivery is the safe default. A full batch reconciles omissions only after every chunk succeeds and requires confirmation.
+
+`src/aida/connectors/registry.py` is the authoritative maturity list, and this paragraph is kept
+equal to it. **Six** native pull connectors are registered `BETA` — PostgreSQL, Oracle, Microsoft
+SQL Server, Google BigQuery, Snowflake and Databricks SQL. **Teradata and IBM Db2** are declared
+`PLANNED` with `implementation_status="PLANNED"`: canonical push ingestion works, there is no native
+pull adapter, and they are shown as planned rather than represented as complete.
+
+`BETA` means the adapter is implemented and reachable, not that it has met a real source. Only
+PostgreSQL has run discovery against live database servers (two majors, in CI) and only SQL Server
+has a Compose fixture. Oracle, BigQuery, Snowflake and Databricks have **never been exercised
+against a live instance** — the Databricks registration says so in the code, and the
+[capability register](Docs/60-delivery/20-capability-register.md) records the same distinction for
+every row.
 
 ## Documentation
 
@@ -93,9 +147,9 @@ Full documentation lives in [`Docs/`](Docs/README.md) — start there for naviga
 | [Contracts](Docs/30-contracts/01-contract-strategy.md) | API conventions, module interfaces, event catalog, ingestion envelope, lineage, tools and agents |
 | [Engineering](Docs/40-engineering/01-development-spec.md) | Development spec, repo layout, coding standards, testing, CI/CD, refactor plan, local runbook |
 | [Security](Docs/50-security/01-security-architecture.md) | Security architecture, threat model, AI safety controls, compliance and evidence |
-| [Delivery](Docs/60-delivery/03-tracker.md) | Roadmap, epic backlog, tracker, status matrix, gap register, accomplishment log, connector backlog |
+| [Delivery](Docs/60-delivery/00-status.md) | Status, capability register, roadmap, epic backlog, tracker, accomplishment log, connector backlog |
 | [Reference](Docs/90-reference/01-glossary.md) | Glossary, decision log, research sources, analysis algorithms |
-| [Competitors](Docs/competitors/00-application-planning-roadmap.md) | Per-vendor deep dives |
+| [Competitors](Docs/review-2026-08/research/04-cross-vendor-synthesis.md) | Per-vendor deep dives (Collibra, Atlan, Alation/Purview/Unity) and the cross-vendor synthesis |
 
 Four things to understand first:
 
@@ -104,7 +158,16 @@ Four things to understand first:
 3. **PostgreSQL is authoritative; everything else is a rebuildable projection** ([ADR-0003](Docs/10-architecture/adr/ADR-0003-authoritative-state-and-projections.md)).
 4. **The control plane is value-free** — metadata and bounded approved results leave a source; business data does not ([ADR-0014](Docs/10-architecture/adr/ADR-0014-value-free-control-plane.md)).
 
-Current state is tracked honestly in the [status matrix](Docs/60-delivery/04-status-matrix.md) and the [tracker](Docs/60-delivery/03-tracker.md).
+Current state is tracked in three places, which answer different questions:
+
+- [Capability register](Docs/60-delivery/20-capability-register.md) — **what is true right now**, with
+  *implemented*, *reachable*, *configured* and *verified* kept as four separate columns, plus a date,
+  an owner and evidence per row. Read this before believing any capability claim elsewhere.
+- [Delivery status](Docs/60-delivery/00-status.md) — the narrative summary and capability matrix.
+- [Tracker](Docs/60-delivery/03-tracker.md) — item-level open work, one row per ID.
+
+The [accomplishment log](Docs/60-delivery/06-accomplishment-log.md) is append-only history. Something
+appearing there is not evidence that it is still true.
 
 ## Developer commands
 

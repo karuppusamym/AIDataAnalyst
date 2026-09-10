@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import get_settings
 from aida.models import AuditEvent, OutboxEvent
 from aida.security import SecurityContext
-from aida.siem_routing import SecurityEvent, SiemConfig, route_to_siem
+from aida.siem_delivery import siem_config_from_settings
+from aida.siem_routing import SecurityEvent, route_to_siem
 
 # OB-2: audit actions that are security-relevant even though the outcome is
 # SUCCESS -- a kill switch being engaged/released, or a token revoked, is
@@ -65,11 +66,18 @@ def record_audit(
     # through (DENIED policy checks, kill-switch engagement, token
     # revocation included), so it is where SIEM routing is wired rather than
     # at each of the dozen-plus individual call sites.
+    #
+    # F04: `route_to_siem` now stages a `DeliveryIntent` in *this* transaction
+    # instead of claiming a delivery it never made. It performs no I/O, so the
+    # audited operation still cannot be delayed or failed by a SOC collector,
+    # and the intent commits atomically with the `AuditEvent` above -- the
+    # event and the obligation to forward it can no longer disagree.
     classified = _classify_security_event(action, outcome)
     if classified is not None:
         event_type, severity = classified
         settings = get_settings()
         route_to_siem(
+            session,
             SecurityEvent(
                 event_type=event_type,
                 severity=severity,
@@ -85,12 +93,7 @@ def record_audit(
                     "resource_id": resource_id,
                 },
             ),
-            SiemConfig(
-                transport=settings.siem_transport,
-                endpoint=settings.siem_endpoint,
-                enabled=settings.siem_enabled,
-                include_details=settings.siem_include_details,
-            ),
+            siem_config_from_settings(settings),
         )
 
 

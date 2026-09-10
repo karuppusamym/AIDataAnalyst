@@ -1,12 +1,39 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { HomeScreen } from "./screens/HomeScreen";
 import { AgentInboxScreen } from "./screens/AgentInboxScreen";
 import { PersonaNav } from "./components/PersonaNav";
+import { Dialog } from "./components/primitives";
+import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { ScopePicker } from "./components/ScopePicker";
 import { fetchMe } from "./lib/api";
-import type { MeRead } from "./lib/types";
+import { APP_CONFIG } from "./lib/appConfig";
+import {
+  authBlock,
+  authRevision,
+  canSignOut,
+  noteSignInFailure,
+  subscribeAuth,
+  type AuthBlock,
+} from "./lib/authSession";
+import { beginSignIn, canStartSignIn, signOut } from "./lib/oidcClient";
+import { OrgProvider } from "./lib/org";
+import { ScopeProvider } from "./lib/scope";
+import { pushLocation, replaceLocation } from "./lib/location";
+import { SCREEN_IDS, type ScreenId } from "./lib/routes";
+import { describeSession, SessionProvider, useSession } from "./lib/session";
+import { useCurrentScreen } from "./lib/useUrlState";
 import { asIdentityProvider, asPersona } from "./lib/ui-types";
 import type { Persona } from "./lib/ui-types";
+import { landingWorkArea, WORK_AREAS, type WorkArea } from "./lib/workAreas";
 import "./App.css";
 
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
@@ -48,26 +75,23 @@ const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalytics
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
 const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
 
-/* UX-20: navigation is organised by *persona workbench*, not by feature area.
-   Thirty flat items grouped by what the code does is a feature map; a person
-   opening Atlas is one of six personas with a job, and the six groups below
-   are `Docs/00-product/02-personas-and-jobs.md`'s own list. Every screen id
-   is unchanged, so every existing deep link (`#/catalog`, `#/governance`, …)
-   still resolves -- only the grouping moved. */
-type Workbench =
-  | "Inbox"
-  | "Analyst"
-  | "Consumer"
-  | "Developer"
-  | "Steward"
-  | "Reviewer"
-  | "Operator"
-  | "Auditor";
+/* UX-20: navigation is organised by *work area*, not by feature area. Thirty
+   flat items grouped by what the code does is a feature map; a person opening
+   Atlas has a job to do, and the eight groups below are those jobs.
 
+   F22: the groups are work areas, NOT personas. They used to share the word,
+   which is why "Consumer" appeared here and in the persona landing map while
+   being absent from the `Persona` union the switcher and `GET /v1/me` use --
+   an entry nobody could ever select. The two vocabularies are now separate
+   (`lib/workAreas.ts` holds the distinction) and every area is reachable from
+   the sidebar regardless of persona.
+
+   F09: `id` is a `ScreenId`, so a typo here is a compile error rather than a
+   nav button that silently renders nothing. */
 type NavItem = {
-  id: string;
+  id: ScreenId;
   label: string;
-  group: Workbench;
+  group: WorkArea;
   icon: string;
   keywords: string;
 };
@@ -78,7 +102,7 @@ const NAV: NavItem[] = [
   { id: "inbox", label: "Agent inbox", group: "Inbox", icon: "⧉", keywords: "agents proposals waiting decisions auto-applied sampled kill switch supervise" },
   // --- Analyst: answer a question, and trust the answer -------------------
   { id: "analyst", label: "Ask Atlas", group: "Analyst", icon: "✦", keywords: "question query analyst ai" },
-  { id: "catalog", label: "Catalog", group: "Analyst", icon: "▦", keywords: "assets tables data search" },
+  { id: "catalog", label: "Catalog", group: "Analyst", icon: "▦", keywords: "assets tables columns definitions descriptions data search" },
   { id: "semantics", label: "Semantic layer", group: "Analyst", icon: "ƒ", keywords: "metrics models measures" },
   { id: "tools", label: "Tool registry", group: "Analyst", icon: "⛭", keywords: "sql tool version execute registry" },
   { id: "tool-plans", label: "Tool plans", group: "Analyst", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
@@ -86,17 +110,16 @@ const NAV: NavItem[] = [
   { id: "unified-lineage", label: "Unified lineage", group: "Analyst", icon: "⇄", keywords: "graph impact upstream downstream unified" },
   // --- Consumer: use what has been approved -------------------------------
   { id: "marketplace", label: "Marketplace", group: "Consumer", icon: "◇", keywords: "products access request" },
+  { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
   // --- Developer: the audience that consumes context rather than reads it --
   //
-  //   Context products moved out of Consumer deliberately. A Consumer browses
-  //   the marketplace and requests access to a product; a Developer *packages*
-  //   context and points an agent at it. Those are different jobs done by
-  //   different people, and keeping them in one group is why the gateway had
-  //   nowhere obvious to live. Screen ids are unchanged, so every existing
-  //   `#/context` deep link still resolves.
+  //   Context products sit here deliberately. A Consumer browses the
+  //   marketplace and requests access to a product; a Developer *packages*
+  //   context and points an agent at it. Those are different jobs, and
+  //   keeping them in one group is why the gateway had nowhere obvious to
+  //   live. Screen ids are unchanged, so `#/context` still resolves.
   { id: "context", label: "Context products", group: "Developer", icon: "◫", keywords: "context compile mcp rest yaml osi odcs snowflake databricks bindings rollout" },
   { id: "developer", label: "Agent gateway", group: "Developer", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
-  { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
   // --- Steward: make the estate mean something ----------------------------
   { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
   { id: "worklist", label: "Documentation worklist", group: "Steward", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
@@ -115,7 +138,7 @@ const NAV: NavItem[] = [
   { id: "refusals", label: "Policy refusals", group: "Reviewer", icon: "!", keywords: "lineage blocked denied" },
   { id: "reviewer-agent", label: "Reviewer agent", group: "Reviewer", icon: "◈", keywords: "reviewer agent adr-0027 auto-decide suspend disagreement sample audit tier0 tier1" },
   // --- Operator: keep the estate and the AI running -----------------------
-  { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health" },
+  { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health model workbook excel columns import export" },
   { id: "operations", label: "Operations", group: "Operator", icon: "↻", keywords: "runs jobs ingestion outbox" },
   { id: "agents", label: "AI governance", group: "Operator", icon: "⌬", keywords: "model routes agents evaluations runtime" },
   { id: "ai", label: "AI registry", group: "Operator", icon: "◆", keywords: "agents models tools" },
@@ -130,39 +153,28 @@ const NAV: NavItem[] = [
   { id: "compliance", label: "Compliance packs", group: "Auditor", icon: "▣", keywords: "evidence audit framework generate download checksum" },
 ];
 
-const GROUPS: Workbench[] = [
-  "Inbox",
-  "Analyst",
-  "Consumer",
-  "Developer",
-  "Steward",
-  "Reviewer",
-  "Operator",
-  "Auditor",
-];
+const NAV_BY_ID = new Map<ScreenId, NavItem>(NAV.map((item) => [item.id, item]));
 
-/** The workbench a persona lands in. Everyone can open every workbench they
- *  are entitled to -- this only chooses the first one. */
-const WORKBENCH_BY_PERSONA: Record<string, Workbench> = {
-  Analyst: "Analyst",
-  Consumer: "Consumer",
-  Steward: "Steward",
-  Reviewer: "Reviewer",
-  Operator: "Operator",
-  Auditor: "Auditor",
-};
-
-function currentFromHash(): string {
-  const candidate = location.hash.replace(/^#\/?/, "");
-  return NAV.some((item) => item.id === candidate) ? candidate : "home";
+/* Every routable screen must be reachable from the sidebar. A screen in the
+ * route table with no nav entry is a page you can only get to by typing its
+ * URL, which is how `portfolio-analytics` ended up filed under a comment for
+ * a different group. Loud in development, inert in production -- a missing
+ * nav row must not blank the app. */
+if (import.meta.env?.DEV) {
+  const missing = SCREEN_IDS.filter((id) => !NAV_BY_ID.has(id));
+  if (missing.length) {
+    console.warn(`App: screens with no navigation entry: ${missing.join(", ")}`);
+  }
 }
+
+const GROUPS: readonly WorkArea[] = WORK_AREAS;
 
 function Screen({
   view,
   personaKey,
   onNavigate,
 }: {
-  view: string;
+  view: ScreenId;
   personaKey: string;
   onNavigate: (view: string, params?: Record<string, string>) => void;
 }) {
@@ -211,24 +223,205 @@ function Screen({
   }
 }
 
-export default function App() {
-  const [view, setView] = useState(currentFromHash);
-  const [me, setMe] = useState<MeRead | null>(null);
-  const [devPersona, setDevPersona] = useState<Persona>("Steward");
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [navOpen, setNavOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [expandedGroup, setExpandedGroup] = useState<string | null>(() => NAV.find(item => item.id === currentFromHash())?.group ?? GROUPS[0]!);
-  useEffect(() => { setExpandedGroup(NAV.find(item => item.id === view)?.group ?? null); }, [view]);
+/* ---------------------------------------------------------------------------
+   The shell status badge (review 2026-09-05, F13 · T10).
 
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchMe(controller.signal).then(setMe).catch(() => undefined);
-    return () => controller.abort();
+   THE DEFECT it removes: "Platform connected" in the sidebar footer and "Live"
+   in the top bar were literal strings in the JSX. They said the same thing
+   with a backend down, a token expired, a tenant forbidden, or no backend
+   configured at all -- and the `/me` error that would have contradicted them
+   was discarded. The one indicator a user consults to decide whether to trust
+   the screen was the one thing on the screen that could not be wrong, because
+   it was not derived from anything.
+
+   Everything below now comes from `describeSession`, which reads real request
+   outcomes. Demo builds get their own tone, deliberately not the success one:
+   fixture data must never be mistaken for a healthy connection.
+--------------------------------------------------------------------------- */
+function StatusBadge({ compact = false }: { compact?: boolean }) {
+  const session = useSession();
+  const described = describeSession(session);
+  /* Only these three can be acted on from here. "Forbidden" is an answer
+   * about this account in this organization -- retrying it changes nothing,
+   * and offering a button that cannot help is how a shell teaches people to
+   * ignore its buttons. */
+  const recoverable =
+    session.state === "degraded" ||
+    session.state === "disconnected" ||
+    session.state === "session-expired";
+
+  return (
+    <span
+      className={`shellstatus${compact ? " shellstatus--compact" : ""}`}
+      data-state={session.state}
+      data-tone={described.tone}
+      data-testid={compact ? "shell-status-compact" : "shell-status"}
+    >
+      <i className="shellstatus__dot" aria-hidden="true" />
+      <span className="shellstatus__label">{described.label}</span>
+      {compact ? (
+        // The hint is the same sentence either way; in the compact footer it
+        // is a tooltip rather than a second line of text.
+        <span className="shellstatus__sr" title={described.hint}>
+          <span className="visually-hidden">{described.hint}</span>
+        </span>
+      ) : (
+        <span className="shellstatus__hint">{described.hint}</span>
+      )}
+      {!compact && recoverable ? (
+        <button
+          type="button"
+          className="shellstatus__action"
+          onClick={() => {
+            /* An expired OIDC session cannot be recovered by repeating the
+             * request that failed -- there is no token to send. Re-running the
+             * authorization-code flow is the only thing that can help, so that
+             * is what the button does when a flow exists. Everywhere else it
+             * retries, which is all it ever could do. */
+            if (session.state === "session-expired" && canStartSignIn()) {
+              void beginSignIn().catch((cause: unknown) => {
+                noteSignInFailure(cause instanceof Error ? cause.message : String(cause));
+              });
+              return;
+            }
+            session.reload();
+          }}
+          data-testid="session-reconnect"
+        >
+          {session.state === "session-expired" ? "Sign in again" : "Reconnect"}
+        </button>
+      ) : null}
+      {!compact && canSignOut() ? (
+        <button
+          type="button"
+          className="shellstatus__action"
+          onClick={() => {
+            // Through the flow module, not `clearAccessToken` directly: the
+            // renewal timer and the refresh token are part of the session and
+            // a sign-out that left either behind would quietly sign the user
+            // back in a minute later.
+            signOut();
+            session.reload();
+          }}
+          data-testid="session-sign-out"
+        >
+          Sign out
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+/* F06/T07: a build configured for OIDC decides, before the first request,
+   whether it can authenticate at all -- and it must say so once, here, rather
+   than let forty screens each render their own 401 as an empty estate or a
+   permissions problem.
+
+   TWO SCREENS, ONE COMPONENT, because they are two answers to one question.
+   With an issuer and a client id this is a sign-in screen and the button
+   starts the real authorization-code + PKCE redirect. Without them there is
+   nothing a user can do, and the screen says which build-time values are
+   missing instead of offering a button that would fail. Neither version ever
+   falls back to the development principal. */
+function AuthBlockedScreen({ block }: { block: AuthBlock }) {
+  const [starting, setStarting] = useState(false);
+  const start = useCallback(() => {
+    setStarting(true);
+    // `beginSignIn` replaces the document on success, so nothing after this
+    // runs in the happy path; the catch is for a discovery or crypto failure,
+    // which has to be shown rather than leaving a spinner on screen forever.
+    void beginSignIn().catch((cause: unknown) => {
+      setStarting(false);
+      noteSignInFailure(cause instanceof Error ? cause.message : String(cause));
+    });
   }, []);
 
+  return (
+    /* `alert` only when the screen is reporting a problem. A sign-in prompt is
+       not an alert, and announcing it as one trains people to ignore the role
+       on the screens where it means something. */
+    <div
+      className="authblock"
+      role={block.canSignIn ? "region" : "alert"}
+      aria-label={block.canSignIn ? "Sign in" : undefined}
+      data-testid="auth-blocked"
+    >
+      <div className="authblock__card">
+        <h1 className="authblock__title">{block.title}</h1>
+        <p className="authblock__detail">{block.detail}</p>
+        <p className="authblock__remedy">{block.remedy}</p>
+        {block.failure ? (
+          <p className="authblock__failure" data-testid="auth-failure">
+            Last attempt: {block.failure}
+          </p>
+        ) : null}
+        {block.canSignIn ? (
+          <button
+            type="button"
+            className="authblock__signin"
+            onClick={start}
+            disabled={starting}
+            data-testid="auth-sign-in"
+          >
+            {starting ? "Redirecting…" : "Sign in"}
+          </button>
+        ) : null}
+        <dl className="authblock__facts">
+          <div>
+            <dt>Data mode</dt>
+            <dd>{APP_CONFIG.dataMode}</dd>
+          </div>
+          <div>
+            <dt>Auth mode</dt>
+            <dd>
+              {APP_CONFIG.authMode}
+              {APP_CONFIG.authModeInferred ? " (inferred)" : ""}
+            </dd>
+          </div>
+          <div>
+            <dt>Issuer</dt>
+            <dd>{APP_CONFIG.oidc?.issuer ?? "not configured"}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+function AppShell() {
+  const view = useCurrentScreen();
+  const session = useSession();
+  const [devPersona, setDevPersona] = useState<Persona>("Steward");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteInputRef = useRef<HTMLInputElement>(null);
+  const [navOpen, setNavOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [expandedGroup, setExpandedGroup] = useState<WorkArea | null>(
+    () => NAV_BY_ID.get(view)?.group ?? GROUPS[0]!,
+  );
   useEffect(() => {
-    const onHashChange = () => setView(currentFromHash());
+    setExpandedGroup(NAV_BY_ID.get(view)?.group ?? null);
+  }, [view]);
+
+  /* F06/T07: when the token changes -- adopted, renewed, or lapsed -- ask the
+   * backend again.
+   *
+   * THE DEFECT this removes, found by watching a real token expire: the badge
+   * reported "Connected" over a token that had already lapsed, because the
+   * connection state is derived from request OUTCOMES and no request had been
+   * made since. Made-up green is the exact thing F13 removed from this badge;
+   * a session that has ended is not allowed to reintroduce it. Re-running the
+   * identity request produces the evidence -- a real 401 -- from which
+   * `session.tsx` reports "Sign-in required". */
+  const reloadSession = session.reload;
+  useEffect(() => subscribeAuth(() => reloadSession()), [reloadSession]);
+
+  const me = session.me;
+  const identityProvider = asIdentityProvider(me?.identity_provider);
+  const persona = identityProvider === "OIDC" ? asPersona(me?.persona) : devPersona;
+  const personaKey = String(persona).toUpperCase();
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -239,50 +432,45 @@ export default function App() {
         setNavOpen(false);
       }
     };
-    window.addEventListener("hashchange", onHashChange);
-    window.addEventListener("popstate", onHashChange);
     window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("hashchange", onHashChange);
-      window.removeEventListener("popstate", onHashChange);
-      window.removeEventListener("keydown", onKeyDown);
-    };
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const identityProvider = asIdentityProvider(me?.identity_provider);
-  const persona = identityProvider === "OIDC" ? asPersona(me?.persona) : devPersona;
-  const personaKey = String(persona).toUpperCase();
-
-  // UX-20: with no explicit route, land in the persona's own workbench
-  // rather than always on Overview. Runs once, and only when the URL names
-  // no screen -- a deep link always wins over the default.
+  // UX-20: with no explicit route, land in the persona's own work area rather
+  // than always on Overview. Runs once, and only when the URL names no screen
+  // -- a deep link always wins over the default.
   const [landed, setLanded] = useState(false);
   useEffect(() => {
     if (landed || !me) return;
     setLanded(true);
     if (location.hash.replace(/^#\/?/, "") !== "") return;
-    const workbench = WORKBENCH_BY_PERSONA[String(persona)];
-    const first = workbench ? NAV.find((item) => item.group === workbench) : undefined;
-    if (first) {
-      setView(first.id);
-      history.replaceState(null, "", `${location.pathname}${location.search}#/${first.id}`);
-    }
+    const area = landingWorkArea(persona);
+    const first = area ? NAV.find((item) => item.group === area) : undefined;
+    // Replace, not push: landing is not a navigation the user made, and Back
+    // should leave the app rather than return to a URL naming no screen.
+    if (first) replaceLocation({ screen: first.id });
   }, [landed, me, persona]);
-  const current = NAV.find((item) => item.id === view) ?? NAV[0]!;
+
+  const current = NAV_BY_ID.get(view) ?? NAV[0]!;
   const sectionItems = NAV.filter((item) => item.group === current.group);
 
+  /* F09: navigation goes through the one location store, which writes the
+   * screen hash and keeps only the fields the TARGET screen declares.
+   *
+   * The old implementation defaulted the query to `location.search`, so the
+   * filters of the page you were leaving arrived on the page you were opening
+   * -- where a same-named field (`status`, `type`) meant something else
+   * entirely. Dropping them is the fix, not a regression: estate context
+   * (`ds`/`project`/`dom`) is still inherited by screens that declare it. */
   const navigate = (id: string, params?: Record<string, string>) => {
-    setView(id);
     setPaletteOpen(false);
     setNavOpen(false);
-    // Query params ride alongside the hash route so a screen the inbox opened
-    // lands focused on the right row (the `useUrlState` convention every
-    // migrated screen already reads).
-    const query = params ? `?${new URLSearchParams(params).toString()}` : location.search;
-    const target = `${location.pathname}${query}#/${id}`;
-    if (`${location.search}${location.hash}` !== `${query}#/${id}`) {
-      history.pushState(null, "", target);
+    const target = SCREEN_IDS.find((screen) => screen === id);
+    if (!target) {
+      if (import.meta.env?.DEV) console.warn(`App.navigate: unknown screen "${id}"`);
+      return;
     }
+    pushLocation({ screen: target, params });
   };
 
   const matches = useMemo(() => {
@@ -328,7 +516,7 @@ export default function App() {
           <span className="snav__avatar" aria-hidden="true">{persona?.slice(0, 1) ?? "U"}</span>
           <span className="snav__who">
             <b>{persona ?? "Workspace user"}</b>
-            <small><i aria-hidden="true" /> Platform connected</small>
+            <StatusBadge compact />
           </span>
         </div>
       </nav>
@@ -344,14 +532,30 @@ export default function App() {
             <strong>{current.label}</strong>
           </div>
           <div className="topbar__actions">
-            <button className="quickfind" onClick={() => setPaletteOpen(true)}>
+            {/* The visible label is `display:none` below a breakpoint, and the
+                icon is aria-hidden, so without this the button announces as
+                just "button" at narrow widths — axe-core `button-name` on
+                every screen. The name is spelled out rather than left to the
+                label, which is exactly the element that disappears. */}
+            <button
+              className="quickfind"
+              aria-label="Jump to a page"
+              onClick={() => setPaletteOpen(true)}
+            >
               <span aria-hidden="true">⌕</span>
               <span className="quickfind__label">Jump to…</span>
               <kbd>Ctrl K</kbd>
             </button>
-            <span className="topbar__status"><i aria-hidden="true" /> Live</span>
+            <StatusBadge />
           </div>
         </header>
+
+        {APP_CONFIG.authModeInferred && APP_CONFIG.dataMode === "live" ? (
+          <p className="shellnotice" role="status" data-testid="auth-mode-inferred">
+            No auth mode configured for this build. Requests are being made with the development
+            identity, which a production backend will reject. Set <code>VITE_AUTH_MODE</code>.
+          </p>
+        ) : null}
 
         <nav className="sectionnav" aria-label={`${current.group} pages`}>
           <span className="sectionnav__label">{current.group}</span>
@@ -369,34 +573,107 @@ export default function App() {
           </div>
         </nav>
 
+        {/* F21: the lazy route lives inside an error boundary, so a chunk that
+            fails to download costs this screen and not the whole app. The
+            boundary resets on the screen id, which is what lets the user
+            navigate away from a broken route without reloading. */}
         <div className="sview" key={view} data-screen={view}>
-          <Suspense fallback={<div className="screenloading" role="status">Loading {current.label}…</div>}>
-            {view === "home" ? <HomeScreen persona={persona} onNavigate={navigate} /> : <Screen view={view} personaKey={personaKey} onNavigate={navigate} />}
-          </Suspense>
+          <RouteErrorBoundary resetKey={view} label={current.label}>
+            <Suspense fallback={<div className="screenloading" role="status">Loading {current.label}…</div>}>
+              {view === "home" ? <HomeScreen persona={persona} onNavigate={navigate} /> : <Screen view={view} personaKey={personaKey} onNavigate={navigate} />}
+            </Suspense>
+          </RouteErrorBoundary>
         </div>
       </main>
 
+      {/* F21: this palette was the review's own example of ARIA standing in for
+        * interaction -- it declared `role="dialog" aria-modal="true"` with an
+        * autofocused input and an Escape handler, and had no focus containment,
+        * no focus restoration and no background inertness. Driving the running
+        * app in a real browser confirmed it: 52 Tab presses walked out of the
+        * open modal and into the sidebar navigation behind it. jsdom could not
+        * show that, because jsdom has no sequential focus navigation.
+        *
+        * `Dialog` owns all three properties, so the palette states its content
+        * and nothing else. */}
       {paletteOpen ? (
-        <div className="palette" role="presentation" onMouseDown={() => setPaletteOpen(false)}>
-          <section className="palette__dialog" role="dialog" aria-modal="true" aria-label="Quick navigation" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="palette__search">
-              <span aria-hidden="true">⌕</span>
-              <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search pages and tools…" aria-label="Search pages" />
-              <kbd>Esc</kbd>
-            </div>
-            <div className="palette__results">
-              {matches.length ? matches.map((item) => (
+        <Dialog
+          title="Quick navigation"
+          description="Type to filter · choose a page to open it"
+          onClose={() => setPaletteOpen(false)}
+          initialFocusRef={paletteInputRef}
+          className="palette__dialog"
+        >
+          <div className="palette__search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              ref={paletteInputRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search pages and tools…"
+              aria-label="Search pages"
+            />
+            <kbd>Esc</kbd>
+          </div>
+          <div className="palette__results">
+            {matches.length ? (
+              matches.map((item) => (
                 <button key={item.id} className="palette__item" onClick={() => navigate(item.id)}>
                   <span className="snav__icon" aria-hidden="true">{item.icon}</span>
-                  <span><b>{item.label}</b><small>{item.group}</small></span>
+                  <span>
+                    <b>{item.label}</b>
+                    <small>{item.group}</small>
+                  </span>
                   <span className="palette__arrow" aria-hidden="true">→</span>
                 </button>
-              )) : <div className="palette__empty">No matching page</div>}
-            </div>
-            <footer className="palette__foot">Type to filter · choose a page to open it</footer>
-          </section>
-        </div>
+              ))
+            ) : (
+              <div className="palette__empty">No matching page</div>
+            )}
+          </div>
+        </Dialog>
       ) : null}
     </div>
+  );
+}
+
+/* The auth verdict is external state -- `authSession` owns it and notifies on
+ * sign-in, renewal, lapse and sign-out -- so it is read the way React reads
+ * external state. Recomputing `authBlock()` on every notification is cheap and
+ * removes the need for a second copy of the answer in component state, which
+ * is how the URL and the screen drifted apart in F09. */
+function useAuthBlock(): AuthBlock | null {
+  const revision = useSyncExternalStore(subscribeAuth, authRevision, authRevision);
+  // `authBlock()` builds a fresh object per call, so the *revision* is what is
+  // subscribed to and the verdict is derived from it. Handing a new object to
+  // `useSyncExternalStore` as its snapshot would re-render forever.
+  return useMemo(() => authBlock(), [revision]);
+}
+
+export default function App() {
+  /* The blocked state is a property of the build's configuration plus whether
+   * a token has ever been obtained, so it replaces the shell rather than
+   * decorating it. Everything else -- expired, forbidden, degraded -- is a
+   * request outcome and belongs in the badge inside the shell.
+   *
+   * F06: the estate providers live BELOW this gate. They used to wrap `App`
+   * from `main.tsx`, so a build that could not authenticate still fired
+   * `fetchOrganizations` on load -- a guaranteed 401 whose failure the user
+   * never saw -- and, worse, that request ran exactly once: after signing in,
+   * the organization list was still the empty one fetched before there was a
+   * token, and every screen queried a tenant that was never resolved. Mounting
+   * them after sign-in makes "signed in" the point at which the app starts
+   * asking questions. */
+  const block = useAuthBlock();
+  if (block) return <AuthBlockedScreen block={block} />;
+
+  return (
+    <OrgProvider>
+      <ScopeProvider>
+        <SessionProvider fetchMe={fetchMe}>
+          <AppShell />
+        </SessionProvider>
+      </ScopeProvider>
+    </OrgProvider>
   );
 }

@@ -53,9 +53,9 @@ from aida.models import (
 )
 from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
 from aida.prompt_risk import DeterministicPromptRiskClassifier
+from aida.query_execution_view import query_execution_response
 from aida.query_gateway import (
     AuthorizationRejected,
-    GatewayResult,
     QueryExecutionGateway,
     QueryRejected,
 )
@@ -272,24 +272,6 @@ async def run_agent_evaluation(
     )
     await session.commit()
     return evaluation
-
-
-def _query_execution_response(result: GatewayResult) -> QueryExecutionResponse:
-    execution = result.execution
-    return QueryExecutionResponse(
-        execution_id=execution.id,
-        status=execution.status,
-        normalized_sql=execution.normalized_sql or "",
-        referenced_tables=execution.referenced_tables,
-        referenced_columns=execution.referenced_columns,
-        column_lineage=execution.column_lineage,
-        plan_cost=execution.plan_cost or 0.0,
-        warehouse_query_id=execution.warehouse_query_id,
-        row_count=execution.row_count or 0,
-        elapsed_ms=execution.elapsed_ms or 0,
-        masked_columns=list(result.masked_columns),
-        rows=list(result.rows),
-    )
 
 
 async def _commit_or_conflict(session: AsyncSession, detail: str) -> None:
@@ -1567,7 +1549,7 @@ async def execute_query(
     except Exception as exc:
         raise HTTPException(status_code=502, detail="source query execution failed") from exc
 
-    return _query_execution_response(result)
+    return query_execution_response(result)
 
 
 @router.get("/query-executions/{execution_id}/lineage", response_model=QueryLineageRead)
@@ -1656,7 +1638,7 @@ async def run_agent_analysis(
         step_trace=result.agent_run.step_trace,
         retrieval_evidence=result.agent_run.retrieval_evidence,
         plan_evidence=result.agent_run.plan_evidence,
-        execution=_query_execution_response(result.gateway_result),
+        execution=query_execution_response(result.gateway_result),
         explanation=result.explanation,
     )
 

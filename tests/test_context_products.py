@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql.expression import UpdateBase
 
 from aida.context_product_api import (
     _can_read_context_product_version,
@@ -54,6 +55,7 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext
 from aida.semantic_api import decide_governance_review
+from tests.support.doubles import ScriptedDmlResult
 
 
 class _GovernanceDecisionSession:
@@ -69,8 +71,49 @@ class _GovernanceDecisionSession:
     async def scalar(self, _statement: object) -> object:
         return self._get_queue.pop(0)
 
-    async def execute(self, statement: object) -> None:
+    async def execute(self, statement: object) -> object:
+        """Record the statement, and answer DML the way a real session does.
+
+        `governance_decision_service.claim_review` decides whether it won the
+        review by reading `rowcount` off this result (review-2026-09-05 F05).
+        Returning None modelled a session that no longer exists: every write
+        path through the decision service now issues a compare-and-set UPDATE
+        first. `rowcount = 1` is the honest answer for this double, which holds
+        exactly the one review the claim targets and is not simulating
+        contention -- the concurrency behaviour itself is proven against real
+        connections in `tests/test_governance_decision_concurrency.py`.
+        """
         self.executed_statements.append(statement)
+        if isinstance(statement, UpdateBase):
+            return ScriptedDmlResult(rowcount=1)
+        return None
+
+
+    @property
+    def target_statements(self) -> list[object]:
+        """Statements other than the decision service's compare-and-set claim.
+
+        Every decision now issues one `UPDATE governance_review SET status=...
+        WHERE id=... AND status='PENDING'` before any target work runs
+        (review-2026-09-05 F05). That claim is not what these assertions are
+        about -- they are about what the *target adapter* did -- so it is
+        excluded here rather than by loosening `== []` into `<= 1`, which
+        would stop the assertions catching a stray supersede.
+        """
+        return [
+            statement
+            for statement in self.executed_statements
+            if getattr(getattr(statement, "table", None), "name", None) != "governance_review"
+        ]
+
+    @property
+    def claim_statements(self) -> list[object]:
+        """The compare-and-set claims, so a test can assert one was issued."""
+        return [
+            statement
+            for statement in self.executed_statements
+            if getattr(getattr(statement, "table", None), "name", None) == "governance_review"
+        ]
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -716,8 +759,8 @@ async def test_approval_publishes_candidate_and_supports_prior_version() -> None
     assert candidate.approved_by == "independent-reviewer"
     assert candidate.approved_at is not None
     assert candidate.published_at is not None
-    assert len(session.executed_statements) == 1
-    compiled = str(session.executed_statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert len(session.target_statements) == 1
+    compiled = str(session.target_statements[0].compile(compile_kwargs={"literal_binds": True}))
     assert "context_product_version" in compiled
     assert "SUPPORTED" in compiled
     assert "SUPERSEDED" not in compiled
@@ -749,7 +792,7 @@ async def test_approval_computes_a_fixed_support_window_from_the_prior_version()
         session,  # type: ignore[arg-type]
     )
 
-    compiled = str(session.executed_statements[0].compile(compile_kwargs={"literal_binds": True}))
+    compiled = str(session.target_statements[0].compile(compile_kwargs={"literal_binds": True}))
     assert "support_window_ends_at" in compiled
     set_clause = compiled.split("SET", 1)[1].split("WHERE", 1)[0]
     ends_at_assignment = [
@@ -774,7 +817,10 @@ async def test_rejection_does_not_modify_other_versions() -> None:
     assert result.status == "REJECTED"
     assert candidate.status == "REJECTED"
     assert candidate.approved_by is None
-    assert session.executed_statements == []
+    assert session.target_statements == []
+    # The decision still claimed the review exactly once: a decision that
+    # modified no other version is not one that skipped the F05 guard.
+    assert len(session.claim_statements) == 1
     assert any(
         isinstance(value, OutboxEvent) and value.event_type == "context.product_rejected.v1"
         for value in session.added
@@ -798,7 +844,10 @@ async def test_approved_deprecation_retires_published_context_product() -> None:
 
     assert result.status == "APPROVED"
     assert candidate.status == "DEPRECATED"
-    assert session.executed_statements == []
+    assert session.target_statements == []
+    # The decision still claimed the review exactly once: a decision that
+    # modified no other version is not one that skipped the F05 guard.
+    assert len(session.claim_statements) == 1
     assert any(
         isinstance(value, OutboxEvent) and value.event_type == "context.product_deprecated.v1"
         for value in session.added

@@ -17,8 +17,10 @@ register it in `_PARSERS` below.
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+
+from aida.artifact_parsing import optional_text, parse_generated_at
 
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 MAX_REPORTS = 5_000
@@ -108,31 +110,11 @@ class ParsedBiArtifact:
     metric_column_edges: list[ParsedBiMetricColumnEdge] = field(default_factory=list)
 
 
-def _optional_text(value: Any, limit: int) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text[:limit] if text else None
-
-
 def _required_text(value: Any, field_name: str, limit: int) -> str:
-    text = _optional_text(value, limit)
+    text = optional_text(value, limit)
     if not text:
         raise BiLineageError(f"bi artifact {field_name} is required")
     return text
-
-
-def _parse_generated_at(value: Any) -> datetime | None:
-    text = _optional_text(value, 100)
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed
 
 
 def _formula_hash(formula: Any) -> tuple[str | None, bool]:
@@ -153,18 +135,18 @@ def _formula_hash(formula: Any) -> tuple[str | None, bool]:
 
 
 def _column_ref_from_payload(payload: dict[str, Any]) -> ParsedBiColumnRef | None:
-    column_name = _optional_text(payload.get("name"), 255)
+    column_name = optional_text(payload.get("name"), 255)
     raw_table = payload.get("table")
     if not column_name or not isinstance(raw_table, dict):
         return None
-    table_name = _optional_text(raw_table.get("name"), 255)
+    table_name = optional_text(raw_table.get("name"), 255)
     if not table_name:
         return None
-    schema_name = _optional_text(raw_table.get("schema"), 255)
+    schema_name = optional_text(raw_table.get("schema"), 255)
     raw_database = raw_table.get("database")
     database_name = None
     if isinstance(raw_database, dict):
-        database_name = _optional_text(raw_database.get("name"), 255)
+        database_name = optional_text(raw_database.get("name"), 255)
     return ParsedBiColumnRef(
         database_name=database_name,
         schema_name=schema_name,
@@ -180,8 +162,8 @@ def _tableau_field_from_payload(
     field_type = payload.get("__typename")
     if field_type not in SUPPORTED_TABLEAU_FIELD_TYPES:
         return None
-    external_id = _optional_text(payload.get("id"), 255)
-    name = _optional_text(payload.get("name"), 500)
+    external_id = optional_text(payload.get("id"), 255)
+    name = optional_text(payload.get("name"), 500)
     if not external_id or not name:
         return None
     formula_hash, formula_present = _formula_hash(payload.get("formula"))
@@ -227,7 +209,7 @@ def _parse_tableau_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
             raise BiLineageError("tableau workbook entries must be objects")
         workbook_id = _required_text(raw_workbook.get("luid"), "workbook.luid", 255)
         workbook_name = _required_text(raw_workbook.get("name"), "workbook.name", 500)
-        project_name = _optional_text(raw_workbook.get("projectName"), 255)
+        project_name = optional_text(raw_workbook.get("projectName"), 255)
         reports.append(
             ParsedBiReport(
                 external_id=workbook_id,
@@ -271,7 +253,7 @@ def _parse_tableau_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
                     raw_field = raw_instance.get("field")
                     if not isinstance(raw_field, dict):
                         continue
-                    datasource_name = _optional_text(raw_field.get("datasourceName"), 255)
+                    datasource_name = optional_text(raw_field.get("datasourceName"), 255)
                     parsed_field = _tableau_field_from_payload(raw_field, datasource_name)
                     if parsed_field is None:
                         continue
@@ -311,7 +293,7 @@ def _parse_tableau_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
     return ParsedBiArtifact(
         fingerprint="",  # filled in by the dispatcher, which hashes the whole payload
         bi_tool="TABLEAU",
-        generated_at=_parse_generated_at(data.get("generatedAt")),
+        generated_at=parse_generated_at(data.get("generatedAt")),
         reports=reports,
         metrics=list(metrics_by_id.values()),
         report_metric_edges=[
@@ -331,7 +313,7 @@ def _power_bi_table_lookup(dataset: dict[str, Any]) -> dict[str, dict[str, Any]]
     for raw_table in raw_tables[:2000]:
         if not isinstance(raw_table, dict):
             continue
-        table_name = _optional_text(raw_table.get("name"), 255)
+        table_name = optional_text(raw_table.get("name"), 255)
         if table_name:
             tables[table_name] = raw_table
     return tables
@@ -339,10 +321,10 @@ def _power_bi_table_lookup(dataset: dict[str, Any]) -> dict[str, dict[str, Any]]
 
 def _power_bi_field_kind_and_name(raw_field: dict[str, Any]) -> tuple[str, str] | None:
     """A visual field-well entry names exactly one of a measure or a column."""
-    measure_name = _optional_text(raw_field.get("measure"), 500)
+    measure_name = optional_text(raw_field.get("measure"), 500)
     if measure_name:
         return "measure", measure_name
-    column_name = _optional_text(raw_field.get("column"), 500)
+    column_name = optional_text(raw_field.get("column"), 500)
     if column_name:
         return "column", column_name
     return None
@@ -363,7 +345,7 @@ def _power_bi_field_from_payload(
     """
     if field_kind not in SUPPORTED_POWER_BI_FIELD_KINDS:
         return None
-    table_name = _optional_text(table_payload.get("name"), 255)
+    table_name = optional_text(table_payload.get("name"), 255)
     if not table_name:
         return None
     external_id = f"{table_name}::{field_kind}::{field_name}"
@@ -374,7 +356,7 @@ def _power_bi_field_from_payload(
             (
                 m
                 for m in measures
-                if isinstance(m, dict) and _optional_text(m.get("name"), 500) == field_name
+                if isinstance(m, dict) and optional_text(m.get("name"), 500) == field_name
             ),
             None,
         )
@@ -402,7 +384,7 @@ def _power_bi_field_from_payload(
         (
             c
             for c in columns
-            if isinstance(c, dict) and _optional_text(c.get("name"), 255) == field_name
+            if isinstance(c, dict) and optional_text(c.get("name"), 255) == field_name
         ),
         None,
     )
@@ -446,7 +428,7 @@ def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
     for raw_workspace in raw_workspaces:
         if not isinstance(raw_workspace, dict):
             raise BiLineageError("power bi workspace entries must be objects")
-        workspace_name = _optional_text(raw_workspace.get("name"), 255)
+        workspace_name = optional_text(raw_workspace.get("name"), 255)
 
         datasets_by_id: dict[str, tuple[str | None, dict[str, dict[str, Any]]]] = {}
         raw_datasets = raw_workspace.get("datasets")
@@ -454,11 +436,11 @@ def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
             for raw_dataset in raw_datasets[:2000]:
                 if not isinstance(raw_dataset, dict):
                     continue
-                dataset_id = _optional_text(raw_dataset.get("id"), 255)
+                dataset_id = optional_text(raw_dataset.get("id"), 255)
                 if not dataset_id:
                     continue
                 datasets_by_id[dataset_id] = (
-                    _optional_text(raw_dataset.get("name"), 255),
+                    optional_text(raw_dataset.get("name"), 255),
                     _power_bi_table_lookup(raw_dataset),
                 )
 
@@ -484,7 +466,7 @@ def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
                     parent_external_id=None,
                 )
             )
-            dataset_id = _optional_text(raw_report.get("datasetId"), 255)
+            dataset_id = optional_text(raw_report.get("datasetId"), 255)
             dataset_name, tables_by_name = (
                 datasets_by_id.get(dataset_id, (None, {})) if dataset_id else (None, {})
             )
@@ -500,7 +482,7 @@ def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
                 if not isinstance(raw_page, dict):
                     raise BiLineageError("power bi page entries must be objects")
                 page_name = _required_text(raw_page.get("name"), "page.name", 255)
-                page_display = _optional_text(raw_page.get("displayName"), 500) or page_name
+                page_display = optional_text(raw_page.get("displayName"), 500) or page_name
                 page_id = f"{report_id}::{page_name}"
                 reports.append(
                     ParsedBiReport(
@@ -521,7 +503,7 @@ def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
                     for raw_field in visual_fields[:2000]:
                         if not isinstance(raw_field, dict):
                             continue
-                        table_name = _optional_text(raw_field.get("table"), 255)
+                        table_name = optional_text(raw_field.get("table"), 255)
                         if not table_name:
                             continue
                         table_payload = tables_by_name.get(table_name)
@@ -572,7 +554,7 @@ def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
     return ParsedBiArtifact(
         fingerprint="",  # filled in by the dispatcher, which hashes the whole payload
         bi_tool="POWER_BI",
-        generated_at=_parse_generated_at(payload.get("generatedAt")),
+        generated_at=parse_generated_at(payload.get("generatedAt")),
         reports=reports,
         metrics=list(metrics_by_id.values()),
         report_metric_edges=[

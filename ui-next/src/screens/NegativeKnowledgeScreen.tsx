@@ -8,7 +8,7 @@ import {
   searchNegativeKnowledge,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "./NegativeKnowledgeScreen.css";
 
@@ -260,26 +260,40 @@ export function NegativeKnowledgeScreen() {
     setParams({ subject: null });
   }, [setParams]);
 
-  const lift = useCallback(async (assertion: NegativeAssertionRead) => {
-    const reason = window.prompt("A reason is required to lift suppression on this assertion:");
-    // The endpoint itself requires a non-empty (>=3 char) reason
-    // (`LiftSuppressionRequest.reason`) -- checked client-side too so a blank
-    // prompt doesn't round-trip to a 422.
-    if (!reason || reason.trim().length < 3) return;
-    setNotice(null);
-    setLiftingId(assertion.id);
-    try {
-      const updated = await liftNegativeAssertionSuppression(assertion.id, {
-        reason: reason.trim(),
-      });
-      setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
-      setNotice(`Suppression lifted on ${updated.subject_id}.`);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setLiftingId(null);
-    }
-  }, []);
+  /* Lifting a suppression re-admits a proposal a human already rejected, so
+     the endpoint requires a written reason (`LiftSuppressionRequest.reason`,
+     minimum 3 characters). `window.prompt` could not state that rule, could
+     not show the 422 when it was broken, and returned `null` both when the
+     steward cancelled and when the browser refused to show it at all
+     (review 2026-09-05, F21). */
+  const [liftTarget, setLiftTarget] = useState<NegativeAssertionRead | null>(null);
+  const [liftError, setLiftError] = useState<string | null>(null);
+
+  const confirmLift = useCallback(
+    async (reason: string) => {
+      const assertion = liftTarget;
+      // Checked client-side as well so a too-short reason does not round-trip
+      // to a 422; the dialog already blocks an empty one.
+      if (!assertion || reason.trim().length < 3) {
+        setLiftError("Give at least three characters of reason; it is recorded on the assertion.");
+        return;
+      }
+      setNotice(null);
+      setLiftError(null);
+      setLiftingId(assertion.id);
+      try {
+        const updated = await liftNegativeAssertionSuppression(assertion.id, { reason: reason.trim() });
+        setItems((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+        setNotice(`Suppression lifted on ${updated.subject_id}.`);
+        setLiftTarget(null);
+      } catch (e) {
+        setLiftError(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setLiftingId(null);
+      }
+    },
+    [liftTarget],
+  );
 
   const hasFilters = assertionType !== "" || suppressionFilter !== "ALL";
 
@@ -389,7 +403,10 @@ export function NegativeKnowledgeScreen() {
               <AssertionRow
                 key={a.id}
                 assertion={a}
-                onLift={(assertion) => void lift(assertion)}
+                onLift={(assertion) => {
+                  setLiftError(null);
+                  setLiftTarget(assertion);
+                }}
                 lifting={liftingId === a.id}
               />
             ))}
@@ -403,6 +420,20 @@ export function NegativeKnowledgeScreen() {
           </div>
         )}
       </div>
+
+      {liftTarget ? (
+        <ConfirmDialog
+          title="Lift this suppression?"
+          description={`${liftTarget.subject_id} becomes eligible for the platform to propose again.`}
+          confirmLabel="Lift suppression"
+          requireReason
+          reasonLabel="Reason (recorded on the assertion)"
+          busy={liftingId === liftTarget.id}
+          error={liftError}
+          onConfirm={(reason) => void confirmLift(reason)}
+          onCancel={() => setLiftTarget(null)}
+        />
+      ) : null}
     </div>
   );
 }

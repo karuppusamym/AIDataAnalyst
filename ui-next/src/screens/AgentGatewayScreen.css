@@ -70,3 +70,11 @@
   .aglist__meta{align-items:flex-start;flex-direction:row}
   .agform__grid{grid-template-columns:1fr}
 }
+
+/* Connection diagnostic (review 2026-09-05, F07). Outcome is carried by the
+   pill's word as well as its colour; the detail line says which repair. */
+.agdiag{margin-top:10px;border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius-sm);background:var(--sunk);padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.agdiag__head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.agdiag__status{font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+.agdiag__detail{margin:0;font-size:12.5px;color:var(--ink-2);line-height:1.55}
+.agcopy__fail{margin:0 0 6px;font-size:12px;color:var(--bad)}

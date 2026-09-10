@@ -16,8 +16,9 @@ import {
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker, datasourceName } from "../lib/useDatasourcePicker";
+import { QueryResultTable } from "../components/QueryResultTable";
 import { VirtualList } from "../components/VirtualList";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./AskScreen.css";
@@ -158,6 +159,7 @@ function record(v: unknown, key: string): unknown {
 function AnswerPanel({
   runId,
   askResult,
+  askedAt,
   detail,
   receipts,
   loading,
@@ -166,6 +168,9 @@ function AnswerPanel({
 }: {
   runId: string;
   askResult: AgentAnalysisResponse | null;
+  /** When this session received `askResult`. The response carries no
+   *  timestamp, and a run reopened from history has no result to date. */
+  askedAt: Date | null;
   detail: AgentRunRead | null;
   receipts: AgentRunGroundingReceiptsRead | null;
   loading: boolean;
@@ -203,7 +208,7 @@ function AnswerPanel({
   const trustScore = trust ? record(trust, "trust_score") : null;
   const trustGrade = trust ? record(trust, "trust_grade") : null;
 
-  const permalink = `${location.origin}${location.pathname}?run=${runId}`;
+
 
   return (
     <aside className="evp" aria-label={`Answer for run ${runId}`}>
@@ -259,6 +264,24 @@ function AnswerPanel({
               </p>
             )}
             {failureReason ? <Pill tone="bad">{failureReason.replace(/_/g, " ")}</Pill> : null}
+
+            {/* The rows themselves (F20). Present only while this session
+                still holds the response that carried them: `AgentRunRead` has
+                no `rows` field, so a reopened run shows its evidence and says
+                so rather than implying the values were kept. */}
+            {execution && askedAt ? (
+              <QueryResultTable
+                execution={execution}
+                semanticVersion={semanticVersion}
+                policyVersion={policyVersion}
+                executedAt={askedAt}
+              />
+            ) : !isFresh && (status === "SUCCEEDED" || status === "COMPLETED") ? (
+              <p className="ask__noexplain">
+                This run's result values are not retained — only the question's evidence, the query
+                that ran and the policy it ran under. Ask again to see current values.
+              </p>
+            ) : null}
 
             {execution ? (
               <dl className="ask__exec">
@@ -415,12 +438,14 @@ function AnswerPanel({
         )}
       </div>
       <footer className="evp__foot">
-        <button
-          className="btn btn--quiet"
-          onClick={() => void navigator.clipboard?.writeText(permalink)}
-        >
-          Copy permalink
-        </button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/analyst`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{ screen: "analyst", params: { run: runId } }}
+          label="Copy permalink"
+        />
       </footer>
     </aside>
   );
@@ -438,6 +463,10 @@ export function AskScreen() {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [askResult, setAskResult] = useState<AgentAnalysisResponse | null>(null);
+  // Freshness of the ANSWER. Recorded here because the response has no
+  // timestamp of its own, and deliberately not persisted anywhere: it is a
+  // property of this session's in-memory result, like the rows themselves.
+  const [askedAt, setAskedAt] = useState<Date | null>(null);
   const [askError, setAskError] = useState<AgentAskError | null>(null);
 
   const askInflight = useRef<AbortController | null>(null);
@@ -458,6 +487,7 @@ export function AskScreen() {
       const response = await runAgentAnalysis(dsId, { question: trimmed }, ac.signal);
       if (seq !== askSeq.current) return;
       setAskResult(response);
+      setAskedAt(new Date());
       setParams({ run: response.agent_run_id });
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
@@ -477,6 +507,7 @@ export function AskScreen() {
   // onChange below.
   useEffect(() => {
     setAskResult(null);
+    setAskedAt(null);
     setAskError(null);
   }, [dsId]);
 
@@ -696,6 +727,7 @@ export function AskScreen() {
           <AnswerPanel
             runId={runId}
             askResult={askResult}
+            askedAt={askedAt}
             detail={panelDetail}
             receipts={panelReceipts}
             loading={panelLoading}

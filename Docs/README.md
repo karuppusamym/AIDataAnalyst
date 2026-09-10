@@ -28,6 +28,8 @@ Two properties make it usable rather than decorative:
 
 ## Start here
 
+For the current agent inventory, automation limits, vendor comparison and open release blockers, read the [2026-09-09 critical architecture review](10-architecture/15-agent-architecture-critical-review.md). Its dated findings supersede conflicting agent-count, reviewer-safety and model-call economics claims in older documents. Its status table is the authority on what has since been fixed: four findings are closed in code, seven are fixed but awaiting the measurement or audit their closure criterion also demands, and enterprise-scale capacity (AR-09) is untouched.
+
 | If you are… | Read, in order |
 |---|---|
 | **New to the project** | `00-product/01-vision-and-goals.md` → `10-architecture/03-logical-architecture.md` → `20-modules/00-module-index.md` |
@@ -84,7 +86,7 @@ Docs/
 | [01 Principles and invariants](10-architecture/01-principles-and-invariants.md) | **Nine invariants, each with an enforcement point and a test** |
 | [02 System context](10-architecture/02-system-context.md) | Boundary crossings and their trust posture |
 | [03 Logical architecture](10-architecture/03-logical-architecture.md) | Five layers, two primary flows, the latency budget |
-| [04 Module decomposition](10-architecture/04-module-decomposition.md) | **The anti-monolith document** — the 21-module target and its boundaries. **Target, not current state:** 1 of 21 modules exists under `src/atlas/modules/` and it is a scaffold; the working code is still the flat `src/aida/` package. Read alongside the tracker's section A |
+| [04 Module decomposition](10-architecture/04-module-decomposition.md) | **The anti-monolith document** — the 21-module target and its boundaries. **Target, not current state:** 5 of 21 modules exist under `src/atlas/modules/` (corrected 2026-09-06; each has real models, schemas and routes, and each has a guide under `20-modules/domain-guides/`), and the bulk of the working code is still the flat `src/aida/` package. Read alongside the tracker's section A |
 | [05 Service extraction plan](10-architecture/05-service-extraction-plan.md) | Why not microservices yet, and the triggers that change that |
 | [06 Data architecture](10-architecture/06-data-architecture.md) | Stores, entities, versioning, projection, retention, partitioning |
 | [07 Event and messaging model](10-architecture/07-event-and-messaging-model.md) | Temporal vs. Kafka, the outbox, envelope, topics |
@@ -93,6 +95,7 @@ Docs/
 | [10 Performance and scale model](10-architecture/10-performance-and-scale-model.md) | Every target, its test, and its current measurement status |
 | [11 Capacity and cost model](10-architecture/11-capacity-and-cost-model.md) | Workload isolation, sizing tiers, backpressure, cost governance, metrics |
 | [12 Runtime sequences](10-architecture/12-runtime-sequences.md) | How the modules compose at runtime, end to end |
+| [14 Architecture map](10-architecture/14-generated-architecture-map.md) | **Generated, not drawn.** The module graph aggregated to groups, what each of the five processes reaches, the bounded contexts, and the import-linter contracts actually enforced |
 | [ADR register](10-architecture/adr/README.md) | Seventeen accepted decisions, one superseded (0017 → 0018) |
 
 ### 20-modules — The bounded contexts
@@ -135,6 +138,9 @@ Full index with reading orders, **and a per-module map from bounded context to t
 | [05 CI/CD and release](40-engineering/05-ci-cd-and-release.md) | Gates, releases, migrations, rollback |
 | [06 Refactor plan](40-engineering/06-refactor-plan.md) | Flat package → modular monolith, in eight shippable phases |
 | [07 Local runbook](40-engineering/07-local-runbook.md) | Start, verify, inspect, triage |
+| [08 Experience shell rebuild plan](40-engineering/08-experience-shell-rebuild-plan.md) | The `ui-next/` rebuild, its phases and its exit criteria |
+| [09 Compatibility shim register](40-engineering/09-compatibility-shim-register.md) | **Generated caller counts, hand-written removal conditions.** Every re-export shim, what replaces it, who still calls it, and what must be true before it can go (review D03) |
+| [10 Bounded-context relocation procedure](40-engineering/10-bounded-context-relocation-procedure.md) | The repeatable steps for moving one context's models and DTOs out of `models.py`/`schemas.py`, the four things it may not change and how each is proved, and what went wrong the last time (review R04) |
 
 ### 50-security — Trust
 
@@ -164,6 +170,7 @@ Full index with reading orders, **and a per-module map from bounded context to t
 | [02 Decision log](90-reference/02-decision-log.md) | One-line index of every decision and open question |
 | [03 Sources](90-reference/03-sources.md) | Competitive research sources and how to refresh them |
 | [04 Analysis algorithms](90-reference/04-analysis-algorithms.md) | Scoring models, pruning strategies, and detection signals behind modules 05–07 |
+| [05 CCDIVACLAD reference architecture](90-reference/05-ccdivaclad-reference-architecture.md) | External prior art: an enterprise metadata-agent platform — ontology, KG standards, ingestion frameworks. Not authoritative for Atlas |
 
 ## The four things to understand first
 

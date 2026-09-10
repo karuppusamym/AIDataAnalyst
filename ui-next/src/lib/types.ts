@@ -79,6 +79,7 @@ export interface AgentAutoApplyRead {
   has_auto_apply_branch: boolean;
   threshold: number | null;
   threshold_source: string | null;
+  enabled: boolean | null;
   evidence: string;
 }
 
@@ -206,7 +207,7 @@ export interface AgentInboxRead {
 
 /** The "task plan" half of this row's exit condition: not a static, */
 export interface AgentMethodSummaryRead {
-  scope: "ORGANIZATION_WIDE";
+  scope: "AGENT_VERSION" | "ORGANIZATION_WIDE";
   note: string;
   window_days: number;
   sampled_runs: number;
@@ -254,6 +255,7 @@ export interface AgentRosterRead {
   generated_at: string;
   window_days: number;
   agents: AgentRosterEntryRead[];
+  unattributed: UnattributedRunsRead;
   total_agents: number;
 }
 
@@ -1793,6 +1795,24 @@ export interface DataSourceRead {
   updated_at: string;
 }
 
+export interface DataSourceSummaryRead {
+  id: string;
+  organization_id: string;
+  line_of_business_id: string;
+  data_domain_id: string;
+  project_id: string;
+  name: string;
+  connector_type: string;
+  dialect: string;
+  environment: string;
+  network_zone: string;
+  status: string;
+  max_concurrency: number;
+  capabilities: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DataSourceUpdate {
   enabled?: boolean | null;
   max_concurrency?: number | null;
@@ -2333,6 +2353,7 @@ export interface GovernanceReviewBulkDecisionItemRead {
   review_id: string;
   status: "SUCCEEDED" | "FAILED";
   reason?: string | null;
+  outcome?: "APPLIED" | "CONFLICT" | "NOT_PERMITTED" | "FAILED" | null;
 }
 
 export interface GovernanceReviewBulkDecisionRequest {
@@ -3777,6 +3798,8 @@ export interface QueryExecutionResponse {
   elapsed_ms: number;
   masked_columns: string[];
   rows: Record<string, unknown>[];
+  applied_row_limit?: number | null;
+  row_limit_source?: string | null;
 }
 
 export interface QueryFeedbackRead {
@@ -3803,6 +3826,18 @@ export interface QueryLineageRead {
   column_lineage: Record<string, unknown>[];
   semantic_version: string | null;
   policy_version: string;
+}
+
+/** `/health/ready`'s body. */
+export interface ReadinessResponse {
+  status: string;
+  service: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  required?: Record<string, string>;
+  optional?: Record<string, string>;
+  controls?: Record<string, string>;
+  signals?: Record<string, string>;
 }
 
 export interface RelationshipCandidateBulkDecisionItemRead {
@@ -3993,6 +4028,18 @@ export interface ReviewQueueRead {
   diffable_count: number;
 }
 
+/** F16: aggregate counts for the review queue, composed from nothing. */
+export interface ReviewQueueSummaryRead {
+  organization_id: string;
+  status_filter: string | null;
+  object_type_filter: string | null;
+  generated_at: string;
+  total: number;
+  by_status: Record<string, number>;
+  by_object_type: Record<string, number>;
+  by_queue: Record<string, number>;
+}
+
 export interface ReviewerAgentRunResult {
   pre_reviewed?: number;
   decided?: number;
@@ -4006,8 +4053,11 @@ export interface ReviewerAgentStateRead {
   enabled: boolean;
   suspended: boolean;
   max_tier: string;
+  configured_max_tier: string;
+  max_tier_clamped: boolean;
   sampling_rate: number;
   agent_principal_id: string;
+  evidence_max_age_minutes: number;
 }
 
 export interface ScanPolicyRead {
@@ -4742,6 +4792,13 @@ export interface ToolPlanStepRead {
   completed_at: string | null;
   evidence: Record<string, unknown>;
   error_message: string | null;
+}
+
+/** Governed runs in this organization that no registered agent owns. */
+export interface UnattributedRunsRead {
+  method: AgentMethodSummaryRead;
+  recent_results: AgentRunOutcomeRead[];
+  recent_results_total: number;
 }
 
 /** One typed edge merged from declared FKs, approved/candidate column */

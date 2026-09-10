@@ -23,8 +23,14 @@ cheaper option:
   the governance transaction has already committed. There is no path by which
   a slow or failing webhook delays or rolls back an approval request.
 * **Nothing is lost to a downed channel.** The watermark is stamped in the
-  same transaction as the delivery attempt, so a crashed sweep simply retries
-  the same rows next pass.
+  same transaction that *creates the delivery intent* -- not one that reports
+  a delivery. Before F12 was fixed this sweep called a function that swallowed
+  transport errors and returned nothing, then stamped anyway; a webhook that
+  was down at that instant meant a review nobody was ever told about, because
+  the next sweep selects only unstamped rows. Now the watermark and the
+  durable obligation to deliver commit together, and the destination outage is
+  the delivery worker's problem to retry (`aida.delivery_intents`). A crashed
+  sweep still simply retries the same rows next pass.
 * **It covers sites that do not exist yet.** A 28th `GovernanceReview(...)`
   written next month is relayed with no change here and no change there.
 
@@ -48,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
 from aida.db import session_factory
-from aida.governance_notifications import notify_safely
+from aida.governance_notifications import notify_safely, sync_notification_ledger
 from aida.models import GovernanceReview
 from aida.review_risk_tiers import risk_tier_for
 
@@ -57,15 +63,25 @@ from aida.review_risk_tiers import risk_tier_for
 #: correct: "please approve this" about something already approved is noise.
 _NOTIFIABLE_STATUS = "PENDING"
 
+#: `review_requested_notified_at` means, precisely, "an intent was created for
+#: this review, or it was deliberately skipped". It is not an attempt time and
+#: it is not a delivery time; those are `DeliveryIntent.attempted_at` and
+#: `DeliveryIntent.delivered_at`, which live on the row that knows them. One
+#: column meaning all three was the shape of F12.
+
 
 @dataclass(frozen=True, slots=True)
 class RelayOutcome:
     """What one sweep did, returned for logging and for the tests."""
 
+    #: Reviews for which a delivery intent now exists. Named `notified` for
+    #: continuity with the callers, but it claims queueing, never delivery.
     notified: tuple[UUID, ...]
-    #: Considered but deliberately not sent -- too old to be news. Stamped all
-    #: the same, so they are not re-examined forever.
+    #: Considered but deliberately not queued -- too old to be news. Stamped
+    #: all the same, so they are not re-examined forever.
     skipped_stale: tuple[UUID, ...]
+    #: Ledger rows reconciled against finished delivery intents this pass.
+    ledger_reconciled: int = 0
 
     @property
     def examined(self) -> int:
@@ -144,12 +160,19 @@ async def relay_review_requested(
                 settings=settings,
             )
             notified.append(review.id)
-        # Stamped either way, and in the same transaction as the delivery
-        # attempt: a sweep that dies mid-batch retries exactly the rows it did
-        # not reach.
+        # Stamped either way, and in the same transaction that created the
+        # intent: a sweep that dies mid-batch retries exactly the rows it did
+        # not reach, and a row this sweep did stamp has a committed intent
+        # behind it. A transport that is down changes neither -- the intent is
+        # retried by the delivery worker, not by re-examining this review.
         review.review_requested_notified_at = now
 
-    return RelayOutcome(notified=tuple(notified), skipped_stale=tuple(skipped))
+    reconciled = await sync_notification_ledger(session, now=now)
+    return RelayOutcome(
+        notified=tuple(notified),
+        skipped_stale=tuple(skipped),
+        ledger_reconciled=reconciled,
+    )
 
 
 async def run_review_notification_pass(

@@ -3,7 +3,7 @@
 The export sibling of `unified_lineage_api.get_unified_lineage_impact` --
 same route shape (`datasource_id`/`node_id` path params, `depth`/`node_limit`
 query params), same `UNIFIED_LINEAGE_READER_ROLES` population, and the exact
-same `_load_datasource` gate (`enforce_organization`) the live graph and
+same `load_datasource_in_scope` gate (`enforce_organization`) the live graph and
 impact routes already run through, so an export can never become a way to
 see lineage its caller could not otherwise read through the live endpoints.
 See `aida.lineage_evidence_export` for how the artifact itself is composed
@@ -32,11 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.lineage_evidence_export import compose_lineage_export_artifact
+from aida.resource_scope import load_datasource_in_scope
 from aida.security import SecurityContext, require_roles
 from aida.unified_lineage_api import (
     UNIFIED_LINEAGE_READER_ROLES,
     LineageNodeNotFoundError,
-    _load_datasource,
 )
 
 router = APIRouter(prefix="/v1", tags=["unified-lineage"])
@@ -70,7 +70,7 @@ async def export_unified_lineage_impact(
     for both, so the export can never disagree with what the live pane would
     show for the same asset/depth at the same instant.
     """
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     try:
         artifact = await compose_lineage_export_artifact(
             session,

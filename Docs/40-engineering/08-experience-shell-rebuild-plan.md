@@ -58,9 +58,18 @@ UX-5 (accessibility audit), UX-6 (graph level-of-detail), UX-8 (onboarding),
 UX-9 (browser regression suite). UX-3 and UX-7 are satisfied by the Catalog pattern
 as each screen adopts it.
 
-### Phase 4 — Retire `ui/`
+### Phase 4 — Retire `ui/` — **done, 2026-09-05**
 
-When no nav entry is marked `legacy`, delete `ui/` and its nginx route.
+The plan was: when no nav entry is marked `legacy`, delete `ui/` and its nginx route.
+
+That happened, and not by the parity gate this plan assumed. The remediation kickoff for
+`review-2026-09-05` took an explicit scope decision to remove the legacy portal outright rather
+than retire it behind a parity matrix (finding D05; see
+[`../review-2026-09-05/POINTS-TRACKER.md`](../review-2026-09-05/POINTS-TRACKER.md)). `ui/` is gone
+from the tree, along with its compose service and nginx route. `ui-next` is the only portal.
+
+Anything below this line that speaks of two frontends, a `legacy` nav marker or a cutover is
+historical design rationale for how the migration was run, not a description of the current tree.
 
 ## 3. The Catalog pattern
 

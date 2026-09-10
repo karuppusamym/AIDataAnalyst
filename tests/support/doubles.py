@@ -15,6 +15,8 @@ Neo4j.
 from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy.sql.expression import UpdateBase
+
 from aida.connectors.base import ConnectorCapabilities, QueryEstimate, QueryResult
 from aida.models import (
     AssetCertification,
@@ -135,6 +137,13 @@ class ScriptedResult:
         return iter(self._rows)
 
 
+class ScriptedDmlResult:
+    """The `rowcount` shape SQLAlchemy's `CursorResult` returns for DML."""
+
+    def __init__(self, *, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
 class ScriptedSession(RecordingSession):
     """A `RecordingSession` that also answers reads from a scripted queue.
 
@@ -170,10 +179,25 @@ class ScriptedSession(RecordingSession):
             raise AssertionError("ScriptedSession.scalars called more times than scripted")
         return ScriptedResult(self._scalars.pop(0))
 
-    async def execute(self, _statement: Any) -> ScriptedResult:
+    async def execute(self, statement: Any) -> Any:
+        if isinstance(statement, UpdateBase):
+            # A write, not a read: there are no rows to script, so it does not
+            # draw from the scripted queue. It answers `rowcount = 1`, which
+            # is what a single-row `UPDATE ... WHERE id = :id` matching an
+            # object this double is holding would return -- the shape
+            # `governance_decision_service.claim_review`'s compare-and-set
+            # reads. A double that raised here would force every test using a
+            # handler that writes through Core to script a meaningless empty
+            # row list.
+            return ScriptedDmlResult(rowcount=1)
         if not self._execute:
             raise AssertionError("ScriptedSession.execute called more times than scripted")
         return ScriptedResult(self._execute.pop(0))
+
+    async def refresh(self, _instance: Any) -> None:
+        """No-op: this double holds the instance the caller already has, and
+        there is no row behind it to re-read."""
+        return None
 
     async def get(self, _model: type, identity: Any) -> Any:
         return self._get.get(identity)
@@ -216,12 +240,30 @@ class FakeSqlExecutor:
         return QueryResult(rows=self._rows, warehouse_query_id=self._warehouse_query_id)
 
 
+class EmptyGraphResult:
+    """A Neo4j `AsyncResult` that yields no records.
+
+    The projector's deletion-reconciliation sweep reads its own
+    `RETURN count(*) AS deleted` back to decide whether another batch is
+    needed; a recorder that returned `None` from `run` would make that an
+    attribute error rather than "nothing was deleted". Yielding nothing is the
+    faithful answer for a driver that never actually held any nodes.
+    """
+
+    def __aiter__(self) -> "EmptyGraphResult":
+        return self
+
+    async def __anext__(self) -> Any:
+        raise StopAsyncIteration
+
+
 class RecordingGraphSession:
     def __init__(self, log: list[tuple[str, dict[str, Any]]]) -> None:
         self._log = log
 
-    async def run(self, statement: str, **parameters: Any) -> None:
+    async def run(self, statement: str, **parameters: Any) -> EmptyGraphResult:
         self._log.append((statement, parameters))
+        return EmptyGraphResult()
 
     async def __aenter__(self) -> "RecordingGraphSession":
         return self
@@ -349,9 +391,7 @@ class CatalogSession(RecordingSession):
         # reaching the behaviour they exist to check. Pass the argument
         # explicitly (`[]` included) to model the genuinely-unresolvable case.
         self._referenced_table_ids = (
-            referenced_table_ids
-            if referenced_table_ids is not None
-            else [uuid4() for _ in tables]
+            referenced_table_ids if referenced_table_ids is not None else [uuid4() for _ in tables]
         )
         self._classifications = classifications or []
         self._certifications = certifications or []

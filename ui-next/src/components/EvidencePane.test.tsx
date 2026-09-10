@@ -62,13 +62,18 @@ describe("EvidencePane as a permalink target", () => {
 
   it("surfaces a 403 from the gated endpoint as an explicit denial, not a silent empty pane", async () => {
     fetchAssetEvidence.mockReset();
-    fetchAssetEvidence.mockRejectedValue(new ApiError(403, "policy_denied"));
+    fetchAssetEvidence.mockRejectedValue(
+      new ApiError(403, "policy_denied", { correlationId: "cid-7" }),
+    );
 
     render(<EvidencePane tableId="t_secret" row={null} onClose={() => {}} />);
 
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent(/not authorized/i),
+      expect(screen.getByRole("alert")).toHaveTextContent(/do not have access/i),
     );
+    // A link the recipient cannot open should give them something support can
+    // grep for, not just a refusal (review 2026-09-05, F08 acceptance).
+    expect(screen.getByText("cid-7")).toBeInTheDocument();
     // Not silently rendered as "nothing to show" -- the idle empty state
     // never mounts once a tableId is present.
     expect(screen.queryByText("Select an asset")).not.toBeInTheDocument();

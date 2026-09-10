@@ -46,6 +46,7 @@ WriteLane = Literal["MEASURED_FACT", "PLATFORM_OBSERVATION", "MODEL_JUDGEMENT_PR
 REASON_CONTRACT_MISSING = "agent_contract_missing"
 REASON_KILL_ENGAGED = "agent_kill_switch_engaged"
 REASON_ENVELOPE_VIOLATION = "agent_envelope_violation"
+REASON_CONTEXT_PRODUCT_VIOLATION = "agent_context_product_violation"
 
 
 class AgentContractValidationError(ValueError):
@@ -190,6 +191,20 @@ def validate_contract_definition(
             "envelope_write_lane_invalid",
             "capability_envelope.write_lanes contains an unknown lane",
         )
+    if definition.capability_envelope.write_lanes:
+        # AR-06, deliberately fail-closed. `write_lanes` has been parsed,
+        # validated and stored since AG-10 shipped, and no write path in this
+        # codebase reads it -- there is no agent write that names a lane, so
+        # there is nothing for a lane to bound. Accepting the declaration would
+        # put an unenforced control into a governance dossier, which is the
+        # specific failure AR-06 names. Refusing it means whoever builds the
+        # first lane-bearing write path has to build the check in the same
+        # change: this branch is what will fail their contract fixture.
+        raise AgentContractValidationError(
+            "envelope_write_lane_unenforceable",
+            "capability_envelope.write_lanes cannot be declared until a write "
+            "path enforces it; declaring an unenforced lane is refused",
+        )
 
 
 def apply_definition(contract: AgentContract, definition: AgentContractDefinition) -> None:
@@ -297,3 +312,65 @@ def envelope_violation(contract: AgentContract, *, tool_slug: str) -> str | None
     if tool_slug not in envelope.tool_slugs:
         return REASON_ENVELOPE_VIOLATION
     return None
+
+
+def context_product_violation(
+    contract: AgentContract, *, product_key: str, product_id: str
+) -> str | None:
+    """`REASON_CONTEXT_PRODUCT_VIOLATION` when a contracted agent reads a
+    context product its envelope does not name (AR-06).
+
+    `capability_envelope.context_product_ids` was parsed and stored from the
+    day AG-10 shipped and read by nothing -- the 2026-09-09 review found the
+    declaration but no enforcement. This is the enforcement, at the one
+    boundary where an agent actually consumes a context product: the MCP
+    server's resource and tool-list paths.
+
+    Either identifier matches, because a contract is written by a human who
+    may reasonably name the product by its stable `product_key` or by its
+    UUID, and refusing one of the two would be a usability trap rather than a
+    control. An empty list allows nothing, exactly as `tool_slugs` does: an
+    envelope is an allowlist, and an empty allowlist is empty.
+    """
+    try:
+        envelope = parse_capability_envelope(dict(contract.capability_envelope or {}))
+    except AgentContractValidationError:
+        return REASON_CONTEXT_PRODUCT_VIOLATION
+    allowed = set(envelope.context_product_ids)
+    if product_key in allowed or product_id in allowed:
+        return None
+    return REASON_CONTEXT_PRODUCT_VIOLATION
+
+
+async def load_contract_for_principal(
+    session: AsyncSession, *, organization_id: UUID, agent_principal_id: str
+) -> AgentContract | None:
+    """The contract for a workload identity, or `None` for a human principal.
+
+    The lookup a *boundary* needs, as opposed to `load_agent_contract`'s:
+    a request arriving at the MCP server carries a principal, not an asset
+    version id, and the question is "is this caller a contracted agent, and if
+    so what may it touch". `ix_agent_contract_org_principal` exists for this.
+
+    Returns `None` rather than raising for an unknown principal: most callers
+    are people, and having no contract is not a policy failure for them. A
+    principal with two contracts (two registered versions sharing a workload
+    identity) resolves to neither -- an ambiguous envelope is not one the
+    platform can enforce, so the caller is treated as uncontracted and its
+    other authorization checks stand alone.
+    """
+    if not agent_principal_id:
+        return None
+    rows = (
+        await session.scalars(
+            select(AgentContract)
+            .where(
+                AgentContract.organization_id == organization_id,
+                AgentContract.agent_principal_id == agent_principal_id,
+            )
+            .limit(2)
+        )
+    ).all()
+    if len(rows) != 1:
+        return None
+    return rows[0]

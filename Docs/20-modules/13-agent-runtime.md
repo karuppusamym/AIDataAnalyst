@@ -4,6 +4,8 @@
 
 ## 1. Purpose
 
+> **Implementation review (2026-09-09, updated after remediation):** Read the [critical architecture review](../10-architecture/15-agent-architecture-critical-review.md) for the five core capabilities (three LLM-capable workflows and two deterministic components) and the AR-01..AR-12 findings with their current status. Since that review: contract token and wall-clock caps now have a runtime consumer (`aida.agent_budget`, reserving against `agent_budget_window` before generation and reconciling after), `capability_envelope.context_product_ids` is enforced at the MCP boundary, `write_lanes` is refused rather than stored unenforced, roster reporting is per-agent-version, and retrieval evidence is screened before it enters the model payload. Enterprise-scale capacity (AR-09) is untouched and unmeasured. Older "current state" and open-work tables below are dated planning snapshots, not certification of today's deployment.
+
 The governed analytical state machine: takes a question, screens it, resolves it against approved semantics, prefers an approved tool, generates only when it must, and hands everything to the deterministic gateway for execution.
 
 This module is where ADR-0001 (models propose, deterministic services decide) becomes concrete. It is the single most important module for the product's differentiation and for its model-risk story.
@@ -35,7 +37,7 @@ Every transition is explicit, recorded, and pins the versions in force at that p
 | EXPLAINED | Lineage, versions, confidence, quality signals assembled | — |
 | COMPLETED | Evidence persisted | — |
 
-**Two ordering properties carry the guarantee.** `SCREENED` precedes retrieval, so hostile input cannot influence what is retrieved or which tool is selected. `VALIDATED` is deterministic and downstream of `GENERATED`, so a model can propose anything but cannot widen what executes.
+**Two ordering properties support the boundary.** `SCREENED` precedes retrieval, so inputs detected and blocked by the classifier do not reach retrieval. This does not prove that all hostile input is detected. The execution gateway must enforce validation and authorization before execution; the orchestrator's post-execution checkpoints provide additional verification, not a replacement for those controls.
 
 > **Implementation status (2026-08-31).** All eleven states exist with a real transition table,
 > and the **SCREENED-before-retrieval ordering is verified in the code** — prompt-risk screening
@@ -74,7 +76,7 @@ flowchart TD
     X -->|yes| D[Tool draft → maker-checker]
 ```
 
-**Why this ordering is the economic core of the product** (differentiator D2). Every competitor regenerates SQL per question: cost and risk grow linearly with usage. Atlas prefers an approved tool: cost and risk *fall* as the tool library matures. Target: ≥40% tool-first execution rate in a mature tenant.
+**Economic hypothesis to measure** (D2). Reusing approved tools can avoid generation calls and reduce repeated validation effort, although source execution still has cost and risk. No verified comparison establishes that every competitor regenerates SQL per question. Target: ≥40% tool-first execution rate in a mature tenant; measure accepted-answer accuracy and total cost alongside the rate.
 
 ## 5. Prompt-risk screening
 
@@ -88,7 +90,7 @@ A **versioned, deterministic classifier** running before retrieval. Blocks:
 
 Retained evidence is **value-free**: classifier version, score, reason codes, plus the question HMAC. The raw question is never stored (ADR-0014).
 
-**Known gap.** Indirect injection through *retrieved metadata* — a malicious column description that reaches model context — is not yet screened. Tracked P0.
+**Coverage qualification (2026-09-09, updated after remediation).** Indirect-screening code exists in `injection_defense.py` and `ingest_screening.py`, with ingestion and MCP integrations. Tracing the ingresses found one that was genuinely unscreened: `retrieval_evidence` carries a business annotation's `business_name` and its domain/entity display names straight into the model payload, with no stored verdict to consult. Those fields are now screened at that boundary, with quarantined text withheld behind a fixed marker while the persisted audit record keeps every hit verbatim. `_model_context` was found to carry only identifiers, types and constraint shapes -- no free text. **This closes one ingress, not the class.** AR-10's path-level coverage audit and adversarial evaluation are outstanding; the classifier is evadable by paraphrase, and INV-3 -- a successful injection still produces a proposal that cannot execute, publish or bind a tool -- remains the load-bearing control. Neither complete absence nor complete protection should be claimed.
 
 ## 6. Evidence model
 

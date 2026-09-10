@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
@@ -131,20 +131,32 @@ describe("DelegationsScreen (PG-4)", () => {
     );
   });
 
-  it("asks for confirmation before revoking, and does nothing if the user cancels", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  /* The confirmation is a real dialog, not `window.confirm`
+     (review 2026-09-05, F21): it names who loses which role, is reachable by
+     keyboard, and stays open to report a revoke the server refused. */
+  async function openRevokeDialog() {
     render(<DelegationsScreen />);
-
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Revoke" }).length).toBe(2));
-    fireEvent.click(screen.getAllByRole("button", { name: "Revoke" })[0]!);
+    const trigger = screen.getAllByRole("button", { name: "Revoke" })[0]!;
+    trigger.focus();
+    fireEvent.click(trigger);
+    return await screen.findByRole("dialog");
+  }
 
-    expect(confirmSpy).toHaveBeenCalledWith("Revoke this delegation?");
+  it("asks for confirmation before revoking, naming the principal, and does nothing if cancelled", async () => {
+    const dialog = await openRevokeDialog();
+
+    expect(within(dialog).getByText(/loses/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(revokeDelegation).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    // The keyboard user is returned to the control they pressed, not the top
+    // of the document.
+    expect(document.activeElement).toBe(screen.getAllByRole("button", { name: "Revoke" })[0]!);
   });
 
   it("revokes the delegation and updates that row in place once confirmed", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const page = await makeFixtureDelegations(ORG);
     const target = page.items.find((d) => d.delegator_principal_id === "priya.steward" && d.status === "ACTIVE")!;
     const revoked: DelegationRead = {
@@ -154,14 +166,23 @@ describe("DelegationsScreen (PG-4)", () => {
       revoked_at: new Date().toISOString(),
     };
     revokeDelegation.mockResolvedValue(revoked);
-    render(<DelegationsScreen />);
 
-    await waitFor(() => expect(screen.getAllByRole("button", { name: "Revoke" }).length).toBe(2));
-    fireEvent.click(screen.getAllByRole("button", { name: "Revoke" })[0]!);
+    const dialog = await openRevokeDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke delegation" }));
 
     await waitFor(() => expect(revokeDelegation).toHaveBeenCalledWith(target.id));
     await waitFor(() => expect(screen.getByText(/delegation revoked/i)).toBeInTheDocument());
-    confirmSpy.mockRestore();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the revoke dialog open and reports why, when the server refuses", async () => {
+    revokeDelegation.mockRejectedValue(new ApiError(409, "delegation already revoked"));
+
+    const dialog = await openRevokeDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Revoke delegation" }));
+
+    expect(await screen.findByText("delegation already revoked")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("filters to only the client-computed expired row when 'Expired' is chosen", async () => {

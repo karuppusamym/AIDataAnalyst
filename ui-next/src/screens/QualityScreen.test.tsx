@@ -185,13 +185,16 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
       acknowledged_by: "me@tenant.example",
       acknowledged_at: "2026-09-02T05:00:00Z",
     });
-    vi.spyOn(window, "prompt").mockReturnValue("Investigating with the data owner");
-
     const QualityScreen = await loadScreen();
     render(<QualityScreen />);
     await waitFor(() => expect(screen.getByText("raw_sales")).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Acknowledge" }));
+    const dialog = await screen.findByRole("dialog", { name: "Acknowledge this incident" });
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "Investigating with the data owner" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Acknowledge" }));
 
     await waitFor(() =>
       expect(transitionQualityIncident).toHaveBeenCalledWith(
@@ -203,9 +206,11 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
     await waitFor(() => expect(fetchQualityIncidents).toHaveBeenCalledTimes(2));
   });
 
-  it("requires a reason before calling the transition endpoint, and skips the call if none is given", async () => {
+  /* The endpoint refuses a transition without at least three characters of
+     reason. That rule is now stated on a labelled field in a real dialog
+     rather than assumed behind an unlabelled `window.prompt` (F21). */
+  it("will not submit a transition until a reason is typed into the dialog", async () => {
     history.replaceState(null, "", "/?ds=ds_1");
-    vi.spyOn(window, "prompt").mockReturnValue(null);
 
     const QualityScreen = await loadScreen();
     render(<QualityScreen />);
@@ -213,7 +218,8 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
 
-    expect(window.prompt).toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: "Resolve this incident" });
+    expect(within(dialog).getByRole("button", { name: "Resolve incident" })).toBeDisabled();
     expect(transitionQualityIncident).not.toHaveBeenCalled();
   });
 

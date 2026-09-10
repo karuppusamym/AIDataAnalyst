@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* Filters and selection live in the URL so a filtered view is shareable and
+   survives Back/Forward. This screen carried a verbatim copy of the old hook
+   -- a `useState` seeded once from `location.search`, subscribed to nothing --
+   so its idea of the selection and the address bar drifted apart the first
+   time either the Back button or a same-screen link was used (review
+   2026-09-05, F09 - R07). The shared hook reads one location store. */
+import { useUrlState } from "../lib/useUrlState";
 import type { AiDecisionRead } from "../lib/types";
 import { ApiError, fetchLineageRefusals, fetchRunDecisions } from "../lib/api";
 import { VirtualList } from "../components/VirtualList";
-import { Empty, ErrorState, Pill } from "../components/primitives";
+import { CopyLinkButton, Empty, ErrorState, Pill } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./LineageRefusalScreen.css";
 
@@ -32,22 +39,6 @@ import "./LineageRefusalScreen.css";
 
 import { useOrgId } from "../lib/org";
 
-function useUrlState() {
-  const [params, setParams] = useState(() => new URLSearchParams(location.search));
-  const update = useCallback((patch: Record<string, string | null>) => {
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null || v === "") next.delete(k);
-        else next.set(k, v);
-      }
-      const query = next.toString();
-      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
-      return next;
-    });
-  }, []);
-  return [params, update] as const;
-}
 
 function RefusalRow({
   decision,
@@ -99,8 +90,6 @@ function RunEvidence({ runId, onClose }: { runId: string; onClose: () => void })
     return () => ac.abort();
   }, [runId]);
 
-  const permalink = `${location.origin}${location.pathname}?run=${runId}`;
-
   return (
     <aside className="evp" aria-label={`Decisions for run ${runId}`}>
       <header className="evp__head">
@@ -130,12 +119,14 @@ function RunEvidence({ runId, onClose }: { runId: string; onClose: () => void })
         )}
       </div>
       <footer className="evp__foot">
-        <button
-          className="btn btn--quiet"
-          onClick={() => void navigator.clipboard?.writeText(permalink)}
-        >
-          Copy permalink
-        </button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/refusals`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{ screen: "refusals", params: { run: runId } }}
+          label="Copy permalink"
+        />
       </footer>
     </aside>
   );

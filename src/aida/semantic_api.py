@@ -35,6 +35,20 @@ from aida.description_withdrawal import (
 )
 from aida.document_ingestion import apply_document_claim, reject_document_claim
 from aida.events import record_audit, record_outbox
+from aida.governance_decision_contracts import (
+    DecisionOutcome,
+    GovernanceDecisionRefused,
+    TargetEffect,
+)
+from aida.governance_decision_service import (
+    TargetEffectAdapter,
+    decide_review,
+    delegation_details,
+    lock_reviews_for_decision,
+    record_decision_audit,
+    record_decision_outbox,
+    register_target_adapters,
+)
 from aida.governance_notifications import notify_safely
 from aida.metric_formula_signature import find_formula_collisions
 from aida.metric_suggestion_service import (
@@ -1445,6 +1459,1346 @@ async def get_governance_review_diff(
     return await compose_governance_review_diff(session, review)
 
 
+# ---------------------------------------------------------------------------
+# R02 (b): one adapter per governed object type.
+#
+# These were a single 921-line `if`/`elif` chain. Each is now its own named
+# rule, and each is reached only through
+# `governance_decision_service.decide_review` -- which has already checked
+# that this caller may decide the review at all, and has already *claimed* it
+# out of PENDING with a compare-and-set (F05). An adapter therefore never has
+# to ask whether the review is still pending, and never writes
+# `review.status` / `decided_by` / `decided_at` itself: it is handed an
+# already-decided review and applies only its own target's transition.
+#
+# An adapter raises `HTTPException` (409 for a target that is gone or has
+# moved on, 422 for a definition it cannot accept) exactly as before. The
+# caller's savepoint unwinds the claim along with it, so a refused target
+# leaves the review PENDING for somebody to decide again rather than
+# consuming its one decision.
+# ---------------------------------------------------------------------------
+
+
+async def _decide_semantic_model_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one semantic model version.
+
+    An APPROVE supersedes whatever version of the same project was
+    PUBLISHED and carries the whole metric set with it, so a project never
+    has two published models at once."""
+    model = await session.get(SemanticModelVersion, UUID(review.object_id))
+    if model is None or model.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        await session.execute(
+            update(SemanticModelVersion)
+            .where(
+                SemanticModelVersion.project_id == model.project_id,
+                SemanticModelVersion.status == "PUBLISHED",
+                SemanticModelVersion.id != model.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        model.status = "PUBLISHED"
+        model.approved_by = context.principal_id
+        model.approved_at = now
+        model.published_at = now
+        await session.execute(
+            update(SemanticMetricVersion)
+            .where(SemanticMetricVersion.semantic_model_version_id == model.id)
+            .values(status="PUBLISHED", updated_at=now)
+        )
+        event_type = "semantic_model.published.v1"
+    else:
+        model.status = "REJECTED"
+        await session.execute(
+            update(SemanticMetricVersion)
+            .where(SemanticMetricVersion.semantic_model_version_id == model.id)
+            .values(status="REJECTED", updated_at=now)
+        )
+        event_type = "semantic_model.rejected.v1"
+    aggregate_type = "semantic_model_version"
+    aggregate_id = str(model.id)
+    payload = {
+        "semantic_model_version_id": str(model.id),
+        "project_id": str(model.project_id),
+        "version": model.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_governed_tool_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish, deprecate or reject one governed tool version.
+
+    DEPRECATE acts only on a still-PUBLISHED version; a publish supersedes
+    the tool's previous PUBLISHED version, so exactly one version of a tool
+    is callable at a time."""
+    tool_version = await session.get(GovernedToolVersion, UUID(review.object_id))
+    if tool_version is None or tool_version.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if review.requested_action == "DEPRECATE":
+        if tool_version.status != "PUBLISHED":
+            raise HTTPException(status_code=409, detail="tool is no longer published")
+        if decision == "APPROVE":
+            tool_version.status = "DEPRECATED"
+            event_type = "tool.version.deprecated.v1"
+        else:
+            event_type = "tool.version.deprecation_rejected.v1"
+    elif decision == "APPROVE":
+        await session.execute(
+            update(GovernedToolVersion)
+            .where(
+                GovernedToolVersion.tool_id == tool_version.tool_id,
+                GovernedToolVersion.status == "PUBLISHED",
+                GovernedToolVersion.id != tool_version.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        tool_version.status = "PUBLISHED"
+        tool_version.approved_by = context.principal_id
+        tool_version.approved_at = now
+        event_type = "tool.version.published.v1"
+    else:
+        tool_version.status = "REJECTED"
+        event_type = "tool.version.rejected.v1"
+    aggregate_type = "governed_tool_version"
+    aggregate_id = str(tool_version.id)
+    payload = {
+        "tool_version_id": str(tool_version.id),
+        "tool_id": str(tool_version.tool_id),
+        "version": tool_version.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_model_route_configuration(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Approve or reject one model route configuration.
+
+    Only a route still PENDING_REVIEW is decidable, and an approval
+    supersedes the route key's previous APPROVED configuration -- one live
+    route per key."""
+    route = await session.get(ModelRouteConfiguration, UUID(review.object_id))
+    if route is None or route.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if route.status != "PENDING_REVIEW":
+        raise HTTPException(status_code=409, detail="model route is no longer pending review")
+    if decision == "APPROVE":
+        await session.execute(
+            update(ModelRouteConfiguration)
+            .where(
+                ModelRouteConfiguration.organization_id == route.organization_id,
+                ModelRouteConfiguration.route_key == route.route_key,
+                ModelRouteConfiguration.status == "APPROVED",
+                ModelRouteConfiguration.id != route.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        route.status = "APPROVED"
+        route.approved_by = context.principal_id
+        route.approved_at = now
+        event_type = "model_route.approved.v1"
+    else:
+        route.status = "REJECTED"
+        event_type = "model_route.rejected.v1"
+    aggregate_type = "model_route_configuration"
+    aggregate_id = str(route.id)
+    payload = {
+        "model_route_id": str(route.id),
+        "route_key": route.route_key,
+        "version": route.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_context_product_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish, deprecate or reject one context product version.
+
+    AT-7(a): the version being replaced enters SUPPORTED for its own
+    support window rather than jumping straight to SUPERSEDED, so a
+    version-pinned consumer keeps reading while discovery already shows
+    the new one."""
+    product_version = await session.get(ContextProductVersion, UUID(review.object_id))
+    if product_version is None or product_version.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if review.requested_action == "DEPRECATE":
+        # AT-7(a): explicit early retirement -- a steward can retire a
+        # still-current PUBLISHED version, or cut a SUPPORTED version's
+        # support window short, rather than waiting it out.
+        if product_version.status not in ("PUBLISHED", "SUPPORTED"):
+            raise HTTPException(status_code=409, detail="context product is no longer published")
+        if decision == "APPROVE":
+            product_version.status = "DEPRECATED"
+            event_type = "context.product_deprecated.v1"
+        else:
+            event_type = "context.product_deprecation_rejected.v1"
+    elif product_version.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="context product is no longer pending")
+    elif decision == "APPROVE":
+        # AT-7(a)/AT-D1: the version being replaced does not jump straight
+        # to fully-hidden SUPERSEDED in this same transaction -- it enters
+        # SUPPORTED for its own configured support window (that version's
+        # own `support_window_days`; `None` means supported until someone
+        # explicitly retires it), during which a version-pinned consumer
+        # can still read it. Discovery/`tools_list` keeps surfacing only
+        # the new PUBLISHED version as current -- unchanged, since those
+        # paths already filter to status == "PUBLISHED" only.
+        prior_support_window_days = await session.scalar(
+            select(ContextProductVersion.support_window_days).where(
+                ContextProductVersion.product_id == product_version.product_id,
+                ContextProductVersion.status == "PUBLISHED",
+                ContextProductVersion.id != product_version.id,
+            )
+        )
+        support_window_ends_at = (
+            None
+            if prior_support_window_days is None
+            else now + timedelta(days=prior_support_window_days)
+        )
+        await session.execute(
+            update(ContextProductVersion)
+            .where(
+                ContextProductVersion.product_id == product_version.product_id,
+                ContextProductVersion.status == "PUBLISHED",
+                ContextProductVersion.id != product_version.id,
+            )
+            .values(
+                status="SUPPORTED",
+                updated_at=now,
+                superseded_at=now,
+                superseded_by_version_id=product_version.id,
+                support_window_ends_at=support_window_ends_at,
+            )
+        )
+        product_version.status = "PUBLISHED"
+        product_version.approved_by = context.principal_id
+        product_version.approved_at = now
+        product_version.published_at = now
+        event_type = "context.product_published.v1"
+    else:
+        product_version.status = "REJECTED"
+        event_type = "context.product_rejected.v1"
+    aggregate_type = "context_product_version"
+    aggregate_id = str(product_version.id)
+    payload = {
+        "context_product_version_id": str(product_version.id),
+        "context_product_id": str(product_version.product_id),
+        "version": product_version.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_data_product_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish, retire or reject one data product version.
+
+    RETIRE acts only on a PUBLISHED version and takes the product's
+    lifecycle with it; a publish supersedes the product's previous
+    PUBLISHED version and marks the product ACTIVE."""
+    data_product_version = await session.get(DataProductVersion, UUID(review.object_id))
+    if (
+        data_product_version is None
+        or data_product_version.organization_id != review.organization_id
+    ):
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    data_product = await session.get(DataProduct, data_product_version.product_id)
+    if data_product is None:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if review.requested_action == "RETIRE":
+        if data_product_version.status != "PUBLISHED":
+            raise HTTPException(status_code=409, detail="data product is no longer published")
+        if decision == "APPROVE":
+            data_product_version.status = "RETIRED"
+            data_product.lifecycle_status = "RETIRED"
+            event_type = "data_product.retired.v1"
+        else:
+            event_type = "data_product.retirement_rejected.v1"
+    elif data_product_version.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="data product is no longer pending")
+    elif decision == "APPROVE":
+        await session.execute(
+            update(DataProductVersion)
+            .where(
+                DataProductVersion.product_id == data_product_version.product_id,
+                DataProductVersion.status == "PUBLISHED",
+                DataProductVersion.id != data_product_version.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        data_product_version.status = "PUBLISHED"
+        data_product_version.approved_by = context.principal_id
+        data_product_version.approved_at = now
+        data_product_version.published_at = now
+        data_product.lifecycle_status = "ACTIVE"
+        event_type = "data_product.published.v1"
+    else:
+        data_product_version.status = "REJECTED"
+        event_type = "data_product.rejected.v1"
+    aggregate_type = "data_product_version"
+    aggregate_id = str(data_product_version.id)
+    payload = {
+        "data_product_version_id": str(data_product_version.id),
+        "data_product_id": str(data_product.id),
+        "version": data_product_version.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_data_contract_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one data contract version.
+
+    A breaking change publishes under its own event type
+    (`data_contract.breaking_exception_approved.v1`) so an exception is
+    never indistinguishable from an ordinary publish in the event log."""
+    contract_version = await session.get(DataContractVersion, UUID(review.object_id))
+    if contract_version is None or contract_version.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if contract_version.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="data contract is no longer pending")
+    if decision == "APPROVE":
+        await session.execute(
+            update(DataContractVersion)
+            .where(
+                DataContractVersion.product_id == contract_version.product_id,
+                DataContractVersion.status == "PUBLISHED",
+                DataContractVersion.id != contract_version.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        contract_version.status = "PUBLISHED"
+        contract_version.approved_by = context.principal_id
+        contract_version.approved_at = now
+        contract_version.published_at = now
+        event_type = (
+            "data_contract.breaking_exception_approved.v1"
+            if review.requested_action == "PUBLISH_BREAKING_EXCEPTION"
+            else "data_contract.published.v1"
+        )
+    else:
+        contract_version.status = "REJECTED"
+        event_type = "data_contract.rejected.v1"
+    aggregate_type = "data_contract_version"
+    aggregate_id = str(contract_version.id)
+    payload = {
+        "data_contract_version_id": str(contract_version.id),
+        "data_product_id": str(contract_version.product_id),
+        "version": contract_version.version,
+        "compatibility_status": contract_version.compatibility_status,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_data_product_access_request(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Grant or refuse one data product access request.
+
+    The grant itself (expiry included) is `product_marketplace_api`'s
+    `approve_access_request`; this adapter only decides and translates its
+    refusals into the 409 the review queue reports."""
+    access_request = await session.get(DataProductAccessRequest, UUID(review.object_id))
+    if access_request is None or access_request.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    try:
+        approve_access_request(
+            access_request,
+            reviewer=context.principal_id,
+            reason=reason,
+            approved=decision == "APPROVE",
+            now=now,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    event_type = (
+        "data_product.access_granted.v1"
+        if decision == "APPROVE"
+        else "data_product.access_rejected.v1"
+    )
+    aggregate_type = "data_product_access_request"
+    aggregate_id = str(access_request.id)
+    payload = {
+        "access_request_id": str(access_request.id),
+        "data_product_version_id": str(access_request.data_product_version_id),
+        "expires_at": access_request.expires_at.isoformat()
+        if access_request.expires_at is not None
+        else None,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_ai_asset(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Retire, or refuse to retire, one AI asset.
+
+    Only an ACTIVE asset is retirable, and retiring it retires every
+    APPROVED version with it rather than leaving an approved version
+    hanging off a retired asset."""
+    ai_asset = await session.get(AiAsset, UUID(review.object_id))
+    if ai_asset is None or ai_asset.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if ai_asset.lifecycle_status != "ACTIVE":
+        raise HTTPException(status_code=409, detail="AI asset is no longer active")
+    if decision == "APPROVE":
+        ai_asset.lifecycle_status = "RETIRED"
+        await session.execute(
+            update(AiAssetVersion)
+            .where(
+                AiAssetVersion.asset_id == ai_asset.id,
+                AiAssetVersion.status == "APPROVED",
+            )
+            .values(status="RETIRED", updated_at=now)
+        )
+        event_type = "ai_registry.asset_retired.v1"
+    else:
+        event_type = "ai_registry.asset_retirement_rejected.v1"
+    aggregate_type = "ai_asset"
+    aggregate_id = str(ai_asset.id)
+    payload = {
+        "ai_asset_id": str(ai_asset.id),
+        "asset_kind": ai_asset.asset_kind,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_ai_asset_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Approve or reject one AI asset version.
+
+    N15: an AGENT-kind version may not reach APPROVED unless its
+    evaluation gate recomputes to PASS here and now -- stored evidence is
+    never taken on trust -- and the passing result is recorded alongside
+    the approval it justified."""
+    ai_version = await session.get(AiAssetVersion, UUID(review.object_id))
+    if ai_version is None or ai_version.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    ai_asset = await session.get(AiAsset, ai_version.asset_id)
+    if ai_asset is None or ai_version.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="AI asset is no longer pending")
+    eval_gate_verdict: str | None = None
+    if decision == "APPROVE":
+        # N15: an AGENT-kind AiAssetVersion may not move to APPROVED
+        # (its published/production state) unless its evaluation gate
+        # currently shows PASS -- see aida.agent_eval_gate's module
+        # docstring for the full design and the honest org-wide scoping
+        # this reuses from UX-19. Runs live, on every APPROVE decision
+        # (single or bulk -- both paths call this function), so a stale
+        # or manufactured evidence blob can never let a publish through:
+        # the CONFIRMED_RUN half is always recomputed fresh here from the
+        # organization's real, current confirmed-run corpus.
+        if ai_asset.asset_kind == "AGENT":
+            gate_result = await compute_agent_eval_gate(
+                session,
+                organization_id=ai_version.organization_id,
+                extra_verdicts=stored_steward_verdicts(ai_version),
+                threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+            )
+            eval_gate_verdict = gate_result.verdict
+            if gate_result.verdict != "PASS":
+                # Deliberately *not* persisted here: a raise this deep
+                # in `_apply_governance_review_decision` unwinds without
+                # a commit in the single-decision path, and rolls back
+                # inside a SAVEPOINT in the bulk path (see
+                # `bulk_decide_governance_reviews`'s own docstring) --
+                # exactly like every other precondition failure already
+                # raised elsewhere in this function. The blocked-attempt
+                # reason is still fully evidenced in this exception's own
+                # detail (verdict, pass rate, named failing exemplars);
+                # `GET .../eval-gate` recomputes the identical live result
+                # for a steward to inspect before retrying, with no
+                # side effect and nothing lost by not persisting a
+                # rolled-back write.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "agent evaluation gate did not pass "
+                        f"({gate_result.verdict}): {gate_result.reason}"
+                    ),
+                )
+            # Only a PASS survives to the final commit -- recorded here,
+            # right alongside the approval it justified, into the exact
+            # `evaluation_evidence` field `ai_registry.
+            # compute_ai_trust_score` already reads, via the existing
+            # `record_audit` trail (never a parallel one).
+            record_agent_eval_gate_evidence(
+                session,
+                ai_version,
+                gate_result,
+                context=replace(context, organization_id=ai_version.organization_id),
+                stage="PUBLISH",
+            )
+        await session.execute(
+            update(AiAssetVersion)
+            .where(
+                AiAssetVersion.asset_id == ai_version.asset_id,
+                AiAssetVersion.status == "APPROVED",
+                AiAssetVersion.id != ai_version.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        ai_version.status = "APPROVED"
+        ai_version.approved_by = context.principal_id
+        ai_version.approved_at = now
+        event_type = "ai_registry.asset_approved.v1"
+    else:
+        ai_version.status = "REJECTED"
+        event_type = "ai_registry.asset_rejected.v1"
+    aggregate_type = "ai_asset_version"
+    aggregate_id = str(ai_version.id)
+    payload = {
+        "ai_asset_version_id": str(ai_version.id),
+        "ai_asset_id": str(ai_asset.id),
+        "asset_kind": ai_asset.asset_kind,
+        "version": ai_version.version,
+        "review_id": str(review.id),
+        "eval_gate_verdict": eval_gate_verdict,
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_agent_contract_request(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Activate or reject one agent contract request.
+
+    AG-10: the same live evaluation gate as AI_ASSET_VERSION, then the
+    stored definition is re-parsed and re-validated before it becomes an
+    `AgentContract`. A malformed or self-supervised definition fails the
+    decision rather than landing a half-built contract."""
+    request = await session.get(AgentContractRequest, UUID(review.object_id))
+    if request is None or request.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if request.status != "PENDING":
+        raise HTTPException(status_code=409, detail="agent contract request is no longer pending")
+    contract_eval_gate_verdict: str | None = None
+    if decision == "APPROVE":
+        # AG-10 extension: see `agent_contract_request_api`'s module
+        # docstring. Mirrors the AI_ASSET_VERSION branch above verbatim --
+        # same gate, same "raise rather than land in a half-decided
+        # state" rule, computed live so a stale pass can never carry a
+        # request through.
+        request_ai_version = await session.get(AiAssetVersion, request.ai_asset_version_id)
+        if (
+            request_ai_version is None
+            or request_ai_version.organization_id != review.organization_id
+        ):
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        gate_result = await compute_agent_eval_gate(
+            session,
+            organization_id=review.organization_id,
+            extra_verdicts=stored_steward_verdicts(request_ai_version),
+            threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+        )
+        contract_eval_gate_verdict = gate_result.verdict
+        if gate_result.verdict != "PASS":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "agent evaluation gate did not pass "
+                    f"({gate_result.verdict}): {gate_result.reason}"
+                ),
+            )
+        record_agent_eval_gate_evidence(
+            session,
+            request_ai_version,
+            gate_result,
+            context=replace(context, organization_id=review.organization_id),
+            stage="PUBLISH",
+        )
+        try:
+            definition = definition_from_json(request.definition)
+            validate_contract_definition(
+                definition,
+                actor_principal_id=context.principal_id,
+                human_principal_ids=frozenset({request.requested_by}),
+            )
+        except AgentContractValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.code) from exc
+        contract = await session.scalar(
+            select(AgentContract).where(
+                AgentContract.organization_id == review.organization_id,
+                AgentContract.ai_asset_version_id == request.ai_asset_version_id,
+            )
+        )
+        if contract is None:
+            contract = AgentContract(
+                organization_id=review.organization_id,
+                ai_asset_version_id=request.ai_asset_version_id,
+                created_by=request.requested_by,
+                kill_engaged=False,
+            )
+            session.add(contract)
+        contract.agent_principal_id = definition.agent_principal_id.strip()
+        contract.capability_envelope = definition.capability_envelope.as_json()
+        contract.autonomy_tier = definition.autonomy_tier
+        contract.supervisor_persona = definition.supervisor_persona
+        contract.kill_scope = definition.kill_scope
+        contract.sampling_rate = definition.sampling_rate
+        contract.daily_token_cap = definition.daily_token_cap
+        contract.per_run_token_cap = definition.per_run_token_cap
+        contract.wall_clock_seconds_cap = definition.wall_clock_seconds_cap
+        contract.eval_gate_threshold = definition.eval_gate_threshold
+        request.status = "ACTIVATED"
+        request.activated_at = now
+        request.eval_gate_verdict = contract_eval_gate_verdict
+        event_type = "agent_contract_request.activated.v1"
+    else:
+        request.status = "REJECTED"
+        event_type = "agent_contract_request.rejected.v1"
+    aggregate_type = "agent_contract_request"
+    aggregate_id = str(request.id)
+    payload = {
+        "agent_contract_request_id": str(request.id),
+        "ai_asset_version_id": str(request.ai_asset_version_id),
+        "review_id": str(review.id),
+        "eval_gate_verdict": contract_eval_gate_verdict,
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_metadata_enrichment_proposal(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Approve or reject one business-semantics proposal.
+
+    The reviewer's identity and rationale are recorded on the proposal
+    itself either way, so a rejection is as attributable as an approval."""
+    proposal = await session.get(MetadataEnrichmentProposal, UUID(review.object_id))
+    if proposal is None or proposal.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if proposal.status != "PENDING_REVIEW":
+        raise HTTPException(status_code=409, detail="business semantics are no longer pending")
+    proposal.reviewed_by = context.principal_id
+    proposal.review_reason = reason
+    proposal.reviewed_at = now
+    if decision == "APPROVE":
+        annotation = await apply_enrichment_proposal(
+            session,
+            proposal=proposal,
+            reviewer=context.principal_id,
+            approved_at=now,
+        )
+        await session.flush()
+        event_type = "business_semantics.approved.v1"
+        annotation_id = str(annotation.id)
+    else:
+        proposal.status = "REJECTED"
+        event_type = "business_semantics.rejected.v1"
+        annotation_id = None
+    aggregate_type = "metadata_enrichment_proposal"
+    aggregate_id = str(proposal.id)
+    payload = {
+        "proposal_id": str(proposal.id),
+        "table_id": str(proposal.table_id),
+        "annotation_id": annotation_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_glossary_term_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Approve or reject one glossary term version.
+
+    An approval supersedes the term's previous APPROVED version, so a term
+    has exactly one current definition."""
+    term_version = await session.get(GlossaryTermVersion, UUID(review.object_id))
+    if term_version is None or term_version.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if term_version.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="glossary term is no longer pending")
+    if decision == "APPROVE":
+        await session.execute(
+            update(GlossaryTermVersion)
+            .where(
+                GlossaryTermVersion.term_id == term_version.term_id,
+                GlossaryTermVersion.status == "APPROVED",
+                GlossaryTermVersion.id != term_version.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        term_version.status = "APPROVED"
+        term_version.approved_by = context.principal_id
+        term_version.approved_at = now
+        event_type = "glossary.term.approved.v1"
+    else:
+        term_version.status = "REJECTED"
+        event_type = "glossary.term.rejected.v1"
+    aggregate_type = "glossary_term_version"
+    aggregate_id = str(term_version.id)
+    payload = {
+        "term_version_id": str(term_version.id),
+        "term_id": str(term_version.term_id),
+        "version": term_version.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_asset_documentation_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Approve or reject one asset documentation version.
+
+    An approval supersedes the previous APPROVED version of the same
+    documentation lineage."""
+    documentation_version = await session.get(AssetDocumentationVersion, UUID(review.object_id))
+    if (
+        documentation_version is None
+        or documentation_version.organization_id != review.organization_id
+    ):
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if documentation_version.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="asset documentation is no longer pending")
+    if decision == "APPROVE":
+        await session.execute(
+            update(AssetDocumentationVersion)
+            .where(
+                AssetDocumentationVersion.documentation_id
+                == documentation_version.documentation_id,
+                AssetDocumentationVersion.status == "APPROVED",
+                AssetDocumentationVersion.id != documentation_version.id,
+            )
+            .values(status="SUPERSEDED", updated_at=now)
+        )
+        documentation_version.status = "APPROVED"
+        documentation_version.approved_by = context.principal_id
+        documentation_version.approved_at = now
+        event_type = "asset.documentation.approved.v1"
+    else:
+        documentation_version.status = "REJECTED"
+        event_type = "asset.documentation.rejected.v1"
+    aggregate_type = "asset_documentation_version"
+    aggregate_id = str(documentation_version.id)
+    payload = {
+        "documentation_version_id": str(documentation_version.id),
+        "documentation_id": str(documentation_version.documentation_id),
+        "version": documentation_version.version,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_bulk_stewardship_operation(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Apply or reject one bulk stewardship operation.
+
+    The apply is `stewardship_service.apply_bulk_operation`, which reports
+    how many subjects it actually changed -- the payload carries both the
+    proposed and the applied count, so a partially-applicable batch is
+    visible rather than rounded up to success."""
+    operation = await session.get(BulkStewardshipOperation, UUID(review.object_id))
+    if operation is None or operation.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if operation.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="bulk operation is no longer pending")
+    if decision == "APPROVE":
+        event_type, applied_count = await apply_bulk_operation(
+            session,
+            operation,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    else:
+        operation.status = "REJECTED"
+        applied_count = 0
+        event_type = "stewardship.bulk_operation_rejected.v1"
+    aggregate_type = "bulk_stewardship_operation"
+    aggregate_id = str(operation.id)
+    payload = {
+        "operation_id": str(operation.id),
+        "operation_type": operation.operation_type,
+        "subject_count": len(operation.subject_ids),
+        "applied_count": applied_count,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_glossary_conflict(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Resolve or refuse one glossary conflict.
+
+    Both directions go through `stewardship_service`, which owns what
+    "resolved" means for each conflict type."""
+    conflict = await session.get(GlossaryConflict, UUID(review.object_id))
+    if conflict is None or conflict.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        event_type = await apply_conflict_resolution(
+            conflict,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    else:
+        event_type = await reject_conflict_resolution(conflict)
+    aggregate_type = "glossary_conflict"
+    aggregate_id = str(conflict.id)
+    payload = {
+        "conflict_id": str(conflict.id),
+        "resolution": conflict.proposed_resolution,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_glossary_link_proposal(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Accept or reject one proposed glossary-to-table link."""
+    link_proposal = await session.get(GlossaryLinkProposal, UUID(review.object_id))
+    if link_proposal is None or link_proposal.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        event_type = await apply_link_proposal(
+            session,
+            link_proposal,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    else:
+        event_type = await reject_link_proposal(
+            link_proposal,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    aggregate_type = "glossary_link_proposal"
+    aggregate_id = str(link_proposal.id)
+    payload = {
+        "proposal_id": str(link_proposal.id),
+        "table_id": str(link_proposal.table_id),
+        "term_id": str(link_proposal.term_id),
+        "confidence": link_proposal.confidence,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_term_semantic_binding(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Activate or reject one term-to-semantic-object binding.
+
+    Only a binding still PENDING_APPROVAL is decidable."""
+    binding = await session.get(TermSemanticBinding, UUID(review.object_id))
+    if binding is None or binding.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if binding.status != "PENDING_APPROVAL":
+        raise HTTPException(status_code=409, detail="binding is no longer pending review")
+    if decision == "APPROVE":
+        binding.status = "ACTIVE"
+        binding.approved_by = context.principal_id
+        binding.approved_at = now
+        event_type = "semantic.term_binding_approved.v1"
+    else:
+        binding.status = "REJECTED"
+        event_type = "semantic.term_binding_rejected.v1"
+    aggregate_type = "term_semantic_binding"
+    aggregate_id = str(binding.id)
+    payload = {
+        "binding_id": str(binding.id),
+        "term_id": str(binding.term_id),
+        "semantic_object_type": binding.semantic_object_type,
+        "semantic_object_id": str(binding.semantic_object_id),
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_cross_boundary_grant(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Activate or reject one cross-boundary grant.
+
+    Only a grant still PENDING_APPROVAL is decidable. This is the point at
+    which a domain boundary is actually crossed, so it never happens
+    without an independent decision."""
+    grant = await session.get(CrossBoundaryGrant, UUID(review.object_id))
+    if grant is None or grant.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if grant.status != "PENDING_APPROVAL":
+        raise HTTPException(status_code=409, detail="cross-boundary grant is no longer pending")
+    if decision == "APPROVE":
+        grant.status = "ACTIVE"
+        grant.approved_by = context.principal_id
+        grant.approved_at = now
+        event_type = "cross_boundary_grant.approved.v1"
+    else:
+        grant.status = "REJECTED"
+        event_type = "cross_boundary_grant.rejected.v1"
+    aggregate_type = "cross_boundary_grant"
+    aggregate_id = str(grant.id)
+    payload = {
+        "cross_boundary_grant_id": str(grant.id),
+        "source_data_domain_id": str(grant.source_data_domain_id),
+        "target_data_domain_id": str(grant.target_data_domain_id),
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_asset_description_draft(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one drafted asset description.
+
+    GL-9: the sole call site of `apply_asset_description_draft`. On top of
+    the shared maker != checker rule, anyone recorded as having *edited*
+    the draft is refused as its approver -- editing is authorship."""
+    draft = await session.get(AssetDescriptionDraft, UUID(review.object_id))
+    if draft is None or draft.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        if (
+            context.principal_id in (draft.evidence or {}).get("editors", [])
+            or (draft.evidence or {}).get("edited_by") == context.principal_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="A description editor cannot approve their own edits"
+            )
+        # GL-9: this is the only call site that publishes a drafted
+        # description onto the asset, and it only runs after the
+        # maker-checker guard above (status PENDING, independent
+        # reviewer) has already passed — no evidence score, however
+        # high, reaches this line without an independent decision.
+        event_type, published_version = await apply_asset_description_draft(
+            session,
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_version_id: str | None = str(published_version.id)
+    else:
+        event_type = await reject_asset_description_draft(
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_version_id = None
+    aggregate_type = "asset_description_draft"
+    aggregate_id = str(draft.id)
+    payload = {
+        "draft_id": str(draft.id),
+        "table_id": str(draft.table_id),
+        "overall_score": draft.overall_score,
+        "published_version_id": published_version_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_document_claim(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one document-derived description claim.
+
+    Publishes into the store for the claim's subject (column or table).
+    This is the only write path for column descriptions, which is why no
+    direct-authoring endpoint for them exists."""
+    claim = await session.get(DocumentClaim, UUID(review.object_id))
+    if claim is None or claim.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        # Publishes into the description store for the claim's subject --
+        # `ColumnDocumentationVersion` for a COLUMN claim,
+        # `AssetDocumentationVersion` for a TABLE one. Reached only after
+        # this endpoint's shared maker-checker guard above, which is the
+        # sole reason a direct-write authoring endpoint for column
+        # descriptions deliberately does not exist.
+        event_type, claim_version_id = await apply_document_claim(
+            session, claim, reviewer=context.principal_id, now=now
+        )
+    else:
+        event_type = await reject_document_claim(claim, reviewer=context.principal_id, now=now)
+        claim_version_id = None
+    aggregate_type = "document_claim"
+    aggregate_id = str(claim.id)
+    payload = {
+        "claim_id": str(claim.id),
+        "document_section_id": str(claim.document_section_id),
+        "subject_type": claim.subject_type,
+        "subject_id": claim.subject_id,
+        "published_version_id": str(claim_version_id) if claim_version_id else None,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_description_withdrawal(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Withdraw or reinstate one published description, or refuse to.
+
+    A withdrawal keeps the text so a run grounded on it stays replayable;
+    a reinstatement republishes as a new version rather than reviving the
+    old row, so the retirement stays in the chain."""
+    withdrawal = await session.get(DescriptionWithdrawal, UUID(review.object_id))
+    if withdrawal is None or withdrawal.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        # WITHDRAW moves the version to WITHDRAWN, keeping its text so a
+        # run grounded on it stays replayable. REINSTATE republishes that
+        # text as a *new* version rather than flipping the old row back,
+        # so the chain goes on recording that it was retired. Either way
+        # the flag is False when the asset moved on in between: the
+        # reviewer decided about text that is no longer current.
+        event_type, retired = await apply_description_withdrawal(
+            session, withdrawal, reviewer=context.principal_id, now=now
+        )
+    else:
+        event_type = await reject_description_withdrawal(
+            withdrawal, reviewer=context.principal_id, now=now
+        )
+        retired = False
+    aggregate_type = "description_withdrawal"
+    aggregate_id = str(withdrawal.id)
+    payload = {
+        "withdrawal_id": str(withdrawal.id),
+        "request_type": withdrawal.request_type,
+        "subject_type": withdrawal.subject_type,
+        "subject_id": withdrawal.subject_id,
+        "version_id": str(withdrawal.version_id),
+        # False when the asset moved on between the request and this
+        # decision, in which case nothing was touched.
+        "applied": retired,
+        "retired": retired,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_model_import_batch(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Apply or reject one workbook import batch.
+
+    A bulk edit publishes through the same helpers a single-asset approval
+    uses; a change superseded since the workbook was exported is skipped,
+    so `applied_count` can be lower than `change_count`."""
+    batch = await session.get(ModelImportBatch, UUID(review.object_id))
+    if batch is None or batch.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        # Publishes through the same `publish_*` helpers a single-asset
+        # approval uses -- a bulk edit gets no shortcut past them. A change
+        # superseded since the workbook was exported is skipped rather than
+        # applied, so `applied` can be lower than the batch proposed.
+        event_type, applied = await apply_model_import_batch(
+            session, batch, reviewer=context.principal_id, now=now
+        )
+    else:
+        event_type = await reject_model_import_batch(
+            session, batch, reviewer=context.principal_id, now=now
+        )
+        applied = 0
+    aggregate_type = "model_import_batch"
+    aggregate_id = str(batch.id)
+    payload = {
+        "batch_id": str(batch.id),
+        "datasource_id": str(batch.datasource_id),
+        "filename": batch.filename,
+        "content_sha256": batch.content_sha256,
+        "change_count": batch.change_count,
+        "applied_count": applied,
+        "skipped_count": batch.skipped_count,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_semantic_metric_proposal(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one proposed semantic metric.
+
+    SM-4: the sole call site of `apply_metric_suggestion_proposal`; no
+    confidence score reaches a published metric without an independent
+    decision."""
+    metric_proposal = await session.get(SemanticMetricProposal, UUID(review.object_id))
+    if metric_proposal is None or metric_proposal.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    if decision == "APPROVE":
+        # SM-4: this is the only call site that publishes a proposed
+        # metric definition, and it only runs after the maker-checker
+        # guard above (status PENDING, independent reviewer) has
+        # already passed -- no evidence score, however high, reaches
+        # this line without an independent decision.
+        event_type, published_metric_version = await apply_metric_suggestion_proposal(
+            session,
+            metric_proposal,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_metric_version_id: str | None = str(published_metric_version.id)
+    else:
+        event_type = await reject_metric_suggestion_proposal(
+            metric_proposal,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_metric_version_id = None
+    aggregate_type = "semantic_metric_proposal"
+    aggregate_id = str(metric_proposal.id)
+    payload = {
+        "proposal_id": str(metric_proposal.id),
+        "table_id": str(metric_proposal.table_id),
+        "measure_column_id": str(metric_proposal.measure_column_id),
+        "overall_score": metric_proposal.overall_score,
+        "published_metric_version_id": published_metric_version_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_column_classification_promotion(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Promote, or refuse to promote, a derived column classification.
+
+    AT-11: `apply_classification_promotion` re-checks the raise-only guard
+    and appends the derived provenance as ClassificationEvidence, so an
+    asserted value always carries the chain it came from."""
+    # AT-11: promoting a lineage-derived classification to the asserted
+    # (policy-enforced) value. The apply function re-checks the raise-only
+    # guard and appends the derived provenance as ClassificationEvidence;
+    # the maker != checker / PENDING-only guards above already ran, so no
+    # derived value reaches assertion without an independent decision.
+    event_type, aggregate_type, aggregate_id, payload = await apply_classification_promotion(
+        session, review, decision=decision, context=context, now=now
+    )
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+async def _decide_query_history_metric_candidate(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one metric candidate mined from query history.
+
+    Group K / AT-12: structure mined from value-free query logs becomes a
+    real, published SemanticMetric only under an independent APPROVE."""
+    # Group K / AT-12: a metric candidate mined from value-free query-log
+    # structure becomes a real, published SemanticMetric only under an
+    # independent APPROVE -- see
+    # `query_history_miner.apply_query_history_metric_candidate_decision`.
+    (
+        event_type,
+        aggregate_type,
+        aggregate_id,
+        payload,
+    ) = await apply_query_history_metric_candidate_decision(
+        session, review, decision=decision, context=context, now=now
+    )
+    return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
+
+
+#: The registry `governance_decision_service` dispatches through. It is
+#: registered *into* the service (a router -> service edge) rather than
+#: imported by it, so the service acquires no router dependency and the
+#: `semantic_api -> agent_contract_request_api -> agent_contract_api ->
+#: reviewer_agent -> semantic_api` cycle the review recorded (R03) cannot
+#: re-form through the automation path.
+_TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
+    "SEMANTIC_MODEL_VERSION": _decide_semantic_model_version,
+    "GOVERNED_TOOL_VERSION": _decide_governed_tool_version,
+    "MODEL_ROUTE_CONFIGURATION": _decide_model_route_configuration,
+    "CONTEXT_PRODUCT_VERSION": _decide_context_product_version,
+    "DATA_PRODUCT_VERSION": _decide_data_product_version,
+    "DATA_CONTRACT_VERSION": _decide_data_contract_version,
+    "DATA_PRODUCT_ACCESS_REQUEST": _decide_data_product_access_request,
+    "AI_ASSET": _decide_ai_asset,
+    "AI_ASSET_VERSION": _decide_ai_asset_version,
+    "AGENT_CONTRACT_REQUEST": _decide_agent_contract_request,
+    "METADATA_ENRICHMENT_PROPOSAL": _decide_metadata_enrichment_proposal,
+    "GLOSSARY_TERM_VERSION": _decide_glossary_term_version,
+    "ASSET_DOCUMENTATION_VERSION": _decide_asset_documentation_version,
+    "BULK_STEWARDSHIP_OPERATION": _decide_bulk_stewardship_operation,
+    "GLOSSARY_CONFLICT": _decide_glossary_conflict,
+    "GLOSSARY_LINK_PROPOSAL": _decide_glossary_link_proposal,
+    "TERM_SEMANTIC_BINDING": _decide_term_semantic_binding,
+    "CROSS_BOUNDARY_GRANT": _decide_cross_boundary_grant,
+    "ASSET_DESCRIPTION_DRAFT": _decide_asset_description_draft,
+    "DOCUMENT_CLAIM": _decide_document_claim,
+    "DESCRIPTION_WITHDRAWAL": _decide_description_withdrawal,
+    "MODEL_IMPORT_BATCH": _decide_model_import_batch,
+    "SEMANTIC_METRIC_PROPOSAL": _decide_semantic_metric_proposal,
+    "COLUMN_CLASSIFICATION_PROMOTION": _decide_column_classification_promotion,
+    "QUERY_HISTORY_METRIC_CANDIDATE": _decide_query_history_metric_candidate,
+}
+
+register_target_adapters(_TARGET_EFFECT_ADAPTERS)
+
+
 async def _apply_governance_review_decision(
     session: AsyncSession,
     review: GovernanceReview,
@@ -1454,923 +2808,73 @@ async def _apply_governance_review_decision(
     context: SecurityContext,
     now: datetime,
 ) -> tuple[str, str, str, dict[str, Any]]:
-    """Apply one governance decision's object-type-specific side effects.
+    """Claim one governance review and apply its object type's side effects.
 
-    This is the single core `decide_governance_review` (single item) and
-    `bulk_decide_governance_reviews` (PG-3) both call, so the two paths
-    cannot drift: every object type the unified review queue supports is
-    dispatched exactly once, here. Mutates `review` itself
-    (status/decided_by/decision_reason/decided_at) plus the target object,
-    and returns `(event_type, aggregate_type, aggregate_id, payload)` for the
-    caller to record as an outbox event. Raises `HTTPException` (409 for a
-    target no longer in a decidable state, 422 for an unsupported object
-    type) -- it does not catch or convert those; callers are responsible for
-    the maker != checker, PENDING-only, and organization-boundary
-    preconditions *before* calling this, and for deciding what a raised
-    exception means for their own path (abort the single decision, or fail
-    just this one item of a bulk batch).
+    Kept at this name and shape because three call sites already destructure
+    its `(event_type, aggregate_type, aggregate_id, payload)` result --
+    `decide_governance_review`, `bulk_decide_governance_reviews` and
+    `asset_description_api`'s sample review. What changed (F05) is what it
+    does *first*: instead of assigning `review.status` from whatever the
+    caller had read into memory, it delegates the whole transition to
+    `governance_decision_service.decide_review`, which claims the review out
+    of PENDING with a compare-and-set. Two checkers acting on the same review
+    therefore no longer both proceed -- the loser gets a 409 carrying the
+    review's refreshed state, and never reaches the adapter that would have
+    published, retired or granted anything.
+
+    Raises `HTTPException`: 403 for a cross-organization attempt, 409 for a
+    self-approval, a lost claim or an unusable target, 422 for an object type
+    no adapter claims. Every existing caller already treats an `HTTPException`
+    from here as "abort this decision" (single) or "fail just this item"
+    (bulk, sample review), so a lost claim is reported through the path each
+    of them already has rather than needing new handling.
     """
-    review.status = "APPROVED" if decision == "APPROVE" else "REJECTED"
-    review.decided_by = context.principal_id
-    review.decision_reason = reason
-    review.decided_at = now
-    if review.object_type == "SEMANTIC_MODEL_VERSION":
-        model = await session.get(SemanticModelVersion, UUID(review.object_id))
-        if model is None or model.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            await session.execute(
-                update(SemanticModelVersion)
-                .where(
-                    SemanticModelVersion.project_id == model.project_id,
-                    SemanticModelVersion.status == "PUBLISHED",
-                    SemanticModelVersion.id != model.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            model.status = "PUBLISHED"
-            model.approved_by = context.principal_id
-            model.approved_at = now
-            model.published_at = now
-            await session.execute(
-                update(SemanticMetricVersion)
-                .where(SemanticMetricVersion.semantic_model_version_id == model.id)
-                .values(status="PUBLISHED", updated_at=now)
-            )
-            event_type = "semantic_model.published.v1"
-        else:
-            model.status = "REJECTED"
-            await session.execute(
-                update(SemanticMetricVersion)
-                .where(SemanticMetricVersion.semantic_model_version_id == model.id)
-                .values(status="REJECTED", updated_at=now)
-            )
-            event_type = "semantic_model.rejected.v1"
-        aggregate_type = "semantic_model_version"
-        aggregate_id = str(model.id)
-        payload = {
-            "semantic_model_version_id": str(model.id),
-            "project_id": str(model.project_id),
-            "version": model.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "GOVERNED_TOOL_VERSION":
-        tool_version = await session.get(GovernedToolVersion, UUID(review.object_id))
-        if tool_version is None or tool_version.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if review.requested_action == "DEPRECATE":
-            if tool_version.status != "PUBLISHED":
-                raise HTTPException(status_code=409, detail="tool is no longer published")
-            if decision == "APPROVE":
-                tool_version.status = "DEPRECATED"
-                event_type = "tool.version.deprecated.v1"
-            else:
-                event_type = "tool.version.deprecation_rejected.v1"
-        elif decision == "APPROVE":
-            await session.execute(
-                update(GovernedToolVersion)
-                .where(
-                    GovernedToolVersion.tool_id == tool_version.tool_id,
-                    GovernedToolVersion.status == "PUBLISHED",
-                    GovernedToolVersion.id != tool_version.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            tool_version.status = "PUBLISHED"
-            tool_version.approved_by = context.principal_id
-            tool_version.approved_at = now
-            event_type = "tool.version.published.v1"
-        else:
-            tool_version.status = "REJECTED"
-            event_type = "tool.version.rejected.v1"
-        aggregate_type = "governed_tool_version"
-        aggregate_id = str(tool_version.id)
-        payload = {
-            "tool_version_id": str(tool_version.id),
-            "tool_id": str(tool_version.tool_id),
-            "version": tool_version.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "MODEL_ROUTE_CONFIGURATION":
-        route = await session.get(ModelRouteConfiguration, UUID(review.object_id))
-        if route is None or route.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if route.status != "PENDING_REVIEW":
-            raise HTTPException(status_code=409, detail="model route is no longer pending review")
-        if decision == "APPROVE":
-            await session.execute(
-                update(ModelRouteConfiguration)
-                .where(
-                    ModelRouteConfiguration.organization_id == route.organization_id,
-                    ModelRouteConfiguration.route_key == route.route_key,
-                    ModelRouteConfiguration.status == "APPROVED",
-                    ModelRouteConfiguration.id != route.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            route.status = "APPROVED"
-            route.approved_by = context.principal_id
-            route.approved_at = now
-            event_type = "model_route.approved.v1"
-        else:
-            route.status = "REJECTED"
-            event_type = "model_route.rejected.v1"
-        aggregate_type = "model_route_configuration"
-        aggregate_id = str(route.id)
-        payload = {
-            "model_route_id": str(route.id),
-            "route_key": route.route_key,
-            "version": route.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "CONTEXT_PRODUCT_VERSION":
-        product_version = await session.get(ContextProductVersion, UUID(review.object_id))
-        if product_version is None or product_version.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if review.requested_action == "DEPRECATE":
-            # AT-7(a): explicit early retirement -- a steward can retire a
-            # still-current PUBLISHED version, or cut a SUPPORTED version's
-            # support window short, rather than waiting it out.
-            if product_version.status not in ("PUBLISHED", "SUPPORTED"):
-                raise HTTPException(
-                    status_code=409, detail="context product is no longer published"
-                )
-            if decision == "APPROVE":
-                product_version.status = "DEPRECATED"
-                event_type = "context.product_deprecated.v1"
-            else:
-                event_type = "context.product_deprecation_rejected.v1"
-        elif product_version.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="context product is no longer pending")
-        elif decision == "APPROVE":
-            # AT-7(a)/AT-D1: the version being replaced does not jump straight
-            # to fully-hidden SUPERSEDED in this same transaction -- it enters
-            # SUPPORTED for its own configured support window (that version's
-            # own `support_window_days`; `None` means supported until someone
-            # explicitly retires it), during which a version-pinned consumer
-            # can still read it. Discovery/`tools_list` keeps surfacing only
-            # the new PUBLISHED version as current -- unchanged, since those
-            # paths already filter to status == "PUBLISHED" only.
-            prior_support_window_days = await session.scalar(
-                select(ContextProductVersion.support_window_days).where(
-                    ContextProductVersion.product_id == product_version.product_id,
-                    ContextProductVersion.status == "PUBLISHED",
-                    ContextProductVersion.id != product_version.id,
-                )
-            )
-            support_window_ends_at = (
-                None
-                if prior_support_window_days is None
-                else now + timedelta(days=prior_support_window_days)
-            )
-            await session.execute(
-                update(ContextProductVersion)
-                .where(
-                    ContextProductVersion.product_id == product_version.product_id,
-                    ContextProductVersion.status == "PUBLISHED",
-                    ContextProductVersion.id != product_version.id,
-                )
-                .values(
-                    status="SUPPORTED",
-                    updated_at=now,
-                    superseded_at=now,
-                    superseded_by_version_id=product_version.id,
-                    support_window_ends_at=support_window_ends_at,
-                )
-            )
-            product_version.status = "PUBLISHED"
-            product_version.approved_by = context.principal_id
-            product_version.approved_at = now
-            product_version.published_at = now
-            event_type = "context.product_published.v1"
-        else:
-            product_version.status = "REJECTED"
-            event_type = "context.product_rejected.v1"
-        aggregate_type = "context_product_version"
-        aggregate_id = str(product_version.id)
-        payload = {
-            "context_product_version_id": str(product_version.id),
-            "context_product_id": str(product_version.product_id),
-            "version": product_version.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "DATA_PRODUCT_VERSION":
-        data_product_version = await session.get(DataProductVersion, UUID(review.object_id))
-        if (
-            data_product_version is None
-            or data_product_version.organization_id != review.organization_id
-        ):
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        data_product = await session.get(DataProduct, data_product_version.product_id)
-        if data_product is None:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if review.requested_action == "RETIRE":
-            if data_product_version.status != "PUBLISHED":
-                raise HTTPException(status_code=409, detail="data product is no longer published")
-            if decision == "APPROVE":
-                data_product_version.status = "RETIRED"
-                data_product.lifecycle_status = "RETIRED"
-                event_type = "data_product.retired.v1"
-            else:
-                event_type = "data_product.retirement_rejected.v1"
-        elif data_product_version.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="data product is no longer pending")
-        elif decision == "APPROVE":
-            await session.execute(
-                update(DataProductVersion)
-                .where(
-                    DataProductVersion.product_id == data_product_version.product_id,
-                    DataProductVersion.status == "PUBLISHED",
-                    DataProductVersion.id != data_product_version.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            data_product_version.status = "PUBLISHED"
-            data_product_version.approved_by = context.principal_id
-            data_product_version.approved_at = now
-            data_product_version.published_at = now
-            data_product.lifecycle_status = "ACTIVE"
-            event_type = "data_product.published.v1"
-        else:
-            data_product_version.status = "REJECTED"
-            event_type = "data_product.rejected.v1"
-        aggregate_type = "data_product_version"
-        aggregate_id = str(data_product_version.id)
-        payload = {
-            "data_product_version_id": str(data_product_version.id),
-            "data_product_id": str(data_product.id),
-            "version": data_product_version.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "DATA_CONTRACT_VERSION":
-        contract_version = await session.get(DataContractVersion, UUID(review.object_id))
-        if contract_version is None or contract_version.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if contract_version.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="data contract is no longer pending")
-        if decision == "APPROVE":
-            await session.execute(
-                update(DataContractVersion)
-                .where(
-                    DataContractVersion.product_id == contract_version.product_id,
-                    DataContractVersion.status == "PUBLISHED",
-                    DataContractVersion.id != contract_version.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            contract_version.status = "PUBLISHED"
-            contract_version.approved_by = context.principal_id
-            contract_version.approved_at = now
-            contract_version.published_at = now
-            event_type = (
-                "data_contract.breaking_exception_approved.v1"
-                if review.requested_action == "PUBLISH_BREAKING_EXCEPTION"
-                else "data_contract.published.v1"
-            )
-        else:
-            contract_version.status = "REJECTED"
-            event_type = "data_contract.rejected.v1"
-        aggregate_type = "data_contract_version"
-        aggregate_id = str(contract_version.id)
-        payload = {
-            "data_contract_version_id": str(contract_version.id),
-            "data_product_id": str(contract_version.product_id),
-            "version": contract_version.version,
-            "compatibility_status": contract_version.compatibility_status,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "DATA_PRODUCT_ACCESS_REQUEST":
-        access_request = await session.get(DataProductAccessRequest, UUID(review.object_id))
-        if access_request is None or access_request.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        try:
-            approve_access_request(
-                access_request,
-                reviewer=context.principal_id,
-                reason=reason,
-                approved=decision == "APPROVE",
-                now=now,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        event_type = (
-            "data_product.access_granted.v1"
-            if decision == "APPROVE"
-            else "data_product.access_rejected.v1"
+    try:
+        effect = await decide_review(
+            session,
+            review,
+            decision=decision,
+            reason=reason,
+            context=context,
+            now=now,
         )
-        aggregate_type = "data_product_access_request"
-        aggregate_id = str(access_request.id)
-        payload = {
-            "access_request_id": str(access_request.id),
-            "data_product_version_id": str(access_request.data_product_version_id),
-            "expires_at": access_request.expires_at.isoformat()
-            if access_request.expires_at is not None
-            else None,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "AI_ASSET":
-        ai_asset = await session.get(AiAsset, UUID(review.object_id))
-        if ai_asset is None or ai_asset.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if ai_asset.lifecycle_status != "ACTIVE":
-            raise HTTPException(status_code=409, detail="AI asset is no longer active")
-        if decision == "APPROVE":
-            ai_asset.lifecycle_status = "RETIRED"
-            await session.execute(
-                update(AiAssetVersion)
-                .where(
-                    AiAssetVersion.asset_id == ai_asset.id,
-                    AiAssetVersion.status == "APPROVED",
-                )
-                .values(status="RETIRED", updated_at=now)
-            )
-            event_type = "ai_registry.asset_retired.v1"
-        else:
-            event_type = "ai_registry.asset_retirement_rejected.v1"
-        aggregate_type = "ai_asset"
-        aggregate_id = str(ai_asset.id)
-        payload = {
-            "ai_asset_id": str(ai_asset.id),
-            "asset_kind": ai_asset.asset_kind,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "AI_ASSET_VERSION":
-        ai_version = await session.get(AiAssetVersion, UUID(review.object_id))
-        if ai_version is None or ai_version.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        ai_asset = await session.get(AiAsset, ai_version.asset_id)
-        if ai_asset is None or ai_version.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="AI asset is no longer pending")
-        eval_gate_verdict: str | None = None
-        if decision == "APPROVE":
-            # N15: an AGENT-kind AiAssetVersion may not move to APPROVED
-            # (its published/production state) unless its evaluation gate
-            # currently shows PASS -- see aida.agent_eval_gate's module
-            # docstring for the full design and the honest org-wide scoping
-            # this reuses from UX-19. Runs live, on every APPROVE decision
-            # (single or bulk -- both paths call this function), so a stale
-            # or manufactured evidence blob can never let a publish through:
-            # the CONFIRMED_RUN half is always recomputed fresh here from the
-            # organization's real, current confirmed-run corpus.
-            if ai_asset.asset_kind == "AGENT":
-                gate_result = await compute_agent_eval_gate(
-                    session,
-                    organization_id=ai_version.organization_id,
-                    extra_verdicts=stored_steward_verdicts(ai_version),
-                    threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
-                )
-                eval_gate_verdict = gate_result.verdict
-                if gate_result.verdict != "PASS":
-                    # Deliberately *not* persisted here: a raise this deep
-                    # in `_apply_governance_review_decision` unwinds without
-                    # a commit in the single-decision path, and rolls back
-                    # inside a SAVEPOINT in the bulk path (see
-                    # `bulk_decide_governance_reviews`'s own docstring) --
-                    # exactly like every other precondition failure already
-                    # raised elsewhere in this function. The blocked-attempt
-                    # reason is still fully evidenced in this exception's own
-                    # detail (verdict, pass rate, named failing exemplars);
-                    # `GET .../eval-gate` recomputes the identical live result
-                    # for a steward to inspect before retrying, with no
-                    # side effect and nothing lost by not persisting a
-                    # rolled-back write.
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "agent evaluation gate did not pass "
-                            f"({gate_result.verdict}): {gate_result.reason}"
-                        ),
-                    )
-                # Only a PASS survives to the final commit -- recorded here,
-                # right alongside the approval it justified, into the exact
-                # `evaluation_evidence` field `ai_registry.
-                # compute_ai_trust_score` already reads, via the existing
-                # `record_audit` trail (never a parallel one).
-                record_agent_eval_gate_evidence(
-                    session,
-                    ai_version,
-                    gate_result,
-                    context=replace(context, organization_id=ai_version.organization_id),
-                    stage="PUBLISH",
-                )
-            await session.execute(
-                update(AiAssetVersion)
-                .where(
-                    AiAssetVersion.asset_id == ai_version.asset_id,
-                    AiAssetVersion.status == "APPROVED",
-                    AiAssetVersion.id != ai_version.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            ai_version.status = "APPROVED"
-            ai_version.approved_by = context.principal_id
-            ai_version.approved_at = now
-            event_type = "ai_registry.asset_approved.v1"
-        else:
-            ai_version.status = "REJECTED"
-            event_type = "ai_registry.asset_rejected.v1"
-        aggregate_type = "ai_asset_version"
-        aggregate_id = str(ai_version.id)
-        payload = {
-            "ai_asset_version_id": str(ai_version.id),
-            "ai_asset_id": str(ai_asset.id),
-            "asset_kind": ai_asset.asset_kind,
-            "version": ai_version.version,
-            "review_id": str(review.id),
-            "eval_gate_verdict": eval_gate_verdict,
-        }
-    elif review.object_type == "AGENT_CONTRACT_REQUEST":
-        request = await session.get(AgentContractRequest, UUID(review.object_id))
-        if request is None or request.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if request.status != "PENDING":
-            raise HTTPException(
-                status_code=409, detail="agent contract request is no longer pending"
-            )
-        contract_eval_gate_verdict: str | None = None
-        if decision == "APPROVE":
-            # AG-10 extension: see `agent_contract_request_api`'s module
-            # docstring. Mirrors the AI_ASSET_VERSION branch above verbatim --
-            # same gate, same "raise rather than land in a half-decided
-            # state" rule, computed live so a stale pass can never carry a
-            # request through.
-            request_ai_version = await session.get(AiAssetVersion, request.ai_asset_version_id)
-            if (
-                request_ai_version is None
-                or request_ai_version.organization_id != review.organization_id
-            ):
-                raise HTTPException(status_code=409, detail="review target is unavailable")
-            gate_result = await compute_agent_eval_gate(
-                session,
-                organization_id=review.organization_id,
-                extra_verdicts=stored_steward_verdicts(request_ai_version),
-                threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
-            )
-            contract_eval_gate_verdict = gate_result.verdict
-            if gate_result.verdict != "PASS":
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "agent evaluation gate did not pass "
-                        f"({gate_result.verdict}): {gate_result.reason}"
-                    ),
-                )
-            record_agent_eval_gate_evidence(
-                session,
-                request_ai_version,
-                gate_result,
-                context=replace(context, organization_id=review.organization_id),
-                stage="PUBLISH",
-            )
-            try:
-                definition = definition_from_json(request.definition)
-                validate_contract_definition(
-                    definition,
-                    actor_principal_id=context.principal_id,
-                    human_principal_ids=frozenset({request.requested_by}),
-                )
-            except AgentContractValidationError as exc:
-                raise HTTPException(status_code=422, detail=exc.code) from exc
-            contract = await session.scalar(
-                select(AgentContract).where(
-                    AgentContract.organization_id == review.organization_id,
-                    AgentContract.ai_asset_version_id == request.ai_asset_version_id,
-                )
-            )
-            if contract is None:
-                contract = AgentContract(
-                    organization_id=review.organization_id,
-                    ai_asset_version_id=request.ai_asset_version_id,
-                    created_by=request.requested_by,
-                    kill_engaged=False,
-                )
-                session.add(contract)
-            contract.agent_principal_id = definition.agent_principal_id.strip()
-            contract.capability_envelope = definition.capability_envelope.as_json()
-            contract.autonomy_tier = definition.autonomy_tier
-            contract.supervisor_persona = definition.supervisor_persona
-            contract.kill_scope = definition.kill_scope
-            contract.sampling_rate = definition.sampling_rate
-            contract.daily_token_cap = definition.daily_token_cap
-            contract.per_run_token_cap = definition.per_run_token_cap
-            contract.wall_clock_seconds_cap = definition.wall_clock_seconds_cap
-            contract.eval_gate_threshold = definition.eval_gate_threshold
-            request.status = "ACTIVATED"
-            request.activated_at = now
-            request.eval_gate_verdict = contract_eval_gate_verdict
-            event_type = "agent_contract_request.activated.v1"
-        else:
-            request.status = "REJECTED"
-            event_type = "agent_contract_request.rejected.v1"
-        aggregate_type = "agent_contract_request"
-        aggregate_id = str(request.id)
-        payload = {
-            "agent_contract_request_id": str(request.id),
-            "ai_asset_version_id": str(request.ai_asset_version_id),
-            "review_id": str(review.id),
-            "eval_gate_verdict": contract_eval_gate_verdict,
-        }
-    elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":
-        proposal = await session.get(MetadataEnrichmentProposal, UUID(review.object_id))
-        if proposal is None or proposal.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if proposal.status != "PENDING_REVIEW":
-            raise HTTPException(status_code=409, detail="business semantics are no longer pending")
-        proposal.reviewed_by = context.principal_id
-        proposal.review_reason = reason
-        proposal.reviewed_at = now
-        if decision == "APPROVE":
-            annotation = await apply_enrichment_proposal(
-                session,
-                proposal=proposal,
-                reviewer=context.principal_id,
-                approved_at=now,
-            )
-            await session.flush()
-            event_type = "business_semantics.approved.v1"
-            annotation_id = str(annotation.id)
-        else:
-            proposal.status = "REJECTED"
-            event_type = "business_semantics.rejected.v1"
-            annotation_id = None
-        aggregate_type = "metadata_enrichment_proposal"
-        aggregate_id = str(proposal.id)
-        payload = {
-            "proposal_id": str(proposal.id),
-            "table_id": str(proposal.table_id),
-            "annotation_id": annotation_id,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "GLOSSARY_TERM_VERSION":
-        term_version = await session.get(GlossaryTermVersion, UUID(review.object_id))
-        if term_version is None or term_version.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if term_version.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="glossary term is no longer pending")
-        if decision == "APPROVE":
-            await session.execute(
-                update(GlossaryTermVersion)
-                .where(
-                    GlossaryTermVersion.term_id == term_version.term_id,
-                    GlossaryTermVersion.status == "APPROVED",
-                    GlossaryTermVersion.id != term_version.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            term_version.status = "APPROVED"
-            term_version.approved_by = context.principal_id
-            term_version.approved_at = now
-            event_type = "glossary.term.approved.v1"
-        else:
-            term_version.status = "REJECTED"
-            event_type = "glossary.term.rejected.v1"
-        aggregate_type = "glossary_term_version"
-        aggregate_id = str(term_version.id)
-        payload = {
-            "term_version_id": str(term_version.id),
-            "term_id": str(term_version.term_id),
-            "version": term_version.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "ASSET_DOCUMENTATION_VERSION":
-        documentation_version = await session.get(AssetDocumentationVersion, UUID(review.object_id))
-        if (
-            documentation_version is None
-            or documentation_version.organization_id != review.organization_id
-        ):
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if documentation_version.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="asset documentation is no longer pending")
-        if decision == "APPROVE":
-            await session.execute(
-                update(AssetDocumentationVersion)
-                .where(
-                    AssetDocumentationVersion.documentation_id
-                    == documentation_version.documentation_id,
-                    AssetDocumentationVersion.status == "APPROVED",
-                    AssetDocumentationVersion.id != documentation_version.id,
-                )
-                .values(status="SUPERSEDED", updated_at=now)
-            )
-            documentation_version.status = "APPROVED"
-            documentation_version.approved_by = context.principal_id
-            documentation_version.approved_at = now
-            event_type = "asset.documentation.approved.v1"
-        else:
-            documentation_version.status = "REJECTED"
-            event_type = "asset.documentation.rejected.v1"
-        aggregate_type = "asset_documentation_version"
-        aggregate_id = str(documentation_version.id)
-        payload = {
-            "documentation_version_id": str(documentation_version.id),
-            "documentation_id": str(documentation_version.documentation_id),
-            "version": documentation_version.version,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "BULK_STEWARDSHIP_OPERATION":
-        operation = await session.get(BulkStewardshipOperation, UUID(review.object_id))
-        if operation is None or operation.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if operation.status != "REVIEW_REQUIRED":
-            raise HTTPException(status_code=409, detail="bulk operation is no longer pending")
-        if decision == "APPROVE":
-            event_type, applied_count = await apply_bulk_operation(
-                session,
-                operation,
-                reviewer=context.principal_id,
-                now=now,
-            )
-        else:
-            operation.status = "REJECTED"
-            applied_count = 0
-            event_type = "stewardship.bulk_operation_rejected.v1"
-        aggregate_type = "bulk_stewardship_operation"
-        aggregate_id = str(operation.id)
-        payload = {
-            "operation_id": str(operation.id),
-            "operation_type": operation.operation_type,
-            "subject_count": len(operation.subject_ids),
-            "applied_count": applied_count,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "GLOSSARY_CONFLICT":
-        conflict = await session.get(GlossaryConflict, UUID(review.object_id))
-        if conflict is None or conflict.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            event_type = await apply_conflict_resolution(
-                conflict,
-                reviewer=context.principal_id,
-                now=now,
-            )
-        else:
-            event_type = await reject_conflict_resolution(conflict)
-        aggregate_type = "glossary_conflict"
-        aggregate_id = str(conflict.id)
-        payload = {
-            "conflict_id": str(conflict.id),
-            "resolution": conflict.proposed_resolution,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "GLOSSARY_LINK_PROPOSAL":
-        link_proposal = await session.get(GlossaryLinkProposal, UUID(review.object_id))
-        if link_proposal is None or link_proposal.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            event_type = await apply_link_proposal(
-                session,
-                link_proposal,
-                reviewer=context.principal_id,
-                now=now,
-            )
-        else:
-            event_type = await reject_link_proposal(
-                link_proposal,
-                reviewer=context.principal_id,
-                now=now,
-            )
-        aggregate_type = "glossary_link_proposal"
-        aggregate_id = str(link_proposal.id)
-        payload = {
-            "proposal_id": str(link_proposal.id),
-            "table_id": str(link_proposal.table_id),
-            "term_id": str(link_proposal.term_id),
-            "confidence": link_proposal.confidence,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "TERM_SEMANTIC_BINDING":
-        binding = await session.get(TermSemanticBinding, UUID(review.object_id))
-        if binding is None or binding.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if binding.status != "PENDING_APPROVAL":
-            raise HTTPException(status_code=409, detail="binding is no longer pending review")
-        if decision == "APPROVE":
-            binding.status = "ACTIVE"
-            binding.approved_by = context.principal_id
-            binding.approved_at = now
-            event_type = "semantic.term_binding_approved.v1"
-        else:
-            binding.status = "REJECTED"
-            event_type = "semantic.term_binding_rejected.v1"
-        aggregate_type = "term_semantic_binding"
-        aggregate_id = str(binding.id)
-        payload = {
-            "binding_id": str(binding.id),
-            "term_id": str(binding.term_id),
-            "semantic_object_type": binding.semantic_object_type,
-            "semantic_object_id": str(binding.semantic_object_id),
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "CROSS_BOUNDARY_GRANT":
-        grant = await session.get(CrossBoundaryGrant, UUID(review.object_id))
-        if grant is None or grant.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if grant.status != "PENDING_APPROVAL":
-            raise HTTPException(status_code=409, detail="cross-boundary grant is no longer pending")
-        if decision == "APPROVE":
-            grant.status = "ACTIVE"
-            grant.approved_by = context.principal_id
-            grant.approved_at = now
-            event_type = "cross_boundary_grant.approved.v1"
-        else:
-            grant.status = "REJECTED"
-            event_type = "cross_boundary_grant.rejected.v1"
-        aggregate_type = "cross_boundary_grant"
-        aggregate_id = str(grant.id)
-        payload = {
-            "cross_boundary_grant_id": str(grant.id),
-            "source_data_domain_id": str(grant.source_data_domain_id),
-            "target_data_domain_id": str(grant.target_data_domain_id),
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "ASSET_DESCRIPTION_DRAFT":
-        draft = await session.get(AssetDescriptionDraft, UUID(review.object_id))
-        if draft is None or draft.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            if (
-                context.principal_id in (draft.evidence or {}).get("editors", [])
-                or (draft.evidence or {}).get("edited_by") == context.principal_id
-            ):
-                raise HTTPException(
-                    status_code=409, detail="A description editor cannot approve their own edits"
-                )
-            # GL-9: this is the only call site that publishes a drafted
-            # description onto the asset, and it only runs after the
-            # maker-checker guard above (status PENDING, independent
-            # reviewer) has already passed — no evidence score, however
-            # high, reaches this line without an independent decision.
-            event_type, published_version = await apply_asset_description_draft(
-                session,
-                draft,
-                reviewer=context.principal_id,
-                now=now,
-            )
-            published_version_id: str | None = str(published_version.id)
-        else:
-            event_type = await reject_asset_description_draft(
-                draft,
-                reviewer=context.principal_id,
-                now=now,
-            )
-            published_version_id = None
-        aggregate_type = "asset_description_draft"
-        aggregate_id = str(draft.id)
-        payload = {
-            "draft_id": str(draft.id),
-            "table_id": str(draft.table_id),
-            "overall_score": draft.overall_score,
-            "published_version_id": published_version_id,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "DOCUMENT_CLAIM":
-        claim = await session.get(DocumentClaim, UUID(review.object_id))
-        if claim is None or claim.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            # Publishes into the description store for the claim's subject --
-            # `ColumnDocumentationVersion` for a COLUMN claim,
-            # `AssetDocumentationVersion` for a TABLE one. Reached only after
-            # this endpoint's shared maker-checker guard above, which is the
-            # sole reason a direct-write authoring endpoint for column
-            # descriptions deliberately does not exist.
-            event_type, claim_version_id = await apply_document_claim(
-                session, claim, reviewer=context.principal_id, now=now
-            )
-        else:
-            event_type = await reject_document_claim(claim, reviewer=context.principal_id, now=now)
-            claim_version_id = None
-        aggregate_type = "document_claim"
-        aggregate_id = str(claim.id)
-        payload = {
-            "claim_id": str(claim.id),
-            "document_section_id": str(claim.document_section_id),
-            "subject_type": claim.subject_type,
-            "subject_id": claim.subject_id,
-            "published_version_id": str(claim_version_id) if claim_version_id else None,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "DESCRIPTION_WITHDRAWAL":
-        withdrawal = await session.get(DescriptionWithdrawal, UUID(review.object_id))
-        if withdrawal is None or withdrawal.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            # WITHDRAW moves the version to WITHDRAWN, keeping its text so a
-            # run grounded on it stays replayable. REINSTATE republishes that
-            # text as a *new* version rather than flipping the old row back,
-            # so the chain goes on recording that it was retired. Either way
-            # the flag is False when the asset moved on in between: the
-            # reviewer decided about text that is no longer current.
-            event_type, retired = await apply_description_withdrawal(
-                session, withdrawal, reviewer=context.principal_id, now=now
-            )
-        else:
-            event_type = await reject_description_withdrawal(
-                withdrawal, reviewer=context.principal_id, now=now
-            )
-            retired = False
-        aggregate_type = "description_withdrawal"
-        aggregate_id = str(withdrawal.id)
-        payload = {
-            "withdrawal_id": str(withdrawal.id),
-            "request_type": withdrawal.request_type,
-            "subject_type": withdrawal.subject_type,
-            "subject_id": withdrawal.subject_id,
-            "version_id": str(withdrawal.version_id),
-            # False when the asset moved on between the request and this
-            # decision, in which case nothing was touched.
-            "applied": retired,
-            "retired": retired,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "MODEL_IMPORT_BATCH":
-        batch = await session.get(ModelImportBatch, UUID(review.object_id))
-        if batch is None or batch.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            # Publishes through the same `publish_*` helpers a single-asset
-            # approval uses -- a bulk edit gets no shortcut past them. A change
-            # superseded since the workbook was exported is skipped rather than
-            # applied, so `applied` can be lower than the batch proposed.
-            event_type, applied = await apply_model_import_batch(
-                session, batch, reviewer=context.principal_id, now=now
-            )
-        else:
-            event_type = await reject_model_import_batch(
-                session, batch, reviewer=context.principal_id, now=now
-            )
-            applied = 0
-        aggregate_type = "model_import_batch"
-        aggregate_id = str(batch.id)
-        payload = {
-            "batch_id": str(batch.id),
-            "datasource_id": str(batch.datasource_id),
-            "filename": batch.filename,
-            "content_sha256": batch.content_sha256,
-            "change_count": batch.change_count,
-            "applied_count": applied,
-            "skipped_count": batch.skipped_count,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "SEMANTIC_METRIC_PROPOSAL":
-        metric_proposal = await session.get(SemanticMetricProposal, UUID(review.object_id))
-        if metric_proposal is None or metric_proposal.organization_id != review.organization_id:
-            raise HTTPException(status_code=409, detail="review target is unavailable")
-        if decision == "APPROVE":
-            # SM-4: this is the only call site that publishes a proposed
-            # metric definition, and it only runs after the maker-checker
-            # guard above (status PENDING, independent reviewer) has
-            # already passed -- no evidence score, however high, reaches
-            # this line without an independent decision.
-            event_type, published_metric_version = await apply_metric_suggestion_proposal(
-                session,
-                metric_proposal,
-                reviewer=context.principal_id,
-                now=now,
-            )
-            published_metric_version_id: str | None = str(published_metric_version.id)
-        else:
-            event_type = await reject_metric_suggestion_proposal(
-                metric_proposal,
-                reviewer=context.principal_id,
-                now=now,
-            )
-            published_metric_version_id = None
-        aggregate_type = "semantic_metric_proposal"
-        aggregate_id = str(metric_proposal.id)
-        payload = {
-            "proposal_id": str(metric_proposal.id),
-            "table_id": str(metric_proposal.table_id),
-            "measure_column_id": str(metric_proposal.measure_column_id),
-            "overall_score": metric_proposal.overall_score,
-            "published_metric_version_id": published_metric_version_id,
-            "review_id": str(review.id),
-        }
-    elif review.object_type == "COLUMN_CLASSIFICATION_PROMOTION":
-        # AT-11: promoting a lineage-derived classification to the asserted
-        # (policy-enforced) value. The apply function re-checks the raise-only
-        # guard and appends the derived provenance as ClassificationEvidence;
-        # the maker != checker / PENDING-only guards above already ran, so no
-        # derived value reaches assertion without an independent decision.
-        event_type, aggregate_type, aggregate_id, payload = await apply_classification_promotion(
-            session, review, decision=decision, context=context, now=now
-        )
-    elif review.object_type == "QUERY_HISTORY_METRIC_CANDIDATE":
-        # Group K / AT-12: a metric candidate mined from value-free query-log
-        # structure becomes a real, published SemanticMetric only under an
-        # independent APPROVE -- see
-        # `query_history_miner.apply_query_history_metric_candidate_decision`.
-        (
-            event_type,
-            aggregate_type,
-            aggregate_id,
-            payload,
-        ) = await apply_query_history_metric_candidate_decision(
-            session, review, decision=decision, context=context, now=now
-        )
-    else:
-        raise HTTPException(status_code=422, detail="unsupported governance object type")
-    return event_type, aggregate_type, aggregate_id, payload
+    except GovernanceDecisionRefused as refusal:
+        raise _refusal_as_http_exception(refusal) from refusal
+    return effect.as_tuple()
+
+
+class _ConflictDetail(dict[str, Any]):
+    """A structured 409 `detail` that still reads as a sentence.
+
+    A losing checker needs the review's refreshed state, which means the
+    detail has to be an object rather than a string. But
+    `asset_description_api`'s sample review puts `str(exc.detail)` straight
+    into a per-item `reason` a steward reads, and a raw dict repr there would
+    be worse than the sentence it replaced -- so stringifying this yields the
+    message and JSON-encoding it yields the whole object.
+    """
+
+    def __str__(self) -> str:
+        return str(self.get("message", ""))
+
+
+def _refusal_as_http_exception(refusal: GovernanceDecisionRefused) -> HTTPException:
+    """Translate a decision-service refusal into this API's error shape.
+
+    The refreshed review state travels as a structured `detail` only when
+    there is one to report (a lost claim), so the wire shape of every
+    pre-existing refusal -- a plain string detail -- is unchanged.
+    """
+    if refusal.review_state is None:
+        return HTTPException(status_code=refusal.http_status, detail=refusal.detail)
+    return HTTPException(
+        status_code=refusal.http_status,
+        detail=_ConflictDetail(
+            message=refusal.detail,
+            outcome=refusal.outcome,
+            review=refusal.review_state.as_detail(),
+        ),
+    )
 
 
 @router.post("/governance/reviews/{review_id}/decision", response_model=GovernanceReviewRead)
@@ -2382,6 +2886,19 @@ async def decide_governance_review(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceReview:
+    """One checker's decision on one governance review.
+
+    The `FOR UPDATE` read and the `PENDING`/maker-checker guards below are
+    kept as the fast, specific refusals a reviewer should see for a review
+    that was already decided before they pressed the button. They are not
+    what makes the decision safe under contention: the authoritative guard is
+    the compare-and-set inside `governance_decision_service.claim_review`,
+    reached through `_apply_governance_review_decision`, which is the same
+    guard the bulk endpoint, the sample-review endpoint and the reviewer
+    agent go through (F05). A checker that loses that race gets a 409
+    carrying the review's refreshed state instead of a second set of side
+    effects.
+    """
     review = await session.scalar(
         select(GovernanceReview).where(GovernanceReview.id == review_id).with_for_update()
     )
@@ -2410,31 +2927,19 @@ async def decide_governance_review(
         context=context,
         now=now,
     )
-    audit_context = replace(context, organization_id=review.organization_id)
-    record_audit(
+    record_decision_audit(
         session,
-        audit_context,
+        review,
+        context=context,
         action="governance.review.decide",
-        resource_type="governance_review",
-        resource_id=str(review.id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
         details={
             "decision": body.decision,
             "object_id": review.object_id,
-            "via_delegation_id": (
-                str(context.active_delegation_id) if context.active_delegation_id else None
-            ),
-            "via_delegator_principal_id": context.active_delegator_principal_id,
+            **delegation_details(context),
         },
     )
-    record_outbox(
-        session,
-        organization_id=review.organization_id,
-        aggregate_type=aggregate_type,
-        aggregate_id=aggregate_id,
-        event_type=event_type,
-        payload=payload,
+    record_decision_outbox(
+        session, review, TargetEffect(event_type, aggregate_type, aggregate_id, payload)
     )
     try:
         await session.commit()
@@ -2465,6 +2970,27 @@ async def decide_governance_review(
 # PG-3: bulk decisions with per-item rationale across the unified review
 # queue, at 10,000-item scale.
 # ---------------------------------------------------------------------------
+
+
+def _bulk_item(
+    review_id: UUID, outcome: DecisionOutcome, reason: str | None
+) -> GovernanceReviewBulkDecisionItemRead:
+    """One bulk-batch item's result, reported at two levels of precision.
+
+    `status` is the original SUCCEEDED/FAILED answer every existing client
+    already reads, unchanged. `outcome` (F05) is the additive detail that
+    distinguishes the three ways an item can not be applied -- it lost the
+    claim to another checker (`CONFLICT`), this checker may not decide it at
+    all (`NOT_PERMITTED`), or its own target refused (`FAILED`) -- so a
+    reviewer looking at a partially-applied batch can tell "somebody else
+    decided this" from "this needs your attention".
+    """
+    return GovernanceReviewBulkDecisionItemRead(
+        review_id=str(review_id),
+        status="SUCCEEDED" if outcome == "APPLIED" else "FAILED",
+        reason=reason,
+        outcome=outcome,
+    )
 
 
 async def _resolve_governance_review_bulk_subjects(
@@ -2529,15 +3055,25 @@ async def bulk_decide_governance_reviews(
     status/object-type filter scoped to the caller's organization.
 
     Exactly the same maker != checker, PENDING-only, and organization-
-    boundary rules as `decide_governance_review` apply per item -- this
-    calls `_apply_governance_review_decision`, the same core the
-    single-item endpoint calls, so the two paths cannot drift -- but a rule
-    violation on one item marks that item FAILED and continues (RL-6/CT-1's
-    partial-success precedent) rather than aborting the whole batch. Each
-    item's dispatch runs inside its own SAVEPOINT (`session.begin_nested`),
-    so a failure partway through one item's (possibly multi-table) side
-    effects can never leak a partial write into an item reported FAILED --
-    verified directly against a real SAVEPOINT rollback, not assumed.
+    boundary rules as `decide_governance_review` apply per item, because both
+    endpoints go through `governance_decision_service.decide_review` -- but a
+    rule violation on one item marks that item FAILED and continues
+    (RL-6/CT-1's partial-success precedent) rather than aborting the whole
+    batch. Each item's dispatch runs inside its own SAVEPOINT
+    (`session.begin_nested`), so a failure partway through one item's
+    (possibly multi-table) side effects can never leak a partial write into
+    an item reported FAILED -- verified directly against a real SAVEPOINT
+    rollback, not assumed.
+
+    F05: the batch's subjects are loaded with `FOR UPDATE` in a deterministic
+    id order (`lock_reviews_for_decision`) so two overlapping batches queue
+    rather than deadlock, and each item is then *claimed* out of PENDING with
+    a compare-and-set before its side effects run. The in-memory status check
+    that used to stand in for that claim is still here, but only as a cheap
+    pre-filter: an item whose status changed between this batch's read and
+    its claim is reported `outcome="CONFLICT"` with the review's refreshed
+    status, and its savepoint is rolled back, so a contended review still
+    ends with exactly one terminal decision and one set of side effects.
 
     Selection is always a single bulk query: an explicit id list is deduped
     in Python then fetched with one `WHERE id IN (...)`, and a filter pushes
@@ -2550,57 +3086,23 @@ async def bulk_decide_governance_reviews(
         review_ids=body.review_ids,
         selection_filter=body.filter,
     )
-    reviews = {
-        row.id: row
-        for row in (
-            await session.scalars(
-                select(GovernanceReview).where(GovernanceReview.id.in_(subject_ids))
-            )
-        ).all()
-    }
+    reviews = await lock_reviews_for_decision(session, subject_ids)
     now = datetime.now(UTC)
     results: list[GovernanceReviewBulkDecisionItemRead] = []
     succeeded = 0
     for review_id in subject_ids:
         review = reviews.get(review_id)
         if review is None:
-            results.append(
-                GovernanceReviewBulkDecisionItemRead(
-                    review_id=str(review_id),
-                    status="FAILED",
-                    reason="governance review not found",
-                )
-            )
-            continue
-        try:
-            enforce_organization(context, review.organization_id)
-        except HTTPException:
-            results.append(
-                GovernanceReviewBulkDecisionItemRead(
-                    review_id=str(review_id),
-                    status="FAILED",
-                    reason="cross-organization access denied",
-                )
-            )
+            results.append(_bulk_item(review_id, "FAILED", "governance review not found"))
             continue
         if review.status != "PENDING":
+            # Cheap pre-filter only; `decide_review`'s claim below is what
+            # actually decides who wins a contended review.
             results.append(
-                GovernanceReviewBulkDecisionItemRead(
-                    review_id=str(review_id),
-                    status="FAILED",
-                    reason=f"governance review is already {review.status.lower()}",
-                )
-            )
-            continue
-        if review.requested_by == context.principal_id or (
-            context.active_delegator_principal_id is not None
-            and review.requested_by == context.active_delegator_principal_id
-        ):
-            results.append(
-                GovernanceReviewBulkDecisionItemRead(
-                    review_id=str(review_id),
-                    status="FAILED",
-                    reason="maker-checker separation is required",
+                _bulk_item(
+                    review_id,
+                    "CONFLICT",
+                    f"governance review is already {review.status.lower()}",
                 )
             )
             continue
@@ -2611,21 +3113,12 @@ async def bulk_decide_governance_reviews(
             item_reason = body.reason
         if body.decision == "REJECT" and not item_reason:
             results.append(
-                GovernanceReviewBulkDecisionItemRead(
-                    review_id=str(review_id),
-                    status="FAILED",
-                    reason="a rationale is required to reject this item",
-                )
+                _bulk_item(review_id, "FAILED", "a rationale is required to reject this item")
             )
             continue
         try:
             async with session.begin_nested():
-                (
-                    event_type,
-                    aggregate_type,
-                    aggregate_id,
-                    payload,
-                ) = await _apply_governance_review_decision(
+                effect = await decide_review(
                     session,
                     review,
                     decision=body.decision,
@@ -2633,26 +3126,17 @@ async def bulk_decide_governance_reviews(
                     context=context,
                     now=now,
                 )
-                record_outbox(
-                    session,
-                    organization_id=review.organization_id,
-                    aggregate_type=aggregate_type,
-                    aggregate_id=aggregate_id,
-                    event_type=event_type,
-                    payload=payload,
-                )
-        except HTTPException as exc:
-            results.append(
-                GovernanceReviewBulkDecisionItemRead(
-                    review_id=str(review_id), status="FAILED", reason=str(exc.detail)
-                )
-            )
+                record_decision_outbox(session, review, effect)
+        except GovernanceDecisionRefused as refusal:
+            results.append(_bulk_item(review_id, refusal.outcome, refusal.detail))
             continue
-        results.append(
-            GovernanceReviewBulkDecisionItemRead(
-                review_id=str(review_id), status="SUCCEEDED", reason=None
-            )
-        )
+        except HTTPException as exc:
+            # A target-specific precondition the adapter refused (the target
+            # object is gone, a gate did not pass). The savepoint has already
+            # unwound this item's claim, so the review is PENDING again.
+            results.append(_bulk_item(review_id, "FAILED", str(exc.detail)))
+            continue
+        results.append(_bulk_item(review_id, "APPLIED", None))
         succeeded += 1
     failed = len(results) - succeeded
     outcome = "SUCCESS" if not failed else "PARTIAL_SUCCESS" if succeeded else "FAILURE"
@@ -2671,10 +3155,14 @@ async def bulk_decide_governance_reviews(
             "succeeded_count": succeeded,
             "failed_count": failed,
             "truncated": truncated,
-            "via_delegation_id": (
-                str(context.active_delegation_id) if context.active_delegation_id else None
-            ),
-            "via_delegator_principal_id": context.active_delegator_principal_id,
+            # F05: how the non-applied items broke down, so a batch that lost
+            # races to another checker is distinguishable in the audit trail
+            # from one whose targets refused.
+            "outcome_counts": {
+                value: sum(1 for item in results if item.outcome == value)
+                for value in ("APPLIED", "CONFLICT", "NOT_PERMITTED", "FAILED")
+            },
+            **delegation_details(context),
         },
     )
     try:

@@ -16,6 +16,7 @@ from aida.fleet import (
     reserve_analysis_run,
     tool_first_execution_rate,
 )
+from aida.graph_projection import TenantBudget, TenantFairQueue
 from aida.models import (
     AgentRun,
     AnalysisRun,
@@ -198,9 +199,25 @@ def test_platform_admin_can_operate_across_organizations() -> None:
     enforce_organization(context, uuid4())
 
 
+class GraphResult:
+    """A Neo4j result that yields the records it was scripted with."""
+
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self._records = list(records)
+
+    def __aiter__(self) -> "GraphResult":
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        if not self._records:
+            raise StopAsyncIteration
+        return self._records.pop(0)
+
+
 class GraphSession:
-    def __init__(self) -> None:
+    def __init__(self, deleted_per_statement: int = 0) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self._deleted = deleted_per_statement
 
     async def __aenter__(self) -> "GraphSession":
         return self
@@ -208,91 +225,267 @@ class GraphSession:
     async def __aexit__(self, *args: object) -> None:
         return None
 
-    async def run(self, query: str, **parameters: object) -> None:
+    async def run(self, query: str, **parameters: object) -> GraphResult:
         self.calls.append((query, parameters))
+        if "DETACH DELETE" in query and self._deleted:
+            # One non-empty batch, then nothing: the projector's sweep keeps
+            # asking until a batch comes back short, so a stub that always
+            # reported deletions would loop forever.
+            self._deleted, deleted = 0, self._deleted
+            return GraphResult([{"deleted": deleted}])
+        return GraphResult([])
 
 
 class GraphDriver:
-    def __init__(self) -> None:
-        self.graph_session = GraphSession()
+    def __init__(self, deleted_per_statement: int = 0) -> None:
+        self.graph_session = GraphSession(deleted_per_statement)
 
     def session(self) -> GraphSession:
         return self.graph_session
 
 
+def _projection_chunks(
+    organization_id: UUID, datasource_id: UUID, ids: dict[str, UUID]
+) -> list[graph_projector.ProjectionChunk]:
+    common = {"organization_id": str(organization_id), "datasource_id": str(datasource_id)}
+    return [
+        graph_projector.ProjectionChunk(
+            level="catalogs",
+            sequence=0,
+            rows=[{"platform_id": str(ids["catalog"]), "name": "warehouse", **common}],
+        ),
+        graph_projector.ProjectionChunk(
+            level="schemas",
+            sequence=0,
+            rows=[
+                {
+                    "platform_id": str(ids["schema"]),
+                    "catalog_id": str(ids["catalog"]),
+                    "name": "finance",
+                    **common,
+                }
+            ],
+        ),
+        graph_projector.ProjectionChunk(
+            level="tables",
+            sequence=0,
+            rows=[
+                {
+                    "platform_id": str(ids["table"]),
+                    "schema_id": str(ids["schema"]),
+                    "name": "payments",
+                    **common,
+                }
+            ],
+        ),
+        graph_projector.ProjectionChunk(
+            level="columns",
+            sequence=0,
+            rows=[
+                {
+                    "platform_id": str(ids["column"]),
+                    "table_id": str(ids["table"]),
+                    "name": "payment_id",
+                    **common,
+                }
+            ],
+        ),
+        graph_projector.ProjectionChunk(
+            level="constraints",
+            sequence=0,
+            rows=[
+                {
+                    "platform_id": str(ids["constraint"]),
+                    "table_id": str(ids["table"]),
+                    "referenced_table_id": str(ids["referenced_table"]),
+                    "constraint_type": "FOREIGN_KEY",
+                    **common,
+                }
+            ],
+        ),
+    ]
+
+
+class _NullSession:
+    async def __aenter__(self) -> "_NullSession":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def get(self, _model: type, _identity: object) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
 async def test_discovery_projection_builds_inventory_hierarchy_and_references(
     monkeypatch: Any,
 ) -> None:
+    """The projector writes each level bottom-up and links every child to its parent.
+
+    Driven from chunks rather than from a whole-estate dict: the read side is
+    now bounded (`aida.graph_projection.iter_projection_chunks`), so the write
+    side has to be correct chunk-by-chunk rather than only for one big list.
+    """
     organization_id, datasource_id = uuid4(), uuid4()
-    catalog_id, schema_id, table_id, column_id, constraint_id = (uuid4() for _ in range(5))
-    referenced_table_id = uuid4()
-    projection: dict[str, list[dict[str, object]]] = {
-        "catalogs": [{"platform_id": str(catalog_id), "name": "warehouse"}],
-        "schemas": [
-            {
-                "platform_id": str(schema_id),
-                "catalog_id": str(catalog_id),
-                "name": "finance",
-            }
-        ],
-        "tables": [
-            {
-                "platform_id": str(table_id),
-                "schema_id": str(schema_id),
-                "name": "payments",
-            }
-        ],
-        "columns": [
-            {
-                "platform_id": str(column_id),
-                "table_id": str(table_id),
-                "name": "payment_id",
-            }
-        ],
-        "constraints": [
-            {
-                "platform_id": str(constraint_id),
-                "table_id": str(table_id),
-                "referenced_table_id": str(referenced_table_id),
-                "constraint_type": "FOREIGN_KEY",
-            }
-        ],
+    ids = {
+        name: uuid4()
+        for name in ("catalog", "schema", "table", "column", "constraint", "referenced_table")
     }
+    chunks = _projection_chunks(organization_id, datasource_id, ids)
     loaded_scope: list[tuple[UUID, UUID]] = []
 
-    async def load(source: UUID, organization: UUID) -> dict[str, list[dict[str, object]]]:
+    async def fake_chunks(
+        _session: object,
+        source: UUID,
+        organization: UUID,
+        **_kwargs: object,
+    ) -> Any:
         loaded_scope.append((source, organization))
-        return projection
+        for chunk in chunks:
+            yield chunk
 
-    monkeypatch.setattr(graph_projector, "load_projection", load)
+    monkeypatch.setattr(graph_projector, "session_factory", lambda: _NullSession())
+    monkeypatch.setattr(graph_projector, "iter_projection_chunks", fake_chunks)
     driver = GraphDriver()
 
-    await graph_projector.project_discovery(
+    report = await graph_projector.project_discovery(
         driver,  # type: ignore[arg-type]
         {
+            "event_id": "evt-1",
             "organization_id": str(organization_id),
             "payload": {"datasource_id": str(datasource_id)},
         },
     )
 
     assert loaded_scope == [(datasource_id, organization_id)]
-    assert len(driver.graph_session.calls) == 6
-    expected_rows = [
-        projection["catalogs"],
-        projection["schemas"],
-        projection["tables"],
-        projection["columns"],
-        projection["constraints"],
-        projection["constraints"],
-    ]
-    assert [parameters["rows"] for _, parameters in driver.graph_session.calls] == expected_rows
-    queries = [" ".join(query.split()) for query, _ in driver.graph_session.calls]
+    assert report.rows == 5
+    write_calls = [call for call in driver.graph_session.calls if "rows" in call[1]]
+    assert [parameters["rows"] for _, parameters in write_calls] == [
+        chunk.rows for chunk in chunks
+    ] + [chunks[-1].rows]
+    queries = [" ".join(query.split()) for query, _ in write_calls]
     assert "MERGE (parent)-[:HAS_SCHEMA]->(n)" in queries[1]
     assert "MERGE (parent)-[:HAS_TABLE]->(n)" in queries[2]
     assert "MERGE (parent)-[:HAS_COLUMN]->(n)" in queries[3]
     assert "MERGE (parent)-[:HAS_CONSTRAINT]->(n)" in queries[4]
     assert "MERGE (n)-[:REFERENCES]->(referenced)" in queries[5]
+    # Every written node is stamped with this rebuild's generation, which is
+    # what makes the deletion sweep below able to tell current from leftover.
+    assert {parameters["generation"] for _, parameters in write_calls} == {report.generation}
 
+
+async def test_discovery_projection_reconciles_rows_deleted_at_the_source(
+    monkeypatch: Any,
+) -> None:
+    """A row that disappears upstream must disappear from the projection.
+
+    MERGE only ever adds, so before generation stamping a dropped table stayed
+    in the graph indefinitely and every lineage answer kept citing it. The
+    sweep runs children-first so a parent's DETACH DELETE cannot silently
+    absorb a child's edges before the child is counted.
+    """
+    organization_id, datasource_id = uuid4(), uuid4()
+
+    async def no_chunks(*_args: object, **_kwargs: object) -> Any:
+        return
+        yield  # pragma: no cover -- makes this an async generator
+
+    monkeypatch.setattr(graph_projector, "session_factory", lambda: _NullSession())
+    monkeypatch.setattr(graph_projector, "iter_projection_chunks", no_chunks)
+    driver = GraphDriver(deleted_per_statement=3)
+
+    report = await graph_projector.project_discovery(
+        driver,  # type: ignore[arg-type]
+        {
+            "event_id": "evt-2",
+            "organization_id": str(organization_id),
+            "payload": {"datasource_id": str(datasource_id)},
+        },
+    )
+
+    delete_queries = [
+        " ".join(query.split())
+        for query, _ in driver.graph_session.calls
+        if "DETACH DELETE" in query
+    ]
+    labels = [query.split("MATCH (n:")[1].split(")")[0] for query in delete_queries]
+    assert labels[:5] == ["Column", "Constraint", "Table", "Schema", "Catalog"]
+    assert all("n.generation IS NULL OR n.generation <> $generation" in q for q in delete_queries)
+    assert report.deleted == 3
+    scopes = {
+        (parameters["organization_id"], parameters["datasource_id"])
+        for query, parameters in driver.graph_session.calls
+        if "DETACH DELETE" in query
+    }
+    assert scopes == {(str(organization_id), str(datasource_id))}
+
+
+def test_tenant_fair_queue_stops_one_tenant_dominating_a_shared_sweep() -> None:
+    """INV-5's operational sibling: isolation is not only about who can *read*
+    another tenant's data, it is also about whether one tenant's backlog can
+    deny every other tenant service on a shared worker.
+    """
+    budget = TenantBudget(events_per_round=2, max_buffered_events=100)
+    queue = TenantFairQueue(budget=budget)
+    for index in range(6):
+        queue.offer({"organization_id": "big", "event_id": f"big-{index}"})
+    queue.offer({"organization_id": "small", "event_id": "small-0"})
+
+    order = []
+    while (event := queue.take()) is not None:
+        order.append(event["event_id"])
+
+    # The small tenant is served after the big tenant's first budgeted round,
+    # not after all six of its events.
+    assert order[:2] == ["big-0", "big-1"]
+    assert "small-0" in order[:3]
+    assert queue.yields >= 1
+    assert sorted(order) == sorted([f"big-{i}" for i in range(6)] + ["small-0"])
+
+
+def test_tenant_fair_queue_never_interrupts_a_tenant_that_is_alone() -> None:
+    """Rotating to nobody would only add latency, so the budget bounds turn
+    length only while somebody else is actually waiting."""
+    queue = TenantFairQueue(budget=TenantBudget(events_per_round=1))
+    for index in range(5):
+        queue.offer({"organization_id": "only", "event_id": f"e-{index}"})
+
+    order = []
+    while (event := queue.take()) is not None:
+        order.append(event["event_id"])
+
+    assert order == [f"e-{i}" for i in range(5)]
+    assert queue.yields == 0
+
+
+def test_tenant_fair_queue_reports_its_oldest_backlog() -> None:
+    """The review says the budget policy needs product input; this is the
+    evidence that decision should be made from."""
+    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    queue = TenantFairQueue()
+    queue.offer(
+        {"organization_id": "a", "occurred_at": (now - timedelta(seconds=90)).isoformat()}
+    )
+    queue.offer({"organization_id": "b", "occurred_at": (now - timedelta(seconds=5)).isoformat()})
+
+    snapshot = queue.backlog(now=now)
+    assert snapshot.events == 2
+    assert snapshot.tenants == 2
+    assert snapshot.oldest_organization_id == "a"
+    assert 89 <= snapshot.oldest_age_seconds <= 91
+
+
+def test_tenant_fair_queue_applies_backpressure_when_full() -> None:
+    """A full buffer is the projector declining to fetch more, not an error:
+    memory stays bounded by `max_buffered_events` whatever Kafka delivers."""
+    queue = TenantFairQueue(budget=TenantBudget(max_buffered_events=2))
+    assert queue.offer({"organization_id": "a"}) is True
+    assert queue.offer({"organization_id": "a"}) is True
+    assert queue.offer({"organization_id": "a"}) is False
+    assert len(queue) == 2
 
 def _pending_outbox_event(**overrides: Any) -> OutboxEvent:
     defaults: dict[str, Any] = {

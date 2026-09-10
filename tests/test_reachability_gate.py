@@ -97,22 +97,15 @@ ALLOWLIST: dict[str, str] = {
         "or anything else outside its own test. Known gap."
     ),
     # --- Identity lifecycle (OW-5, P2-07) ---
-    # `identity_events.emit_principal_deleted` / `emit_principal_merged` are the
-    # *inbound* half of OW-5: they record the identity event and call the
-    # ownership lifecycle handler in one transaction. Their caller is an
-    # identity-provider integration -- an IdP webhook or directory sync -- that
-    # has not been built, so nothing in the five entry points reaches either
-    # module yet. Both are exercised end to end by
-    # tests/test_ownership_expiry_and_leaver.py; the gap is the trigger, not
-    # the behaviour. Remove both entries when the IdP integration lands.
-    "aida.identity_events": (
-        "OW-5: emission half of the identity-lifecycle handler. No IdP webhook or "
-        "directory sync calls it yet. Known gap."
-    ),
-    "aida.ownership_principal_lifecycle": (
-        "OW-5: leaver/merge ownership handler, reached only through aida.identity_events, "
-        "which is itself awaiting the IdP integration. Known gap."
-    ),
+    # `aida.identity_events` and `aida.ownership_principal_lifecycle` were on
+    # this list until F19 (`Docs/review-2026-09-05/REVIEW.md`) was remediated:
+    # `aida.principal_reconciliation.run_principal_reconciliation_pass` now runs
+    # on the fleet scheduler and replays the two identity-lifecycle outbox event
+    # types through the ownership handlers, so both modules are reachable from
+    # `aida.workflows.scheduler`. The pass is off by default
+    # (`principal_reconciliation_enabled`) -- which this gate does not and should
+    # not care about: it asks whether a live process can reach the module, not
+    # whether a particular deployment has switched the feature on.
 }
 
 

@@ -15,7 +15,7 @@ never decides an item it proposed.
 """
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -26,25 +26,33 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 import aida.models  # noqa: F401 -- registers every table on the metadata
+import aida.semantic_api  # noqa: F401 -- registers the decision target adapters
 from aida.config import Settings
 from aida.db import Base
 from aida.models import (
+    AssetDescriptionDraft,
     AuditEvent,
+    BulkStewardshipOperation,
     GovernanceReview,
+    ModelImportBatch,
     Organization,
     ReviewAuditSample,
 )
 from aida.review_risk_tiers import (
+    HARD_MAX_AGENT_TIER,
     TIER_T0,
     TIER_T1,
     TIER_T2,
     TIER_T3,
     agent_decidable_object_types,
+    effective_agent_ceiling,
     known_object_types,
+    requires_size_evidence,
     risk_tier_for,
     tier_at_or_below,
 )
 from aida.reviewer_agent import (
+    REASON_AUDIT_BACKLOG,
     REASON_DISABLED,
     REASON_SUSPENDED,
     ReviewerAgentUnavailable,
@@ -110,6 +118,79 @@ async def _seed_review(
         requested_by=requested_by,
     )
     session.add(review)
+    await session.flush()
+    return review
+
+
+async def _seed_description_draft(
+    session: AsyncSession,
+    org: Organization,
+    review: GovernanceReview,
+    *,
+    overall_score: float,
+) -> AssetDescriptionDraft:
+    """The proposal row behind an `ASSET_DESCRIPTION_DRAFT` review.
+
+    `review.object_id` is repointed at the draft, which is the shape
+    `asset_description_api` actually creates -- the agent reads the score off
+    this row, never off the review it writes itself.
+    """
+    draft = AssetDescriptionDraft(
+        organization_id=org.id,
+        table_id=uuid4(),
+        drafted_text="Customer master, one row per customer.",
+        text_fingerprint="f" * 64,
+        accuracy_score=overall_score,
+        clarity_score=overall_score,
+        style_score=overall_score,
+        completeness_score=overall_score,
+        overall_score=overall_score,
+        evidence={"source": "deterministic"},
+        status="PENDING_APPROVAL",
+        governance_review_id=review.id,
+        created_by="steward-a",
+    )
+    session.add(draft)
+    await session.flush()
+    review.object_id = str(draft.id)
+    await session.flush()
+    return draft
+
+
+async def _seed_import_batch(
+    session: AsyncSession,
+    org: Organization,
+    review: GovernanceReview,
+    *,
+    change_count: int,
+) -> ModelImportBatch:
+    batch = ModelImportBatch(
+        organization_id=org.id,
+        datasource_id=uuid4(),
+        filename="model.xlsx",
+        content_sha256="a" * 64,
+        status="PENDING_REVIEW",
+        governance_review_id=review.id,
+        change_count=change_count,
+        uploaded_by="steward-a",
+    )
+    session.add(batch)
+    await session.flush()
+    review.object_id = str(batch.id)
+    await session.flush()
+    return batch
+
+
+async def _pre_reviewed(
+    session: AsyncSession,
+    org: Organization,
+    *,
+    overall_score: float = 0.95,
+) -> GovernanceReview:
+    """A review the agent has genuinely pre-reviewed into APPROVE."""
+    review = await _seed_review(session, org)
+    await _seed_description_draft(session, org, review, overall_score=overall_score)
+    await pre_review_pending(session, org.id, settings=_settings())
     await session.flush()
     return review
 
@@ -247,10 +328,11 @@ async def test_the_reviewer_agent_cannot_reach_a_publish_or_activate_path() -> N
     """ADR-0027 condition (a), as a static property rather than a behaviour.
 
     `reviewer_agent.py` may reach exactly one decision entry point --
-    `_apply_governance_review_decision`, the same core a human checker uses.
-    It must not import or call anything that publishes a semantic version,
-    activates a model route, or grants access directly. Same technique as
-    `test_inv4_authorization_wiring.py`'s static scan.
+    `governance_decision_service.decide_review`, the same application service
+    the human single-decision, bulk-decision and sample-review endpoints all
+    go through (F05). It must not import or call anything that publishes a
+    semantic version, activates a model route, or grants access directly.
+    Same technique as `test_inv4_authorization_wiring.py`'s static scan.
     """
     source = (REPO_ROOT / "src" / "aida" / "reviewer_agent.py").read_text(encoding="utf-8")
     forbidden = (
@@ -264,9 +346,17 @@ async def test_the_reviewer_agent_cannot_reach_a_publish_or_activate_path() -> N
     )
     hits = [name for name in forbidden if name in source]
     assert hits == [], f"reviewer_agent must not reach these paths: {hits}"
-    assert "_apply_governance_review_decision" in source, (
+    assert "decide_review(" in source, (
         "the agent must decide through the same core a human checker uses, "
         "not through a private path of its own"
+    )
+    assert "from aida.governance_decision_service import" in source, (
+        "that core is the shared application service, imported at module scope -- "
+        "not a deferred import of a router (R03)"
+    )
+    assert "from aida.semantic_api import" not in source, (
+        "reaching back into the router for the decision core is exactly the "
+        "cycle edge the review recorded (R03)"
     )
 
 
@@ -352,9 +442,7 @@ async def test_one_human_action_suspends_and_resumes_one_organization(
 async def test_suspension_is_audited(session: AsyncSession) -> None:
     org = await _seed_org(session)
     context = security_context(organization_id=org.id, principal_id="risk-officer")
-    await set_suspended(
-        session, org.id, suspended=True, context=context, reason="spike"
-    )
+    await set_suspended(session, org.id, suspended=True, context=context, reason="spike")
     await session.flush()
     rows = (
         await session.scalars(
@@ -383,15 +471,26 @@ async def test_pre_review_decides_nothing(session: AsyncSession) -> None:
 async def test_pre_review_attaches_tier_recommendation_and_evidence(
     session: AsyncSession,
 ) -> None:
+    """The happy path, which now requires a real scored draft behind the row.
+
+    Before AR-03 this test passed with no draft at all: a review pointing at
+    nothing scored APPROVE, because "no confidence" was the most permissive
+    input the rule had.
+    """
     org = await _seed_org(session)
     review = await _seed_review(session, org)
+    await _seed_description_draft(session, org, review, overall_score=0.91)
     outcomes = await pre_review_pending(session, org.id, settings=_settings())
     assert len(outcomes) == 1
     assert review.risk_tier == TIER_T0
     assert review.pre_review_recommendation == "APPROVE"
     assert review.pre_reviewed_by == "agent:reviewer"
-    assert review.pre_review_evidence["rule_version"] == 1
+    assert review.pre_review_evidence["rule_version"] == 2
     assert review.pre_review_evidence["negative_knowledge_hits"] == 0
+    assert review.pre_review_evidence["proposal_confidence"] == 0.91
+    assert review.pre_review_evidence["evidence_source"] == (
+        "asset_description_draft.overall_score"
+    )
 
 
 @pytest.mark.asyncio
@@ -589,3 +688,485 @@ async def test_an_invalid_outcome_is_refused(session: AsyncSession) -> None:
             rationale="unsure",
             context=security_context(organization_id=org.id),
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. AR-01 -- AR-04: the boundary defects the 2026-09-09 review found
+#
+# Each test below fails against the implementation as it stood at 15f29cd.
+# See `Docs/10-architecture/15-agent-architecture-critical-review.md`.
+# ---------------------------------------------------------------------------
+
+
+def test_ar01_an_elevated_configured_ceiling_admits_nothing_new() -> None:
+    """AR-01. The old assertion was that the allowlist only ever contained
+    *classified* types, which a T3 ceiling satisfied while still admitting
+    every T2 and T3 one. The invariant ADR-0027 actually states is this."""
+    for configured in ("T0", "T1", "T2", "T3"):
+        for object_type in agent_decidable_object_types(configured):
+            assert risk_tier_for(object_type) in (TIER_T0, TIER_T1), (
+                f"ceiling {configured} admitted {object_type}"
+            )
+
+
+def test_ar01_the_specific_types_a_t3_ceiling_used_to_admit() -> None:
+    """The reproduction printed in the review, inverted into an assertion."""
+    at_t3 = agent_decidable_object_types(TIER_T3)
+    assert "CONTEXT_PRODUCT_VERSION" not in at_t3
+    assert "MODEL_ROUTE_CONFIGURATION" not in at_t3
+    assert "CROSS_BOUNDARY_GRANT" not in at_t3
+    assert "ACCESS_POLICY" not in at_t3
+
+
+def test_ar01_the_ceiling_in_force_is_clamped_but_narrowing_still_works() -> None:
+    assert effective_agent_ceiling("T2") == HARD_MAX_AGENT_TIER
+    assert effective_agent_ceiling("T3") == HARD_MAX_AGENT_TIER
+    assert effective_agent_ceiling("T1") == TIER_T1
+    assert effective_agent_ceiling("T0") == TIER_T0
+    assert effective_agent_ceiling(None) == TIER_T1
+    assert effective_agent_ceiling("banana") == TIER_T1
+    # Narrowing is still real: a T0 ceiling excludes the T1 types.
+    assert "GLOSSARY_LINK_PROPOSAL" not in agent_decidable_object_types(TIER_T0)
+
+
+@pytest.mark.asyncio
+async def test_ar01_a_t2_item_is_refused_under_a_t3_configured_ceiling(
+    session: AsyncSession,
+) -> None:
+    """End to end: the guard, not just the helper."""
+    org = await _seed_org(session)
+    review = await _seed_review(session, org, object_type="CONTEXT_PRODUCT_VERSION")
+    review.risk_tier = TIER_T2
+    review.pre_review_recommendation = "APPROVE"
+    review.pre_reviewed_at = datetime.now(UTC)
+    await session.flush()
+
+    decisions = await auto_decide_tier0_tier1(
+        session, org.id, settings=_settings(reviewer_agent_max_tier="T3")
+    )
+
+    assert decisions == []
+    assert review.status == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_ar01_the_clamp_is_recorded_in_the_evidence(session: AsyncSession) -> None:
+    """A refused ceiling is visible to an auditor, not merely ineffective."""
+    org = await _seed_org(session)
+    review = await _seed_review(session, org)
+    await _seed_description_draft(session, org, review, overall_score=0.9)
+    await pre_review_pending(
+        session, org.id, settings=_settings(reviewer_agent_max_tier="T3")
+    )
+    assert review.pre_review_evidence["configured_max_tier"] == "T3"
+    assert review.pre_review_evidence["max_tier"] == TIER_T1
+    assert review.pre_review_evidence["max_tier_clamped"] is True
+
+
+def test_ar02_the_bulk_types_are_flagged_as_needing_size_evidence() -> None:
+    assert requires_size_evidence("MODEL_IMPORT_BATCH")
+    assert requires_size_evidence("BULK_STEWARDSHIP_OPERATION")
+    assert not requires_size_evidence("ASSET_DESCRIPTION_DRAFT")
+
+
+@pytest.mark.asyncio
+async def test_ar02_a_900_change_import_is_pre_reviewed_as_t2(
+    session: AsyncSession,
+) -> None:
+    """AR-02, the review's own worked example. Pre-review used to call
+    `risk_tier_for(object_type)` with no payload, so this landed T1."""
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session,
+        org,
+        object_type="MODEL_IMPORT_BATCH",
+        requested_action="APPLY_WORKBOOK_EDITS",
+    )
+    await _seed_import_batch(session, org, review, change_count=900)
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.risk_tier == TIER_T2
+    assert review.pre_review_recommendation == "NONE"
+    assert review.pre_review_evidence["change_count"] == 900
+
+
+@pytest.mark.asyncio
+async def test_ar02_a_small_import_stays_t1(session: AsyncSession) -> None:
+    """The escalation is about size, not about the type -- a genuinely small
+    batch is still inside the agent's reach."""
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session,
+        org,
+        object_type="MODEL_IMPORT_BATCH",
+        requested_action="APPLY_WORKBOOK_EDITS",
+    )
+    await _seed_import_batch(session, org, review, change_count=3)
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.risk_tier == TIER_T1
+    assert review.pre_review_recommendation == "APPROVE"
+
+
+@pytest.mark.asyncio
+async def test_ar02_an_unresolvable_size_escalates_rather_than_defaulting_small(
+    session: AsyncSession,
+) -> None:
+    """No batch row behind the review: the count is unknown, which is not the
+    same as zero."""
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session,
+        org,
+        object_type="MODEL_IMPORT_BATCH",
+        requested_action="APPLY_WORKBOOK_EDITS",
+    )
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.risk_tier == TIER_T2
+    assert review.pre_review_recommendation == "NONE"
+    assert review.pre_review_evidence["size_evidence"] == "bulk_change_count_unresolvable"
+
+
+@pytest.mark.asyncio
+async def test_ar02_an_import_that_grew_after_pre_review_is_not_decided(
+    session: AsyncSession,
+) -> None:
+    """The tier is recomputed at decision time, so a batch that grew between
+    the two passes escalates instead of riding its stored T1."""
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session,
+        org,
+        object_type="MODEL_IMPORT_BATCH",
+        requested_action="APPLY_WORKBOOK_EDITS",
+    )
+    batch = await _seed_import_batch(session, org, review, change_count=3)
+    await pre_review_pending(session, org.id, settings=_settings())
+    assert review.pre_review_recommendation == "APPROVE"
+
+    batch.change_count = 900
+    await session.flush()
+
+    assert await auto_decide_tier0_tier1(session, org.id, settings=_settings()) == []
+    assert review.status == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_ar03_a_missing_confidence_abstains_rather_than_approving(
+    session: AsyncSession,
+) -> None:
+    """AR-03. A review pointing at a proposal row that does not exist carries
+    no positive evidence, and absence of contrary evidence is not a reason to
+    believe it is right."""
+    org = await _seed_org(session)
+    review = await _seed_review(session, org)
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.pre_review_recommendation == "NONE"
+    assert review.pre_review_evidence["evidence_reason"] == "proposal_object_not_found"
+
+
+@pytest.mark.asyncio
+async def test_ar03_a_low_confidence_draft_abstains(session: AsyncSession) -> None:
+    org = await _seed_org(session)
+    review = await _seed_review(session, org)
+    await _seed_description_draft(session, org, review, overall_score=0.4)
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.pre_review_recommendation == "NONE"
+    assert review.pre_review_confidence == 0.4
+
+
+@pytest.mark.asyncio
+async def test_ar03_an_object_type_with_no_evidence_resolver_abstains(
+    session: AsyncSession,
+) -> None:
+    """`TERM_SEMANTIC_BINDING` is T1 and therefore inside the ceiling, but it
+    is a human steward's unscored assertion -- the agent has no independent
+    way to judge it, so it says so rather than agreeing."""
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session, org, object_type="TERM_SEMANTIC_BINDING", requested_action="BIND"
+    )
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.risk_tier == TIER_T1
+    assert review.pre_review_recommendation == "NONE"
+    assert review.pre_review_evidence["evidence_reason"] == (
+        "no_evidence_resolver_for_object_type"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ar03_the_approve_threshold_is_reachable_configuration(
+    session: AsyncSession,
+) -> None:
+    """The threshold used to be unreachable -- every real proposal arrived
+    with `confidence is None`, which short-circuited above it."""
+    org = await _seed_org(session)
+    review = await _seed_review(session, org)
+    await _seed_description_draft(session, org, review, overall_score=0.7)
+
+    await pre_review_pending(
+        session, org.id, settings=_settings(reviewer_agent_approve_confidence=0.6)
+    )
+    assert review.pre_review_recommendation == "APPROVE"
+
+    review.pre_reviewed_at = None
+    review.pre_review_recommendation = None
+    await session.flush()
+    await pre_review_pending(
+        session, org.id, settings=_settings(reviewer_agent_approve_confidence=0.9)
+    )
+    assert review.pre_review_recommendation == "NONE"
+
+
+@pytest.mark.asyncio
+async def test_the_agent_decides_a_well_evidenced_item(session: AsyncSession) -> None:
+    """The happy path, which this suite did not previously assert at all:
+    every auto-decide test before AR-01--AR-04 asserted a refusal."""
+    org = await _seed_org(session)
+    review = await _pre_reviewed(session, org)
+    assert review.pre_review_recommendation == "APPROVE"
+
+    decisions = await auto_decide_tier0_tier1(session, org.id, settings=_settings())
+
+    assert len(decisions) == 1
+    assert decisions[0].decision == "APPROVED"
+    assert decisions[0].risk_tier == TIER_T0
+    assert review.status == "APPROVED"
+    assert review.decided_by == "agent:reviewer"
+
+
+@pytest.mark.asyncio
+async def test_ar04_evidence_that_moved_since_pre_review_stops_the_decision(
+    session: AsyncSession,
+) -> None:
+    """AR-04. A rejection of the identical proposal recorded after pre-review
+    flips the fresh verdict to REJECT, which contradicts the stored APPROVE --
+    and a contradiction is exactly what a human should see."""
+    org = await _seed_org(session)
+    review = await _pre_reviewed(session, org)
+    await _seed_review(session, org, object_id=review.object_id, status="REJECTED")
+    await session.flush()
+
+    assert await auto_decide_tier0_tier1(session, org.id, settings=_settings()) == []
+    assert review.status == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_ar04_a_stale_pre_review_is_not_acted_on(session: AsyncSession) -> None:
+    org = await _seed_org(session)
+    review = await _pre_reviewed(session, org)
+    review.pre_reviewed_at = datetime.now(UTC) - timedelta(hours=6)
+    await session.flush()
+
+    assert await auto_decide_tier0_tier1(session, org.id, settings=_settings()) == []
+    assert review.status == "PENDING"
+
+    # The same item, inside a window that admits it, is decided.
+    assert (
+        await auto_decide_tier0_tier1(
+            session,
+            org.id,
+            settings=_settings(reviewer_agent_evidence_max_age_minutes=1440),
+        )
+        != []
+    )
+
+
+@pytest.mark.asyncio
+async def test_ar04_a_suspension_raised_mid_batch_stops_the_batch(
+    session: AsyncSession,
+) -> None:
+    """The check used to sit at batch entry, so a suspension raised while a
+    batch was running left that batch to run to its limit. It is now re-read
+    before each commit, which bounds the stop at one item."""
+    org = await _seed_org(session)
+    first = await _pre_reviewed(session, org)
+    second = await _pre_reviewed(session, org)
+    await session.flush()
+    context = security_context(organization_id=org.id, principal_id="risk-officer")
+
+    # Decide one item, then suspend, then ask for the rest: the second call
+    # refuses outright rather than working through the remaining item.
+    first_pass = await auto_decide_tier0_tier1(
+        session, org.id, settings=_settings(), limit=1
+    )
+    decided = [outcome.review_id for outcome in first_pass]
+    assert len(decided) == 1
+
+    await set_suspended(session, org.id, suspended=True, context=context, reason="spike")
+    await session.flush()
+
+    with pytest.raises(ReviewerAgentUnavailable) as excinfo:
+        await auto_decide_tier0_tier1(session, org.id, settings=_settings())
+    assert excinfo.value.reason_code == REASON_SUSPENDED
+
+    undecided = first if second.id in decided else second
+    assert undecided.status == "PENDING"
+
+
+# ---------------------------------------------------------------------------
+# 9. AR-11: the sample backlog is a precondition, not a report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ar11_an_unread_sample_backlog_stops_new_decisions(
+    session: AsyncSession,
+) -> None:
+    """ADR-0027 condition (b) argues a 5% sample makes unattended decisions
+    acceptable. That argument is about humans *reading* the sample. Nothing
+    checked that they were, so the safety case could degrade to nothing while
+    the agent kept deciding."""
+    org = await _seed_org(session)
+    review = await _pre_reviewed(session, org)
+    for _ in range(3):
+        await _seed_sample(session, org)
+    await session.flush()
+
+    with pytest.raises(ReviewerAgentUnavailable) as excinfo:
+        await auto_decide_tier0_tier1(
+            session, org.id, settings=_settings(reviewer_agent_max_unresolved_samples=3)
+        )
+    assert excinfo.value.reason_code == REASON_AUDIT_BACKLOG
+    assert review.status == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_ar11_resolving_the_backlog_restores_the_licence(
+    session: AsyncSession,
+) -> None:
+    org = await _seed_org(session)
+    await _pre_reviewed(session, org)
+    sample = await _seed_sample(session, org)
+    await session.flush()
+    settings = _settings(reviewer_agent_max_unresolved_samples=1)
+
+    with pytest.raises(ReviewerAgentUnavailable):
+        await auto_decide_tier0_tier1(session, org.id, settings=settings)
+
+    await resolve_audit_sample(
+        session,
+        sample,
+        human_outcome="AGREED",
+        rationale="checked against the source system",
+        context=security_context(organization_id=org.id, principal_id="reviewer-h"),
+    )
+    await session.flush()
+
+    assert await auto_decide_tier0_tier1(session, org.id, settings=settings) != []
+
+
+@pytest.mark.asyncio
+async def test_ar11_the_backlog_check_is_organization_scoped(
+    session: AsyncSession,
+) -> None:
+    """One organization's unread queue must not stop another's agent."""
+    org = await _seed_org(session)
+    other = await _seed_org(session)
+    await _pre_reviewed(session, org)
+    for _ in range(5):
+        await _seed_sample(session, other)
+    await session.flush()
+
+    assert (
+        await auto_decide_tier0_tier1(
+            session, org.id, settings=_settings(reviewer_agent_max_unresolved_samples=1)
+        )
+        != []
+    )
+
+
+@pytest.mark.asyncio
+async def test_ar11_a_zero_bound_disables_the_check(session: AsyncSession) -> None:
+    """Explicitly opting out is allowed -- and is an operator accepting that
+    the oversight claim is then unbacked, not a default."""
+    org = await _seed_org(session)
+    await _pre_reviewed(session, org)
+    for _ in range(20):
+        await _seed_sample(session, org)
+    await session.flush()
+
+    assert (
+        await auto_decide_tier0_tier1(
+            session, org.id, settings=_settings(reviewer_agent_max_unresolved_samples=0)
+        )
+        != []
+    )
+    assert Settings(_env_file=None, environment="test").reviewer_agent_max_unresolved_samples > 0
+
+
+@pytest.mark.asyncio
+async def test_ar02_a_bulk_stewardship_operation_is_sized_through_its_back_link(
+    session: AsyncSession,
+) -> None:
+    """The second bulk path. Its review carries `object_id="pending"` -- the
+    operation is created after the review it belongs to -- so the count is
+    only reachable through `BulkStewardshipOperation.governance_review_id`.
+    """
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session,
+        org,
+        object_type="BULK_STEWARDSHIP_OPERATION",
+        object_id="pending",
+        requested_action="ASSIGN_OWNER",
+    )
+    session.add(
+        BulkStewardshipOperation(
+            organization_id=org.id,
+            operation_type="ASSIGN_OWNER",
+            subject_type="TABLE",
+            subject_ids=[str(uuid4()) for _ in range(900)],
+            parameters={},
+            governance_review_id=review.id,
+            requested_by="steward-a",
+        )
+    )
+    await session.flush()
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.risk_tier == TIER_T2
+    assert review.pre_review_recommendation == "NONE"
+    assert review.pre_review_evidence["change_count"] == 900
+
+
+@pytest.mark.asyncio
+async def test_ar02_a_small_bulk_stewardship_operation_stays_t1(
+    session: AsyncSession,
+) -> None:
+    org = await _seed_org(session)
+    review = await _seed_review(
+        session,
+        org,
+        object_type="BULK_STEWARDSHIP_OPERATION",
+        object_id="pending",
+        requested_action="ASSIGN_OWNER",
+    )
+    session.add(
+        BulkStewardshipOperation(
+            organization_id=org.id,
+            operation_type="ASSIGN_OWNER",
+            subject_type="TABLE",
+            subject_ids=[str(uuid4()) for _ in range(3)],
+            parameters={},
+            governance_review_id=review.id,
+            requested_by="steward-a",
+        )
+    )
+    await session.flush()
+
+    await pre_review_pending(session, org.id, settings=_settings())
+
+    assert review.risk_tier == TIER_T1
+    assert review.pre_review_recommendation == "APPROVE"

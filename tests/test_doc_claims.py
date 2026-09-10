@@ -147,6 +147,31 @@ EXEMPT_CONTRACT_SLUGS = {
 # A bare `test_xxx` mention that is a real, non-test artefact, verified by hand:
 # `Connector.test_connection` is an interface method every connector implements
 # (see `src/aida/connectors/base.py`), not a pytest test function.
+# Test modules a *deliberate removal* deleted, still cited by the append-only history
+# documents that recorded the work when it was done. Those citations are true as
+# history and must not be rewritten; the modules are gone and must not be resurrected.
+# Same standing as `KNOWN_UNRESOLVED_CONTRACT_CITATIONS` below: an investigated
+# baseline, not a permanent exemption, guarded by a staleness test that fires if the
+# file ever comes back.
+RETIRED_TEST_PATHS: dict[str, str] = {
+    "tests/test_ui_accessibility.py": (
+        "asserted against the legacy `ui/` portal's static HTML/CSS/JS. That portal was "
+        "removed outright (Docs/review-2026-09-05 D05, explicitly approved), so the "
+        "subject under test no longer exists. The guarantees it encoded -- dialog "
+        "titles, focus handling, reduced-motion boundaries -- are covered for the React "
+        "app by ui-next/src/components/primitives.test.tsx and tokens.css."
+    ),
+    "tests/test_ui_lineage_graph_virtualization.py": (
+        "legacy `ui/` lineage graph; removed with that portal (D05). ui-next's "
+        "equivalent is components/VirtualList.tsx and its LineageGraph table view."
+    ),
+    "tests/test_ui_lineage_graph_clustering.py": (
+        "legacy `ui/` lineage graph; removed with that portal (D05)."
+    ),
+}
+
+RETIRED_TEST_BASENAMES = {path.rsplit("/", 1)[-1] for path in RETIRED_TEST_PATHS}
+
 EXCLUDED_BARE_TEST_NAMES = {
     "test_connection",
     # DbtResource fields recording a dbt *test's* outcome, not a pytest test function —
@@ -548,6 +573,8 @@ def test_acceptance_block_lines_matches_epic_backlog_shape():
     ids=_ids([c for c, _, _ in TEST_PATH_CITATIONS]),
 )
 def test_cited_test_path_resolves(citation: Citation, path_str: str, func: str | None):
+    if path_str in RETIRED_TEST_PATHS:
+        pytest.skip(f"{path_str}: {RETIRED_TEST_PATHS[path_str]}")
     full_path = REPO_ROOT / path_str
     assert full_path.is_file(), (
         f"{citation.doc}:{citation.line} cites `{citation.text}`, but "
@@ -594,6 +621,8 @@ def test_cited_src_path_resolves(citation: Citation):
 
 @pytest.mark.parametrize("citation", BARE_PY_CITATIONS, ids=_ids(BARE_PY_CITATIONS))
 def test_cited_bare_filename_resolves(citation: Citation):
+    if citation.text in RETIRED_TEST_BASENAMES:
+        pytest.skip(f"{citation.text}: retired, see RETIRED_TEST_PATHS")
     name = citation.text
     direct = SRC_ROOT / name
     if direct.is_file():
@@ -677,6 +706,12 @@ KNOWN_UNRESOLVED_CONTRACT_CITATIONS: dict[str, str] = {
     "data-quality": (
         "module 11's slug in a module-index table row, on a line that separately uses "
         "the word 'contracts' to mean data-quality contracts (freshness/SLA), not "
+        "import-linter"
+    ),
+    "agent-roster": (
+        "a ui-next screen id in the review's 40-route table "
+        "(Docs/review-2026-09-05/UX-AND-JOURNEYS.md), on a row whose recommendation text "
+        "separately uses 'contracts' to mean agent contracts (aida.agent_contracts), not "
         "import-linter"
     ),
     "python-tds": (
@@ -764,4 +799,17 @@ def test_import_linter_contract_check_status():
         f"{len(CONTRACT_NAME_CITATIONS)} contract-name citation(s) in Docs/ are "
         "target-architecture language and are not yet checked (see module docstring).",
         file=sys.stderr,
+    )
+
+
+def test_retired_test_paths_are_still_actually_absent():
+    """`RETIRED_TEST_PATHS` is a baseline of modules a deliberate removal deleted, not a
+    licence to leave a real test uncited. If one of these files exists again -- someone
+    restored it, or wrote a new module under the same name -- the entry is stale and must
+    be deleted so its citations go back to being checked for real.
+    """
+    resurrected = [path for path in RETIRED_TEST_PATHS if (REPO_ROOT / path).is_file()]
+    assert not resurrected, (
+        "These paths in RETIRED_TEST_PATHS exist again in the repository — remove them "
+        f"from the baseline so their citations are checked: {sorted(resurrected)}"
     )

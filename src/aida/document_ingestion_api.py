@@ -24,7 +24,8 @@ from aida.document_ingestion import (
     resolve_structural_mappings,
 )
 from aida.events import record_audit, record_outbox
-from aida.models import Document, DocumentClaim, DocumentMapping, DocumentSection, Project
+from aida.models import Document, DocumentClaim, DocumentMapping, DocumentSection
+from aida.resource_scope import load_project_in_scope
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
 
@@ -94,16 +95,6 @@ class DocumentMappingSummaryRead(ApiModel):
     unmatched_count: int
 
 
-async def _project_scope(
-    session: AsyncSession, project_id: UUID, context: SecurityContext
-) -> Project:
-    project = await session.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    enforce_organization(context, project.organization_id)
-    return project
-
-
 async def _document_scope(
     session: AsyncSession, document_id: UUID, context: SecurityContext
 ) -> Document:
@@ -125,7 +116,7 @@ async def upload_document(
     context: SecurityContext = Depends(require_roles(*DOCUMENT_WRITE_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> Document:
-    project = await _project_scope(session, project_id, context)
+    project = await load_project_in_scope(session, project_id, context)
     document = await create_document_from_csv(
         session,
         organization_id=project.organization_id,
@@ -172,7 +163,7 @@ async def list_documents(
     context: SecurityContext = Depends(require_roles(*DOCUMENT_READ_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    project = await _project_scope(session, project_id, context)
+    project = await load_project_in_scope(session, project_id, context)
     rows = (
         await session.scalars(
             select(Document)

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { DataSourceRead, UnifiedLineageImpactRead } from "../lib/types";
 import type { CatalogRowRead, CursorPage, PageOf } from "../lib/ui-types";
 
@@ -119,8 +119,33 @@ describe("NarratedLineageScreen against the real unified-lineage impact endpoint
 
     fireEvent.click(screen.getByRole("tab", { name: "Graph (supporting view)" }));
 
-    await waitFor(() => expect(screen.getByRole("img", { name: /grouped by hop distance/ })).toBeInTheDocument());
+    /* Not `role="img"` any more: the diagram's nodes are real buttons, and an
+       image role hid every one of them from assistive technology (review
+       2026-09-05, F21). */
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: /grouped by hop distance/ })).toBeInTheDocument(),
+    );
     expect(new URLSearchParams(location.search).get("view")).toBe("graph");
+  });
+
+  it("offers the same lineage as a table, so the edges are not mouse-only", async () => {
+    history.replaceState(null, "", "/?ds=ds_1&node=t_orders_raw&view=graph");
+    const NarratedLineageScreen = await loadScreen();
+    render(<NarratedLineageScreen />);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Lineage view" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Table" }));
+
+    /* The edges were `<path>` elements with a `<title>` -- readable by a mouse
+       pointer and by nothing else. Every one of them is now a row. */
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Upstream" })).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: "Evidence" })).toBeInTheDocument();
+    expect(within(table).getAllByRole("row").length).toBeGreaterThan(1);
   });
 
   it("shows the empty-before-search state without calling the impact endpoint", async () => {

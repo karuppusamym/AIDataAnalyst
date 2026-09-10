@@ -1,0 +1,15 @@
+/* One rule per shared control, with the values the screens already used --
+   `.adminpanel__err` and `.wsaccess-panel__err` were byte-identical, as were
+   `.cpscreen__status*` and `.trscreen__status*` and the two skeletons. This
+   is a de-duplication, not a restyle: nothing here renders differently. */
+
+.formfeedback{margin:0;font-size:12.5px;border-radius:var(--radius-sm);padding:7px 9px}
+.formfeedback--err{color:var(--bad);background:var(--bad-soft)}
+.formfeedback--ok{color:var(--ok);background:var(--ok-soft)}
+
+.statusstrip{flex:none;border-radius:var(--radius-sm);padding:8px 12px;font-size:12.5px;border:1px solid var(--line-soft)}
+.statusstrip--info{background:var(--sunk);color:var(--ink-2)}
+.statusstrip--success{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.statusstrip--error{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+
+.loadingpanel{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px;min-height:160px}
