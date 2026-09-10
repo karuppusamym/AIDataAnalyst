@@ -43,6 +43,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Final
 from urllib.parse import quote, urlsplit
 
@@ -60,7 +61,7 @@ from aida.audit_archive_storage import (
     StoredObject,
     VerificationResult,
 )
-from aida.aws_sigv4 import signed_headers_for
+from aida.aws_sigv4 import canonical_query_string, signed_headers_for
 
 logger = structlog.get_logger(__name__)
 
@@ -135,6 +136,18 @@ def _content_md5(payload: bytes) -> str:
 def _iso_z(moment: datetime) -> str:
     """S3 wants a UTC instant with a literal `Z` and no microseconds."""
     return moment.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _last_modified(response: httpx.Response, *, default: datetime) -> datetime:
+    """The object's own `Last-Modified`, in UTC, or `default` if absent."""
+    raw = response.headers.get("last-modified", "")
+    if not raw:
+        return default
+    try:
+        parsed: datetime = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return default
+    return parsed.astimezone(UTC)
 
 
 def _parse_iso_z(raw: str) -> datetime:
@@ -232,13 +245,21 @@ class S3ArchiveStorage:
             secret_key=self._secret_key,
             session_token=self._session_token,
         )
+        # The query string is built here, in the same canonical form the
+        # signature commits to, and handed to httpx as part of the URL --
+        # not as `params`. Passing a dict would leave the wire order and the
+        # percent-encoding to the client, and a query string that differs
+        # from the signed one by so much as a parameter's position is a 403
+        # with nothing in it to say why.
+        canonical_query = canonical_query_string(query)
         url = f"{self._endpoint}{path}"
+        if canonical_query:
+            url = f"{url}?{canonical_query}"
         try:
             with httpx.Client(timeout=self._timeout) as client:
                 response = client.request(
                     method,
                     url,
-                    params=query or None,
                     headers=signed,
                     content=payload or None,
                 )
@@ -297,6 +318,11 @@ class S3ArchiveStorage:
         turned on at creation time, so a pre-existing bucket is left alone
         and `bucket_has_object_lock` is the way to find out whether it is
         actually usable for WORM.
+
+        A `HEAD` answering 301 means the bucket exists in a different region
+        than the one configured; that is reported rather than treated as
+        absent, because creating it here would either fail or make a second
+        bucket somewhere nobody expects.
         """
         path = f"/{quote(self.bucket, safe='')}"
         head = self._request(
@@ -304,10 +330,27 @@ class S3ArchiveStorage:
         )
         if head.status_code in (200, 204):
             return False
+        if head.status_code == 301:
+            raise ArchiveStorageError(
+                f"bucket {self.bucket!r} exists in region "
+                f"{head.headers.get('x-amz-bucket-region', 'unknown')!r}, not the configured "
+                f"{self.region!r}; set audit_archive_s3_region to match"
+            )
+        # Outside us-east-1, S3 requires the region in a body -- omitting it
+        # silently creates (or refuses to create) the bucket in us-east-1.
+        # MinIO accepts either form.
+        body = b""
+        if self.region != "us-east-1":
+            body = (
+                "<CreateBucketConfiguration>"
+                f"<LocationConstraint>{self.region}</LocationConstraint>"
+                "</CreateBucketConfiguration>"
+            ).encode()
         self._request(
             "PUT",
             path,
             headers={"x-amz-bucket-object-lock-enabled": "true"},
+            payload=body,
             operation="CreateBucket",
             expected=(200, 204),
         )
@@ -364,7 +407,10 @@ class S3ArchiveStorage:
             return StoredObject(
                 uri=uri,
                 provider=self.name,
-                stored_at=datetime.now(UTC),
+                # When the object was actually written, not when this retry
+                # noticed it: the record's `uploaded_at` must describe the
+                # upload, and a crash-recovery pass can run days later.
+                stored_at=_last_modified(existing, default=datetime.now(UTC)),
                 retention_acknowledged_until=(
                     _parse_iso_z(retain_until) if retain_until else obj.retention_until
                 ),
@@ -537,15 +583,27 @@ class S3ArchiveStorage:
         )
 
     def legal_hold_status(self, uri: str) -> bool:
-        """Read the hold back from the service rather than from our own record."""
+        """Read the hold back from the service rather than from our own record.
+
+        An object written with `legal-hold-status: OFF` has never had a hold
+        *configuration* created, and the service answers
+        `NoSuchObjectLockConfiguration` rather than reporting `OFF`. That one
+        code means "no hold"; every other failure is re-raised, so a
+        permissions or transport error can never be read as an absent hold.
+        """
         key, version_id = self._parts(uri)
-        response = self._request(
-            "GET",
-            self._path_for(key),
-            query={"legal-hold": "", "versionId": version_id},
-            operation="GetObjectLegalHold",
-            expected=(200, 404),
-        )
+        try:
+            response = self._request(
+                "GET",
+                self._path_for(key),
+                query={"legal-hold": "", "versionId": version_id},
+                operation="GetObjectLegalHold",
+                expected=(200, 404),
+            )
+        except S3ArchiveError as error:
+            if error.code == "NoSuchObjectLockConfiguration":
+                return False
+            raise
         if response.status_code != 200:
             return False
         return _findtext(ET.fromstring(response.text), "Status") == "ON"

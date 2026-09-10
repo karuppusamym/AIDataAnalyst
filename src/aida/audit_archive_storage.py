@@ -159,7 +159,9 @@ class NullArchiveStorage:
 
     DEFAULT_DETAIL: Final = (
         "no archive destination is configured. Set audit_archive_storage_backend to "
-        "'filesystem' and audit_archive_filesystem_root to a durable path."
+        "'filesystem' with audit_archive_filesystem_root pointing at a durable path, or "
+        "to 's3' with object_store_endpoint/access_key/secret_key and "
+        "audit_archive_bucket_name naming an Object Lock bucket."
     )
 
     def __init__(self, name: str = "none", detail: str = DEFAULT_DETAIL) -> None:
