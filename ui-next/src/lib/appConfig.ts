@@ -39,6 +39,28 @@ interface RawEnv {
   readonly VITE_AUTH_MODE?: string;
   readonly VITE_DEV_PRINCIPAL_ID?: string;
   readonly VITE_DEV_ROLES?: string;
+  readonly VITE_OIDC_ISSUER?: string;
+  readonly VITE_OIDC_CLIENT_ID?: string;
+  readonly VITE_OIDC_SCOPE?: string;
+  readonly VITE_OIDC_REDIRECT_PATH?: string;
+}
+
+/**
+ * What the browser needs to run an authorization-code flow itself.
+ *
+ * Only the issuer is named here. Endpoint URLs are read from the issuer's
+ * discovery document at sign-in time (`lib/oidcClient.ts`) rather than being
+ * configured one by one, because an IdP is entitled to move them and a
+ * hand-copied `authorization_endpoint` is a configuration item that silently
+ * rots. `redirectPath` is a path, not a URL: the origin is whatever origin
+ * this build is being served from, so one image works on localhost and on a
+ * deployed host without rebuilding.
+ */
+export interface OidcClientConfig {
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly scope: string;
+  readonly redirectPath: string;
 }
 
 const DEFAULT_DEV_ROLES =
@@ -53,6 +75,18 @@ export interface AppConfig {
   readonly devRoles: string;
   /** True when `VITE_AUTH_MODE` was not set and the default was inferred. */
   readonly authModeInferred: boolean;
+  /**
+   * The issuer this build can sign in against, or null when none was
+   * configured.
+   *
+   * THE DEFECT this removes: `authMode === "oidc"` used to mean two different
+   * things at once -- "the backend requires a bearer token" and "this build
+   * has no way to obtain one" -- so the only honest screen was an apology.
+   * They are separate facts. `authMode` says what the backend accepts; this
+   * says whether the browser can run a flow. A build with the first and not
+   * the second is still blocked, and still says so.
+   */
+  readonly oidc: OidcClientConfig | null;
 }
 
 function readAuthMode(raw: string | undefined): AuthMode | null {
@@ -64,6 +98,23 @@ function readAuthMode(raw: string | undefined): AuthMode | null {
     default:
       return null;
   }
+}
+
+function readOidcConfig(env: RawEnv): OidcClientConfig | null {
+  // Issuer AND client id, or nothing. A half-configured flow would redirect
+  // to an endpoint that rejects it, which reads to a user as "sign-in is
+  // broken" rather than "this build was never given an identity provider".
+  const issuer = (env.VITE_OIDC_ISSUER ?? "").trim().replace(/\/+$/, "");
+  const clientId = (env.VITE_OIDC_CLIENT_ID ?? "").trim();
+  if (!issuer || !clientId) return null;
+  return {
+    issuer,
+    clientId,
+    // `openid` is mandatory for an OIDC authorization-code flow; the rest is
+    // what a deployment's IdP contract asks for.
+    scope: (env.VITE_OIDC_SCOPE || "openid profile email").trim(),
+    redirectPath: env.VITE_OIDC_REDIRECT_PATH?.trim() || "/",
+  };
 }
 
 export function resolveAppConfig(env: RawEnv): AppConfig {
@@ -79,6 +130,7 @@ export function resolveAppConfig(env: RawEnv): AppConfig {
     authModeInferred: declared === null,
     devPrincipalId: env.VITE_DEV_PRINCIPAL_ID || "local-ui-admin",
     devRoles: env.VITE_DEV_ROLES || DEFAULT_DEV_ROLES,
+    oidc: readOidcConfig(env),
   };
 }
 

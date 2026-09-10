@@ -7,7 +7,9 @@ import {
   canSignOut,
   clearAccessToken,
   getAccessToken,
+  noteSignInFailure,
   resetAuthForTests,
+  sessionLapsed,
 } from "./authSession";
 import type { AppConfig } from "./appConfig";
 
@@ -24,6 +26,7 @@ function config(overrides: Partial<AppConfig>): AppConfig {
     devPrincipalId: "local-ui-admin",
     devRoles: "Viewer",
     authModeInferred: false,
+    oidc: null,
     ...overrides,
   };
 }
@@ -93,5 +96,58 @@ describe("sign out", () => {
     clearAccessToken();
     expect(getAccessToken()).toBeNull();
     expect(authBlock(config({ authMode: "oidc" }))?.reason).toBe("oidc-no-token");
+  });
+});
+
+describe("a lapsed session is not the same as never having signed in", () => {
+  /* F06's acceptance criterion names expiry behaviour, and the two states
+   * have to be told apart on screen: an expired session leaves the shell up
+   * so the badge can report "sign-in required" against the backend's real
+   * 401, while a build that has never held a token is blocked outright. What
+   * neither may do is fall back to the development principal. */
+  const live = config({ dataMode: "live", authMode: "oidc" });
+
+  it("keeps the shell mounted after a token expires", () => {
+    adoptAccessToken("token-123", -1);
+    expect(getAccessToken()).toBeNull();
+    expect(sessionLapsed()).toBe(true);
+    expect(authBlock(live)).toBeNull();
+    // And still sends nothing that could be mistaken for an identity.
+    expect(authorizationHeaders(live)).toEqual({});
+  });
+
+  it("blocks again after signing out, which is a different intent", () => {
+    adoptAccessToken("token-123", -1);
+    expect(authBlock(live)).toBeNull();
+    clearAccessToken();
+    expect(sessionLapsed()).toBe(false);
+    expect(authBlock(live)?.reason).toBe("oidc-no-token");
+  });
+
+  it("offers a sign-in button only when an issuer was configured", () => {
+    expect(authBlock(live)?.canSignIn).toBe(false);
+    const withIssuer = config({
+      dataMode: "live",
+      authMode: "oidc",
+      oidc: {
+        issuer: "http://idp.test/atlas",
+        clientId: "atlas-ui-next",
+        scope: "openid",
+        redirectPath: "/",
+      },
+    });
+    const block = authBlock(withIssuer);
+    expect(block?.reason).toBe("oidc-sign-in-required");
+    expect(block?.canSignIn).toBe(true);
+    expect(block?.detail).toContain("http://idp.test/atlas");
+  });
+
+  it("carries the last failure onto the screen rather than losing it", () => {
+    noteSignInFailure("the identity provider refused the token request");
+    expect(authBlock(live)?.failure).toBe("the identity provider refused the token request");
+    adoptAccessToken("token-123");
+    // A successful sign-in clears the stale complaint.
+    clearAccessToken();
+    expect(authBlock(live)?.failure).toBeNull();
   });
 });

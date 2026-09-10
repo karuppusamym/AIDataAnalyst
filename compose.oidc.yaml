@@ -1,0 +1,121 @@
+# DEVELOPMENT ONLY. Do not deploy this file, and do not merge it into
+# compose.yaml (review 2026-09-05, F06 · T07).
+#
+# WHAT IT IS FOR: exercising the browser's authorization-code + PKCE flow, and
+# the backend's OIDC verification, end to end on a laptop. The default stack
+# keeps `identity_provider=development`; OIDC is and stays an explicit
+# deployment choice, so it is an opt-in overlay rather than a flag in the main
+# file that someone could leave on:
+#
+#   docker compose -f compose.yaml -f compose.oidc.yaml up -d --build
+#
+# WHAT IT PROVES AND WHAT IT DOES NOT. `mock-oidc` is a genuine OIDC provider:
+# real RS256 signatures, a real JWKS document, real discovery, authorization
+# and token endpoints, real `exp`. So it proves the *protocol integration* --
+# that the browser obtains a signed token, that the API verifies it against a
+# published key set, that issuer/audience/expiry are enforced and that claims
+# map to platform roles. It proves NOTHING about a corporate IdP: it has no
+# user directory, no password, no MFA, no consent, no session policy and no
+# administrative revocation. It will mint a token for anyone who asks, with
+# whatever claims they type into its login form. That is exactly why it must
+# never be reachable from anything but a developer's machine.
+
+services:
+  # The development issuer. Named, ported and commented so that it cannot be
+  # mistaken for infrastructure: it is in this file only, it is never started
+  # by a plain `docker compose up`, and it holds no state worth keeping.
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    environment:
+      # Interactive login is the point: F06 is about a browser completing a
+      # redirect flow, and a token minted by curl would not test that. The
+      # form's "claims" box is where a tester chooses the roles, groups and
+      # organization the resulting principal carries, which is how the
+      # least-privilege journey below is exercised without a user directory.
+      JSON_CONFIG: '{"interactiveLogin":true}'
+    ports:
+      # Published because the BROWSER has to reach the authorization and token
+      # endpoints; the API reaches JWKS over the Compose network instead. The
+      # two therefore use different hostnames for the same server, which is
+      # fine and deliberate -- see AIDA_OIDC_ISSUER and AIDA_OIDC_JWKS_URL
+      # below. Bound to the loopback interface so the issuer is not on the
+      # local network.
+      - "127.0.0.1:8090:8080"
+    # NO HEALTHCHECK, deliberately: the image is distroless -- no shell, no
+    # wget, no curl -- so any `test:` here reports "unhealthy" forever and the
+    # services depending on it never start. Nothing needs one: the API reads
+    # JWKS lazily, on the first token it is asked to verify, which is long
+    # after startup, and the browser reaches the issuer only when someone
+    # presses Sign in.
+    restart: unless-stopped
+
+  api:
+    depends_on:
+      mock-oidc:
+        condition: service_started
+    environment:
+      AIDA_IDENTITY_PROVIDER: oidc
+
+      # The issuer is what the TOKEN says (`iss`), and the token is minted for
+      # a browser that reached the server on localhost:8090 -- mock-oauth2-server
+      # derives the issuer from the request's Host header, exactly as a real
+      # deployment's issuer is a fixed public URL. So this is the browser's URL,
+      # not the container's.
+      AIDA_OIDC_ISSUER: http://localhost:8090/atlas
+
+      # The JWKS is fetched by the API container, which cannot resolve
+      # "localhost:8090" -- that is the host's loopback. It uses the Compose
+      # service name. The verifier compares `iss` against the issuer above and
+      # fetches keys from here; the two are allowed to differ, and here they
+      # must. In production both are the same HTTPS URL and `config.py` refuses
+      # a non-HTTPS JWKS URL when `environment=production`.
+      AIDA_OIDC_JWKS_URL: http://mock-oidc:8080/atlas/jwks
+
+      # mock-oauth2-server issues `aud: "default"` unless the login form asks
+      # for something else. The audience check is a real control and it does
+      # run -- a token minted for another audience is rejected -- the literal
+      # value is just this server's default.
+      AIDA_OIDC_AUDIENCE: default
+
+      # External claim -> platform role. This is the bank's group contract in
+      # miniature: the IdP knows "atlas-admin"; the platform knows
+      # "PlatformAdmin". Nothing in the token names a platform role directly,
+      # and an unmapped claim maps to nothing (`aida.oidc.context_from_claims`
+      # keeps only names in PLATFORM_ROLES), so a token cannot invent a role by
+      # asking for it.
+      AIDA_OIDC_ROLE_MAPPINGS: >-
+        {"atlas-admin":["PlatformAdmin","OrganizationAdmin","MetadataAdmin","DataAdmin",
+        "SemanticAdmin","DataSteward","Reviewer","MetadataReviewer","Auditor","Operations",
+        "Analyst","Viewer","ToolDeveloper","ToolConsumer","AgentDeveloper"],
+        "atlas-steward":["DataSteward","MetadataReviewer","Analyst","Viewer"],
+        "atlas-viewer":["Viewer"]}
+
+      # UX-1: the shell's persona comes from the verified groups claim, never
+      # from the browser, when the identity provider is OIDC.
+      AIDA_OIDC_PERSONA_MAPPINGS: >-
+        {"atlas-admins":"Operator","atlas-stewards":"Steward",
+        "atlas-reviewers":"Reviewer","atlas-auditors":"Auditor",
+        "atlas-analysts":"Analyst"}
+      AIDA_OIDC_DEFAULT_PERSONA: Analyst
+
+  # A second image, tagged separately, so switching back to the default stack
+  # does not require rebuilding: `docker compose up` still runs the
+  # development-identity bundle it always did.
+  ui-next:
+    image: aida-platform-ui-next-oidc
+    build:
+      context: ./ui-next
+      args:
+        VITE_USE_FIXTURES: "0"
+        VITE_AUTH_MODE: oidc
+        # The browser's view of the issuer. Endpoint URLs are read from its
+        # discovery document at sign-in time rather than configured here.
+        VITE_OIDC_ISSUER: http://localhost:8090/atlas
+        VITE_OIDC_CLIENT_ID: atlas-ui-next
+        VITE_OIDC_SCOPE: openid profile email
+        # A path, not a URL: the origin is whatever origin the app is served
+        # from, so the same image works on any host.
+        VITE_OIDC_REDIRECT_PATH: /
+    depends_on:
+      mock-oidc:
+        condition: service_started
