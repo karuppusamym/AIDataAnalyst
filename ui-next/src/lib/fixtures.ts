@@ -1,4 +1,6 @@
 import type {
+  ParsedLineageEdgeReviewQueueItemRead,
+  ParsedLineageEdgeReviewQueueRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
   AgentEvaluationRunRead,
@@ -7348,4 +7350,86 @@ export async function makeFixtureAssetTermLinks(
   const offset = query.offset ?? 0;
   const limit = query.limit ?? 100;
   return { items: matching.slice(offset, offset + limit), limit, offset, total: matching.length };
+}
+
+/* ---------------------------------------------------------------------------
+   Parsed lineage review queue.
+
+   THE DEFECT this removes: `listParsedLineageReviewQueue` was the one review
+   client with no demo branch, so in the default `VITE_USE_FIXTURES` build the
+   Parsed lineage review screen issued a live request, the backend answered
+   "X-Principal-Id is required in development mode", and the screen rendered a
+   load failure. A demo build that cannot open one of its own navigation
+   entries is exactly the "demo mode must be unmistakable, and must work"
+   property F13 is about -- a broken screen is not an honest demo state, it is
+   an error the viewer has to diagnose.
+
+   The three edges below are the three shapes the screen renders differently:
+   a column-level DBT edge with a transformation, a table-level VIEW edge with
+   none, and an OpenLineage column edge whose confidence arrives as a string
+   (the backend serialises `Numeric` that way, and the screen coerces it).
+--------------------------------------------------------------------------- */
+export async function makeFixtureParsedLineageReviewQueue(query: {
+  edgeType?: string | null;
+  minConfidence?: number | null;
+  limit?: number;
+  offset?: number;
+}): Promise<ParsedLineageEdgeReviewQueueRead> {
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  const all: ParsedLineageEdgeReviewQueueItemRead[] = [
+    {
+      edge_id: "ple_dbt_1",
+      edge_type: "DBT",
+      organization_id: ORG_ID,
+      created_at: "2026-09-04T09:12:00Z",
+      created_by: "dbt-artifact-import",
+      confidence: 0.92,
+      source_label: "analytics.core.orders_raw.amount",
+      target_label: "analytics.marts.revenue.net_amount",
+      transformation_type: "SUM",
+      source_sql_reference: { model: "revenue", path: "models/marts/revenue.sql" },
+    },
+    {
+      edge_id: "ple_view_1",
+      edge_type: "VIEW",
+      organization_id: ORG_ID,
+      created_at: "2026-09-04T10:41:00Z",
+      created_by: "view-lineage-parser",
+      confidence: 0.74,
+      source_label: "analytics.core.customers",
+      target_label: "analytics.core.v_active_customers",
+      transformation_type: null,
+      source_sql_reference: { view: "v_active_customers" },
+    },
+    {
+      edge_id: "ple_ol_col_1",
+      edge_type: "OPENLINEAGE_COLUMN",
+      organization_id: ORG_ID,
+      created_at: "2026-09-05T06:03:00Z",
+      created_by: "openlineage-ingest",
+      // A string on purpose: the backend serialises Numeric as a string and
+      // the screen must coerce it. A fixture that only ever produced numbers
+      // would let that coercion rot unnoticed.
+      confidence: "0.58",
+      source_label: "warehouse.raw.payments.customer_id",
+      target_label: "warehouse.marts.customer_ltv.customer_id",
+      transformation_type: "IDENTITY",
+      source_sql_reference: { run: "ol-run-4412", job: "payments_ltv" },
+    },
+  ];
+  const filtered = all.filter((edge) => {
+    if (query.edgeType && edge.edge_type !== query.edgeType) return false;
+    if (query.minConfidence != null && Number(edge.confidence ?? 0) < query.minConfidence) {
+      return false;
+    }
+    return true;
+  });
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return {
+    items: filtered.slice(offset, offset + limit),
+    limit,
+    offset,
+    total: filtered.length,
+  };
 }

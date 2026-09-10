@@ -30,6 +30,7 @@ import {
   makeFixtureRelationshipCandidateReviewQueue,
   makeFixtureRelationshipCandidates,
   makeFixtureReviewQueue,
+  makeFixtureParsedLineageReviewQueue,
 } from "../fixtures";
 import type {
   CompliancePackRead,
@@ -490,9 +491,16 @@ export async function listParsedLineageReviewQueue(
     params.set("min_confidence", String(query.minConfidence));
   params.set("limit", String(query.limit ?? 100));
   params.set("offset", String(query.offset ?? 0));
-  return get<import("../types").ParsedLineageEdgeReviewQueueRead>(
-    `/v1/lineage/parsed-edges/review-queue?${params}`,
-    signal,
+  // This was the one review client with no demo branch, so the screen behind
+  // it issued a live request in the default fixtures build and rendered the
+  // backend's "X-Principal-Id is required" as a load failure.
+  return demoOr(
+    () => makeFixtureParsedLineageReviewQueue(query),
+    () =>
+      get<import("../types").ParsedLineageEdgeReviewQueueRead>(
+        `/v1/lineage/parsed-edges/review-queue?${params}`,
+        signal,
+      ),
   );
 }
 
