@@ -11884,3 +11884,115 @@ would have meant looking in two places to answer one question.
 - **No bulk withdraw.** Retiring the descriptions on forty columns is forty
   requests and forty reviews. The workbook path deliberately cannot express a
   deletion, so there is no bulk route at all.
+
+---
+
+## 2026-09-09 — Four documented agent controls were not the controls that ran
+
+A critical review of the agent architecture (`10-architecture/15-agent-architecture-critical-review.md`,
+findings AR-01..AR-12) went looking for the distance between what the platform's documents claim
+about agent authority and what its code enforces. It found four guard defects and a class of
+declared-but-unread configuration. This entry records the remediation and, more usefully, the
+three things the *fix* found that the review itself had missed.
+
+### The correction this entry exists to make
+
+Three tracker rows and two entries in this log state, as verified evidence, that `AgentRun` carries
+no foreign key back to `AiAsset`/`AiAssetVersion` and that no proposal pathway in this codebase has
+a confidence-gated auto-apply branch: **UX-19** (2026-09-01), **N15** (2026-09-02) and **UX-15**
+(2026-09-02). Both statements were true and carefully checked when written. Both are false now.
+`AgentRun.ai_asset_version_id` exists and is populated by `agent_orchestrator._stage_screen`
+whenever a run executes under a registered agent's contract, and ADR-0027's
+`reviewer_agent.auto_decide_tier0_tier1` is a genuine unattended-decision branch. Per this log's own
+convention the original entries stand unedited; this is the correction. The delivered work in those
+rows is unaffected — what expired is their honesty note, which is exactly the kind of claim that
+rots silently because nothing tests a docstring.
+
+### What the review found
+
+Four guard defects, all in code that had passing tests:
+
+1. **The T0/T1 ceiling was a default, not a limit.** `Settings.reviewer_agent_max_tier` accepts T2
+   and T3, and `agent_decidable_object_types` passed that value straight into its comparison — so a
+   configured T3 admitted `CONTEXT_PRODUCT_VERSION`, `MODEL_ROUTE_CONFIGURATION`,
+   `CROSS_BOUNDARY_GRANT` and `ACCESS_POLICY`. Its own docstring said this could not happen.
+2. **Bulk items were tiered without their size.** Pre-review called `risk_tier_for(object_type)`
+   with no payload, which answers T1 for both bulk types — reading as "small" when it meant "not
+   measured". A 900-change workbook sat at T1.
+3. **A missing confidence was the most permissive input the reviewer rule had**, not the most
+   restrictive.
+4. **Suspension was checked at batch entry only**, so a suspension raised while a batch ran did not
+   stop the batch it was raised during.
+
+And a class of configuration that was validated on write, stored, and read by nothing:
+`AgentContract.daily_token_cap`, `per_run_token_cap`, `wall_clock_seconds_cap`,
+`capability_envelope.context_product_ids` and `capability_envelope.write_lanes`.
+
+### The three things the fix found that the review had not
+
+**AR-03 was understated, and the real version is worse.** The review said a missing confidence
+produced an approval. In practice the confidence was *always* missing: `_proposal_confidence` read
+`proposal_confidence` out of `GovernanceReview.pre_review_evidence`, a field that pre-review alone
+writes — and pre-review skips already-pre-reviewed rows to reach it. So the only pass that ever read
+it saw `None` every time. Every tier-eligible item with no prior rejection and no open quality
+incident was recommended APPROVE, and `reviewer_agent_approve_confidence` was unreachable dead
+configuration. The rule's docstring described it as "deliberately reluctant"; absent confidence was
+its most permissive branch.
+
+**A docstring was the specification and the code did not implement it.**
+`review_risk_tiers.agent_decidable_object_types` stated that a misconfigured ceiling "can never
+widen it past what this module classifies" while doing exactly that. The claim was load-bearing —
+ADR-0027's condition (a) rests on it — and nothing compared the two.
+
+**The reviewer agent's happy path had never been executed by a test.** Every auto-decision test in
+`tests/test_reviewer_agent.py` asserted a refusal, and the file never imported `aida.semantic_api`,
+so no target adapter was registered and `decide_review` would have refused every object type with
+`unsupported governance object type`. That is how four defects in one guard chain coexisted with a
+green suite. A fifth defect of the same shape: `test_the_allowlist_is_derived_from_the_tier_table_not_from_config`
+asserted that every type a T3 ceiling admitted was a *classified* type — true, while it admitted
+every T2 and T3 one. A passing test asserting the wrong property.
+
+### What was verified
+
+Full Python suite green (9,061 tests). `ruff`, `mypy`, import-linter (11 contracts kept), docs-link
+gate (214 files), reachability gate. OpenAPI baseline and `ui-next/src/lib/types.ts` regenerated,
+purely additive both times; `ui-next` 514 tests green. Migration `a7c41e93d2b0`
+(`agent_budget_window`) is the single Alembic head, **applied against the running PostgreSQL 17 and
+the table verified column-for-column** rather than assumed from a passing SQLite suite.
+
+AR-05's guard was raced on real PostgreSQL the following day
+(`tests/test_agent_budget_postgres_concurrency.py`), the same reproduction F05 got: ten racers on
+ten connections released from one `asyncio.Barrier`, at READ COMMITTED and REPEATABLE READ. It is
+falsifiable and was falsified — removing the cap clause from the conditional `UPDATE`'s `WHERE`
+turns three READ COMMITTED tests red with a 1000-token day holding 2000 tokens.
+
+### Known limitations, named rather than absorbed
+
+- **AR-09 is untouched.** Enterprise-scale capacity, recovery and tenant fairness are unmeasured.
+  One Temporal task queue still carries discovery and ingestion. Separating queues without the
+  experiments would have looked like progress and established nothing.
+- **AR-03's evaluation does not exist.** The agent now approves on a proposal's *self-reported*
+  score. Nothing has tested what that score is worth against misleading metadata or a deliberately
+  wrong proposal. Unattended review should not be enabled on the code fix alone.
+- **AR-04's stop is bounded only at READ COMMITTED.** At REPEATABLE READ a re-read returns the
+  snapshot and a running batch continues to its limit; no application-level check can defeat that.
+- **AR-05's numbers are estimates.** No provider adapter reports billable usage.
+  `reconcile_run_budget` is the single place a real figure would enter. At REPEATABLE READ the
+  losing reserver is refused SQLSTATE 40001, which needs a retry loop the application does not
+  supply — and at that isolation level removing the guard changes nothing, because the isolation
+  level bounds the day by itself.
+- **AR-06 enforced what it could trace and fail-closed what it could not.** `write_lanes` is now
+  refused at validation rather than stored unenforced. The endpoint/path enforcement matrix does not
+  exist.
+- **AR-10 closed one ingress, not the class.** The classifier remains evadable by paraphrase; INV-3
+  remains the load-bearing control.
+- **AR-11 stops the agent when humans fall behind. It says nothing about the decisions already
+  made** — withdrawal, compensation and notification procedures are absent.
+
+### Operator action required before enabling any of this
+
+Every `AgentContract` written before this change has an empty `capability_envelope.context_product_ids`,
+because nothing read the field. An empty allowlist now allows nothing, so a contracted agent will
+lose context-product access through MCP until its contract names the products it needs. Human
+principals are unaffected. Checked against the running stack at the time of writing: zero contracts
+exist there, so no live deployment is affected today.

@@ -985,6 +985,7 @@ async def test_ar04_a_stale_pre_review_is_not_acted_on(session: AsyncSession) ->
 @pytest.mark.asyncio
 async def test_ar04_a_suspension_raised_mid_batch_stops_the_batch(
     session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The check used to sit at batch entry, so a suspension raised while a
     batch was running left that batch to run to its limit. It is now re-read
@@ -995,20 +996,23 @@ async def test_ar04_a_suspension_raised_mid_batch_stops_the_batch(
     await session.flush()
     context = security_context(organization_id=org.id, principal_id="risk-officer")
 
-    # Decide one item, then suspend, then ask for the rest: the second call
-    # refuses outright rather than working through the remaining item.
-    first_pass = await auto_decide_tier0_tier1(
-        session, org.id, settings=_settings(), limit=1
-    )
-    decided = [outcome.review_id for outcome in first_pass]
-    assert len(decided) == 1
+    import aida.reviewer_agent as reviewer
+    original = reviewer.decide_review
+    decided = []
 
-    await set_suspended(session, org.id, suspended=True, context=context, reason="spike")
-    await session.flush()
+    async def suspend_after_first(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        decided.append(args[1].id)
+        await set_suspended(session, org.id, suspended=True, context=context, reason="spike")
+        await session.flush()
+        return result
+
+    monkeypatch.setattr(reviewer, "decide_review", suspend_after_first)
 
     with pytest.raises(ReviewerAgentUnavailable) as excinfo:
         await auto_decide_tier0_tier1(session, org.id, settings=_settings())
     assert excinfo.value.reason_code == REASON_SUSPENDED
+    assert len(decided) == 1
 
     undecided = first if second.id in decided else second
     assert undecided.status == "PENDING"

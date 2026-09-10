@@ -352,12 +352,9 @@ async def load_contract_for_principal(
     version id, and the question is "is this caller a contracted agent, and if
     so what may it touch". `ix_agent_contract_org_principal` exists for this.
 
-    Returns `None` rather than raising for an unknown principal: most callers
-    are people, and having no contract is not a policy failure for them. A
-    principal with two contracts (two registered versions sharing a workload
-    identity) resolves to neither -- an ambiguous envelope is not one the
-    platform can enforce, so the caller is treated as uncontracted and its
-    other authorization checks stand alone.
+    Humans without a contract return None. A workload identity with no
+    contract, or any identity with multiple matching contracts, is refused.
+    Ambiguity must never disable the caller's capability restriction.
     """
     if not agent_principal_id:
         return None
@@ -372,5 +369,10 @@ async def load_contract_for_principal(
         )
     ).all()
     if len(rows) != 1:
+        if rows or agent_principal_id.startswith("agent:"):
+            raise AgentContractValidationError(
+                "agent_contract_unresolved",
+                "agent identity requires exactly one unambiguous contract",
+            )
         return None
     return rows[0]

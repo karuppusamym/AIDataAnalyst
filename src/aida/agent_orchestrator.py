@@ -1285,7 +1285,12 @@ class GovernedAgentOrchestrator:
             # is in it -- so the input estimate is the one the gateway will
             # itself compute, not an approximation of it.
             reservation = await self._reserve_generation_budget(
-                session, request, ledger, screened, payload=payload
+                session, request, ledger, screened, payload=payload,
+                attempt_count=len(approved_routes),
+                output_allowance=sum(
+                    min(self.settings.model_max_output_tokens, route.max_output_tokens)
+                    for route in approved_routes
+                ),
             )
             try:
                 # 2026-09-03: iterate approved routes; `_generate_with_fallback`
@@ -1305,12 +1310,9 @@ class GovernedAgentOrchestrator:
                     payload=payload,
                 )
             except BaseException:
-                # A generation that never produced evidence has no figure to
-                # reconcile against, so the reservation is released in full.
-                # This is the optimistic direction and it is the right one: the
-                # alternative lets a run of provider failures exhaust a day's
-                # budget without a single answer being produced.
-                await reconcile_run_budget(session, reservation, actual_tokens=0)
+                # A timeout or invalid response can follow billed work. Keep
+                # the reservation until usage is known; failure is not free.
+                ledger.plan_evidence["budget_usage_uncertain"] = True
                 raise
             agent_run.model_route = model_evidence.route
             ledger.plan_evidence["model_call_evidence"] = {
@@ -1341,7 +1343,11 @@ class GovernedAgentOrchestrator:
             spent = int(agent_run.estimated_input_tokens or 0) + int(
                 agent_run.estimated_output_tokens or 0
             )
-            await reconcile_run_budget(session, reservation, actual_tokens=spent)
+            try:
+                await reconcile_run_budget(session, reservation, actual_tokens=spent)
+            except AgentBudgetExceeded as exc:
+                await self._persist_rejection(session, request, ledger, exc.reason_code)
+                raise AgentPolicyRejected(exc.reason_code) from exc
             ledger.plan_evidence["budget_evidence"] = {
                 "estimated_tokens": spent,
                 "per_run_token_cap": (
@@ -1678,6 +1684,8 @@ class GovernedAgentOrchestrator:
         screened: ScreenOutcome,
         *,
         payload: dict[str, Any],
+        attempt_count: int = 1,
+        output_allowance: int = 0,
     ) -> BudgetReservation:
         """AG-10 / AR-05: clear this run's contract budget before spending.
 
@@ -1702,17 +1710,18 @@ class GovernedAgentOrchestrator:
         if elapsed is not None:
             await self._persist_rejection(session, request, ledger, elapsed)
             raise AgentPolicyRejected(elapsed)
-        estimated_input = estimate_payload_tokens(payload)
+        estimated_input = estimate_payload_tokens(payload) * max(1, attempt_count)
         # The input half is knowable before the call and is what a request
         # refused mid-stream still costs, so it is worth refusing on its own
         # rather than waiting for the total.
-        oversized = per_run_violation(contract, tokens=estimated_input)
+        oversized = per_run_violation(contract, tokens=estimated_input + output_allowance)
         if oversized is not None:
             await self._persist_rejection(session, request, ledger, oversized)
             raise AgentPolicyRejected(oversized)
         try:
             return await reserve_run_budget(
-                session, contract, estimated_input_tokens=estimated_input, now=now
+                session, contract, estimated_input_tokens=estimated_input,
+                estimated_output_tokens=output_allowance, now=now
             )
         except AgentBudgetExceeded as exc:
             await self._persist_rejection(session, request, ledger, exc.reason_code)

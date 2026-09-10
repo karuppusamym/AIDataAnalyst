@@ -4,6 +4,11 @@
 .ult__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:74ch}
 
 .ult__controls{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
+.ult__filters{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:12px 0}
+.ult__filters .field{flex:1 1 180px;min-width:0}
+.ult form{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;padding:12px;border:1px solid var(--line);border-radius:var(--radius)}
+.ult form>.field{flex:1 1 280px;min-width:0}
+.ult form>p,.ult form>div{flex-basis:100%;margin:0}
 .ult__controls .field:nth-child(1){width:240px}
 .ult__controls input[type="number"]{width:90px}
 .ult__note{margin:0;font-size:11.5px;color:var(--ink-3);max-width:80ch}

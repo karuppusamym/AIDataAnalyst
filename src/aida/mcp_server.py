@@ -62,6 +62,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import (
+    AgentContractValidationError,
     context_product_violation,
     load_contract_for_principal,
 )
@@ -498,15 +499,14 @@ async def _resolve_context_product_scope(
     # Ordered after the role and support-window checks and before the quality
     # evaluation deliberately: an envelope violation should not depend on, or
     # pay for, a quality query.
-    contract = await load_contract_for_principal(
-        session,
-        # The product row was already selected with
-        # `ContextProduct.organization_id == context.organization_id`, so this
-        # is the caller's organization and is non-null, which
-        # `context.organization_id` is not.
-        organization_id=product_version.organization_id,
-        agent_principal_id=context.principal_id,
-    )
+    try:
+        contract = await load_contract_for_principal(
+            session,
+            organization_id=product_version.organization_id,
+            agent_principal_id=context.principal_id,
+        )
+    except AgentContractValidationError:
+        return None
     if contract is not None and context_product_violation(
         contract, product_key=product.product_key, product_id=str(product.id)
     ):

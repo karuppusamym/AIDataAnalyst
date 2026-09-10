@@ -631,7 +631,9 @@ async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID)
 
 async def organization_suspended(session: AsyncSession, organization_id: UUID) -> bool:
     state = await session.scalar(
-        select(ReviewerAgentState).where(ReviewerAgentState.organization_id == organization_id)
+        select(ReviewerAgentState)
+        .where(ReviewerAgentState.organization_id == organization_id)
+        .execution_options(populate_existing=True)
     )
     return bool(state and state.suspended)
 

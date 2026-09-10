@@ -68,6 +68,7 @@ class BudgetReservation:
 
     window_id: UUID | None
     amount: int
+    daily_cap: int | None = None
 
     @property
     def is_reserved(self) -> bool:
@@ -167,6 +168,7 @@ async def reserve_run_budget(
     contract: AgentContract | None,
     *,
     estimated_input_tokens: int,
+    estimated_output_tokens: int = 0,
     now: datetime | None = None,
 ) -> BudgetReservation:
     """Take this run's worst case out of the agent's daily window, or refuse.
@@ -183,7 +185,13 @@ async def reserve_run_budget(
     """
     if contract is None or contract.daily_token_cap is None:
         return BudgetReservation(window_id=None, amount=0)
-    amount = max(1, contract.per_run_token_cap or estimated_input_tokens)
+    if estimated_input_tokens < 0 or estimated_output_tokens < 0:
+        raise ValueError("token estimates must be nonnegative")
+    planned = estimated_input_tokens + estimated_output_tokens
+    violation = per_run_violation(contract, tokens=planned)
+    if violation:
+        raise AgentBudgetExceeded(violation)
+    amount = max(1, contract.per_run_token_cap or planned)
     if amount > contract.daily_token_cap:
         # A single run that cannot fit inside the whole day never will; refuse
         # before touching the ledger rather than leaving a row at its cap.
@@ -213,7 +221,7 @@ async def reserve_run_budget(
     # predicate refused -- this reservation would take the day past its cap.
     if cast("CursorResult[Any]", result).rowcount == 0:
         raise AgentBudgetExceeded(REASON_DAILY_TOKEN_CAP)
-    return BudgetReservation(window_id=window_id, amount=amount)
+    return BudgetReservation(window_id=window_id, amount=amount, daily_cap=contract.daily_token_cap)
 
 
 async def reconcile_run_budget(
@@ -231,6 +239,8 @@ async def reconcile_run_budget(
     `actual_tokens` is an estimate today (see this module's docstring). It is
     the single place a provider-reported figure would enter.
     """
+    if actual_tokens < 0:
+        raise ValueError("actual tokens must be nonnegative")
     if not reservation.is_reserved:
         return
     delta = actual_tokens - reservation.amount
@@ -248,6 +258,16 @@ async def reconcile_run_budget(
             reserved_tokens=case((adjusted < 0, literal(0)), else_=adjusted)
         )
     )
+    # Preserve overage evidence instead of hiding already-incurred spend.
+    # Admission reserves the complete planned route chain before any call;
+    # unexpected provider/estimator overruns must still fail visibly.
+    used = await session.scalar(
+        select(AgentBudgetWindow.reserved_tokens).where(
+            AgentBudgetWindow.id == reservation.window_id
+        )
+    )
+    if reservation.daily_cap is not None and int(used or 0) > reservation.daily_cap:
+        raise AgentBudgetExceeded(REASON_DAILY_TOKEN_CAP)
 
 
 async def daily_reserved_tokens(

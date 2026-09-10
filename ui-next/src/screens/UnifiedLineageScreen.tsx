@@ -1,4 +1,5 @@
 import { layoutTopology } from "../lib/lineageLayout";
+import { resolveGraphQuestion } from "../lib/graphQuestion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   UnifiedLineageEdgeRead,
@@ -212,6 +213,14 @@ export function UnifiedLineageScreen() {
   const [maximized, setMaximized] = useState(false);
   const [neighborhood, setNeighborhood] = useState(true);
   const [params, setParams] = useUrlState();
+  const [assetSearch, setAssetSearch] = useState("");
+  const [nodeKind, setNodeKind] = useState("ALL");
+  const [minimumConfidence, setMinimumConfidence] = useState(0);
+  const [question, setQuestion] = useState("");
+  const [questionError, setQuestionError] = useState<string | null>(null);
+  const [questionPlan, setQuestionPlan] = useState<ReturnType<typeof resolveGraphQuestion> | null>(null);
+  const impactDepth = Math.min(5, Math.max(1, Math.floor(Number(params.get("depth")) || 5)));
+  const impactDirection = ["upstream", "downstream"].includes(params.get("direction") ?? "") ? params.get("direction")! : "both";
   const ds = params.get("ds");
   // Scope lives in the URL alongside `ds`/`dom` so a domain-wide graph is as
   // shareable as a single-source one.
@@ -363,7 +372,7 @@ export function UnifiedLineageScreen() {
     setImpactLoading(true);
     setImpactError(null);
     try {
-      const result = await fetchLineageImpact(impactDatasourceId, impactNodeId, { depth: 5, nodeLimit: 200 }, ac.signal);
+      const result = await fetchLineageImpact(impactDatasourceId, impactNodeId, { depth: impactDepth, nodeLimit: 200 }, ac.signal);
       if (seq !== impactSeq.current) return;
       setImpact(result);
     } catch (e) {
@@ -373,7 +382,7 @@ export function UnifiedLineageScreen() {
     } finally {
       if (seq === impactSeq.current) setImpactLoading(false);
     }
-  }, [ds, scopeKind, selectedNodeId]);
+  }, [ds, scopeKind, selectedNodeId, impactDepth]);
 
   useEffect(() => {
     void loadImpact();
@@ -389,12 +398,20 @@ export function UnifiedLineageScreen() {
     });
   }, []);
 
+  const filteredNodes = useMemo(() => (graph?.nodes ?? []).filter(n =>
+    (nodeKind === "ALL" || n.node_kind === nodeKind) &&
+    `${n.label} ${n.qualified_name}`.toLowerCase().includes(assetSearch.trim().toLowerCase())
+  ), [graph, nodeKind, assetSearch]);
   const filteredEdges = useMemo(
-    () => (graph ? graph.edges.filter((e) => activeLayers.has(layerOf(e.edge_source))) : []),
-    [graph, activeLayers],
+    () => {
+      const ids = new Set(filteredNodes.map(n => n.id));
+      return (graph?.edges ?? []).filter(e => activeLayers.has(layerOf(e.edge_source)) &&
+        e.confidence >= minimumConfidence && ids.has(e.source_node_id) && ids.has(e.target_node_id));
+    },
+    [graph, activeLayers, filteredNodes, minimumConfidence],
   );
 
-  const layout = useMemo(() => (graph ? layoutTopology(graph.nodes, filteredEdges, selectedNodeId, neighborhood) : null), [graph, filteredEdges, selectedNodeId, neighborhood]);
+  const layout = useMemo(() => (graph ? layoutTopology(filteredNodes, filteredEdges, selectedNodeId, neighborhood) : null), [graph, filteredNodes, filteredEdges, selectedNodeId, neighborhood]);
 
   const topologyEdges = useMemo(() => {
     if (!layout) return [];
@@ -408,8 +425,8 @@ export function UnifiedLineageScreen() {
     return [
       ...[...impact.upstream].sort((a, b) => a.depth - b.depth).map((item) => ({ direction: "Upstream" as const, item })),
       ...[...impact.downstream].sort((a, b) => a.depth - b.depth).map((item) => ({ direction: "Downstream" as const, item })),
-    ];
-  }, [impact]);
+    ].filter(row => impactDirection === "both" || row.direction.toLowerCase() === impactDirection);
+  }, [impact, impactDirection]);
 
   return (
     <div className={`ult${maximized ? " ult--maximized" : ""}`}>
@@ -612,10 +629,28 @@ export function UnifiedLineageScreen() {
                     className={`ult__tab${tab === t ? " ult__tab--active" : ""}`}
                     onClick={() => setParams({ tab: t === "topology" ? null : t })}
                   >
-                    {t === "topology" ? "Topology" : t === "nodes" ? `Nodes (${graph.nodes.length})` : `Edges (${filteredEdges.length})`}
+                    {t === "topology" ? "Topology" : t === "nodes" ? `Nodes (${filteredNodes.length})` : `Edges (${filteredEdges.length})`}
                   </button>
                 ))}
               </div>
+
+              <div className="ult__filters">
+                <Field label="Find assets"><input value={assetSearch} onChange={e => setAssetSearch(e.target.value)} placeholder="Name or qualified name" /></Field>
+                <Field label="Node type"><select value={nodeKind} onChange={e => setNodeKind(e.target.value)}><option value="ALL">All types</option>{[...new Set(graph.nodes.map(n => n.node_kind))].sort().map(kind => <option key={kind}>{kind}</option>)}</select></Field>
+                <Field label="Minimum edge confidence"><select value={minimumConfidence} onChange={e => setMinimumConfidence(Number(e.target.value))}><option value={0}>All confidence levels</option><option value={0.75}>75% and above</option><option value={0.9}>90% and above</option><option value={1}>100%</option></select></Field>
+                <Button onClick={() => { setAssetSearch(""); setNodeKind("ALL"); setMinimumConfidence(0); }}>Clear asset filters</Button>
+              </div>
+              <p>Filters apply to the loaded graph. Impact queries use the authorized source graph, independently of these display filters.</p>
+              <form onSubmit={e => { e.preventDefault(); setQuestionPlan(null); setQuestionError(null); try { setQuestionPlan(resolveGraphQuestion(question, graph.nodes)); } catch (error) { setQuestionError((error as Error).message); } }}>
+                <Field label="Ask the graph"><input value={question} onChange={e => { setQuestion(e.target.value); setQuestionPlan(null); }} placeholder="downstream of sales.orders within 3 hops" /></Field>
+                <Button type="submit">Preview graph query</Button>
+                {questionError ? <p role="alert">{questionError}</p> : null}
+                {questionPlan && graph.nodes.some(n => n.id === questionPlan.node.id) ? <div>
+                  <p>{questionPlan.direction} of {questionPlan.node.qualified_name || questionPlan.node.label}, up to {questionPlan.depth} hops; 200-node limit. Domain selections inspect impact within the asset's own source.</p>
+                  <Button onClick={() => { setParams({ node: questionPlan.node.id, depth: String(questionPlan.depth), direction: questionPlan.direction }); setDetailsVisible(true); }}>Run impact query</Button>
+                </div> : null}
+                <p>Supported phrases: upstream of / downstream of an exact asset name. This is a guided read-only lookup.</p>
+              </form>
 
               {tab === "topology" ? (
                 layout && layout.columns.length > 0 ? (
@@ -694,7 +729,7 @@ export function UnifiedLineageScreen() {
               ) : tab === "nodes" ? (
                 <div className="ult__listwrap">
                   <VirtualList
-                    items={graph.nodes}
+                    items={filteredNodes}
                     getKey={(n) => n.id}
                     ariaLabel="Unified lineage nodes"
                     estimateSize={40}

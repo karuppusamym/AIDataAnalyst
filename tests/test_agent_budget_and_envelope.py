@@ -14,9 +14,10 @@ The daily-cap tests are the ones that matter most, and the interleaving they
 use is deliberate: reservations are taken without reconciling between them,
 which is the shape a read-then-check implementation gets wrong. SQLite
 serializes writers, so none of this proves behaviour under genuine
-multi-connection contention -- the PostgreSQL reproduction F05 got is still
-outstanding for `agent_budget_window`, and AR-05 is not closed on these tests
-alone.
+multi-connection contention. That half lives in
+`tests/test_agent_budget_postgres_concurrency.py`, which races the same guard
+on a real PostgreSQL at both isolation levels; AR-05 is closed on the two
+files together, never on this one alone.
 """
 
 from __future__ import annotations
@@ -266,8 +267,8 @@ async def test_ar05_interleaved_reservations_cannot_jointly_break_the_cap(
     **What this does not prove.** SQLite serializes writers, so this exercises
     the predicate, not genuine multi-connection contention. The equivalent of
     F05's PostgreSQL reproduction -- N racers released from a shared barrier on
-    separate connections, at both isolation levels -- is still outstanding for
-    this table, and AR-05 is not closed on this test alone.
+    separate connections, at both isolation levels -- lives in
+    `tests/test_agent_budget_postgres_concurrency.py`.
     """
     contract = await _seed_contract(session, daily_token_cap=1_000, per_run_token_cap=250)
 
@@ -482,7 +483,7 @@ async def test_ar06_a_human_principal_has_no_contract(session: AsyncSession) -> 
     )
 
 
-async def test_ar06_an_ambiguous_principal_resolves_to_no_contract(
+async def test_ar06_an_ambiguous_principal_is_refused(
     session: AsyncSession,
 ) -> None:
     """Two registered versions sharing one workload identity give an envelope
@@ -494,14 +495,12 @@ async def test_ar06_an_ambiguous_principal_resolves_to_no_contract(
     second.organization_id = first.organization_id
     await session.flush()
 
-    assert (
+    with pytest.raises(AgentContractValidationError, match="unambiguous"):
         await load_contract_for_principal(
             session,
             organization_id=first.organization_id,
             agent_principal_id="agent:shared",
         )
-        is None
-    )
 
 
 async def test_ar06_the_contract_lookup_is_organization_scoped(
@@ -511,9 +510,26 @@ async def test_ar06_the_contract_lookup_is_organization_scoped(
     other = Organization(name="Other", slug=f"other-{uuid4().hex[:8]}")
     session.add(other)
     await session.flush()
-    assert (
+    with pytest.raises(AgentContractValidationError, match="unambiguous"):
         await load_contract_for_principal(
             session, organization_id=other.id, agent_principal_id="agent:reviewer"
         )
-        is None
-    )
+
+
+async def test_daily_budget_reserves_output_before_generation(session: AsyncSession) -> None:
+    contract = await _seed_contract(session, daily_token_cap=100)
+    with pytest.raises(AgentBudgetExceeded):
+        await reserve_run_budget(
+            session, contract, estimated_input_tokens=80, estimated_output_tokens=50, now=_NOW
+        )
+
+
+async def test_daily_budget_unexpected_overage_is_reported(session: AsyncSession) -> None:
+    contract = await _seed_contract(session, daily_token_cap=100)
+    reservation = await reserve_run_budget(session, contract, estimated_input_tokens=80, now=_NOW)
+    with pytest.raises(AgentBudgetExceeded):
+        await reconcile_run_budget(session, reservation, actual_tokens=130)
+    assert await daily_reserved_tokens(
+        session, organization_id=contract.organization_id,
+        ai_asset_version_id=contract.ai_asset_version_id, window_date=_NOW.date()
+    ) == 130
