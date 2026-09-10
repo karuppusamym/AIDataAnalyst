@@ -212,7 +212,16 @@ export function CatalogTable({
                 onClick={() => onSelect(row)}
                 onKeyDown={(e) => onRowKey(e, row)}
               >
-                <div className="cc cc--check" onClick={(e) => e.stopPropagation()}>
+                {/* `role="gridcell"` is not decoration: every other cell in this
+                    row declares it, and without it here the checkbox becomes a
+                    direct child of `role="row"`, which ARIA does not allow. An
+                    axe-core run against the running app failed this on every
+                    rendered row (`aria-required-children`, critical). */}
+                <div
+                  className="cc cc--check"
+                  role="gridcell"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <input
                     type="checkbox"
                     checked={checked.has(row.id)}

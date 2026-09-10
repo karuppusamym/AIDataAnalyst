@@ -12,10 +12,20 @@ import "./VirtualList.css";
    "small enough to skip virtualization," and the tracker's exit condition
    asks for the pattern "in full," not only where the row count forces it.
    This is that same windowed-DOM idiom (only the visible slice mounts,
-   `aria-rowcount`/absolute `aria-rowindex` so a screen reader announces the
+   `aria-setsize`/absolute `aria-posinset` so a screen reader announces the
    true position, `onReachEnd` for keyset/offset paging on approach to the
    loaded window's end) factored out once instead of re-implemented per
    screen with a slightly different bug each time.
+
+   THE POSITION ATTRIBUTES ARE `setsize`/`posinset`, NOT `rowcount`/`rowindex`.
+   This carried `aria-rowcount` on the container and `aria-rowindex` on each
+   row until an axe-core run against the running app flagged it. Those two
+   attributes are defined only on `grid`, `table` and `treegrid` and their
+   rows; on a `list`/`listitem` they are invalid and, worse, simply ignored --
+   so the announcement this component exists to provide was never being made.
+   `aria-setsize`/`aria-posinset` are the list-shaped equivalents and say the
+   same thing: item N of a total larger than the DOM holds. `CatalogTable` is
+   a real `role="grid"`, so it correctly keeps `rowcount`/`rowindex`.
 
    Unlike `CatalogTable`'s fixed 38px row, list items here (proposal cards,
    marketplace cards, change-set rows) vary in height, so this measures each
@@ -119,7 +129,6 @@ export function VirtualList<T>({
       className="vlist"
       role="list"
       aria-label={ariaLabel}
-      aria-rowcount={totalCount ?? items.length}
       onKeyDown={onKeyDown}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
@@ -132,7 +141,8 @@ export function VirtualList<T>({
               ref={virtualizer.measureElement}
               data-index={v.index}
               role="listitem"
-              aria-rowindex={v.index + 1}
+              aria-setsize={totalCount ?? items.length}
+              aria-posinset={v.index + 1}
               className="vlist__row"
               style={{ transform: `translateY(${v.start}px)` }}
             >
