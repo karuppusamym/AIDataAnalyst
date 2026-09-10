@@ -11996,3 +11996,74 @@ because nothing read the field. An empty allowlist now allows nothing, so a cont
 lose context-product access through MCP until its contract names the products it needs. Human
 principals are unaffected. Checked against the running stack at the time of writing: zero contracts
 exist there, so no live deployment is affected today.
+
+---
+
+## 2026-09-10 — AR-05 raced on PostgreSQL, and a budget leak found in its own fix
+
+Two pieces of work against the 2026-09-09 agent review, one of which is a correction to the
+remediation rather than to the original finding.
+
+### AR-05's reproduction, and what falsifying it showed
+
+`tests/test_agent_budget_postgres_concurrency.py` races `reserve_run_budget` on a real
+PostgreSQL, the same shape F05 got: ten racers on ten connections released from one
+`asyncio.Barrier`, at READ COMMITTED and REPEATABLE READ. Migration `a7c41e93d2b0` was applied
+against the running PostgreSQL 17 and `agent_budget_window` verified column-for-column — the
+table, both foreign keys, the unique constraint, the CHECK and all three indexes — rather than
+inferred from a green SQLite suite.
+
+The guard was then removed to check the tests were worth having. At READ COMMITTED three go red,
+with a 1000-token day holding 2000. **At REPEATABLE READ removing it changes nothing**: PostgreSQL
+aborts the blocked writers with 40001 before they can double-count, so the isolation level bounds
+the day by itself and those cases confirm the invariant without testing the guard. That is written
+into the file rather than left as an implied "eight tests passed", because it means only half the
+matrix is load-bearing — and it is the READ COMMITTED half, which is what the application connects
+at.
+
+### The leak that arrived inside the fix
+
+The reservation's failure path changed twice in a day and both versions were wrong.
+
+The first released a failed run's reservation in full. That treats a timeout as free, and a
+timeout can follow work the provider already billed.
+
+The second — a review correction, and right about the first — held the reservation in full
+instead. Nothing ever reconciled it. Five timeouts against a 1000-token day at a 200-token per-run
+cap consumed **the entire day**, and the sixth run was refused, the agent locked out until the UTC
+window rolled over having produced nothing. This was reproduced directly before being fixed, not
+reasoned about: five reservations, no answers, `agent_daily_token_cap_exhausted`.
+
+Neither version was careless; both substituted a guess for the number the platform actually has.
+It has the input. The payload was serialized and sent, once per planned attempt, and
+`estimate_payload_tokens` measured it. `settle_unresolved_run_budget` charges that and releases
+the output allowance the failed run never produced, recording both figures in
+`plan_evidence.budget_usage_uncertain`. Failure is neither free nor permanent.
+
+It never raises: it runs while an exception is already unwinding, and a budget error thrown from
+there would replace the reason the run failed with a reason about accounting.
+
+### Two fail-opens in the previous day's work, found by another session
+
+Recorded here because both were in code this project's own remediation added, and both passed
+their tests:
+
+- `load_contract_for_principal` returned `None` for an ambiguous principal, so an agent holding
+  two contracts skipped the capability envelope entirely — a fail-open introduced by the fix for
+  AR-06. It now refuses (`agent_contract_unresolved`).
+- `organization_suspended` lacked `populate_existing=True`, so the per-item suspension re-read
+  added for AR-04 was served from SQLAlchemy's identity map. The mid-batch stop was weaker than
+  its own docstring claimed.
+
+### Verified
+
+Full Python suite green. `ruff`, `mypy`, docs-link gate, `test_doc_claims.py`. The eight PostgreSQL
+concurrency tests run against the live stack rather than skipping, because the default
+`Settings.database_url` reaches it.
+
+### Still open, unchanged
+
+AR-09 (enterprise-scale capacity, unmeasured) and the measurement halves of AR-03, AR-04, AR-06,
+AR-10, AR-11 and AR-12. Every figure in the budget path remains an *estimate*; no provider adapter
+reports billable usage, and `reconcile_run_budget` is still the single place a real one would
+enter.

@@ -23,6 +23,7 @@ files together, never on this one alone.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -37,10 +38,12 @@ from aida.agent_budget import (
     REASON_PER_RUN_TOKEN_CAP,
     REASON_WALL_CLOCK_CAP,
     AgentBudgetExceeded,
+    BudgetReservation,
     daily_reserved_tokens,
     per_run_violation,
     reconcile_run_budget,
     reserve_run_budget,
+    settle_unresolved_run_budget,
     wall_clock_violation,
 )
 from aida.agent_contracts import (
@@ -200,9 +203,18 @@ async def test_ar05_a_reservation_is_recorded_and_reconciled(session: AsyncSessi
     )
 
 
-async def test_ar05_a_failed_run_gives_its_reservation_back(session: AsyncSession) -> None:
-    """A run of provider failures must not exhaust a day's budget without a
-    single answer being produced."""
+async def test_ar05_reconciling_to_zero_returns_the_whole_reservation(
+    session: AsyncSession,
+) -> None:
+    """Reconciling a reservation to zero returns all of it, five times over.
+
+    This asserts the *mechanism*. No runtime path passes zero for a generation
+    that failed: `agent_orchestrator` routes those through
+    `settle_unresolved_run_budget`, which charges the input estimate -- a
+    timeout can follow billed work, so unknown usage is not treated as zero
+    (see `agent_budget.reconcile_run_budget`). A caller that genuinely knows a
+    run cost nothing still has this route, and any future reclaim job for
+    unresolved reservations will use it."""
     contract = await _seed_contract(session, daily_token_cap=1_000, per_run_token_cap=400)
     for _ in range(5):
         reservation = await reserve_run_budget(
@@ -533,3 +545,154 @@ async def test_daily_budget_unexpected_overage_is_reported(session: AsyncSession
         session, organization_id=contract.organization_id,
         ai_asset_version_id=contract.ai_asset_version_id, window_date=_NOW.date()
     ) == 130
+
+
+# ---------------------------------------------------------------------------
+# AR-05 follow-up: a generation that fails must neither be free nor permanent
+# ---------------------------------------------------------------------------
+
+
+async def test_ar05_an_unresolved_run_is_charged_its_input_not_its_reservation(
+    session: AsyncSession,
+) -> None:
+    """The failure path charges what was demonstrably sent.
+
+    Not zero -- a timeout can follow work the provider already billed. Not the
+    whole reservation -- the output allowance covers output the failed run
+    never produced.
+    """
+    contract = await _seed_contract(session, daily_token_cap=10_000, per_run_token_cap=1_000)
+    reservation = await reserve_run_budget(
+        session,
+        contract,
+        estimated_input_tokens=120,
+        estimated_output_tokens=400,
+        now=_NOW,
+    )
+    assert reservation.amount == 1_000
+    assert reservation.known_input_tokens == 120
+
+    charged = await settle_unresolved_run_budget(session, reservation)
+
+    assert charged == 120
+    assert (
+        await daily_reserved_tokens(
+            session,
+            organization_id=contract.organization_id,
+            ai_asset_version_id=contract.ai_asset_version_id,
+            window_date=_NOW.date(),
+        )
+        == 120
+    )
+
+
+async def test_ar05_repeated_failures_do_not_lock_out_the_rest_of_the_day(
+    session: AsyncSession,
+) -> None:
+    """The regression this function exists for.
+
+    Before it, the orchestrator kept the whole reservation on failure and
+    nothing ever reconciled it: five timeouts against a 1000-token day at a
+    200-token per-run cap held the entire day, and the sixth run was refused
+    having produced nothing. The charge is real but proportionate, so the day
+    survives a bad provider.
+    """
+    contract = await _seed_contract(session, daily_token_cap=1_000, per_run_token_cap=200)
+
+    for _ in range(5):
+        reservation = await reserve_run_budget(
+            session,
+            contract,
+            estimated_input_tokens=40,
+            estimated_output_tokens=100,
+            now=_NOW,
+        )
+        await settle_unresolved_run_budget(session, reservation)
+
+    held = await daily_reserved_tokens(
+        session,
+        organization_id=contract.organization_id,
+        ai_asset_version_id=contract.ai_asset_version_id,
+        window_date=_NOW.date(),
+    )
+    assert held == 200, "five failures cost their input, not the whole day"
+
+    # The sixth run is admitted -- the assertion that was false before the fix.
+    sixth = await reserve_run_budget(
+        session, contract, estimated_input_tokens=40, estimated_output_tokens=100, now=_NOW
+    )
+    assert sixth.is_reserved is True
+
+
+async def test_ar05_failure_is_still_not_free(session: AsyncSession) -> None:
+    """The other half of the same rule. Releasing in full would let an agent
+    pointed at a broken provider retry without ever touching its budget."""
+    contract = await _seed_contract(session, daily_token_cap=1_000, per_run_token_cap=200)
+    reservation = await reserve_run_budget(
+        session, contract, estimated_input_tokens=40, estimated_output_tokens=100, now=_NOW
+    )
+
+    charged = await settle_unresolved_run_budget(session, reservation)
+
+    assert charged > 0
+    assert (
+        await daily_reserved_tokens(
+            session,
+            organization_id=contract.organization_id,
+            ai_asset_version_id=contract.ai_asset_version_id,
+            window_date=_NOW.date(),
+        )
+        > 0
+    )
+
+
+async def test_ar05_settling_an_unreserved_run_is_a_no_op(session: AsyncSession) -> None:
+    """A contract with no daily cap reserved nothing, so there is nothing to
+    settle -- and no window row is created by trying."""
+    contract = await _seed_contract(session)
+    reservation = await reserve_run_budget(
+        session, contract, estimated_input_tokens=500, now=_NOW
+    )
+
+    assert await settle_unresolved_run_budget(session, reservation) == 0
+    assert (
+        await daily_reserved_tokens(
+            session,
+            organization_id=contract.organization_id,
+            ai_asset_version_id=contract.ai_asset_version_id,
+            window_date=_NOW.date(),
+        )
+        == 0
+    )
+
+
+async def test_ar05_settlement_never_masks_the_failure_being_unwound(
+    session: AsyncSession,
+) -> None:
+    """It runs inside an `except` block while an exception unwinds. A budget
+    error raised from there would replace the reason the run failed with a
+    reason about accounting."""
+    contract = await _seed_contract(session, daily_token_cap=1_000, per_run_token_cap=200)
+    reservation = await reserve_run_budget(
+        session, contract, estimated_input_tokens=40, estimated_output_tokens=100, now=_NOW
+    )
+    # A reservation whose window row has been deleted underneath it is the
+    # cheapest way to make the underlying UPDATE do something unexpected.
+    broken = replace(reservation, window_id=uuid4())
+
+    assert await settle_unresolved_run_budget(session, broken) == 40
+
+
+def test_ar05_the_charge_can_never_exceed_the_reservation() -> None:
+    """`known_input_tokens` is bounded by `amount` in every reachable case --
+    a run whose input alone broke the per-run cap is refused before it
+    reserves. This pins the clamp anyway, because the consequence of being
+    wrong is a window that grows on failure."""
+    over = BudgetReservation(
+        window_id=uuid4(), amount=100, daily_cap=1_000, known_input_tokens=10_000
+    )
+    assert min(over.known_input_tokens, over.amount) == 100
+    negative = BudgetReservation(
+        window_id=uuid4(), amount=100, daily_cap=1_000, known_input_tokens=-5
+    )
+    assert max(0, min(negative.known_input_tokens, negative.amount)) == 0

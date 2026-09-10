@@ -718,13 +718,12 @@ export function UnifiedLineageScreen() {
                     </div>
                     {layout.omitted > 0 ? (
                       <p className="ult__topocap">
-                        Showing {layout.shown} of {graph.nodes.length} nodes in the diagram — the "Nodes" tab lists all of
-                        them.
+                        Showing {layout.shown} of {filteredNodes.length} matching nodes in the diagram — the "Nodes" tab lists all matching nodes.
                       </p>
                     ) : null}
                   </div>
                 ) : (
-                  <Empty title="No connected nodes in view" hint="Every returned node was filtered out by the active layer chips." />
+                  <Empty title="No connected nodes in view" hint="Try clearing the asset filters or enabling more lineage layers." />
                 )
               ) : tab === "nodes" ? (
                 <div className="ult__listwrap">

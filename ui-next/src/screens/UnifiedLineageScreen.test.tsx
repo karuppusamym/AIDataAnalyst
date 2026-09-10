@@ -131,6 +131,36 @@ afterEach(() => {
 });
 
 describe("UnifiedLineageScreen against the real unified-lineage graph/impact endpoints", () => {
+  it("previews a guided question before executing bounded directional impact", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+    fireEvent.change(screen.getByLabelText("Ask the graph"), { target: { value: "upstream of orders_raw within 2 hops" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview graph query" }));
+    expect(fetchLineageImpact).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Run impact query" }));
+    await waitFor(() => expect(fetchLineageImpact).toHaveBeenCalledWith("ds_1", "t_orders_raw", { depth: 2, nodeLimit: 200 }, expect.anything()));
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("raw_sales")).toBeInTheDocument();
+    expect(within(table).queryByText("revenue_agg")).not.toBeInTheDocument();
+  });
+
+  it("filters nodes and incident edges by asset name and type, and clears filters", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+    await screen.findByText("3 nodes");
+    fireEvent.change(screen.getByLabelText("Find assets"), { target: { value: "revenue" } });
+    expect(screen.getByRole("tab", { name: "Nodes (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Edges (0)" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Node type"), { target: { value: "TABLE" } });
+    expect(screen.getByRole("tab", { name: "Nodes (0)" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear asset filters" }));
+    expect(screen.getByRole("tab", { name: "Nodes (3)" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Edges (2)" })).toBeInTheDocument();
+  });
+
   it("picking a datasource loads the bounded graph with the default node/edge limits and APPROVED suggestions", async () => {
     const UnifiedLineageScreen = await loadScreen();
     render(<UnifiedLineageScreen />);

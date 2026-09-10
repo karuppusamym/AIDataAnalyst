@@ -35,6 +35,7 @@ from aida.agent_budget import (
     per_run_violation,
     reconcile_run_budget,
     reserve_run_budget,
+    settle_unresolved_run_budget,
     wall_clock_violation,
 )
 from aida.agent_contracts import (
@@ -1310,9 +1311,21 @@ class GovernedAgentOrchestrator:
                     payload=payload,
                 )
             except BaseException:
-                # A timeout or invalid response can follow billed work. Keep
-                # the reservation until usage is known; failure is not free.
-                ledger.plan_evidence["budget_usage_uncertain"] = True
+                # A timeout or an invalid response can follow work the provider
+                # already billed, so this does not treat failure as free -- but
+                # nor does it hold the whole reservation, which nothing would
+                # ever reconcile: a run of timeouts would consume the day and
+                # lock the agent out until the UTC window rolled over, having
+                # produced nothing. The input was demonstrably sent and is
+                # charged; the output allowance was never produced and is
+                # released. `settle_unresolved_run_budget` never raises, so the
+                # exception being unwound here is the one the caller sees.
+                charged = await settle_unresolved_run_budget(session, reservation)
+                ledger.plan_evidence["budget_usage_uncertain"] = {
+                    "charged_estimated_input_tokens": charged,
+                    "released_output_allowance": max(0, reservation.amount - charged),
+                    "basis": "INPUT_SENT_OUTPUT_NEVER_PRODUCED",
+                }
                 raise
             agent_run.model_route = model_evidence.route
             ledger.plan_evidence["model_call_evidence"] = {
