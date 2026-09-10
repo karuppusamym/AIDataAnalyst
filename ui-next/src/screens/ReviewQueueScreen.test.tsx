@@ -430,6 +430,61 @@ const TERM_VERSION: ReviewQueueRead["proposals"][number] = {
   },
 };
 
+describe("ReviewQueueScreen when the queue cannot be loaded", () => {
+  /* The load-failure journey had no test at all, and it shipped a defect the
+     decision-path tests could not see: the three tiles read
+     `data?.byStatus[...] ?? 0`, so a first failure rendered "0 pending review"
+     directly beside "The review queue could not be loaded", and a later
+     failure rendered the previous load's counts with nothing marking them
+     stale. "Nothing is waiting for you" and "we could not find out" are
+     different answers and only one of them is safe to act on. */
+
+  it("does not report zero pending when it could not find out", async () => {
+    fetchReviewQueue.mockRejectedValue(new Error("upstream unavailable"));
+    const ReviewQueueScreen = await loadScreen();
+
+    render(<ReviewQueueScreen />);
+
+    await screen.findByText("The review queue could not be loaded");
+    expect(screen.getByText("upstream unavailable")).toBeInTheDocument();
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("—");
+    expect(screen.getByText("approved").previousSibling).toHaveTextContent("—");
+    expect(screen.getByText("rejected").previousSibling).toHaveTextContent("—");
+  });
+
+  it("does not keep showing the last good counts when a refresh fails", async () => {
+    fetchReviewQueue.mockResolvedValueOnce(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    const { rerender } = render(<ReviewQueueScreen />);
+    await waitFor(() =>
+      expect(screen.getByText("pending review").previousSibling).toHaveTextContent("1"),
+    );
+
+    fetchReviewQueue.mockRejectedValue(new Error("upstream unavailable"));
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "ALL" } });
+    rerender(<ReviewQueueScreen />);
+
+    await screen.findByText("The review queue could not be loaded");
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("—");
+  });
+
+  it("retries the load, and restores the counts when it succeeds", async () => {
+    fetchReviewQueue.mockRejectedValueOnce(new Error("upstream unavailable"));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+    await screen.findByText("The review queue could not be loaded");
+
+    fetchReviewQueue.mockResolvedValue(queueOf([PENDING_PROPOSAL]));
+    fireEvent.click(screen.getByRole("button", { name: /Retry|Try again/i }));
+
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("1");
+    expect(
+      screen.queryByText("The review queue could not be loaded"),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
   it("GLOSSARY_LINK_PROPOSAL row shows the term display_name in the title and confidence in the subtitle", async () => {
     fetchReviewQueue.mockResolvedValue(queueOf([LINK_PROPOSAL]));

@@ -415,9 +415,17 @@ export function ReviewQueueScreen() {
     [load, setParams],
   );
 
-  const totalPending = data?.byStatus["PENDING"] ?? 0;
-  const totalApproved = data?.byStatus["APPROVED"] ?? 0;
-  const totalRejected = data?.byStatus["REJECTED"] ?? 0;
+  /* A failed load must not leave three tiles asserting counts.
+     `data?.byStatus[...] ?? 0` rendered "0 pending review" beside "The review
+     queue could not be loaded" on a first failure, and the previous load's
+     counts -- unmarked as stale -- on a later one. Both state a fact the
+     screen does not have: "nothing is waiting for you" and "we could not find
+     out" are different answers, and only one of them is safe to act on.
+     Unknown renders as unknown, the same way the Catalog header renders its
+     asset total before the count arrives. */
+  const countsKnown = error === null && data !== null;
+  const tileCount = (status: string): string =>
+    countsKnown ? String(data?.byStatus[status] ?? 0) : "—";
 
   const focused = useMemo(
     () => proposals.find((p) => p.review_id === focusedId) ?? null,
@@ -468,15 +476,15 @@ export function ReviewQueueScreen() {
 
       <div className="rq__tiles">
         <div className="tile tile--warn">
-          <div className="tile__n tnum">{totalPending}</div>
+          <div className="tile__n tnum">{tileCount("PENDING")}</div>
           <div className="tile__l">pending review</div>
         </div>
         <div className="tile tile--ok">
-          <div className="tile__n tnum">{totalApproved}</div>
+          <div className="tile__n tnum">{tileCount("APPROVED")}</div>
           <div className="tile__l">approved</div>
         </div>
         <div className="tile">
-          <div className="tile__n tnum">{totalRejected}</div>
+          <div className="tile__n tnum">{tileCount("REJECTED")}</div>
           <div className="tile__l">rejected</div>
         </div>
       </div>
