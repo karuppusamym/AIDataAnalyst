@@ -1,4 +1,13 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { HomeScreen } from "./screens/HomeScreen";
 import { AgentInboxScreen } from "./screens/AgentInboxScreen";
 import { PersonaNav } from "./components/PersonaNav";
@@ -7,7 +16,17 @@ import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { ScopePicker } from "./components/ScopePicker";
 import { fetchMe } from "./lib/api";
 import { APP_CONFIG } from "./lib/appConfig";
-import { authBlock, canSignOut, clearAccessToken, type AuthBlock } from "./lib/authSession";
+import {
+  authBlock,
+  authRevision,
+  canSignOut,
+  noteSignInFailure,
+  subscribeAuth,
+  type AuthBlock,
+} from "./lib/authSession";
+import { beginSignIn, canStartSignIn, signOut } from "./lib/oidcClient";
+import { OrgProvider } from "./lib/org";
+import { ScopeProvider } from "./lib/scope";
 import { pushLocation, replaceLocation } from "./lib/location";
 import { SCREEN_IDS, type ScreenId } from "./lib/routes";
 import { describeSession, SessionProvider, useSession } from "./lib/session";
@@ -253,7 +272,20 @@ function StatusBadge({ compact = false }: { compact?: boolean }) {
         <button
           type="button"
           className="shellstatus__action"
-          onClick={session.reload}
+          onClick={() => {
+            /* An expired OIDC session cannot be recovered by repeating the
+             * request that failed -- there is no token to send. Re-running the
+             * authorization-code flow is the only thing that can help, so that
+             * is what the button does when a flow exists. Everywhere else it
+             * retries, which is all it ever could do. */
+            if (session.state === "session-expired" && canStartSignIn()) {
+              void beginSignIn().catch((cause: unknown) => {
+                noteSignInFailure(cause instanceof Error ? cause.message : String(cause));
+              });
+              return;
+            }
+            session.reload();
+          }}
           data-testid="session-reconnect"
         >
           {session.state === "session-expired" ? "Sign in again" : "Reconnect"}
@@ -264,7 +296,11 @@ function StatusBadge({ compact = false }: { compact?: boolean }) {
           type="button"
           className="shellstatus__action"
           onClick={() => {
-            clearAccessToken();
+            // Through the flow module, not `clearAccessToken` directly: the
+            // renewal timer and the refresh token are part of the session and
+            // a sign-out that left either behind would quietly sign the user
+            // back in a minute later.
+            signOut();
             session.reload();
           }}
           data-testid="session-sign-out"
@@ -276,23 +312,60 @@ function StatusBadge({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/* F06/T07: a build configured for OIDC that has no way to obtain a token
-   cannot do anything useful, and it knows that before the first request. It
-   must say so once, here, rather than let forty screens each render their own
-   401 as an empty estate or a permissions problem.
+/* F06/T07: a build configured for OIDC decides, before the first request,
+   whether it can authenticate at all -- and it must say so once, here, rather
+   than let forty screens each render their own 401 as an empty estate or a
+   permissions problem.
 
-   This is deliberately NOT a login screen. Writing an authorization-code flow
-   against no issuer, no client id and no registered redirect would be code
-   that cannot be run or verified. The seam exists
-   (`authSession.adoptAccessToken`); the flow is blocked on choosing a real
-   identity provider, and until then the honest thing on screen is why. */
+   TWO SCREENS, ONE COMPONENT, because they are two answers to one question.
+   With an issuer and a client id this is a sign-in screen and the button
+   starts the real authorization-code + PKCE redirect. Without them there is
+   nothing a user can do, and the screen says which build-time values are
+   missing instead of offering a button that would fail. Neither version ever
+   falls back to the development principal. */
 function AuthBlockedScreen({ block }: { block: AuthBlock }) {
+  const [starting, setStarting] = useState(false);
+  const start = useCallback(() => {
+    setStarting(true);
+    // `beginSignIn` replaces the document on success, so nothing after this
+    // runs in the happy path; the catch is for a discovery or crypto failure,
+    // which has to be shown rather than leaving a spinner on screen forever.
+    void beginSignIn().catch((cause: unknown) => {
+      setStarting(false);
+      noteSignInFailure(cause instanceof Error ? cause.message : String(cause));
+    });
+  }, []);
+
   return (
-    <div className="authblock" role="alert" data-testid="auth-blocked">
+    /* `alert` only when the screen is reporting a problem. A sign-in prompt is
+       not an alert, and announcing it as one trains people to ignore the role
+       on the screens where it means something. */
+    <div
+      className="authblock"
+      role={block.canSignIn ? "region" : "alert"}
+      aria-label={block.canSignIn ? "Sign in" : undefined}
+      data-testid="auth-blocked"
+    >
       <div className="authblock__card">
         <h1 className="authblock__title">{block.title}</h1>
         <p className="authblock__detail">{block.detail}</p>
         <p className="authblock__remedy">{block.remedy}</p>
+        {block.failure ? (
+          <p className="authblock__failure" data-testid="auth-failure">
+            Last attempt: {block.failure}
+          </p>
+        ) : null}
+        {block.canSignIn ? (
+          <button
+            type="button"
+            className="authblock__signin"
+            onClick={start}
+            disabled={starting}
+            data-testid="auth-sign-in"
+          >
+            {starting ? "Redirecting…" : "Sign in"}
+          </button>
+        ) : null}
         <dl className="authblock__facts">
           <div>
             <dt>Data mode</dt>
@@ -304,6 +377,10 @@ function AuthBlockedScreen({ block }: { block: AuthBlock }) {
               {APP_CONFIG.authMode}
               {APP_CONFIG.authModeInferred ? " (inferred)" : ""}
             </dd>
+          </div>
+          <div>
+            <dt>Issuer</dt>
+            <dd>{APP_CONFIG.oidc?.issuer ?? "not configured"}</dd>
           </div>
         </dl>
       </div>
@@ -325,6 +402,19 @@ function AppShell() {
   useEffect(() => {
     setExpandedGroup(NAV_BY_ID.get(view)?.group ?? null);
   }, [view]);
+
+  /* F06/T07: when the token changes -- adopted, renewed, or lapsed -- ask the
+   * backend again.
+   *
+   * THE DEFECT this removes, found by watching a real token expire: the badge
+   * reported "Connected" over a token that had already lapsed, because the
+   * connection state is derived from request OUTCOMES and no request had been
+   * made since. Made-up green is the exact thing F13 removed from this badge;
+   * a session that has ended is not allowed to reintroduce it. Re-running the
+   * identity request produces the evidence -- a real 401 -- from which
+   * `session.tsx` reports "Sign-in required". */
+  const reloadSession = session.reload;
+  useEffect(() => subscribeAuth(() => reloadSession()), [reloadSession]);
 
   const me = session.me;
   const identityProvider = asIdentityProvider(me?.identity_provider);
@@ -442,7 +532,16 @@ function AppShell() {
             <strong>{current.label}</strong>
           </div>
           <div className="topbar__actions">
-            <button className="quickfind" onClick={() => setPaletteOpen(true)}>
+            {/* The visible label is `display:none` below a breakpoint, and the
+                icon is aria-hidden, so without this the button announces as
+                just "button" at narrow widths — axe-core `button-name` on
+                every screen. The name is spelled out rather than left to the
+                label, which is exactly the element that disappears. */}
+            <button
+              className="quickfind"
+              aria-label="Jump to a page"
+              onClick={() => setPaletteOpen(true)}
+            >
               <span aria-hidden="true">⌕</span>
               <span className="quickfind__label">Jump to…</span>
               <kbd>Ctrl K</kbd>
@@ -538,17 +637,43 @@ function AppShell() {
   );
 }
 
+/* The auth verdict is external state -- `authSession` owns it and notifies on
+ * sign-in, renewal, lapse and sign-out -- so it is read the way React reads
+ * external state. Recomputing `authBlock()` on every notification is cheap and
+ * removes the need for a second copy of the answer in component state, which
+ * is how the URL and the screen drifted apart in F09. */
+function useAuthBlock(): AuthBlock | null {
+  const revision = useSyncExternalStore(subscribeAuth, authRevision, authRevision);
+  // `authBlock()` builds a fresh object per call, so the *revision* is what is
+  // subscribed to and the verdict is derived from it. Handing a new object to
+  // `useSyncExternalStore` as its snapshot would re-render forever.
+  return useMemo(() => authBlock(), [revision]);
+}
+
 export default function App() {
-  /* The blocked state is a property of the build's configuration, knowable
-   * before anything renders, so it replaces the shell rather than decorating
-   * it. Everything else -- expired, forbidden, degraded -- is a request
-   * outcome and belongs in the badge inside the shell. */
-  const block = authBlock();
+  /* The blocked state is a property of the build's configuration plus whether
+   * a token has ever been obtained, so it replaces the shell rather than
+   * decorating it. Everything else -- expired, forbidden, degraded -- is a
+   * request outcome and belongs in the badge inside the shell.
+   *
+   * F06: the estate providers live BELOW this gate. They used to wrap `App`
+   * from `main.tsx`, so a build that could not authenticate still fired
+   * `fetchOrganizations` on load -- a guaranteed 401 whose failure the user
+   * never saw -- and, worse, that request ran exactly once: after signing in,
+   * the organization list was still the empty one fetched before there was a
+   * token, and every screen queried a tenant that was never resolved. Mounting
+   * them after sign-in makes "signed in" the point at which the app starts
+   * asking questions. */
+  const block = useAuthBlock();
   if (block) return <AuthBlockedScreen block={block} />;
 
   return (
-    <SessionProvider fetchMe={fetchMe}>
-      <AppShell />
-    </SessionProvider>
+    <OrgProvider>
+      <ScopeProvider>
+        <SessionProvider fetchMe={fetchMe}>
+          <AppShell />
+        </SessionProvider>
+      </ScopeProvider>
+    </OrgProvider>
   );
 }

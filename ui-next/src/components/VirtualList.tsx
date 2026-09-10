@@ -129,6 +129,13 @@ export function VirtualList<T>({
       className="vlist"
       role="list"
       aria-label={ariaLabel}
+      /* This element scrolls, so it must be reachable by keyboard. Where its
+         rows are focusable the region is reachable through them, but lists
+         whose rows are plain content (Operations' analysis runs) left a
+         keyboard user with no way to scroll it at all -- axe-core
+         `scrollable-region-focusable`. Making the container itself a tab stop
+         fixes both cases and costs one stop. */
+      tabIndex={0}
       onKeyDown={onKeyDown}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
