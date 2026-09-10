@@ -71,12 +71,22 @@ revalidate those journeys. In particular, manual workbook import/export does not
 establish automatic Excel save-back; that needs an explicit editing integration,
 identity binding, concurrency/conflict handling and the existing approval gate.
 
-The agent review's production-scale, independent semantic evaluation,
-multi-worker revocation and human-audit recovery evidence remain separate work.
-Provider-timeout usage is uncertain: releasing reserved output allowance based
-only on estimated input makes accounting a soft estimate, not proof of a hard
-provider-spend ceiling. Concurrent changes to that policy need reconciliation
-before closing the budget finding.
+The agent review's production-scale, independent semantic evaluation and
+human-audit recovery evidence remain separate work.
+
+Two items this section listed as open have since been settled, and the note is
+corrected rather than left standing. **Provider-timeout accounting** was
+reconciled on 2026-09-10: a failed generation is settled to the input it
+demonstrably sent, releasing the output allowance it never produced
+(`agent_budget.settle_unresolved_run_budget`). The reservation itself is still
+the worst case — admission holds every planned route's input estimate plus its
+output allowance — so this is not a loosening; and the figure remains an
+estimate, because no provider adapter reports billable usage. That limit is
+AR-05's, not a new one. **Multi-worker revocation** was measured the same day:
+`tests/test_reviewer_agent_postgres_suspension.py` puts four agents on four
+PostgreSQL connections and suspends them from a fifth, giving a maximum stop
+delay of 0 items at READ COMMITTED and 6 — the whole remaining batch — at
+REPEATABLE READ. Contention between workers on one queue remains untested.
 
 ## Regression coverage
 
