@@ -8,6 +8,8 @@
 
 ## 0. Executive summary
 
+> **Review correction (2026-09-09):** This is a historical strategy proposal, not a verified current feature matrix. Universal claims below such as "every incumbent shipped", "nobody" and "every workflow today", numeric competitive advantages and delivery estimates must not be reused as established facts without fresh evidence. The [critical architecture review](../10-architecture/15-agent-architecture-critical-review.md) supplies the current capability counting convention, a narrower primary-source comparison, and open automation/scale findings. Contracts and estimated token attribution now exist; their existence does not prove all declared limits are enforced. No enterprise-scale certification follows from test counts.
+
 Ten findings, in the order a decision-maker needs them.
 
 1. **The market has finished agreeing on the destination.** Between May and July 2026 every incumbent shipped the same four things: context-drafting agents, an MCP server, an agent registry with a non-human identity model, and an evaluation gate on context before it is published. The "context layer" is no longer a positioning idea; it is a shipped feature at Atlan, Collibra, Alation, Databricks, Snowflake, Microsoft, OpenMetadata and DataHub.

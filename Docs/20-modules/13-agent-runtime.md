@@ -4,6 +4,8 @@
 
 ## 1. Purpose
 
+> **Implementation review (2026-09-09):** Read the [critical architecture review](../10-architecture/15-agent-architecture-critical-review.md) for five core capabilities (three LLM-capable workflows and two deterministic components), declared-versus-enforced contract limits, stale roster reporting, reviewer release blockers and scale criteria. Older "current state" and open-work tables below are dated planning snapshots, not certification of today's deployment.
+
 The governed analytical state machine: takes a question, screens it, resolves it against approved semantics, prefers an approved tool, generates only when it must, and hands everything to the deterministic gateway for execution.
 
 This module is where ADR-0001 (models propose, deterministic services decide) becomes concrete. It is the single most important module for the product's differentiation and for its model-risk story.
@@ -35,7 +37,7 @@ Every transition is explicit, recorded, and pins the versions in force at that p
 | EXPLAINED | Lineage, versions, confidence, quality signals assembled | — |
 | COMPLETED | Evidence persisted | — |
 
-**Two ordering properties carry the guarantee.** `SCREENED` precedes retrieval, so hostile input cannot influence what is retrieved or which tool is selected. `VALIDATED` is deterministic and downstream of `GENERATED`, so a model can propose anything but cannot widen what executes.
+**Two ordering properties support the boundary.** `SCREENED` precedes retrieval, so inputs detected and blocked by the classifier do not reach retrieval. This does not prove that all hostile input is detected. The execution gateway must enforce validation and authorization before execution; the orchestrator's post-execution checkpoints provide additional verification, not a replacement for those controls.
 
 > **Implementation status (2026-08-31).** All eleven states exist with a real transition table,
 > and the **SCREENED-before-retrieval ordering is verified in the code** — prompt-risk screening
@@ -74,7 +76,7 @@ flowchart TD
     X -->|yes| D[Tool draft → maker-checker]
 ```
 
-**Why this ordering is the economic core of the product** (differentiator D2). Every competitor regenerates SQL per question: cost and risk grow linearly with usage. Atlas prefers an approved tool: cost and risk *fall* as the tool library matures. Target: ≥40% tool-first execution rate in a mature tenant.
+**Economic hypothesis to measure** (D2). Reusing approved tools can avoid generation calls and reduce repeated validation effort, although source execution still has cost and risk. No verified comparison establishes that every competitor regenerates SQL per question. Target: ≥40% tool-first execution rate in a mature tenant; measure accepted-answer accuracy and total cost alongside the rate.
 
 ## 5. Prompt-risk screening
 
@@ -88,7 +90,7 @@ A **versioned, deterministic classifier** running before retrieval. Blocks:
 
 Retained evidence is **value-free**: classifier version, score, reason codes, plus the question HMAC. The raw question is never stored (ADR-0014).
 
-**Known gap.** Indirect injection through *retrieved metadata* — a malicious column description that reaches model context — is not yet screened. Tracked P0.
+**Coverage qualification (2026-09-09).** Indirect-screening code exists in `injection_defense.py` and `ingest_screening.py`, with ingestion/MCP integrations. Complete coverage of retrieved metadata, updates and legacy content was not established by this review. AR-10 requires a path-level coverage audit and adversarial evaluation; neither complete absence nor complete protection should be claimed.
 
 ## 6. Evidence model
 

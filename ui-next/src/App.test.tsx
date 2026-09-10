@@ -215,3 +215,44 @@ describe("navigation drops the page you left behind", () => {
     expect(location.search).not.toContain("status=OPEN");
   });
 });
+
+describe("the command palette is a real modal", () => {
+  /* F21's own worked example. The palette declared `role="dialog"
+   * aria-modal="true"` with an autofocused input and an Escape handler, and
+   * had none of the three properties those attributes advertise. Driving the
+   * running app in a real browser confirmed it: 52 Tab presses walked out of
+   * the open modal into the sidebar behind it.
+   *
+   * jsdom cannot assert that — it implements no sequential focus navigation,
+   * which is precisely why the defect survived a green unit suite. What jsdom
+   * CAN assert is the structural guarantee underneath: the palette renders
+   * through the shared `Dialog`, so the background really is marked inert
+   * while it is open and really is released afterwards. The Tab-order proof
+   * belongs to `Dialog`'s own tests and to interactive validation. */
+  it("marks the background inert while open and releases it on close", async () => {
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+    await screen.findByRole("button", { name: /Jump to/ });
+
+    const backgroundBefore = [...document.body.children].map((el) => el.hasAttribute("inert"));
+    expect(backgroundBefore.some(Boolean)).toBe(false);
+
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const dialog = await screen.findByRole("dialog", { name: /Quick navigation/ });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+
+    // The shell's own panes are inert; the portal the dialog lives in is not.
+    const inertFlags = [...document.body.children].map((el) => el.hasAttribute("inert"));
+    expect(inertFlags.filter(Boolean).length).toBeGreaterThan(0);
+    expect(inertFlags.some((flag) => !flag)).toBe(true);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: /Quick navigation/ })).toBeNull(),
+    );
+    // Released, not merely hidden: a stuck `inert` would leave the whole shell
+    // unreachable to keyboard and assistive technology after one Ctrl+K.
+    expect([...document.body.children].every((el) => !el.hasAttribute("inert"))).toBe(true);
+  });
+});

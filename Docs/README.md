@@ -28,6 +28,8 @@ Two properties make it usable rather than decorative:
 
 ## Start here
 
+For the current agent inventory, automation limits, vendor comparison and open release blockers, read the [2026-09-09 critical architecture review](10-architecture/15-agent-architecture-critical-review.md). Its dated findings supersede conflicting agent-count, reviewer-safety and model-call economics claims in older documents; code remediation remains open.
+
 | If you are… | Read, in order |
 |---|---|
 | **New to the project** | `00-product/01-vision-and-goals.md` → `10-architecture/03-logical-architecture.md` → `20-modules/00-module-index.md` |

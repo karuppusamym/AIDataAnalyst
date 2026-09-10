@@ -4,6 +4,8 @@
 
 ## Context
 
+> **Implementation warning (2026-09-09):** The decision below remains a proposed requirement, not an achieved guarantee. [Critical review AR-01 through AR-04](../15-agent-architecture-critical-review.md) found that an elevated configured ceiling admits T2/T3 types, bulk pre-review omits size payloads, missing confidence can yield approval, and suspension is checked at batch entry. The implementation is deterministic, not a second-model checker. Statements below about an un-widenable T1 boundary, immediate suspension and independent model judgment must be read as targets pending remediation. Default-off configuration does not establish the live deployment state. Historical claims below about all environments were not revalidated in this review.
+
 INV-8 says **maker ≠ checker**: no actor approves its own work. It is one of the nine invariants, it is enforced platform-wide rather than per-feature, and it is a large part of why Atlas can claim a governance story a bank's model-risk function will accept.
 
 Atlas now drafts a great deal of the work that arrives in the review queue. Asset descriptions, business annotations, glossary link proposals, classification promotions, metric candidates mined from query history — all are produced by deterministic services or by an approved model route, all land as proposals, and all wait for a human. That is correct and it is the design. It is also, at estate scale, the bottleneck: the 2026 market research in `00-product/08` records vendors generating hundreds of thousands of descriptions in weeks, and a queue that only humans can clear does not clear.

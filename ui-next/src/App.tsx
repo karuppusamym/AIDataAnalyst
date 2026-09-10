@@ -1,7 +1,8 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { HomeScreen } from "./screens/HomeScreen";
 import { AgentInboxScreen } from "./screens/AgentInboxScreen";
 import { PersonaNav } from "./components/PersonaNav";
+import { Dialog } from "./components/primitives";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { ScopePicker } from "./components/ScopePicker";
 import { fetchMe } from "./lib/api";
@@ -315,6 +316,7 @@ function AppShell() {
   const session = useSession();
   const [devPersona, setDevPersona] = useState<Persona>("Steward");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteInputRef = useRef<HTMLInputElement>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [expandedGroup, setExpandedGroup] = useState<WorkArea | null>(
@@ -485,26 +487,52 @@ function AppShell() {
         </div>
       </main>
 
+      {/* F21: this palette was the review's own example of ARIA standing in for
+        * interaction -- it declared `role="dialog" aria-modal="true"` with an
+        * autofocused input and an Escape handler, and had no focus containment,
+        * no focus restoration and no background inertness. Driving the running
+        * app in a real browser confirmed it: 52 Tab presses walked out of the
+        * open modal and into the sidebar navigation behind it. jsdom could not
+        * show that, because jsdom has no sequential focus navigation.
+        *
+        * `Dialog` owns all three properties, so the palette states its content
+        * and nothing else. */}
       {paletteOpen ? (
-        <div className="palette" role="presentation" onMouseDown={() => setPaletteOpen(false)}>
-          <section className="palette__dialog" role="dialog" aria-modal="true" aria-label="Quick navigation" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="palette__search">
-              <span aria-hidden="true">⌕</span>
-              <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search pages and tools…" aria-label="Search pages" />
-              <kbd>Esc</kbd>
-            </div>
-            <div className="palette__results">
-              {matches.length ? matches.map((item) => (
+        <Dialog
+          title="Quick navigation"
+          description="Type to filter · choose a page to open it"
+          onClose={() => setPaletteOpen(false)}
+          initialFocusRef={paletteInputRef}
+          className="palette__dialog"
+        >
+          <div className="palette__search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              ref={paletteInputRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search pages and tools…"
+              aria-label="Search pages"
+            />
+            <kbd>Esc</kbd>
+          </div>
+          <div className="palette__results">
+            {matches.length ? (
+              matches.map((item) => (
                 <button key={item.id} className="palette__item" onClick={() => navigate(item.id)}>
                   <span className="snav__icon" aria-hidden="true">{item.icon}</span>
-                  <span><b>{item.label}</b><small>{item.group}</small></span>
+                  <span>
+                    <b>{item.label}</b>
+                    <small>{item.group}</small>
+                  </span>
                   <span className="palette__arrow" aria-hidden="true">→</span>
                 </button>
-              )) : <div className="palette__empty">No matching page</div>}
-            </div>
-            <footer className="palette__foot">Type to filter · choose a page to open it</footer>
-          </section>
-        </div>
+              ))
+            ) : (
+              <div className="palette__empty">No matching page</div>
+            )}
+          </div>
+        </Dialog>
       ) : null}
     </div>
   );

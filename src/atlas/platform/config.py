@@ -158,6 +158,15 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = ""
     kafka_bootstrap_servers: str = "localhost:19092"
+    # Object store (S3-compatible). Read by `aida.main._audit_archive_loop`,
+    # which passes them to `aida.worm_archive.storage_for` ->
+    # `aida.audit_archive_s3.S3ArchiveStorage` when
+    # `audit_archive_storage_backend == "s3"`. That is the only consumer;
+    # with the backend at its `none` default nothing opens a connection, so
+    # a set credential here is not by itself an active destination.
+    # `object_store_secret_key` ships empty and its value is never logged,
+    # never placed in a dataclass `repr`, and never emitted into a
+    # generated document (see `scripts/generate_destination_inventory.py`).
     object_store_endpoint: str = "http://localhost:9000"
     object_store_access_key: str = "aida"
     object_store_secret_key: str = ""
@@ -791,12 +800,38 @@ class Settings(BaseSettings):
     # destination does not have an archive (review F01). It resolves to
     # `aida.audit_archive_storage.NullArchiveStorage`, which refuses every
     # operation, so the sweep records a FAILED attempt instead of a
-    # fabricated success. `filesystem` is the one complete provider here;
-    # `s3`/`gcs`/`azure_blob` remain accepted names but resolve to a
-    # provider that refuses and says so, because no cloud SDK is a
-    # dependency of this project.
+    # fabricated success. Selecting `s3` is therefore an explicit
+    # deployment decision, never something a default drifts into.
+    #
+    # Two complete providers: `filesystem` (a durable root, immutability by
+    # mode bit -- a guard rail) and `s3` (S3 Object Lock, immutability
+    # enforced by the service -- a boundary). `gcs`/`azure_blob` remain
+    # accepted names but resolve to a provider that refuses and says so;
+    # they are deliberately not faked to match `s3`, because no SDK for
+    # them is a dependency of this project and pretending otherwise is the
+    # exact defect F01 records.
     audit_archive_storage_backend: Literal["none", "filesystem", "s3", "gcs", "azure_blob"] = "none"
     audit_archive_bucket_name: str = "audit-archive"
+    # The `s3` provider's destination and credential. Endpoint and keys are
+    # the existing `object_store_*` settings (below), read here rather than
+    # duplicated: one object store per deployment, one place to configure
+    # it. Region matters even against an S3-compatible service, because it
+    # is part of the SigV4 credential scope the service verifies.
+    audit_archive_s3_region: str = "us-east-1"
+    # COMPLIANCE cannot be bypassed or shortened by any principal, including
+    # the account root; GOVERNANCE can be waived by anyone holding
+    # `s3:BypassGovernanceRetention`. An audit archive whose deletion
+    # protection the audited operator can waive is not WORM, so COMPLIANCE
+    # is the default and GOVERNANCE exists only for a deployment that has
+    # consciously chosen a weaker guarantee (e.g. a staging bucket it needs
+    # to be able to empty).
+    audit_archive_s3_retention_mode: Literal["COMPLIANCE", "GOVERNANCE"] = "COMPLIANCE"
+    # Whether the archive worker may create the bucket when it is missing.
+    # Object Lock can only be enabled at bucket-creation time, so a bucket
+    # made any other way may silently not enforce retention; leaving this
+    # True lets the worker create a correctly-locked one, and a deployment
+    # that provisions buckets out of band should set it False.
+    audit_archive_s3_create_bucket: bool = True
     audit_archive_legal_hold_enabled: bool = False
     audit_archive_classification: Literal["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"] = (
         "CONFIDENTIAL"

@@ -5,6 +5,8 @@
 
 ## 1. The core idea
 
+> **Review correction (2026-09-09):** The DAG below is a target decomposition, not proof that every stage has a dedicated worker. The inspected Temporal worker registers discovery and ingestion on one configured task queue. Queue separation and fleet-wide isolation described later are deployment requirements until verified. Older dated worker-status rows are historical snapshots, not a current inventory. See [critical review AR-08/AR-09](15-agent-architecture-critical-review.md).
+
 **Metadata analysis is a distributed job/DAG execution problem, not an agent problem** (P7).
 
 The naive design — one autonomous agent per table — fails on four counts: cost scales linearly with model calls, there is no dependency ordering (cross-table relationships need both tables profiled first), permissions become unbounded, and failure is unattributable.
@@ -22,15 +24,15 @@ flowchart TD
     E --> F[Cross-table relationship candidates]
     F --> G[Lineage extraction]
     G --> H[Quality baseline comparison]
-    H --> I["Selective semantic inference<br/>(one call per domain, not per table)"]
-    I --> J{Confidence?}
-    J -->|high| K[Publish]
-    J -->|low| L[Review queue]
-    L --> K
+    H --> I["Selective semantic inference<br/>bounded metadata batches"]
+    I --> L[Proposal and evidence]
+    L --> J{Independent governed decision}
+    J -->|approved| K[Apply authorized change]
+    J -->|rejected or deferred| N[Retain outcome and evidence]
     K --> M[Outbox → projections]
 ```
 
-**Note the shape.** Fan-out is deterministic and cheap (profiling). Fan-in is where cross-table reasoning happens. Model calls sit at the narrow end — one per domain, not one per table. A 100,000-table estate produces ~100,000 cheap deterministic tasks and perhaps 50 model calls.
+**Measured claims versus design intent.** Profiling fans out as bounded deterministic work; its actual cost depends on the source and profiling policy. Current semantic enrichment groups at most 25 tables per model call (`semantic_inference.py`). Enriching 100,000 selected tables therefore entails 4,000 nominal batch attempts before failures or retries, not the previously claimed roughly 50. This arithmetic is not a throughput benchmark. Confidence alone does not authorize publication; automated review has open boundary defects documented in AR-01 through AR-04.
 
 ## 2. Worker classes
 
@@ -141,14 +143,14 @@ Models are expensive, slow, and non-deterministic. The worker design minimizes c
 | Rule | Effect |
 |---|---|
 | Deterministic first | Never invoke a model for something a rule computes |
-| Aggregate before invoking | One call per domain or table family, not per table |
+| Aggregate before invoking | Current implementation: up to 25 selected tables per call; grouping by domain/family is an optimization target |
 | Only after deterministic completion | The model sees structure, keys, classifications, and baselines — not raw metadata |
 | Metadata only | Identifiers, types, classifications, constraints, deterministic baselines. Never sample values (INV-6) |
 | Structured output | Strict schema validation; malformed output is discarded, not repaired |
 | Bounded | Tokens, retries, and timeout per route budget |
 | Proposal only | Output enters the review queue, never authoritative state (INV-3) |
 
-**Expected economics.** A 100,000-table estate should produce a low-hundreds count of model calls per full analysis, not 100,000. If model call volume scales linearly with table count, the design has regressed.
+**Economics to measure.** Track selected tables, tokens per batch, failed attempts, deterministic fallbacks and cost per accepted result. Fixed-size batching still scales linearly with selected table count. Reuse and incremental selection can reduce volume; low-hundreds call counts are not established for a full 100,000-table enrichment run.
 
 ## 7. Worker deployment
 

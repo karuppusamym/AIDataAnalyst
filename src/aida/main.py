@@ -23,6 +23,7 @@ from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.asset_description_api import router as asset_description_router
 from aida.asset_evidence_api import router as asset_evidence_router
+from aida.audit_archive_s3 import S3ArchiveStorage
 from aida.authorization_posture import assert_startup_posture
 from aida.bi_api import router as bi_router
 from aida.column_documentation_api import router as column_documentation_router
@@ -147,6 +148,16 @@ async def _audit_archive_loop(loop_settings: Settings) -> None:
         classification=loop_settings.audit_archive_classification,
         lease_seconds=loop_settings.audit_archive_lease_seconds,
         late_arrival_overlap_seconds=(loop_settings.audit_archive_late_arrival_overlap_seconds),
+        # The object store is one destination per deployment, so the `s3`
+        # provider reads the existing `object_store_*` settings rather than
+        # growing a parallel set. These are only ever *used* when the
+        # backend is `s3`; at the `none` default they are carried and
+        # ignored, and no connection is opened.
+        s3_endpoint=loop_settings.object_store_endpoint,
+        s3_region=loop_settings.audit_archive_s3_region,
+        s3_access_key=loop_settings.object_store_access_key,
+        s3_secret_key=loop_settings.object_store_secret_key,
+        s3_retention_mode=loop_settings.audit_archive_s3_retention_mode,
     )
     # Resolved once, at loop start, and logged: an operator reading the logs
     # must be able to tell a running archive from one whose destination
@@ -155,10 +166,38 @@ async def _audit_archive_loop(loop_settings: Settings) -> None:
     # cycle then records a FAILED attempt rather than a fabricated archive.
     storage = storage_for(config)
     owner = default_worker_identity()
+    object_lock: bool | None = None
+    if isinstance(storage, S3ArchiveStorage) and loop_settings.audit_archive_s3_create_bucket:
+        # Object Lock can only be enabled when a bucket is created, so this
+        # is the one moment a correctly-locked bucket can come into
+        # existence. A failure here is logged and not raised: the sweep then
+        # records FAILED attempts against an unusable destination, which is
+        # the honest outcome, rather than the process refusing to start.
+        try:
+            created = await asyncio.to_thread(storage.ensure_bucket)
+            object_lock = await asyncio.to_thread(storage.bucket_has_object_lock)
+            if not object_lock:
+                logger.error(
+                    "audit_archive_bucket_without_object_lock",
+                    bucket=storage.bucket,
+                    created=created,
+                    detail=(
+                        "the bucket exists but does not enforce Object Lock; lock cannot "
+                        "be enabled after creation, so archives written here would not be "
+                        "retained immutably"
+                    ),
+                )
+        except Exception as error:  # noqa: BLE001 -- destination-specific, never fatal
+            logger.warning(
+                "audit_archive_bucket_preflight_failed",
+                bucket=storage.bucket,
+                error=f"{type(error).__name__}: {error}",
+            )
     logger.info(
         "audit_archive_loop_started",
         storage_backend=storage.name,
         storage_available=storage.available,
+        object_lock_enforced=object_lock,
         owner=owner,
         interval_seconds=loop_settings.audit_archive_interval_seconds,
     )

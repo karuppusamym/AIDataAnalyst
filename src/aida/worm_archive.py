@@ -42,7 +42,7 @@ import asyncio
 import json
 import os
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -103,6 +103,16 @@ class ArchiveConfig:
     classification: str = "CONFIDENTIAL"
     lease_seconds: int = 900
     late_arrival_overlap_seconds: int = 86_400
+    # Destination for the `s3` backend. `s3_secret_key` is `repr=False` so
+    # that a traceback, a structlog kwarg or a debugger frame that renders
+    # this config cannot spill the credential -- the generated destination
+    # inventory asserts no secret value reaches a document, and the same
+    # rule holds for anything that renders a config.
+    s3_endpoint: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key: str = ""
+    s3_secret_key: str = field(default="", repr=False)
+    s3_retention_mode: str = "COMPLIANCE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +150,16 @@ def default_worker_identity() -> str:
 
 def storage_for(config: ArchiveConfig) -> ArchiveStorage:
     """Resolve the provider named by `config`. Never returns a silent no-op."""
-    return build_archive_storage(config.storage_backend, filesystem_root=config.filesystem_root)
+    return build_archive_storage(
+        config.storage_backend,
+        filesystem_root=config.filesystem_root,
+        s3_endpoint=config.s3_endpoint,
+        s3_bucket=config.bucket_name,
+        s3_region=config.s3_region,
+        s3_access_key=config.s3_access_key,
+        s3_secret_key=config.s3_secret_key,
+        s3_retention_mode=config.s3_retention_mode,
+    )
 
 
 def serialize_archive(

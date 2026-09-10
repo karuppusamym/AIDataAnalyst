@@ -21,12 +21,17 @@ Three provider kinds, and the distinction between them is the point:
   **refuses**. Every call raises `ArchiveStorageUnavailable`. The archive
   lifecycle turns that into a FAILED record, so an unconfigured deployment
   reports "no archive" rather than a fabricated one.
+* `S3ArchiveStorage` (in `aida.audit_archive_s3`) -- complete and real,
+  over S3 Object Lock in COMPLIANCE mode, signed by `aida.aws_sigv4`
+  rather than by an SDK this project would otherwise have to depend on.
+  Unlike the filesystem provider, its immutability is the *service's*
+  refusal, not a mode bit this process could clear.
 * `UnavailableArchiveStorage` -- named for a backend that is advertised in
-  configuration (`s3`, `gcs`, `azure_blob`) but has no implementation in
-  this repository. It refuses the same way, naming the backend. Object-lock
-  against a real cloud service needs an SDK this project does not depend on;
-  until one is added, selecting those backends is an explicit configuration
-  error, not a silent no-op.
+  configuration (`gcs`, `azure_blob`) but has no implementation in this
+  repository. It refuses the same way, naming the backend. Object-lock
+  against those services needs an SDK this project does not depend on;
+  until one is added, selecting them is an explicit configuration error,
+  not a silent no-op. They are deliberately not faked to match `s3`.
 
 Every method is synchronous and blocking. Callers on the event loop wrap
 them in `asyncio.to_thread`; keeping the provider sync keeps it directly
@@ -440,11 +445,24 @@ class FilesystemArchiveStorage:
         logger.info("audit_archive_object_deleted", uri=uri)
 
 
-def build_archive_storage(backend: str, *, filesystem_root: str = "") -> ArchiveStorage:
+def build_archive_storage(
+    backend: str,
+    *,
+    filesystem_root: str = "",
+    s3_endpoint: str = "",
+    s3_bucket: str = "",
+    s3_region: str = "us-east-1",
+    s3_access_key: str = "",
+    s3_secret_key: str = "",
+    s3_retention_mode: str = "COMPLIANCE",
+) -> ArchiveStorage:
     """Resolve a configured backend name to a provider.
 
     Anything unconfigured or unimplemented resolves to a provider that
-    refuses, never to one that quietly succeeds.
+    refuses, never to one that quietly succeeds. An `s3` backend whose
+    endpoint, bucket or credentials are missing is *misconfiguration*, and
+    resolves to a refusing provider naming what is absent -- it does not
+    fall back to a working local one.
     """
     normalized = (backend or "none").strip().lower()
     if normalized == "filesystem":
@@ -454,6 +472,26 @@ def build_archive_storage(backend: str, *, filesystem_root: str = "") -> Archive
                 "audit_archive_filesystem_root is empty; there is nowhere to write.",
             )
         return FilesystemArchiveStorage(filesystem_root)
+    if normalized == "s3":
+        # Imported here, not at module scope: `aida.audit_archive_s3` imports
+        # the protocol types defined above, so a top-level import would be a
+        # cycle. The reachability gate walks nested imports too, so this
+        # stays a visible edge in the import graph.
+        from aida.audit_archive_s3 import S3ArchiveStorage
+
+        try:
+            return S3ArchiveStorage(
+                endpoint=s3_endpoint,
+                bucket=s3_bucket,
+                access_key=s3_access_key,
+                secret_key=s3_secret_key,
+                region=s3_region,
+                retention_mode=s3_retention_mode,
+            )
+        except ArchiveStorageUnavailable as error:
+            # Never carries the credential: `S3ArchiveStorage` reports which
+            # setting is missing, never any setting's value.
+            return UnavailableArchiveStorage("s3", str(error))
     if normalized in {"none", ""}:
         return NullArchiveStorage()
     return UnavailableArchiveStorage(normalized)
