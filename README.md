@@ -26,6 +26,33 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    `http://localhost:5174` with hot-module reload, and API changes under
    `src/` reload automatically.
 
+   Both of the above run the **development identity provider**: the browser
+   sends `X-Principal-Id`/`X-Roles` headers and the API trusts them. That is
+   the default and it stays the default. To run the stack the way a deployment
+   runs it — the API verifying a signed bearer token, the browser obtaining one
+   through an authorization-code + PKCE redirect — add the OIDC overlay, which
+   also starts a local development issuer:
+
+   ```powershell
+   docker compose -f compose.yaml -f compose.oidc.yaml up --build -d
+   ```
+
+   Then open <http://localhost:3001>, press **Sign in**, and enter any subject
+   plus a claims document that names the caller's roles, groups and
+   organization, for example:
+
+   ```json
+   {"roles":["atlas-admin"],"groups":["atlas-stewards"],
+    "organization_id":"<an organization id from /v1/organizations>"}
+   ```
+
+   `atlas-viewer` in place of `atlas-admin` produces a least-privilege
+   principal. The issuer is `ghcr.io/navikt/mock-oauth2-server`: a real OIDC
+   provider (RS256, JWKS, discovery, real expiry) with **no user directory,
+   password, MFA or revocation** — it mints a token for whoever asks. It
+   exercises the protocol integration; it is not a stand-in for a corporate
+   IdP, and `compose.oidc.yaml` must never be deployed.
+
 3. Open:
 
    - API documentation: <http://localhost:8000/docs>

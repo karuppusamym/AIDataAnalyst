@@ -5,7 +5,7 @@
 
 ## 1. The core idea
 
-> **Review correction (2026-09-09):** The DAG below is a target decomposition, not proof that every stage has a dedicated worker. The inspected Temporal worker registers discovery and ingestion on one configured task queue. Queue separation and fleet-wide isolation described later are deployment requirements until verified. Older dated worker-status rows are historical snapshots, not a current inventory. See [critical review AR-08/AR-09](15-agent-architecture-critical-review.md).
+> **Review correction (2026-09-09):** The DAG below is a target decomposition, not proof that every stage has a dedicated worker. `workflows/worker.py` registers discovery and ingestion on one configured task queue, and `workflows/scheduler.py` starts both on the same one. Queue separation and fleet-wide isolation described later are deployment requirements until verified. This was **not** changed by the 2026-09-09 remediation pass, deliberately: [AR-09](15-agent-architecture-critical-review.md) closes on measured multi-tenant load, recovery and fairness experiments, and separating queues without them would look like progress while establishing nothing. Older dated worker-status rows are historical snapshots, not a current inventory.
 
 **Metadata analysis is a distributed job/DAG execution problem, not an agent problem** (P7).
 

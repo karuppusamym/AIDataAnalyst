@@ -22,12 +22,21 @@ import hmac
 import json
 import math
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any, NoReturn
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.agent_budget import (
+    AgentBudgetExceeded,
+    BudgetReservation,
+    per_run_violation,
+    reconcile_run_budget,
+    reserve_run_budget,
+    wall_clock_violation,
+)
 from aida.agent_contracts import (
     REASON_CONTRACT_MISSING,
     agent_kill_blocking_reason,
@@ -55,12 +64,14 @@ from aida.business_annotation_versions import (
 )
 from aida.config import Settings
 from aida.events import record_audit, record_outbox
+from aida.ingest_screening import SCREENING_VERSION, screen_text
 from aida.model_gateway import (
     ApprovedModelRoute,
     ModelCallEvidence,
     ModelGatewayError,
     ProviderNeutralModelGateway,
     SqlGenerationOutput,
+    estimate_payload_tokens,
 )
 from aida.models import (
     AgentRun,
@@ -145,6 +156,13 @@ class AgentOrchestrationResult:
 # (`aida.orchestration_stages`) so a stage that records a step and a stage that
 # advances the state cannot produce differently-shaped entries.
 _trace = trace_entry
+
+#: What the model is shown in place of a quarantined free-text fragment
+#: (AR-10). Deliberately a fixed, self-describing marker rather than an empty
+#: string: the model should see that something was removed, not that the field
+#: was blank, and a marker no source can forge keeps a hostile annotation from
+#: impersonating the redaction itself.
+_WITHHELD_TEXT = "[withheld: failed indirect-injection screening]"
 
 
 def _record_retrieval_decisions(
@@ -552,6 +570,65 @@ class GovernedAgentOrchestrator:
             ],
         }
 
+    #: Fields of a retrieval hit that carry source- or steward-authored free
+    #: text rather than an identifier. `display_name` is a business annotation's
+    #: `business_name`; `domain` and `entity` are display names off the same
+    #: annotation's domain/entity. Everything else on a hit is a UUID, a score,
+    #: or a platform-generated reason code.
+    _FREE_TEXT_EVIDENCE_FIELDS: tuple[str, ...] = ("display_name",)
+    _FREE_TEXT_EVIDENCE_METADATA_FIELDS: tuple[str, ...] = ("domain", "entity")
+
+    @staticmethod
+    def _screened_evidence_for_model(
+        evidence: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Retrieval evidence with quarantined free text withheld (AR-10).
+
+        `ingest_screening` screens source text at write time, and the read
+        paths that consume a *stored* verdict honour it. Retrieval evidence had
+        neither: a business annotation's `business_name` and its domain/entity
+        display names reach the model payload directly from
+        `retrieval.hybrid_retrieve`, with no stored verdict to consult and no
+        screening on the way through. That is a genuine indirect-injection
+        ingress, and it is the one the 2026-09-09 review (AR-10) asked to be
+        traced rather than assumed absent.
+
+        Screened here rather than at retrieval because the *audit* record on
+        `AgentRun.retrieval_evidence` must stay complete -- a steward
+        investigating a quarantine needs to see what was retrieved. What
+        changes is only what the model is shown.
+
+        Withheld, not dropped: the hit stays, so the model still knows the
+        object was retrieved and the evidence count still reconciles with the
+        persisted record. Only the text is replaced.
+        """
+        screened: list[dict[str, Any]] = []
+        withheld = 0
+        for hit in evidence:
+            copy = dict(hit)
+            for field_name in GovernedAgentOrchestrator._FREE_TEXT_EVIDENCE_FIELDS:
+                value = copy.get(field_name)
+                if isinstance(value, str) and not screen_text(
+                    value, content_origin=f"retrieval_evidence:{field_name}"
+                ).is_clean:
+                    copy[field_name] = _WITHHELD_TEXT
+                    withheld += 1
+            metadata = copy.get("metadata")
+            if isinstance(metadata, dict):
+                metadata_copy = dict(metadata)
+                for field_name in (
+                    GovernedAgentOrchestrator._FREE_TEXT_EVIDENCE_METADATA_FIELDS
+                ):
+                    value = metadata_copy.get(field_name)
+                    if isinstance(value, str) and not screen_text(
+                        value, content_origin=f"retrieval_evidence:metadata.{field_name}"
+                    ).is_clean:
+                        metadata_copy[field_name] = _WITHHELD_TEXT
+                        withheld += 1
+                copy["metadata"] = metadata_copy
+            screened.append(copy)
+        return screened, withheld
+
     async def run(
         self,
         session: AsyncSession,
@@ -953,7 +1030,9 @@ class GovernedAgentOrchestrator:
         elif plan.strategy == "DEVELOPMENT_SQL" and request.candidate_sql:
             statement = await self._validate_development_sql(session, request, ledger)
         else:
-            statement = await self._generate_statement(session, request, ledger, retrieved)
+            statement = await self._generate_statement(
+                session, request, ledger, screened, retrieved
+            )
 
         ledger.agent_run.generation_source = statement.generation_source
         ledger.advance(
@@ -1087,6 +1166,7 @@ class GovernedAgentOrchestrator:
         session: AsyncSession,
         request: OrchestrationRequest,
         ledger: RunLedger,
+        screened: ScreenOutcome,
         retrieved: RetrievalOutcome,
     ) -> ValidatedStatement:
         """Ask an approved model route for SQL, grounded in this run's evidence.
@@ -1124,11 +1204,22 @@ class GovernedAgentOrchestrator:
                 "Use only qualified tables, columns, and joins present in the supplied "
                 "metadata context. Never invent an identifier or include source values."
             )
+            # AR-10: the audit record keeps every hit verbatim; the model sees
+            # the same hits with quarantined free text withheld.
+            model_evidence_hits, withheld_fragments = self._screened_evidence_for_model(
+                retrieved.evidence
+            )
+            if withheld_fragments:
+                ledger.plan_evidence["withheld_context_fragments"] = {
+                    "count": withheld_fragments,
+                    "reason": "INDIRECT_INJECTION_SCREENING",
+                    "screening_version": SCREENING_VERSION,
+                }
             payload: dict[str, Any] = {
                 "question": request.question,
                 "datasource_id": str(request.datasource.id),
                 "semantic_version": retrieved.semantic_version,
-                "retrieval_evidence": retrieved.evidence,
+                "retrieval_evidence": model_evidence_hits,
                 "metadata_context": model_context,
             }
             if memory_match is not None:
@@ -1188,18 +1279,39 @@ class GovernedAgentOrchestrator:
                         for exemplar in exemplars
                     ]
                     fewshot_ids = [e.memory_evidence_id for e in exemplars]
-            # 2026-09-03: iterate approved routes; `_generate_with_fallback`
-            # handles retryable-error semantics + per-attempt evidence.
-            # Governance-preserving: iteration walks routes that are already
-            # APPROVED via `_approved_model_routes`, never a route the runtime
-            # discovers itself. See ADR-0024.
-            output, model_evidence, model_call_attempts = await self._generate_with_fallback(
-                session=session,
-                organization_id=request.organization_id,
-                approved_routes=approved_routes,
-                system_instruction=system_instruction,
-                payload=payload,
+            # AG-10 / AR-05: the contract's budget caps, enforced here because
+            # this is the last point before the platform spends anything. The
+            # payload is final -- every exemplar, template and context fragment
+            # is in it -- so the input estimate is the one the gateway will
+            # itself compute, not an approximation of it.
+            reservation = await self._reserve_generation_budget(
+                session, request, ledger, screened, payload=payload
             )
+            try:
+                # 2026-09-03: iterate approved routes; `_generate_with_fallback`
+                # handles retryable-error semantics + per-attempt evidence.
+                # Governance-preserving: iteration walks routes that are already
+                # APPROVED via `_approved_model_routes`, never a route the runtime
+                # discovers itself. See ADR-0024.
+                (
+                    output,
+                    model_evidence,
+                    model_call_attempts,
+                ) = await self._generate_with_fallback(
+                    session=session,
+                    organization_id=request.organization_id,
+                    approved_routes=approved_routes,
+                    system_instruction=system_instruction,
+                    payload=payload,
+                )
+            except BaseException:
+                # A generation that never produced evidence has no figure to
+                # reconcile against, so the reservation is released in full.
+                # This is the optimistic direction and it is the right one: the
+                # alternative lets a run of provider failures exhaust a day's
+                # budget without a single answer being produced.
+                await reconcile_run_budget(session, reservation, actual_tokens=0)
+                raise
             agent_run.model_route = model_evidence.route
             ledger.plan_evidence["model_call_evidence"] = {
                 "route": model_evidence.route,
@@ -1221,6 +1333,35 @@ class GovernedAgentOrchestrator:
                 len(model_call_attempts), 1
             )
             agent_run.estimated_output_tokens = model_evidence.estimated_output_tokens
+            # AR-05: reconcile the reservation down (or up) to what this run
+            # actually cost, then apply the per-run cap to the total. The cap
+            # check cannot prevent the spend it detects -- the provider has
+            # already answered -- so it fails the run instead, which is what
+            # makes an overrun attributable rather than silent.
+            spent = int(agent_run.estimated_input_tokens or 0) + int(
+                agent_run.estimated_output_tokens or 0
+            )
+            await reconcile_run_budget(session, reservation, actual_tokens=spent)
+            ledger.plan_evidence["budget_evidence"] = {
+                "estimated_tokens": spent,
+                "per_run_token_cap": (
+                    screened.agent_contract.per_run_token_cap
+                    if screened.agent_contract is not None
+                    else None
+                ),
+                "daily_token_cap": (
+                    screened.agent_contract.daily_token_cap
+                    if screened.agent_contract is not None
+                    else None
+                ),
+                # Named so nobody reads this block as billable spend.
+                "basis": "ESTIMATED_NOT_PROVIDER_REPORTED",
+            }
+            overrun = per_run_violation(screened.agent_contract, tokens=spent)
+            if overrun is not None:
+                ledger.publish_plan_evidence()
+                await self._persist_rejection(session, request, ledger, overrun)
+                raise AgentPolicyRejected(overrun)
             # Record the attempt chain only when it materially explains the
             # outcome -- either more than one attempt fired, or a fallback was
             # configured (so the audit shows "the fallback was set but the
@@ -1528,6 +1669,54 @@ class GovernedAgentOrchestrator:
     ) -> NoReturn:
         await self._persist_rejection(session, request, ledger, reason)
         raise ModelRouteUnavailable(reason)
+
+    async def _reserve_generation_budget(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        ledger: RunLedger,
+        screened: ScreenOutcome,
+        *,
+        payload: dict[str, Any],
+    ) -> BudgetReservation:
+        """AG-10 / AR-05: clear this run's contract budget before spending.
+
+        Three checks, in the order that refuses most cheaply first: the
+        wall-clock cap (pure arithmetic), the per-run cap against the input
+        estimate (arithmetic on a payload already in hand), then the daily cap
+        (one conditional UPDATE). A run with no agent contract clears all three
+        trivially and reserves nothing -- the caps belong to a registered
+        agent's contract, and an analyst asking a question has none.
+
+        The input estimate uses `model_gateway.estimate_payload_tokens`, the
+        same function the gateway itself calls, so the number refused here and
+        the number recorded on the run cannot drift apart.
+        """
+        contract = screened.agent_contract
+        if contract is None:
+            return BudgetReservation(window_id=None, amount=0)
+        agent_run = ledger.agent_run
+        now = datetime.now(UTC)
+        started_at = agent_run.created_at or now
+        elapsed = wall_clock_violation(contract, started_at=started_at, now=now)
+        if elapsed is not None:
+            await self._persist_rejection(session, request, ledger, elapsed)
+            raise AgentPolicyRejected(elapsed)
+        estimated_input = estimate_payload_tokens(payload)
+        # The input half is knowable before the call and is what a request
+        # refused mid-stream still costs, so it is worth refusing on its own
+        # rather than waiting for the total.
+        oversized = per_run_violation(contract, tokens=estimated_input)
+        if oversized is not None:
+            await self._persist_rejection(session, request, ledger, oversized)
+            raise AgentPolicyRejected(oversized)
+        try:
+            return await reserve_run_budget(
+                session, contract, estimated_input_tokens=estimated_input, now=now
+            )
+        except AgentBudgetExceeded as exc:
+            await self._persist_rejection(session, request, ledger, exc.reason_code)
+            raise AgentPolicyRejected(exc.reason_code) from exc
 
     async def _persist_rejection(
         self,

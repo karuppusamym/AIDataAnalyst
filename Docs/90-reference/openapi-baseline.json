@@ -332,6 +332,17 @@
         "additionalProperties": false,
         "description": "Whether this agent's plan has a real, code-backed auto-apply branch\nand, only when one genuinely exists, the threshold that governs it. See\nthis module's docstring for how this is determined -- never a value\ninvented for an agent that does not actually have one.",
         "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
           "evidence": {
             "title": "Evidence",
             "type": "string"
@@ -367,6 +378,7 @@
           "has_auto_apply_branch",
           "threshold",
           "threshold_source",
+          "enabled",
           "evidence"
         ],
         "title": "AgentAutoApplyRead",
@@ -1120,7 +1132,7 @@
       },
       "AgentMethodSummaryRead": {
         "additionalProperties": false,
-        "description": "The \"task plan\" half of this row's exit condition: not a static,\nhand-written description, but what this organization's governed agent\nhas actually been doing lately, aggregated from `AgentRun.plan_evidence`\n(`agent_intelligence.AgentPlan.evidence()`) and `generation_source`.",
+        "description": "The \"task plan\" half of this row's exit condition: not a static,\nhand-written description, but what this agent version has actually been\ndoing lately, aggregated from `AgentRun.plan_evidence`\n(`agent_intelligence.AgentPlan.evidence()`) and `generation_source`.",
         "properties": {
           "average_confidence": {
             "anyOf": [
@@ -1149,7 +1161,10 @@
             "type": "integer"
           },
           "scope": {
-            "const": "ORGANIZATION_WIDE",
+            "enum": [
+              "AGENT_VERSION",
+              "ORGANIZATION_WIDE"
+            ],
             "title": "Scope",
             "type": "string"
           },
@@ -1356,6 +1371,9 @@
             "title": "Total Agents",
             "type": "integer"
           },
+          "unattributed": {
+            "$ref": "#/components/schemas/UnattributedRunsRead"
+          },
           "window_days": {
             "title": "Window Days",
             "type": "integer"
@@ -1366,6 +1384,7 @@
           "generated_at",
           "window_days",
           "agents",
+          "unattributed",
           "total_agents"
         ],
         "title": "AgentRosterRead",
@@ -24136,13 +24155,25 @@
             "title": "Agent Principal Id",
             "type": "string"
           },
+          "configured_max_tier": {
+            "title": "Configured Max Tier",
+            "type": "string"
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
           },
+          "evidence_max_age_minutes": {
+            "title": "Evidence Max Age Minutes",
+            "type": "integer"
+          },
           "max_tier": {
             "title": "Max Tier",
             "type": "string"
+          },
+          "max_tier_clamped": {
+            "title": "Max Tier Clamped",
+            "type": "boolean"
           },
           "organization_id": {
             "format": "uuid",
@@ -24163,8 +24194,11 @@
           "enabled",
           "suspended",
           "max_tier",
+          "configured_max_tier",
+          "max_tier_clamped",
           "sampling_rate",
-          "agent_principal_id"
+          "agent_principal_id",
+          "evidence_max_age_minutes"
         ],
         "title": "ReviewerAgentStateRead",
         "type": "object"
@@ -28441,6 +28475,33 @@
           "error_message"
         ],
         "title": "ToolPlanStepRead",
+        "type": "object"
+      },
+      "UnattributedRunsRead": {
+        "additionalProperties": false,
+        "description": "Governed runs in this organization that no registered agent owns.\n\n`AgentRun.ai_asset_version_id` is NULL for these -- the ordinary case of a\nperson asking the runtime a question, rather than a registered agent\nacting under a contract. Reported once at the top level so the numbers\nremain visible without being credited to an agent that did not produce\nthem (AR-07).",
+        "properties": {
+          "method": {
+            "$ref": "#/components/schemas/AgentMethodSummaryRead"
+          },
+          "recent_results": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunOutcomeRead"
+            },
+            "title": "Recent Results",
+            "type": "array"
+          },
+          "recent_results_total": {
+            "title": "Recent Results Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "method",
+          "recent_results",
+          "recent_results_total"
+        ],
+        "title": "UnattributedRunsRead",
         "type": "object"
       },
       "UnifiedLineageEdgeRead": {

@@ -79,6 +79,7 @@ export interface AgentAutoApplyRead {
   has_auto_apply_branch: boolean;
   threshold: number | null;
   threshold_source: string | null;
+  enabled: boolean | null;
   evidence: string;
 }
 
@@ -206,7 +207,7 @@ export interface AgentInboxRead {
 
 /** The "task plan" half of this row's exit condition: not a static, */
 export interface AgentMethodSummaryRead {
-  scope: "ORGANIZATION_WIDE";
+  scope: "AGENT_VERSION" | "ORGANIZATION_WIDE";
   note: string;
   window_days: number;
   sampled_runs: number;
@@ -254,6 +255,7 @@ export interface AgentRosterRead {
   generated_at: string;
   window_days: number;
   agents: AgentRosterEntryRead[];
+  unattributed: UnattributedRunsRead;
   total_agents: number;
 }
 
@@ -4051,8 +4053,11 @@ export interface ReviewerAgentStateRead {
   enabled: boolean;
   suspended: boolean;
   max_tier: string;
+  configured_max_tier: string;
+  max_tier_clamped: boolean;
   sampling_rate: number;
   agent_principal_id: string;
+  evidence_max_age_minutes: number;
 }
 
 export interface ScanPolicyRead {
@@ -4787,6 +4792,13 @@ export interface ToolPlanStepRead {
   completed_at: string | null;
   evidence: Record<string, unknown>;
   error_message: string | null;
+}
+
+/** Governed runs in this organization that no registered agent owns. */
+export interface UnattributedRunsRead {
+  method: AgentMethodSummaryRead;
+  recent_results: AgentRunOutcomeRead[];
+  recent_results_total: number;
 }
 
 /** One typed edge merged from declared FKs, approved/candidate column */

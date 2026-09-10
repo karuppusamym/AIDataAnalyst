@@ -318,9 +318,13 @@ class Settings(BaseSettings):
     #: proposed, and `agent_contracts.validate_contract_definition` refuses a
     #: contract whose principal collides with its author.
     reviewer_agent_principal_id: str = "agent:reviewer"
-    #: The tier ceiling. Never widens what the agent may touch beyond what
-    #: `review_risk_tiers` classifies -- the allowlist is derived from the
-    #: tier table, not from this value (ADR-0027 condition (a)).
+    #: The tier ceiling. Clamped to `review_risk_tiers.HARD_MAX_AGENT_TIER`
+    #: (T1) by `effective_agent_ceiling` before anything derives from it, so
+    #: T2 and T3 are accepted here and then refused in force -- narrowing
+    #: works, widening does not (ADR-0027 condition (a), AR-01). Accepted
+    #: rather than rejected at startup so a misconfiguration cannot take down
+    #: a process over a feature that is off by default; the clamp is recorded
+    #: in every pre-review's evidence as `max_tier_clamped`.
     reviewer_agent_max_tier: Literal["T0", "T1", "T2", "T3"] = "T1"
     #: ADR-0027 condition (b): a hard 5% floor, re-applied at the point of
     #: use and not only here.
@@ -329,9 +333,27 @@ class Settings(BaseSettings):
     #: This is the process-wide switch; the per-organization one lives in
     #: `reviewer_agent_state`.
     reviewer_agent_suspended: bool = False
-    #: Confidence at or above which the agent recommends APPROVE for a
-    #: tier-eligible item that carries a confidence at all.
+    #: Confidence at or above which the agent recommends APPROVE. A proposal
+    #: that carries no confidence of its own is abstained on, never approved
+    #: (AR-03) -- until 2026-09-09 the absence of a confidence was the rule's
+    #: most permissive input, which made this threshold unreachable in
+    #: practice and therefore dead configuration.
     reviewer_agent_approve_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    #: AR-11: how many sampled decisions may sit unresolved before the agent
+    #: stops deciding. ADR-0027's condition (b) argues that a 5% sample makes
+    #: unattended decisions safe -- but a sample nobody resolves is not
+    #: oversight, it is a queue, and the argument fails silently as the queue
+    #: grows. This turns the assumption into an enforced precondition: the
+    #: agent's licence to decide is contingent on humans keeping up with what
+    #: it already decided. Set to 0 to disable the check (and to accept that
+    #: the oversight claim is then unbacked).
+    reviewer_agent_max_unresolved_samples: int = Field(default=50, ge=0, le=100_000)
+    #: AR-04: how old a pre-review may be and still be acted on. Beyond this
+    #: the item is left for the next pre-review pass to re-derive rather than
+    #: decided on evidence gathered before the world moved. The decision path
+    #: re-derives evidence anyway; this bounds how far back a *selected*
+    #: recommendation may have come from.
+    reviewer_agent_evidence_max_age_minutes: int = Field(default=60, ge=1, le=10_080)
 
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to

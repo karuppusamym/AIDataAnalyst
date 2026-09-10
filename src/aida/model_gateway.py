@@ -60,6 +60,31 @@ class KillSwitchEngaged(ModelGatewayError):
     every other activation condition is otherwise satisfied."""
 
 
+#: Bytes of serialized JSON the platform counts as one token. A heuristic,
+#: not a tokenizer: no provider adapter in this codebase reports real usage,
+#: and a number derived from one vendor's tokenizer would be no more accurate
+#: for the others. Named and exported so contract-budget enforcement
+#: (`aida.agent_budget`) bounds the *same* quantity this gateway measures,
+#: rather than a second estimate that could drift from it.
+BYTES_PER_ESTIMATED_TOKEN = 4
+
+
+def estimate_serialized_tokens(serialized: str) -> int:
+    """Estimated tokens for an already-serialized string. Never zero: a call
+    that happened cost something, and a zero would make a budget check pass
+    for free."""
+    return max(1, len(serialized) // BYTES_PER_ESTIMATED_TOKEN)
+
+
+def estimate_payload_tokens(payload: dict[str, Any]) -> int:
+    """Estimated input tokens for a request payload, serialized exactly as
+    `structured_completion` serializes it -- same `sort_keys`/`separators`, so
+    the pre-flight estimate and the recorded one cannot disagree."""
+    return estimate_serialized_tokens(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovedModelRoute:
     route_key: str
@@ -444,7 +469,7 @@ class ProviderNeutralModelGateway:
         except SecretResolutionError as exc:
             raise ModelRouteNotApproved("approved model route credential is unavailable") from exc
         serialized_input = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        estimated_tokens = max(1, len(serialized_input) // 4)
+        estimated_tokens = estimate_payload_tokens(payload)
         input_budget = min(self.settings.model_max_input_tokens, route.max_input_tokens)
         output_budget = min(self.settings.model_max_output_tokens, route.max_output_tokens)
         if estimated_tokens > input_budget:
@@ -479,7 +504,7 @@ class ProviderNeutralModelGateway:
             output_size_bytes=len(serialized_output.encode()),
             schema_name=output_schema.__name__,
             estimated_input_tokens=estimated_tokens,
-            estimated_output_tokens=max(1, len(serialized_output) // 4),
+            estimated_output_tokens=estimate_serialized_tokens(serialized_output),
         )
         return output, evidence
 

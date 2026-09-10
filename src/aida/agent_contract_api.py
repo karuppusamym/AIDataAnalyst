@@ -48,7 +48,7 @@ from aida.models import (
     Organization,
     ReviewAuditSample,
 )
-from aida.review_risk_tiers import risk_tier_for
+from aida.review_risk_tiers import effective_agent_ceiling, risk_tier_for
 from aida.reviewer_agent import (
     ReviewerAgentUnavailable,
     auto_decide_tier0_tier1,
@@ -263,9 +263,18 @@ class ReviewerAgentStateRead(ApiModel):
     organization_id: UUID
     enabled: bool
     suspended: bool
+    #: The ceiling actually in force -- `configured_max_tier` clamped to
+    #: `review_risk_tiers.HARD_MAX_AGENT_TIER`. Reporting the configured value
+    #: here would tell an operator who set T3 that T3 was in effect (AR-01).
     max_tier: str
+    configured_max_tier: str
+    #: True when the two differ, i.e. configuration asked for a ceiling the
+    #: hard limit refused. Surfaced so a misconfiguration is visible rather
+    #: than merely ineffective.
+    max_tier_clamped: bool
     sampling_rate: float
     agent_principal_id: str
+    evidence_max_age_minutes: int
 
 
 # ---------------------------------------------------------------------------
@@ -875,9 +884,15 @@ async def get_reviewer_agent_state(
         enabled=settings.reviewer_agent_enabled,
         suspended=settings.reviewer_agent_suspended
         or await organization_suspended(session, organization_id),
-        max_tier=settings.reviewer_agent_max_tier,
+        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
+        configured_max_tier=settings.reviewer_agent_max_tier,
+        max_tier_clamped=(
+            effective_agent_ceiling(settings.reviewer_agent_max_tier)
+            != settings.reviewer_agent_max_tier
+        ),
         sampling_rate=settings.reviewer_agent_sampling_rate,
         agent_principal_id=settings.reviewer_agent_principal_id,
+        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
     )
 
 
@@ -954,9 +969,15 @@ async def suspend_reviewer_agent(
         organization_id=organization_id,
         enabled=settings.reviewer_agent_enabled,
         suspended=True,
-        max_tier=settings.reviewer_agent_max_tier,
+        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
+        configured_max_tier=settings.reviewer_agent_max_tier,
+        max_tier_clamped=(
+            effective_agent_ceiling(settings.reviewer_agent_max_tier)
+            != settings.reviewer_agent_max_tier
+        ),
         sampling_rate=settings.reviewer_agent_sampling_rate,
         agent_principal_id=settings.reviewer_agent_principal_id,
+        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
     )
 
 
@@ -980,9 +1001,15 @@ async def resume_reviewer_agent(
         organization_id=organization_id,
         enabled=settings.reviewer_agent_enabled,
         suspended=settings.reviewer_agent_suspended,
-        max_tier=settings.reviewer_agent_max_tier,
+        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
+        configured_max_tier=settings.reviewer_agent_max_tier,
+        max_tier_clamped=(
+            effective_agent_ceiling(settings.reviewer_agent_max_tier)
+            != settings.reviewer_agent_max_tier
+        ),
         sampling_rate=settings.reviewer_agent_sampling_rate,
         agent_principal_id=settings.reviewer_agent_principal_id,
+        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
     )
 
 

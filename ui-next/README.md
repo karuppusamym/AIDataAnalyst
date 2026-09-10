@@ -41,6 +41,42 @@ The image uses live API calls by default (`compose.yaml` passes
 `UI_NEXT_USE_FIXTURES:-0`). Set `UI_NEXT_USE_FIXTURES=1` before
 `docker compose up --build` if a fixture-backed image is needed for local UI work.
 
+## Authentication modes (F06)
+
+Two independent build-time axes, neither inferred from the other:
+
+| Variable | Values | Meaning |
+| --- | --- | --- |
+| `VITE_USE_FIXTURES` | `0` / anything else | live backend, or bundled demo data |
+| `VITE_AUTH_MODE` | `development` (default) / `oidc` / `proxy` | how a request proves who is making it |
+
+`development` sends `X-Principal-Id`/`X-Roles`. `proxy` sends nothing — an
+authenticating reverse proxy is the authority. `oidc` sends only
+`Authorization: Bearer`, and additionally needs
+
+| Variable | Example |
+| --- | --- |
+| `VITE_OIDC_ISSUER` | `http://localhost:8090/atlas` |
+| `VITE_OIDC_CLIENT_ID` | `atlas-ui-next` |
+| `VITE_OIDC_SCOPE` | `openid profile email` (default) |
+| `VITE_OIDC_REDIRECT_PATH` | `/` (default) |
+
+Endpoint URLs are **not** configured: `src/lib/oidcClient.ts` reads the
+issuer's `.well-known/openid-configuration` at sign-in time. The flow is
+authorization code with PKCE (`S256`, `crypto.subtle`, no dependency). The
+access and refresh tokens are held **in memory only** — a reload signs you out,
+which is deliberate: a token in web storage is readable by any injected script
+and outlives the tab. Only the PKCE verifier, `state` and `nonce` go to
+`sessionStorage`, because they have to survive the redirect; they are
+single-use and removed the moment the callback is handled.
+
+An `oidc` build with no issuer configured is blocked with an explanation
+instead of a sign-in button that could not work.
+
+To run this end to end locally, use the OIDC compose overlay described in the
+root `README.md`. It starts a mock issuer, which proves the protocol
+integration and nothing about a corporate IdP's directory, MFA or revocation.
+
 `npm run dev` on the host defaults to fixtures, so the Catalog runs without a
 backend: it generates a 1,000,000-row catalog lazily and mirrors the server's
 keyset cursor contract.

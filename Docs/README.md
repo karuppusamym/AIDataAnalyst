@@ -28,7 +28,7 @@ Two properties make it usable rather than decorative:
 
 ## Start here
 
-For the current agent inventory, automation limits, vendor comparison and open release blockers, read the [2026-09-09 critical architecture review](10-architecture/15-agent-architecture-critical-review.md). Its dated findings supersede conflicting agent-count, reviewer-safety and model-call economics claims in older documents; code remediation remains open.
+For the current agent inventory, automation limits, vendor comparison and open release blockers, read the [2026-09-09 critical architecture review](10-architecture/15-agent-architecture-critical-review.md). Its dated findings supersede conflicting agent-count, reviewer-safety and model-call economics claims in older documents. Its status table is the authority on what has since been fixed: four findings are closed in code, seven are fixed but awaiting the measurement or audit their closure criterion also demands, and enterprise-scale capacity (AR-09) is untouched.
 
 | If you are… | Read, in order |
 |---|---|

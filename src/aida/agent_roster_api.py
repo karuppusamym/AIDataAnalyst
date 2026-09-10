@@ -2,8 +2,9 @@
 
 See `aida.agent_roster` for how the response is composed, and in particular
 its module docstring for the two honesty notes this row's exit condition
-requires: the organization-wide (not per-agent) scope of the method/results
-data, and why every agent is reported with no auto-apply branch.
+requires: how runs are attributed to a registered agent version (and which
+runs are attributed to nobody), and how an auto-apply branch is determined
+from the version's own contract rather than asserted for the platform.
 """
 
 from uuid import UUID
@@ -19,6 +20,7 @@ from aida.agent_roster import (
     compose_agent_roster,
 )
 from aida.ai_registry_api import AI_READERS
+from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.tool_first_rate import DEFAULT_WINDOW_DAYS
@@ -38,6 +40,7 @@ async def get_agent_roster(
     ),
     context: SecurityContext = Depends(require_roles(*AI_READERS)),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> AgentRosterRead:
     """The agent roster: for every registered `AGENT`-kind AI asset in this
     organization, its published purpose (EA.10c AI registry), an aggregated
@@ -54,6 +57,7 @@ async def get_agent_roster(
     return await compose_agent_roster(
         session,
         organization_id=organization_id,
+        settings=settings,
         window_days=window_days,
         recent_results_limit=recent_results_limit,
         method_sample_limit=DEFAULT_METHOD_SAMPLE_LIMIT,

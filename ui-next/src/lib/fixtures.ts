@@ -6282,18 +6282,19 @@ export function makeFixtureAgentInbox(organizationId: string, persona: string): 
 /** UX-19: `GET /v1/organizations/{org}/ai-agents/roster` fixture. Mirrors
  *  `aida.agent_roster.compose_agent_roster` — every registered `AGENT`-kind
  *  asset alongside the *same* organization-wide method summary and recent
- *  results window (the honesty note the real endpoint's docstring makes:
- *  `AgentRun` carries no per-agent identity today). */
+ *  results window scoped to each agent version through
+ *  `AgentRun.ai_asset_version_id`, plus the `unattributed` block for runs no
+ *  registered agent owns (AR-07). */
 export function makeFixtureAgentRoster(organizationId: string, windowDays = 30): AgentRosterRead {
   const now = new Date();
   const iso = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 3_600_000).toISOString();
 
   const method = {
-    scope: "ORGANIZATION_WIDE" as const,
+    scope: "AGENT_VERSION" as const,
     note:
-      "AgentRun carries no per-registered-agent identity today -- this summarizes this " +
-      "organization's actual governed-agent run activity as a whole, not this specific " +
-      "registered entity's own isolated execution history.",
+      "Runs linked to this agent version by AgentRun.ai_asset_version_id, which the " +
+      "orchestrator sets when a run executes under this version's contract. A registered " +
+      "agent this platform does not execute reports zero runs rather than the organization's.",
     window_days: windowDays,
     sampled_runs: 214,
     by_strategy: {
@@ -6352,10 +6353,12 @@ export function makeFixtureAgentRoster(organizationId: string, windowDays = 30):
     has_auto_apply_branch: false,
     threshold: null,
     threshold_source: null,
+    enabled: null,
     evidence:
-      "No agent plan in this codebase reaches a branch that applies an AI-authored action " +
-      "without a human decision. Every proposal-shaped output routes through the shared " +
-      "GovernanceReview maker-checker queue.",
+      "This agent has no branch that applies its own output without a human decision. Its " +
+      "proposal-shaped output routes through the shared GovernanceReview maker-checker " +
+      "queue. The platform's one unattended-decision branch belongs to the ADR-0027 " +
+      "reviewer agent, which is a different registered identity.",
   };
 
   return {
@@ -6402,6 +6405,20 @@ export function makeFixtureAgentRoster(organizationId: string, windowDays = 30):
         auto_apply: autoApply,
       },
     ],
+    // AR-07: governed runs no registered agent owns -- the ordinary case of a
+    // person asking the runtime a question. Reported once, credited to nobody.
+    unattributed: {
+      method: {
+        ...method,
+        scope: "ORGANIZATION_WIDE" as const,
+        note:
+          "Governed runs in this organization that carry no registered-agent identity -- " +
+          "typically a person asking the runtime a question. Attributed to no agent.",
+        sampled_runs: 96,
+      },
+      recent_results: recentResults,
+      recent_results_total: 96,
+    },
     total_agents: 2,
   };
 }
@@ -6413,9 +6430,15 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
     organization_id: organizationId,
     enabled: true,
     suspended: false,
+    // AR-01: `max_tier` is the ceiling in force, which is the configured value
+    // clamped to the hard T1 limit; `configured_max_tier` is what was asked
+    // for, so an operator who set T3 can see that it was refused.
     max_tier: "T1",
+    configured_max_tier: "T1",
+    max_tier_clamped: false,
     sampling_rate: 0.1,
     agent_principal_id: "agent:reviewer",
+    evidence_max_age_minutes: 60,
   };
 }
 

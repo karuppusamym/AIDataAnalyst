@@ -58,6 +58,7 @@ from aida.config import Settings
 from aida.db import Base
 from aida.governance_decision_contracts import GovernanceDecisionRefused
 from aida.models import (
+    AssetDescriptionDraft,
     AuditEvent,
     GlossaryTerm,
     GovernanceReview,
@@ -160,6 +161,54 @@ async def _seed_binding_and_review(
     session.add(review)
     await session.flush()
     return review
+
+
+async def _seed_agent_decidable_review(
+    session: AsyncSession,
+    org: Organization,
+    *,
+    requested_by: str = "maker",
+    overall_score: float = 0.95,
+) -> tuple[GovernanceReview, AssetDescriptionDraft]:
+    """A review the reviewer agent may actually decide.
+
+    `TERM_SEMANTIC_BINDING` -- the leanest type this file otherwise uses --
+    stopped being agent-decidable when AR-03 landed: it is a steward's
+    unscored assertion, so the agent has no object-specific evidence to judge
+    it by and abstains. Tests that assert an auto-*decision* therefore need a
+    proposal that carries its own score. `ASSET_DESCRIPTION_DRAFT` is the
+    cheapest one: a draft row and the review that points at it.
+    """
+    review = GovernanceReview(
+        organization_id=org.id,
+        object_type="ASSET_DESCRIPTION_DRAFT",
+        object_id="pending",
+        requested_action="PUBLISH",
+        requested_by=requested_by,
+        status="PENDING",
+    )
+    session.add(review)
+    await session.flush()
+    draft = AssetDescriptionDraft(
+        organization_id=org.id,
+        table_id=uuid4(),
+        drafted_text="Customer master, one row per customer.",
+        text_fingerprint="f" * 64,
+        accuracy_score=overall_score,
+        clarity_score=overall_score,
+        style_score=overall_score,
+        completeness_score=overall_score,
+        overall_score=overall_score,
+        evidence={"source": "deterministic"},
+        status="PENDING_APPROVAL",
+        governance_review_id=review.id,
+        created_by=requested_by,
+    )
+    session.add(draft)
+    await session.flush()
+    review.object_id = str(draft.id)
+    await session.flush()
+    return review, draft
 
 
 async def _term(session: AsyncSession, org: Organization) -> GlossaryTerm:
@@ -595,7 +644,54 @@ async def test_reviewer_automation_approving_actually_approves(engine: AsyncEngi
     passed the terminal status ("APPROVED") where the verdict ("APPROVE") was
     expected, and the shared core read anything that was not exactly
     "APPROVE" as a rejection -- so an auto-*approval* rejected the proposal
-    and reported success. `TERMINAL_STATUS` now derives one from the other."""
+    and reported success. `TERMINAL_STATUS` now derives one from the other.
+
+    Since AR-03/AR-04 the agent will not act on a recommendation it did not
+    itself derive from live evidence, so this seeds a scored proposal and runs
+    the real pre-review pass rather than writing "APPROVE" onto the row.
+    """
+    maker = _sessions(engine)
+    async with maker() as setup:
+        org = await _org(setup)
+        review, draft = await _seed_agent_decidable_review(setup, org)
+        await reviewer_agent.pre_review_pending(setup, org.id, settings=_agent_settings())
+        assert review.pre_review_recommendation == "APPROVE"
+        await setup.commit()
+        organization_id, review_id = org.id, review.id
+        draft_id = draft.id
+
+    async with maker() as agent_session:
+        outcomes = await reviewer_agent.auto_decide_tier0_tier1(
+            agent_session, organization_id, settings=_agent_settings()
+        )
+        await agent_session.commit()
+
+    assert [outcome.decision for outcome in outcomes] == ["APPROVED"]
+
+    async with maker() as reader:
+        final = await _load(reader, review_id)
+        assert final.status == "APPROVED"
+        assert final.decided_by == "agent:reviewer"
+        applied = await reader.get(AssetDescriptionDraft, draft_id)
+        assert applied is not None
+        assert applied.status == "APPROVED", "an auto-approval must publish, not reject"
+        assert applied.published_version_id is not None
+
+    _, events = await _side_effect_counts(engine, review_id, draft_id)
+    assert events == 1
+
+
+async def test_reviewer_automation_abstains_without_object_specific_evidence(
+    engine: AsyncEngine,
+) -> None:
+    """AR-03, at the decision boundary rather than at the rule.
+
+    `TERM_SEMANTIC_BINDING` is T1 and inside the ceiling, so the old rule
+    approved it on the strength of nothing arguing against it. It is a
+    steward's unscored assertion; an agent agreeing with it adds throughput
+    and no independent check, so the agent now leaves it alone -- even with an
+    APPROVE recommendation written onto the row by hand.
+    """
     maker = _sessions(engine)
     async with maker() as setup:
         org = await _org(setup)
@@ -614,18 +710,13 @@ async def test_reviewer_automation_approving_actually_approves(engine: AsyncEngi
         )
         await agent_session.commit()
 
-    assert [outcome.decision for outcome in outcomes] == ["APPROVED"]
-
+    assert outcomes == []
     async with maker() as reader:
         final = await _load(reader, review_id)
-        assert final.status == "APPROVED"
-        assert final.decided_by == "agent:reviewer"
+        assert final.status == "PENDING"
         binding = await reader.get(TermSemanticBinding, binding_id)
         assert binding is not None
-        assert binding.status == "ACTIVE", "an auto-approval must activate, not reject"
-
-    _, events = await _side_effect_counts(engine, review_id, binding_id)
-    assert events == 1
+        assert binding.status == "PENDING_APPROVAL"
 
 
 # ---------------------------------------------------------------------------

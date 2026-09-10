@@ -1,4 +1,4 @@
-from datetime import datetime  # noqa: I001
+from datetime import date, datetime  # noqa: I001
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -6,6 +6,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -5249,6 +5250,60 @@ class AgentContractRequest(Base, TimestampMixin):
     )
     eval_gate_verdict: Mapped[str | None] = mapped_column(String(20))
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentBudgetWindow(Base, TimestampMixin):
+    """One agent version's token spend inside one UTC day (AG-10 / AR-05).
+
+    `AgentContract.daily_token_cap` was validated and stored from the day the
+    contract shipped, and nothing read it: the 2026-09-09 architecture review
+    found no runtime consumer of any contract cap field. This table is the
+    consumer. It exists rather than a `SUM(...)` over `AgentRun` because a
+    read-then-check cannot bound concurrent runs -- two runs that both read a
+    day's spend before either writes will both pass a cap they jointly break.
+    `reserved_tokens` is moved by a *conditional* UPDATE that carries the cap
+    in its own `WHERE`, so the database, not the application, decides who
+    fits.
+
+    `reserved_tokens` is a reservation, not a measurement. A run reserves its
+    per-run cap (or its input estimate, when no per-run cap is set) before it
+    calls a provider, and reconciles down to what it actually spent
+    afterwards. A run that dies between the two leaves its reservation
+    standing, which is the safe direction: the day is treated as more spent
+    than it was until the window rolls over.
+
+    Every number here is *estimated* tokens, by the same
+    4-bytes-per-token heuristic `ProviderNeutralModelGateway` uses -- see
+    `AgentRun.estimated_input_tokens`. No provider adapter reports billable
+    usage, so this bounds a modelled quantity and must not be presented as
+    spend.
+    """
+
+    __tablename__ = "agent_budget_window"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "ai_asset_version_id",
+            "window_date",
+            name="uq_agent_budget_window_scope",
+        ),
+        Index("ix_agent_budget_window_org_date", "organization_id", "window_date"),
+        CheckConstraint("reserved_tokens >= 0", name="ck_agent_budget_window_non_negative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The UTC day this window covers, as a plain date. Stored rather than
+    #: derived so the conditional UPDATE has an equality predicate to match on.
+    window_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: How many runs contributed, for reconciliation diagnostics. Not a cap.
+    run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class AgentTask(Base, TimestampMixin):

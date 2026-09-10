@@ -4,7 +4,9 @@ Every `GovernanceReview` object type is classified into one of four tiers.
 The tier decides two things:
 
 * whether the reviewer agent (`aida.reviewer_agent`) may decide the item at
-  all -- it is capped at `AIDA_REVIEWER_AGENT_MAX_TIER`, default `T1`; and
+  all -- capped at `AIDA_REVIEWER_AGENT_MAX_TIER` (default `T1`) and then
+  clamped again to `HARD_MAX_AGENT_TIER`, which configuration cannot raise;
+  and
 * how the agent inbox ranks and labels the item for a human.
 
 The classification is a pure function of the object type -- no model, no
@@ -51,6 +53,38 @@ TIER_ORDER: Final[tuple[str, ...]] = (TIER_T0, TIER_T1, TIER_T2, TIER_T3)
 #: T3 (ADR-0027 condition (a)): an agent may never publish a semantic
 #: version, activate a model route, change a policy, or grant access.
 DEFAULT_MAX_AGENT_TIER: Final = TIER_T1
+
+#: The ceiling no configuration can raise (AR-01). ADR-0027 condition (a) is
+#: stated as an unconditional boundary -- "never agent-decidable, whatever the
+#: configuration says" -- but until 2026-09-09 it was only a *default*:
+#: `Settings.reviewer_agent_max_tier` accepts T2 and T3, and
+#: `agent_decidable_object_types` passed that value straight into the
+#: comparison, so an elevated ceiling widened the allowlist to include
+#: `CONTEXT_PRODUCT_VERSION`, `MODEL_ROUTE_CONFIGURATION` and every other
+#: published-meaning or trust-boundary type. This constant is the invariant
+#: the ADR always claimed: configuration narrows, never widens.
+HARD_MAX_AGENT_TIER: Final = TIER_T1
+
+
+def effective_agent_ceiling(configured: RiskTier | None) -> RiskTier:
+    """The ceiling actually in force, given what configuration asked for.
+
+    Clamped to `HARD_MAX_AGENT_TIER` rather than rejected, because the
+    alternative -- refusing to start on a T2/T3 value -- turns a
+    misconfiguration into an outage for a feature that is off by default.
+    Callers that need to *report* the difference compare this against the
+    configured value; `reviewer_agent` writes both into its evidence so an
+    auditor can see that a widened ceiling was asked for and refused.
+
+    An unrecognised or absent value falls back to the default, not to the
+    configured string: a ceiling the tier order cannot compare would make
+    `tier_at_or_below` answer False for everything, which is safe but silent.
+    """
+    if configured not in TIER_ORDER:
+        return DEFAULT_MAX_AGENT_TIER
+    if TIER_ORDER.index(configured) > TIER_ORDER.index(HARD_MAX_AGENT_TIER):
+        return HARD_MAX_AGENT_TIER
+    return configured
 
 _TIERS: Final[Mapping[str, str]] = {
     # --- T0: language attached to an asset -------------------------------
@@ -165,15 +199,31 @@ def tier_at_or_below(tier: RiskTier, ceiling: RiskTier) -> bool:
 def agent_decidable_object_types(ceiling: RiskTier = DEFAULT_MAX_AGENT_TIER) -> frozenset[str]:
     """Every object type an agent may decide at `ceiling`.
 
-    `reviewer_agent` derives its allowlist from this rather than from
-    configuration, so a misconfigured ceiling can narrow what the agent may
-    touch but can never widen it past what this module classifies.
+    The ceiling is clamped to `HARD_MAX_AGENT_TIER` before it is used, so a
+    configured T2 or T3 narrows nothing and widens nothing: the result is the
+    T0/T1 set either way. This is the fix for AR-01 -- the docstring here
+    always claimed configuration "can never widen it", but the claim rested on
+    the caller passing a value no larger than T1, which nothing enforced.
     """
+    in_force = effective_agent_ceiling(ceiling)
     return frozenset(
         object_type
         for object_type, tier in _TIERS.items()
-        if tier_at_or_below(tier, ceiling)
+        if tier_at_or_below(tier, in_force)
     )
+
+
+def requires_size_evidence(object_type: str) -> bool:
+    """Whether this type's tier cannot be settled from the type alone (AR-02).
+
+    `risk_tier_for` answers T1 for both bulk types when it is handed no
+    payload, which reads as "small" when it actually means "not measured".
+    Callers that gate an *action* on the tier -- as opposed to labelling a
+    queue row -- must resolve an authoritative count first, and treat an
+    unresolvable one as T2. Exposed as a predicate so those callers do not
+    each hard-code the pair.
+    """
+    return object_type in _COUNT_ESCALATED
 
 
 def known_object_types() -> frozenset[str]:

@@ -4,7 +4,7 @@
 
 ## 1. Purpose
 
-> **Implementation review (2026-09-09):** Read the [critical architecture review](../10-architecture/15-agent-architecture-critical-review.md) for five core capabilities (three LLM-capable workflows and two deterministic components), declared-versus-enforced contract limits, stale roster reporting, reviewer release blockers and scale criteria. Older "current state" and open-work tables below are dated planning snapshots, not certification of today's deployment.
+> **Implementation review (2026-09-09, updated after remediation):** Read the [critical architecture review](../10-architecture/15-agent-architecture-critical-review.md) for the five core capabilities (three LLM-capable workflows and two deterministic components) and the AR-01..AR-12 findings with their current status. Since that review: contract token and wall-clock caps now have a runtime consumer (`aida.agent_budget`, reserving against `agent_budget_window` before generation and reconciling after), `capability_envelope.context_product_ids` is enforced at the MCP boundary, `write_lanes` is refused rather than stored unenforced, roster reporting is per-agent-version, and retrieval evidence is screened before it enters the model payload. Enterprise-scale capacity (AR-09) is untouched and unmeasured. Older "current state" and open-work tables below are dated planning snapshots, not certification of today's deployment.
 
 The governed analytical state machine: takes a question, screens it, resolves it against approved semantics, prefers an approved tool, generates only when it must, and hands everything to the deterministic gateway for execution.
 
@@ -90,7 +90,7 @@ A **versioned, deterministic classifier** running before retrieval. Blocks:
 
 Retained evidence is **value-free**: classifier version, score, reason codes, plus the question HMAC. The raw question is never stored (ADR-0014).
 
-**Coverage qualification (2026-09-09).** Indirect-screening code exists in `injection_defense.py` and `ingest_screening.py`, with ingestion/MCP integrations. Complete coverage of retrieved metadata, updates and legacy content was not established by this review. AR-10 requires a path-level coverage audit and adversarial evaluation; neither complete absence nor complete protection should be claimed.
+**Coverage qualification (2026-09-09, updated after remediation).** Indirect-screening code exists in `injection_defense.py` and `ingest_screening.py`, with ingestion and MCP integrations. Tracing the ingresses found one that was genuinely unscreened: `retrieval_evidence` carries a business annotation's `business_name` and its domain/entity display names straight into the model payload, with no stored verdict to consult. Those fields are now screened at that boundary, with quarantined text withheld behind a fixed marker while the persisted audit record keeps every hit verbatim. `_model_context` was found to carry only identifiers, types and constraint shapes -- no free text. **This closes one ingress, not the class.** AR-10's path-level coverage audit and adversarial evaluation are outstanding; the classifier is evadable by paraphrase, and INV-3 -- a successful injection still produces a proposal that cannot execute, publish or bind a tool -- remains the load-bearing control. Neither complete absence nor complete protection should be claimed.
 
 ## 6. Evidence model
 
