@@ -388,3 +388,35 @@ it("shows no table section when the table has never been documented", async () =
   await waitFor(() => expect(screen.getByText("No description.")).toBeInTheDocument());
   expect(screen.queryByText("Table description")).not.toBeInTheDocument();
 });
+
+/* The workbook is the only user-reachable way to author a column description.
+
+   Column descriptions have exactly three write paths -- document-claim
+   approval, the model workbook, and withdrawal-republish. The document
+   ingestion API has seven routes and no ui-next caller, so in the product a
+   user can actually drive, the workbook is it. The panel's guidance already
+   said so; it named Sources without being able to reach it, from Catalog. */
+
+it("offers the trip to the source workbook the guidance names", async () => {
+  fetchColumns.mockResolvedValue([column({})]);
+
+  render(<ColumnPanel tableId="t1" datasourceId="ds_9" />);
+
+  await waitFor(() => expect(screen.getByText("No description.")).toBeInTheDocument());
+  const link = screen.getByRole("button", { name: /Source model workbook/ });
+  fireEvent.click(link);
+  expect(location.hash).toBe("#/sources");
+  expect(new URLSearchParams(location.search).get("source")).toBe("ds_9");
+});
+
+it("keeps the guidance but offers no trip when the source is not known", async () => {
+  fetchColumns.mockResolvedValue([column({})]);
+
+  render(<ColumnPanel tableId="t1" />);
+
+  await waitFor(() => expect(screen.getByText("No description.")).toBeInTheDocument());
+  expect(
+    screen.getByText(/use the source model workbook for bulk column business descriptions/),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Source model workbook/ })).not.toBeInTheDocument();
+});

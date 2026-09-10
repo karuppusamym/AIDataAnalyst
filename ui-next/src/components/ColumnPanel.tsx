@@ -10,6 +10,7 @@ import {
   DescriptionActionDialog,
   type DescriptionActionSubject,
 } from "./DescriptionActionDialog";
+import { CrossLinks } from "./CrossLinks";
 import { Pill } from "./primitives";
 import "./ColumnPanel.css";
 
@@ -151,7 +152,16 @@ function ColumnRow({
   );
 }
 
-export function ColumnPanel({ tableId }: { tableId: string }) {
+export function ColumnPanel({
+  tableId,
+  datasourceId = null,
+}: {
+  tableId: string;
+  /** The owning source, when the caller has it. Only used to make the
+   *  guidance below actionable -- absent, the guidance still states where
+   *  column descriptions come from, it just cannot offer the trip. */
+  datasourceId?: string | null;
+}) {
   const [columns, setColumns] = useState<ColumnDocumentationRead[] | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -310,11 +320,31 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
             : `${documentedCount} of ${columns.length} described`}
         </span>
       </div>
+      {/* This guidance was already correct and already the only place the
+          product says it -- but it named the workbook without being able to
+          reach it, and the workbook lives on Sources while the person reading
+          this is in Catalog. Naming a destination a reader cannot navigate to
+          is how a documented feature stays undiscovered, so the cross-link
+          carries the source id the way every other catalog cross-link does. */}
       <p className="colp__guidance">
         Definitions and source comments come from discovery scans. Automatic description
         drafts currently apply to tables; use the source model workbook for bulk column
         business descriptions.
       </p>
+      {datasourceId ? (
+        <CrossLinks
+          label="Describe columns in"
+          links={[
+            {
+              screen: "sources",
+              label: "Source model workbook",
+              params: { source: datasourceId },
+              title:
+                "Download this source's model workbook, edit the business descriptions in Excel, and upload it for review",
+            },
+          ]}
+        />
+      ) : null}
 
       {notice ? (
         <div className="colp__notice" role="status">

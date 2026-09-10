@@ -147,7 +147,7 @@ export function EvidencePane({
             mean?" previously had nowhere in this app to look. Rendered after
             the evidence list and before the cross-links so the table-level
             answer still leads. */}
-        <ColumnPanel tableId={tableId} />
+        <ColumnPanel tableId={tableId} datasourceId={row?.datasource_id ?? null} />
 
         {links.length > 0 ? (
           <div className="evp__links">
