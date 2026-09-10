@@ -28,8 +28,8 @@
 .scopepicker select:disabled{color:#77849a;opacity:.78}
 .scopepicker__status{margin:3px 0 0;padding-top:6px;border-top:1px solid rgba(255,255,255,.07);font-size:9.5px;line-height:1.35;color:#72c79f}
 .scopepicker__status--warn{color:#e8bc73}
-/* The four scope fields collapse below `SCOPE_FIELDS_MIN_HEIGHT`
-   (`ScopePicker.tsx`, which carries the measurement). Same disclosure idiom as
+/* The four scope fields start collapsed (`ScopePicker.tsx` carries the
+   measurement and why it is not viewport-conditional). Same disclosure idiom as
    `.snav__ghead`: a transparent full-width button with a hover wash. The
    summary uses `.snav__pvalue`'s colour because it is the same kind of thing --
    a resolved value shown instead of its control -- and it sits outside the

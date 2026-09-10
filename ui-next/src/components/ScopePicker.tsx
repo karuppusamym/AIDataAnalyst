@@ -26,22 +26,6 @@ import type { ScopeTruncation } from "../lib/scope";
    the organization you just switched to.
 --------------------------------------------------------------------------- */
 
-/* The height below which the four fields start collapsed.
-
-   Measured, not guessed: on a 1366x768 laptop at 100% zoom this block rendered
-   446px tall -- 58% of the viewport -- and pushed the first navigation link to
-   y=525, so 6 of the sidebar's 19 rendered nav items were on screen and the
-   Reviewer, Operator and Auditor groups were entirely below the fold. The
-   sidebar scrolls, so nothing was unreachable; it was just that a laptop user
-   opened the app and saw no navigation. Collapsing the fields returns that
-   budget to the nav list and costs one click on the rare occasion scope is
-   being changed rather than read.
-
-   Scope stays *readable* while collapsed -- the summary line and the binding
-   status below it are outside the collapsible region -- because a scope picker
-   that hides which tenant you are in is a worse bug than the one being fixed. */
-const SCOPE_FIELDS_MIN_HEIGHT = 900;
-
 function truncationNote(what: string, counts: ScopeTruncation | undefined): string | null {
   if (!counts || !counts.truncated) return null;
   return `${counts.loaded.toLocaleString()} of ${counts.total.toLocaleString()} ${what} loaded`;
@@ -55,9 +39,27 @@ export function ScopePicker() {
   const org = useOrgSelection();
   const scope = useScopeSelection();
   const [filter, setFilter] = useState("");
-  const [fieldsOpen, setFieldsOpen] = useState(
-    () => typeof window === "undefined" || window.innerHeight >= SCOPE_FIELDS_MIN_HEIGHT,
-  );
+  /* The four fields start collapsed, on every screen.
+
+     Measured, not guessed: on a 1366x768 laptop at 100% zoom this block
+     rendered 446px tall -- 58% of the viewport -- and pushed the first
+     navigation link to y=525, so 6 of the sidebar's 19 rendered nav items were
+     on screen and the Reviewer, Operator and Auditor groups were entirely
+     below the fold. The sidebar scrolls, so nothing was unreachable; a laptop
+     user simply opened the app and saw no navigation.
+
+     A viewport threshold was tried first and abandoned. Expanded, the sidebar
+     chrome is ~614px (brand + fields + footer), so showing most of a 19-item
+     nav needs roughly 1120px of viewport height -- a 1440p monitor, not a
+     laptop. At 1440x900 the threshold still left 8 of 19 items visible while
+     making behaviour depend on which monitor the window happened to be on.
+     Collapsed-by-default is the same on every screen and costs one click on
+     the rare occasion scope is changed rather than read.
+
+     Scope stays *readable* while collapsed: the summary line and the binding
+     status sit outside the collapsible region, because a scope picker that
+     hides which tenant you are in is a worse bug than the one being fixed. */
+  const [fieldsOpen, setFieldsOpen] = useState(false);
   const needle = filter.trim().toLowerCase();
 
   const visibleProjects = useMemo(
