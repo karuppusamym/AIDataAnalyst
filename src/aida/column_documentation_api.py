@@ -12,8 +12,8 @@ hundreds -- and leaves `list_columns` exactly as it was.
 
 Read-only by design. There is no sibling POST here: an authored column
 description reaches `ColumnDocumentationVersion` only through
-`semantic_api.decide_governance_review`'s maker-checker guard (today via an
-approved `DocumentClaim`), and adding a direct-write endpoint would be a way
+`semantic_api.decide_governance_review`'s maker-checker guard (an approved
+`DocumentClaim`, workbook import batch or column description draft), and adding a direct-write endpoint would be a way
 around the one gate that makes the content trustworthy. See
 `aida.column_documentation`'s module docstring.
 """

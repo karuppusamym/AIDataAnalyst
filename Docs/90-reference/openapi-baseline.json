@@ -6532,6 +6532,294 @@
         "title": "ClassificationFeedRecord",
         "type": "object"
       },
+      "ColumnDescriptionDraftBulkSubmitResult": {
+        "additionalProperties": false,
+        "properties": {
+          "skipped_below_threshold": {
+            "title": "Skipped Below Threshold",
+            "type": "integer"
+          },
+          "submitted_review_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Submitted Review Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "submitted_review_ids",
+          "skipped_below_threshold"
+        ],
+        "title": "ColumnDescriptionDraftBulkSubmitResult",
+        "type": "object"
+      },
+      "ColumnDescriptionDraftEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "drafted_text": {
+            "maxLength": 20000,
+            "minLength": 10,
+            "title": "Drafted Text",
+            "type": "string"
+          },
+          "expected_text": {
+            "maxLength": 20000,
+            "title": "Expected Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "drafted_text",
+          "expected_text"
+        ],
+        "title": "ColumnDescriptionDraftEdit",
+        "type": "object"
+      },
+      "ColumnDescriptionDraftGenerate": {
+        "additionalProperties": false,
+        "description": "Draft descriptions for the columns of up to 50 tables at once.",
+        "properties": {
+          "include_described": {
+            "default": false,
+            "title": "Include Described",
+            "type": "boolean"
+          },
+          "table_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Table Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "table_ids"
+        ],
+        "title": "ColumnDescriptionDraftGenerate",
+        "type": "object"
+      },
+      "ColumnDescriptionDraftGenerateResult": {
+        "additionalProperties": false,
+        "description": "What a generation call did, and each thing it deliberately did not do.",
+        "properties": {
+          "below_review_threshold": {
+            "title": "Below Review Threshold",
+            "type": "integer"
+          },
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "drafts": {
+            "items": {
+              "$ref": "#/components/schemas/ColumnDescriptionDraftRead"
+            },
+            "title": "Drafts",
+            "type": "array"
+          },
+          "skipped_described": {
+            "title": "Skipped Described",
+            "type": "integer"
+          },
+          "skipped_duplicate_rejected": {
+            "title": "Skipped Duplicate Rejected",
+            "type": "integer"
+          },
+          "skipped_open": {
+            "title": "Skipped Open",
+            "type": "integer"
+          },
+          "tables_skipped": {
+            "title": "Tables Skipped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "drafts",
+          "created",
+          "skipped_open",
+          "skipped_described",
+          "skipped_duplicate_rejected",
+          "below_review_threshold",
+          "tables_skipped"
+        ],
+        "title": "ColumnDescriptionDraftGenerateResult",
+        "type": "object"
+      },
+      "ColumnDescriptionDraftRead": {
+        "additionalProperties": false,
+        "properties": {
+          "accuracy_score": {
+            "title": "Accuracy Score",
+            "type": "number"
+          },
+          "base_description_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Description Version"
+          },
+          "clarity_score": {
+            "title": "Clarity Score",
+            "type": "number"
+          },
+          "column_id": {
+            "format": "uuid",
+            "title": "Column Id",
+            "type": "string"
+          },
+          "column_name": {
+            "title": "Column Name",
+            "type": "string"
+          },
+          "completeness_score": {
+            "title": "Completeness Score",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "drafted_text": {
+            "title": "Drafted Text",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "governance_review_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Review Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "overall_score": {
+            "title": "Overall Score",
+            "type": "number"
+          },
+          "published_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published Version Id"
+          },
+          "reviewable": {
+            "title": "Reviewable",
+            "type": "boolean"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "style_score": {
+            "title": "Style Score",
+            "type": "number"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "table_name": {
+            "title": "Table Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "table_id",
+          "table_name",
+          "column_id",
+          "column_name",
+          "drafted_text",
+          "accuracy_score",
+          "clarity_score",
+          "style_score",
+          "completeness_score",
+          "overall_score",
+          "reviewable",
+          "evidence",
+          "status",
+          "base_description_version",
+          "governance_review_id",
+          "published_version_id",
+          "created_by",
+          "reviewed_by",
+          "reviewed_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ColumnDescriptionDraftRead",
+        "type": "object"
+      },
       "ColumnProfileRead": {
         "additionalProperties": false,
         "properties": {
@@ -36250,6 +36538,273 @@
         "summary": "Get Rollup",
         "tags": [
           "workspaces"
+        ]
+      }
+    },
+    "/v1/column-description-drafts/{draft_id}": {
+      "put": {
+        "description": "Fix a draft's text before it is submitted.\n\nThe editor is recorded, and `semantic_api._decide_column_description_draft`\nrefuses anyone so recorded as the draft's approver: editing is authorship.\nThe score is left alone -- it measures the catalog evidence the draft rests\non, and rewording the prose does not change that evidence.",
+        "operationId": "edit_column_description_draft_v1_column_description_drafts__draft_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ColumnDescriptionDraftEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ColumnDescriptionDraftRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Column Description Draft",
+        "tags": [
+          "column-description-drafting"
+        ]
+      }
+    },
+    "/v1/column-description-drafts/{draft_id}/submit": {
+      "post": {
+        "operationId": "submit_column_description_draft_v1_column_description_drafts__draft_id__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceReviewRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Column Description Draft",
+        "tags": [
+          "column-description-drafting"
         ]
       }
     },
@@ -68344,6 +68899,331 @@
         "summary": "List Catalog Rows"
       }
     },
+    "/v1/organizations/{organization_id}/column-description-drafts": {
+      "get": {
+        "description": "One table's drafts (gated), or -- for stewards and reviewers -- all of them.\n\nOne table's drafts come back in column order, which is how a steward reads\na table. The organization-wide list comes back highest-evidence first,\nwhich is how a reviewer triages; that ordering is the score's *only*\neffect, exactly as for table drafts.",
+        "operationId": "list_column_description_drafts_v1_organizations__organization_id__column_description_drafts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "table_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Table Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Column Description Drafts",
+        "tags": [
+          "column-description-drafting"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/column-description-drafts/generate": {
+      "post": {
+        "description": "Draft descriptions for the columns of the requested tables.\n\nTwo passes, on purpose. The first decides *which* columns would be drafted\nand refuses the whole request when that is over `GENERATE_COLUMN_LIMIT`,\nbefore anything is written. Slicing silently to the limit -- which the\ntable-draft endpoint does, and which its client has to guard against --\nwould hand back a subset that looks complete. The second pass composes and\nwrites.",
+        "operationId": "generate_column_description_drafts_v1_organizations__organization_id__column_description_drafts_generate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ColumnDescriptionDraftGenerate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ColumnDescriptionDraftGenerateResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate Column Description Drafts",
+        "tags": [
+          "column-description-drafting"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/consumption-lineage/by-consumer": {
       "get": {
         "operationId": "list_consumption_by_consumer_v1_organizations__organization_id__consumption_lineage_by_consumer_get",
@@ -90743,6 +91623,135 @@
           }
         },
         "summary": "Revoke Table Certification"
+      }
+    },
+    "/v1/tables/{table_id}/column-description-drafts/submit": {
+      "post": {
+        "description": "Submit every reviewable DRAFT for one table.\n\nStill one review per draft, not one for the table: a reviewer may approve\n`customer_id` and reject `amt_ccy`, and a single decision for both would\nforce them to accept or refuse text they had judged separately. Volume is\nhandled where it already is -- the queue's bulk decision and sampling\nreview -- not by merging decisions here.",
+        "operationId": "submit_table_column_description_drafts_v1_tables__table_id__column_description_drafts_submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ColumnDescriptionDraftBulkSubmitResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Table Column Description Drafts",
+        "tags": [
+          "column-description-drafting"
+        ]
       }
     },
     "/v1/tables/{table_id}/column-documentation": {

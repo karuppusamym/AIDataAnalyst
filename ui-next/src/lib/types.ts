@@ -1091,6 +1091,59 @@ export interface ClassificationFeedRecord {
   note?: string | null;
 }
 
+export interface ColumnDescriptionDraftBulkSubmitResult {
+  submitted_review_ids: string[];
+  skipped_below_threshold: number;
+}
+
+export interface ColumnDescriptionDraftEdit {
+  drafted_text: string;
+  expected_text: string;
+}
+
+/** Draft descriptions for the columns of up to 50 tables at once. */
+export interface ColumnDescriptionDraftGenerate {
+  table_ids: string[];
+  include_described?: boolean;
+}
+
+/** What a generation call did, and each thing it deliberately did not do. */
+export interface ColumnDescriptionDraftGenerateResult {
+  drafts: ColumnDescriptionDraftRead[];
+  created: number;
+  skipped_open: number;
+  skipped_described: number;
+  skipped_duplicate_rejected: number;
+  below_review_threshold: number;
+  tables_skipped: number;
+}
+
+export interface ColumnDescriptionDraftRead {
+  id: string;
+  organization_id: string;
+  table_id: string;
+  table_name: string;
+  column_id: string;
+  column_name: string;
+  drafted_text: string;
+  accuracy_score: number;
+  clarity_score: number;
+  style_score: number;
+  completeness_score: number;
+  overall_score: number;
+  reviewable: boolean;
+  evidence: Record<string, unknown>;
+  status: string;
+  base_description_version: number | null;
+  governance_review_id: string | null;
+  published_version_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ColumnProfileRead {
   column_id: string;
   column_name: string;

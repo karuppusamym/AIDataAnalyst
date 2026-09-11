@@ -57,11 +57,12 @@ from aida.business_annotation_versions import (
     write_annotation_version,
 )
 from aida.catalog_read_model import _business_annotations, _latest_approved_documentation
+from aida.column_description_service import supersede_open_column_drafts
 from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
 )
-from aida.model_export import COLUMN_SHEET, TABLE_SHEET
+from aida.model_export import COLUMN_SHEET, README_SHEET, TABLE_SHEET
 from aida.models import (
     DataSource,
     GovernanceReview,
@@ -377,6 +378,40 @@ async def _diff_tables(
     return changes
 
 
+def _check_workbook_datasource(sheets: dict[str, ParsedSheet], datasource: DataSource) -> None:
+    """Refuse a workbook exported from a different datasource.
+
+    The workbook's identity is the README sheet's `Datasource id` row. Rows are
+    matched on ids scoped to the target datasource, so a foreign workbook could
+    never *apply* to the wrong source -- every row would be rejected as "no
+    active column with this id in this datasource". That is safe and useless: a
+    steward who saved into the wrong source is told four hundred times that ids
+    are wrong instead of once that the file is. A save-back client (the Excel
+    add-in) reads the same row to decide where to send the file, so the server
+    checking it is what makes the binding more than a client-side convention.
+
+    A workbook with no README, or no id in it -- an old export, or one rebuilt
+    by hand -- is still accepted: the per-row id check stays the authority, and
+    refusing it would break round trips that work today.
+    """
+    readme = _sheet_or_none(sheets, README_SHEET)
+    if readme is None:
+        return
+    for row in readme.rows:
+        if (row.get("Field") or "").strip() != "Datasource id":
+            continue
+        declared = (row.get("Value") or "").strip().lower()
+        if declared and declared != str(datasource.id).lower():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"this workbook was exported from a different datasource ({declared}). "
+                    "Save it back to that source, or export a fresh workbook from this one."
+                ),
+            )
+        return
+
+
 async def parse_and_diff_workbook(
     session: AsyncSession,
     *,
@@ -401,6 +436,7 @@ async def parse_and_diff_workbook(
         sheets = read_workbook(content)
     except WorkbookParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _check_workbook_datasource(sheets, datasource)
 
     columns_sheet = _sheet_or_none(sheets, COLUMN_SHEET)
     tables_sheet = _sheet_or_none(sheets, TABLE_SHEET)
@@ -632,6 +668,18 @@ async def _apply_column_changes(
             approved_at=now,
         )
         change.status = "APPLIED"
+
+    # A column that just received a reviewed description no longer needs the
+    # machine draft that was waiting for it. Only DRAFT-status drafts are
+    # closed: one already in review keeps its review, and approving it will be
+    # refused on the version check rather than overwrite what this batch
+    # published.
+    await supersede_open_column_drafts(
+        session,
+        [UUID(change.subject_id) for change in changes if change.status == "APPLIED"],
+        reason=f"model import batch {batch.id} published a description for this column",
+        now=now,
+    )
 
 
 async def _apply_table_changes(

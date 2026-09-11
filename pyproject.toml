@@ -506,6 +506,7 @@ forbidden_modules = [
   "aida.agent_contract_api",
   "aida.agent_contract_request_api",
   "aida.asset_description_api",
+  "aida.column_description_api",
 ]
 
 [[tool.importlinter.contracts]]

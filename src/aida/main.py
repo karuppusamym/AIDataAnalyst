@@ -26,6 +26,7 @@ from aida.asset_evidence_api import router as asset_evidence_router
 from aida.audit_archive_s3 import S3ArchiveStorage
 from aida.authorization_posture import assert_startup_posture
 from aida.bi_api import router as bi_router
+from aida.column_description_api import router as column_description_router
 from aida.column_documentation_api import router as column_documentation_router
 from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
@@ -450,6 +451,7 @@ app.include_router(delegation_router)
 app.include_router(persona_router)
 app.include_router(playbooks_router)
 app.include_router(asset_description_router)
+app.include_router(column_description_router)
 app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)

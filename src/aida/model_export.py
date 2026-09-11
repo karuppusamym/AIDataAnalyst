@@ -46,6 +46,7 @@ from aida.catalog_read_model import (
 )
 from aida.column_documentation import current_descriptions_by_column_id
 from aida.models import (
+    ColumnDescriptionDraft,
     DataSource,
     MetadataColumn,
     MetadataSchema,
@@ -98,6 +99,10 @@ _COLUMN_HEADERS = [
     "classification_source",
     "source_description",
     "business_description",
+    "drafted_description",
+    "draft_score",
+    "draft_status",
+    "draft_id",
     "description_version",
     "approved_by",
     "approved_at",
@@ -209,6 +214,28 @@ async def _table_rows(
     return rows, truncated
 
 
+async def _open_column_drafts(
+    session: AsyncSession, column_ids: list[UUID]
+) -> dict[UUID, ColumnDescriptionDraft]:
+    """The open (DRAFT or PENDING_APPROVAL) draft for each column, if any.
+
+    At most one should exist -- `uq_column_description_draft_open` enforces it
+    -- and ordering by `created_at` makes the newest win deterministically if a
+    row that predates the index ever breaks that.
+    """
+    if not column_ids:
+        return {}
+    rows = await session.scalars(
+        select(ColumnDescriptionDraft)
+        .where(
+            ColumnDescriptionDraft.column_id.in_(column_ids),
+            ColumnDescriptionDraft.status.in_(("DRAFT", "PENDING_APPROVAL")),
+        )
+        .order_by(ColumnDescriptionDraft.created_at, ColumnDescriptionDraft.id)
+    )
+    return {row.column_id: row for row in rows.all()}
+
+
 async def _column_rows(
     session: AsyncSession, datasource_id: UUID
 ) -> tuple[list[list[CellValue]], bool]:
@@ -236,10 +263,12 @@ async def _column_rows(
     descriptions = await current_descriptions_by_column_id(
         session, [column.id for column, _, _ in records]
     )
+    drafts = await _open_column_drafts(session, [column.id for column, _, _ in records])
 
     rows: list[list[CellValue]] = []
     for column, table_name, schema_name in records:
         documented = descriptions.get(column.id)
+        draft = drafts.get(column.id)
         rows.append(
             [
                 str(column.id),
@@ -254,6 +283,10 @@ async def _column_rows(
                 column.classification_source,
                 column.source_description,
                 documented.description if documented else None,
+                draft.drafted_text if draft else None,
+                round(draft.overall_score, 2) if draft else None,
+                draft.status if draft else None,
+                str(draft.id) if draft else None,
                 documented.version if documented else None,
                 documented.approved_by if documented else None,
                 _iso(documented.approved_at) if documented else None,
@@ -387,6 +420,22 @@ def _readme_sheet(
             [
                 "business_description",
                 "Reviewed, authored content. This is the editable column.",
+            ],
+            [
+                "drafted_description",
+                "A machine-drafted proposal, composed only from catalog "
+                "evidence -- dbt column docs, source comments, keys and "
+                "reviewed relationships -- with no model call. Read-only here "
+                "and never applied on its own. To use it, copy it into "
+                "business_description, fixing it as you go, and upload: that "
+                "is an ordinary edit, reviewed like any other.",
+            ],
+            [
+                "draft_score / draft_status",
+                "How much catalog evidence the draft rests on (0 to 1), and "
+                "where it is in review. A draft scored under 0.4 cannot be "
+                "submitted as a draft; copying its text into "
+                "business_description is still a normal, reviewed edit.",
             ],
             [
                 "Tables: two descriptions",

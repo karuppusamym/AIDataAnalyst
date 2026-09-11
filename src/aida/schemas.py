@@ -1740,6 +1740,94 @@ class AssetDescriptionDraftRead(ApiModel):
     updated_at: datetime
 
 
+class ColumnDescriptionDraftGenerate(ApiModel):
+    """Draft descriptions for the columns of up to 50 tables at once."""
+
+    table_ids: list[UUID] = Field(min_length=1, max_length=50)
+    #: Also draft for columns that already carry an approved description, or
+    #: had one retired through review. Off by default: generation is for gaps,
+    #: and a draft over a reviewed (or deliberately retired) description is a
+    #: proposed *replacement*, which a steward should ask for on purpose rather
+    #: than receive as a side effect.
+    include_described: bool = False
+
+    @model_validator(mode="after")
+    def validate_table_ids(self) -> "ColumnDescriptionDraftGenerate":
+        if len(set(self.table_ids)) != len(self.table_ids):
+            raise ValueError("table_ids must be unique")
+        return self
+
+
+class ColumnDescriptionDraftRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    table_name: str
+    column_id: UUID
+    column_name: str
+    drafted_text: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    #: Whether `overall_score` clears the bar a draft must reach to be
+    #: submitted for review. Computed server-side so no client mirrors the
+    #: threshold constant and drifts from it.
+    reviewable: bool
+    evidence: dict[str, Any]
+    status: str
+    #: The column's description version when this draft was composed (null
+    #: when it had none). Approval refuses if it has moved since.
+    base_description_version: int | None
+    governance_review_id: UUID | None
+    published_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ColumnDescriptionDraftGenerateResult(ApiModel):
+    """What a generation call did, and each thing it deliberately did not do."""
+
+    drafts: list[ColumnDescriptionDraftRead]
+    created: int
+    #: A draft for the column is already open (DRAFT or PENDING_APPROVAL); a
+    #: second would split one column's review in two.
+    skipped_open: int
+    #: The column already has an approved description, or had one retired
+    #: through review, and `include_described` was false.
+    skipped_described: int
+    #: The would-be draft is identical to one a reviewer already rejected.
+    skipped_duplicate_rejected: int
+    #: Created, but on too little catalog evidence to be submitted for review.
+    below_review_threshold: int
+    #: Requested tables that do not exist, are not ACTIVE, belong to another
+    #: organization, or are not readable by the caller. Counted together on
+    #: purpose: telling "unreadable" apart from "absent" would disclose which
+    #: ids exist.
+    tables_skipped: int
+
+
+class ColumnDescriptionDraftEdit(ApiModel):
+    drafted_text: str = Field(min_length=10, max_length=20_000)
+    #: The text the editor started from. A mismatch means someone else edited
+    #: or submitted the draft in the meantime, and the edit is refused rather
+    #: than silently overwriting theirs.
+    expected_text: str = Field(max_length=20_000)
+
+
+class ColumnDescriptionDraftBulkSubmitResult(ApiModel):
+    submitted_review_ids: list[UUID]
+    #: DRAFT drafts left as they were because their evidence is below the
+    #: review bar. Editing does not change that -- the score is computed from
+    #: catalog evidence, not prose -- so a human-written description for such
+    #: a column goes through the model workbook instead.
+    skipped_below_threshold: int
+
+
 class CoverageDimensionRead(ApiModel):
     covered: int
     total: int

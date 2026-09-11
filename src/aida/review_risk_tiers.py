@@ -89,6 +89,7 @@ def effective_agent_ceiling(configured: RiskTier | None) -> RiskTier:
 _TIERS: Final[Mapping[str, str]] = {
     # --- T0: language attached to an asset -------------------------------
     "ASSET_DESCRIPTION_DRAFT": TIER_T0,
+    "COLUMN_DESCRIPTION_DRAFT": TIER_T0,
     "ASSET_DOCUMENTATION_VERSION": TIER_T0,
     "BUSINESS_ANNOTATION": TIER_T0,
     "METADATA_ENRICHMENT_PROPOSAL": TIER_T0,

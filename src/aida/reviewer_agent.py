@@ -79,6 +79,7 @@ from aida.governance_decision_service import (
 from aida.models import (
     AssetDescriptionDraft,
     BulkStewardshipOperation,
+    ColumnDescriptionDraft,
     DataQualityIncident,
     DocumentClaim,
     GlossaryLinkProposal,
@@ -363,6 +364,7 @@ async def _bulk_size_evidence(
 #: human's unscored assertion adds no independent check.
 _EVIDENCE_RESOLVERS: dict[str, Any] = {
     "ASSET_DESCRIPTION_DRAFT": _by_object_id(AssetDescriptionDraft, "overall_score"),
+    "COLUMN_DESCRIPTION_DRAFT": _by_object_id(ColumnDescriptionDraft, "overall_score"),
     "METADATA_ENRICHMENT_PROPOSAL": _by_object_id(MetadataEnrichmentProposal, "confidence"),
     "GLOSSARY_LINK_PROPOSAL": _by_object_id(GlossaryLinkProposal, "confidence"),
     "QUERY_HISTORY_METRIC_CANDIDATE": _by_object_id(QueryHistoryMetricCandidate, "confidence"),

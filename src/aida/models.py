@@ -2309,6 +2309,70 @@ class AssetDescriptionDraft(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ColumnDescriptionDraft(Base, TimestampMixin):
+    """Deterministically drafted column description; always routed through review.
+
+    The column-level sibling of `AssetDescriptionDraft` (GL-9), on the same
+    contract: composed from catalog evidence alone, evidence-scored, and
+    published only by an independent APPROVE on its `GovernanceReview`.
+    Rejected drafts are retained as negative knowledge, so identical text is
+    not proposed again for the same column.
+
+    `base_description_version` is the column's description version when the
+    draft was composed (None when it had none). Approval re-checks it, so a
+    draft written against v2 cannot silently replace a v3 published since --
+    the rule the workbook import's `*_version` columns enforce, applied to the
+    other path that writes column descriptions.
+
+    `uq_column_description_draft_open` allows one open draft per column. Two
+    would split one column's review into two decisions about the same text,
+    and whichever was approved second would be refused on the version check
+    anyway.
+    """
+
+    __tablename__ = "column_description_draft"
+    __table_args__ = (
+        Index("ix_column_description_draft_org_status", "organization_id", "status"),
+        Index(
+            "uq_column_description_draft_open",
+            "column_id",
+            unique=True,
+            postgresql_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+            sqlite_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    drafted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    base_description_version: Mapped[int | None] = mapped_column(Integer)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("column_documentation_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CoverageSnapshot(Base, TimestampMixin):
     __tablename__ = "coverage_snapshot"
     __table_args__ = (

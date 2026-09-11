@@ -94,6 +94,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
     AssetDescriptionDraft,
+    ColumnDescriptionDraft,
     GlossaryLinkProposal,
     GlossaryTermVersion,
     GovernanceReview,
@@ -161,6 +162,17 @@ async def _asset_description_drafts_by_id(
     return {row.id: row for row in rows.all()}
 
 
+async def _column_description_drafts_by_id(
+    session: AsyncSession, ids: Sequence[UUID]
+) -> dict[UUID, ColumnDescriptionDraft]:
+    if not ids:
+        return {}
+    rows = await session.scalars(
+        select(ColumnDescriptionDraft).where(ColumnDescriptionDraft.id.in_(ids))
+    )
+    return {row.id: row for row in rows.all()}
+
+
 async def _term_semantic_bindings_by_id(
     session: AsyncSession, ids: Sequence[UUID]
 ) -> dict[UUID, TermSemanticBinding]:
@@ -184,6 +196,21 @@ def _dict_evidence_items(
         EvidenceItemRead(category=category, claim=f"{key}: {value}", source=source)
         for key, value in sorted(evidence.items(), key=lambda item: item[0])
     ]
+
+
+def _proposed_text_item(text: str, *, source: str) -> EvidenceItemRead:
+    """The drafted text itself, as the first thing a reviewer reads.
+
+    Description drafts have no field diff -- `compose_review_queue_diffs`
+    gives them `_NOT_DIFFABLE_MESSAGE` -- and their evidence payloads record the
+    *signals* a draft was built from, not the draft. Before this item existed a
+    reviewer working from the queue approved table-description text the queue
+    never showed them. `_dict_evidence_items` sorts keys, so this cannot be
+    folded into that dict and still come first.
+    """
+    return EvidenceItemRead(
+        category="DESCRIPTION_DRAFT", claim=f"proposed_description: {text}", source=source
+    )
 
 
 def _metadata_enrichment_evidence(proposal: MetadataEnrichmentProposal) -> list[EvidenceItemRead]:
@@ -618,6 +645,9 @@ async def compose_review_queue(
     description_drafts = await _asset_description_drafts_by_id(
         session, ids_by_type.get("ASSET_DESCRIPTION_DRAFT", [])
     )
+    column_drafts = await _column_description_drafts_by_id(
+        session, ids_by_type.get("COLUMN_DESCRIPTION_DRAFT", [])
+    )
     term_bindings = await _term_semantic_bindings_by_id(
         session, ids_by_type.get("TERM_SEMANTIC_BINDING", [])
     )
@@ -656,11 +686,32 @@ async def compose_review_queue(
             draft = description_drafts.get(object_id)
             if draft is not None:
                 confidence = draft.overall_score
-                evidence = _dict_evidence_items(
-                    draft.evidence,
-                    category="DESCRIPTION_DRAFT",
-                    source=f"asset_description_draft:{draft.id}.evidence",
-                )
+                evidence = [
+                    _proposed_text_item(
+                        draft.drafted_text,
+                        source=f"asset_description_draft:{draft.id}.drafted_text",
+                    ),
+                    *_dict_evidence_items(
+                        draft.evidence,
+                        category="DESCRIPTION_DRAFT",
+                        source=f"asset_description_draft:{draft.id}.evidence",
+                    ),
+                ]
+        elif review.object_type == "COLUMN_DESCRIPTION_DRAFT" and object_id is not None:
+            column_draft = column_drafts.get(object_id)
+            if column_draft is not None:
+                confidence = column_draft.overall_score
+                evidence = [
+                    _proposed_text_item(
+                        column_draft.drafted_text,
+                        source=f"column_description_draft:{column_draft.id}.drafted_text",
+                    ),
+                    *_dict_evidence_items(
+                        column_draft.evidence,
+                        category="DESCRIPTION_DRAFT",
+                        source=f"column_description_draft:{column_draft.id}.evidence",
+                    ),
+                ]
         elif review.object_type == "TERM_SEMANTIC_BINDING" and object_id is not None:
             binding = term_bindings.get(object_id)
             if binding is not None:
@@ -698,4 +749,5 @@ def confidence_bearing_object_types() -> Iterable[str]:
         "GLOSSARY_LINK_PROPOSAL",
         "SEMANTIC_METRIC_PROPOSAL",
         "ASSET_DESCRIPTION_DRAFT",
+        "COLUMN_DESCRIPTION_DRAFT",
     )

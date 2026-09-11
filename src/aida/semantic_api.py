@@ -25,6 +25,10 @@ from aida.asset_description_service import (
     reject_asset_description_draft,
 )
 from aida.classification_propagation import apply_classification_promotion
+from aida.column_description_service import (
+    apply_column_description_draft,
+    reject_column_description_draft,
+)
 from aida.config import Settings, get_settings
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
@@ -64,6 +68,7 @@ from aida.models import (
     AssetDescriptionDraft,
     AssetDocumentationVersion,
     BulkStewardshipOperation,
+    ColumnDescriptionDraft,
     ContextProductVersion,
     CrossBoundaryGrant,
     DataContractVersion,
@@ -2522,6 +2527,60 @@ async def _decide_asset_description_draft(
     return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
 
 
+async def _decide_column_description_draft(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one drafted column description.
+
+    The column-level twin of `_decide_asset_description_draft`, with the same
+    rule on top of the shared maker != checker guard: anyone recorded as having
+    *edited* the draft is refused as its approver, because editing is
+    authorship. Publishing belongs to `apply_column_description_draft`, which
+    also refuses a draft whose column description moved after it was composed
+    -- so a draft written against v2 cannot silently replace a v3."""
+    draft = await session.get(ColumnDescriptionDraft, UUID(review.object_id))
+    if draft is None or draft.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    published_version_id: str | None = None
+    if decision == "APPROVE":
+        evidence = draft.evidence or {}
+        if (
+            context.principal_id in evidence.get("editors", [])
+            or evidence.get("edited_by") == context.principal_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="A description editor cannot approve their own edits"
+            )
+        event_type, published_version = await apply_column_description_draft(
+            session,
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_version_id = str(published_version.id)
+    else:
+        event_type = await reject_column_description_draft(
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    payload = {
+        "draft_id": str(draft.id),
+        "table_id": str(draft.table_id),
+        "column_id": str(draft.column_id),
+        "overall_score": draft.overall_score,
+        "published_version_id": published_version_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, "column_description_draft", str(draft.id), payload)
+
+
 async def _decide_document_claim(
     session: AsyncSession,
     review: GovernanceReview,
@@ -2534,8 +2593,9 @@ async def _decide_document_claim(
     """Publish or reject one document-derived description claim.
 
     Publishes into the store for the claim's subject (column or table).
-    This is the only write path for column descriptions, which is why no
-    direct-authoring endpoint for them exists."""
+    One of three reviewed write paths for column descriptions -- the others
+    are workbook import batches and column description drafts -- and none of
+    them has a direct-authoring endpoint."""
     claim = await session.get(DocumentClaim, UUID(review.object_id))
     if claim is None or claim.organization_id != review.organization_id:
         raise HTTPException(status_code=409, detail="review target is unavailable")
@@ -2788,6 +2848,7 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "TERM_SEMANTIC_BINDING": _decide_term_semantic_binding,
     "CROSS_BOUNDARY_GRANT": _decide_cross_boundary_grant,
     "ASSET_DESCRIPTION_DRAFT": _decide_asset_description_draft,
+    "COLUMN_DESCRIPTION_DRAFT": _decide_column_description_draft,
     "DOCUMENT_CLAIM": _decide_document_claim,
     "DESCRIPTION_WITHDRAWAL": _decide_description_withdrawal,
     "MODEL_IMPORT_BATCH": _decide_model_import_batch,
