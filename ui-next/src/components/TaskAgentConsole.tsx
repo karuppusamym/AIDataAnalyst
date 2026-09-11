@@ -320,6 +320,14 @@ export function TaskAgentConsole({
                   <dt>Wall-clock cap</dt>
                   <dd>{state.wall_clock_seconds_cap ? `${state.wall_clock_seconds_cap}s` : "none"}</dd>
                 </div>
+                <div>
+                  <dt>Schedule</dt>
+                  <dd>
+                    {state.interval_minutes
+                      ? `every ${state.interval_minutes} min`
+                      : "on demand — a person starts each run"}
+                  </dd>
+                </div>
               </dl>
               <ul className="taskagent__list" aria-label="What it proposes">
                 {state.capabilities.map((capability) => (

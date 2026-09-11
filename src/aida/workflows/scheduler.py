@@ -41,6 +41,7 @@ from aida.stewardship_api import (
     _scope_table_ids,
     _unowned_asset_table_facts,
 )
+from aida.task_agent_schedule import run_task_agent_schedule_pass
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
 logger = structlog.get_logger(__name__)
@@ -617,6 +618,11 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await run_custom_rule_pack_pass(now=now)
     await run_graph_reconciliation_scheduler_pass(settings, now=now)
     await run_due_playbooks_pass(now=now)
+    # ADR-0029: scheduled task-agent runs. Off by default -- every
+    # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening
+    # a session when nothing is scheduled. Each run is the governed run a person
+    # would start: contract, kill switch, tier, bounds and ledger unchanged.
+    await run_task_agent_schedule_pass(settings, now=now)
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.

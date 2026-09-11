@@ -566,6 +566,8 @@ source_modules = [
   "aida.quality_rule_proposals",
   "aida.steward_agent",
   "aida.task_agent",
+  "aida.task_agent_registry",
+  "aida.task_agent_schedule",
 ]
 forbidden_modules = [
   "aida.agent_contract_api",

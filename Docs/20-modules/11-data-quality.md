@@ -139,5 +139,5 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 | DQ-5 | Data SLA/SLO definitions | P1 |
 | DQ-6 | Seasonality-aware thresholds | P2 |
 | DQ-7 | Bank-scale incident-volume certification | P1 |
-| AG-14 | Quality agent: rule proposals from profile history under a contracted identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | Delivered 2026-09-11 — on-demand runs; no scheduler |
+| AG-14 | Quality agent: rule proposals from profile history under a contracted identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | Delivered 2026-09-11 — on demand, or scheduled once its interval is set (off by default) |
 | DQ-8 | Open quality framework for third-party detector integration | P2 |

@@ -136,14 +136,16 @@ So a person decides every T2 proposal, and no agent ever asks to move the trust 
 * **The shared runtime:** `task_agent.py` and `task_agent_api.py`, with its response shapes.
 * **The lineage agent:** `lineage_agent.py`, `lineage_agent_api.py` and `lineage_table_resolution.py`.
 * **The quality agent:** `quality_agent.py`, `quality_agent_api.py`, `quality_rule_proposals.py`, `quality_rule_proposal_model.py` and migration `e3b8f14c6a92`.
-* **For every agent:** three settings, and a console built on one shared screen component.
+* **For every agent:** four settings, and a console built on one shared screen component.
+* **Scheduling:** `task_agent_registry.py` lists the agents for every surface that treats them as a class, and `task_agent_schedule.py` is a scheduler pass. A positive `<key>_agent_interval_minutes` starts that agent once per interval in every organization that registered it. A scheduled run is the governed run; only its trigger differs.
+* **Counting:** a refusal that came after authority resolved records the version it stopped. The agent inbox counts task-agent runs, completed and refused, from their audit rows.
 
-Tests: `tests/test_lineage_agent.py` and `tests/test_quality_agent.py`, alongside the steward agent's.
+Tests: `tests/test_lineage_agent.py`, `tests/test_quality_agent.py` and `tests/test_task_agent_schedule.py`, alongside the steward agent's.
 
 **Not done, stated plainly:**
 
-* There is no scheduler for any task agent. A person starts every run.
-* The inbox and the roster count `AgentRun` rows, and no task agent writes any, so both report zero runs for all three agents. Each agent's work shows on its own console and in the inbox's task lists.
+* Scheduled runs are off. Every `<key>_agent_interval_minutes` is 0 by default, so a person starts every run until an operator sets one.
+* The roster's run counts still come from `AgentRun` rows, which no task agent writes. Each task agent's row now says so and points to where its runs are counted, instead of reading as an agent that never ran.
 * The lineage agent parses views only. Stored procedures and dbt models keep their own parse paths.
 * The quality agent proposes floors and null-rate ceilings only. Profiles store no values, so it has nothing to derive a range or distribution rule from without breaking INV-6.
 * Nothing has been measured on a real estate.

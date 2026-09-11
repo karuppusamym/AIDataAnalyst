@@ -6552,6 +6552,7 @@ export function makeFixtureTaskAgentState(
     max_pending_proposals: 100,
     pending_proposals: 7,
     wall_clock_seconds_cap: 300,
+    interval_minutes: 0,
     // One row per object type, as the server groups them -- the quality
     // agent's two capabilities share one.
     outcomes: [...new Set(capabilities.map((capability) => capability.object_type))].map(

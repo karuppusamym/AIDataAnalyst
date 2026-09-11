@@ -93,6 +93,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.models import AgentContract, AgentRun, AiAsset, AiAssetVersion
 from aida.schemas import ApiModel
+from aida.task_agent_registry import task_agent_for_principal
 from aida.tool_first_rate import DEFAULT_WINDOW_DAYS, compute_tool_first_rate
 
 #: Steward-facing recent-results window default -- a roster entry is a
@@ -481,6 +482,19 @@ async def _contract_principals(
     return {version_id: principal for version_id, principal in rows}
 
 
+def _task_agent_note(run_action: str) -> str:
+    """ADR-0029: a task agent runs, but writes no `AgentRun`, so the counts on
+    its row are zero by construction -- not because it did nothing. Saying so
+    is the AR-07 rule applied the other way: a number that looks like evidence
+    of inactivity must not be left to read as one."""
+    return (
+        "A task agent (ADR-0029). It runs, but not as AgentRun rows: each run is "
+        f"a {run_action} audit event and each proposal a ledger task, so the run "
+        "counts on this row stay at zero. The agent inbox and the agent's own "
+        "console count its runs, proposals and acceptance rate."
+    )
+
+
 async def compose_agent_roster(
     session: AsyncSession,
     *,
@@ -565,6 +579,11 @@ async def compose_agent_roster(
             now=moment,
             sample_limit=method_sample_limit,
         )
+        task_agent = task_agent_for_principal(resolved_settings, principals.get(version.id))
+        if task_agent is not None:
+            method = method.model_copy(
+                update={"note": _task_agent_note(task_agent.spec.run_action)}
+            )
         recent_results, recent_results_total = await _recent_results(
             session,
             organization_id=organization_id,

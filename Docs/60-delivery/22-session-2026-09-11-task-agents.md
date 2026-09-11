@@ -81,6 +81,25 @@
   settings. Operators are the roles that may create a rule by hand.
 - Tests: `tests/test_quality_agent.py`.
 
+### AG-15 -- scheduled task-agent runs, and counting them honestly (P2)
+
+- `task_agent_registry.py` lists the three agents for every surface that
+  treats them as a class. A test fails if an agent principal setting exists
+  without an entry.
+- `task_agent_schedule.py`, called from the scheduler: a positive
+  `<key>_agent_interval_minutes` starts that agent once per interval, in every
+  organization with a contract for it on an approved version. The default is
+  0, so nothing changes until an operator sets one.
+- A scheduled run is the governed run, triggered by `fleet-scheduler` instead
+  of a person. A refusal is rolled back and recorded, and the pass goes on to
+  the next organization.
+- A refusal that came after authority resolved now records the version it
+  stopped. The agent inbox counts a task agent's runs, completed and refused,
+  from those audit rows. The roster says where a task agent's runs are counted
+  instead of reading as an agent that never ran. The console shows the
+  schedule.
+- Tests: `tests/test_task_agent_schedule.py`.
+
 ### UX-23 -- one console for every task agent (P1)
 
 - `TaskAgentConsole` renders any task agent. The steward, lineage and quality
@@ -93,9 +112,10 @@
 
 ## What is still not done
 
-1. **No scheduler.** A person starts every run of every task agent.
-2. **The inbox and the roster undercount all three agents.** They count
-   `AgentRun` rows, which task agents do not write.
+1. **Scheduled runs are off.** Every `<key>_agent_interval_minutes` is 0 by
+   default, so a person starts every run until an operator sets one.
+2. **The roster still counts `AgentRun` rows only.** Each task agent's row now
+   says where its runs are counted instead; the inbox counts them.
 3. **The lineage agent parses views only.** Procedures and dbt models keep
    their own parse paths.
 4. **The quality agent proposes two rule types.** Profiles store no values,
@@ -123,3 +143,8 @@ check_docs_links / test_doc_claims             -> OK
 ui-next: npm run typecheck                     -> clean
 ui-next: npm run test                          -> 81 files, 607 passed
 ```
+
+AG-15 (scheduling and counting) was verified separately, in a clean worktree
+at `b0eaccd`. Its tests and the steward, lineage and quality agent tests
+passed, 83 in all. Only the same two ontology failures appeared, in the
+reachability and tier-table tests. Its commit message records the runs.

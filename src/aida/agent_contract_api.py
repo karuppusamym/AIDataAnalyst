@@ -44,6 +44,7 @@ from aida.models import (
     AgentTask,
     AiAsset,
     AiAssetVersion,
+    AuditEvent,
     GovernanceReview,
     Organization,
     ReviewAuditSample,
@@ -63,6 +64,7 @@ from aida.reviewer_agent_metrics import (
 )
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.task_agent_registry import task_agent_for_principal
 
 router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 
@@ -697,6 +699,36 @@ async def get_agent_inbox(
             if version_id is not None:
                 run_counts[version_id] = (int(total or 0), int(completed or 0))
                 tokens_today[version_id] = int(tokens or 0)
+
+    # ADR-0029: a task agent writes no `AgentRun`. Every run it makes, completed
+    # or refused, leaves one `<key>_agent.run` audit row against its version, so
+    # its runs are counted from those -- one more grouped statement.
+    task_agent_runs = {
+        contract.ai_asset_version_id: agent.spec.run_action
+        for contract in contracts
+        if (agent := task_agent_for_principal(settings, contract.agent_principal_id))
+        is not None
+    }
+    if task_agent_runs:
+        for resource_id, audit_outcome, count in (
+            await session.execute(
+                select(AuditEvent.resource_id, AuditEvent.outcome, func.count())
+                .where(
+                    AuditEvent.organization_id == organization_id,
+                    AuditEvent.action.in_(set(task_agent_runs.values())),
+                    AuditEvent.resource_type == "agent_contract",
+                    AuditEvent.resource_id.in_([str(v) for v in task_agent_runs]),
+                    AuditEvent.occurred_at >= since,
+                )
+                .group_by(AuditEvent.resource_id, AuditEvent.outcome)
+            )
+        ).all():
+            version_id = UUID(str(resource_id))
+            total, completed = run_counts.get(version_id, (0, 0))
+            run_counts[version_id] = (
+                total + int(count),
+                completed + (int(count) if audit_outcome == "SUCCESS" else 0),
+            )
 
     agents: list[InboxAgent] = []
     for contract in contracts:

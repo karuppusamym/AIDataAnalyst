@@ -106,6 +106,9 @@ class TaskAgentStateRead(ApiModel):
     max_pending_proposals: int
     pending_proposals: int
     wall_clock_seconds_cap: int | None
+    #: How often the scheduler starts it, in minutes; 0 means only when a
+    #: person does.
+    interval_minutes: int
     outcomes: list[TaskAgentOutcomeRead]
 
 
@@ -187,6 +190,7 @@ def task_agent_state_read(
         max_pending_proposals=spec.max_pending_proposals(settings),
         pending_proposals=state.pending_proposals,
         wall_clock_seconds_cap=contract.wall_clock_seconds_cap if contract is not None else None,
+        interval_minutes=spec.interval_minutes(settings),
         outcomes=[
             TaskAgentOutcomeRead(
                 object_type=row.object_type,
@@ -279,7 +283,12 @@ async def execute_task_agent_run(
     except TaskAgentRefused as exc:
         await session.rollback()
         record_task_agent_refusal(
-            session, organization_id, spec=spec, triggered_by=context, reason_code=exc.reason_code
+            session,
+            organization_id,
+            spec=spec,
+            triggered_by=context,
+            reason_code=exc.reason_code,
+            ai_asset_version_id=exc.ai_asset_version_id,
         )
         await session.commit()
         raise HTTPException(status_code=409, detail=exc.reason_code) from exc

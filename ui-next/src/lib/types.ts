@@ -4703,6 +4703,7 @@ export interface TaskAgentStateRead {
   max_pending_proposals: number;
   pending_proposals: number;
   wall_clock_seconds_cap: number | null;
+  interval_minutes: number;
   outcomes: TaskAgentOutcomeRead[];
 }
 

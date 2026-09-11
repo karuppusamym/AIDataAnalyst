@@ -372,6 +372,10 @@ class Settings(BaseSettings):
     #: time -- it moves the backlog into the review queue, which is AR-11's
     #: lesson applied to the maker side. 0 disables the check.
     steward_agent_max_pending_proposals: int = Field(default=100, ge=0, le=100_000)
+    #: How often the scheduler starts it, in minutes, in every organization
+    #: that registered it (`aida.task_agent_schedule`). 0, the default, means
+    #: never: a person starts every run. The same for every task agent below.
+    steward_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
     # --- ADR-0029: the lineage agent -------------------------------------
     # The same registration rules as the steward agent's: nothing until an
@@ -383,6 +387,7 @@ class Settings(BaseSettings):
     #: One view yields a column edge per output column, so this is larger than
     #: the steward agent's bound on whole proposals.
     lineage_agent_max_pending_proposals: int = Field(default=500, ge=0, le=100_000)
+    lineage_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
     # --- ADR-0029: the quality agent -------------------------------------
     # Registered like the others: nothing until an approved AGENT-kind version
@@ -393,6 +398,7 @@ class Settings(BaseSettings):
     #: How many of its own proposals may wait for review before it stops. Lower
     #: than the steward agent's bound: every one is T2 and needs a person.
     quality_agent_max_pending_proposals: int = Field(default=50, ge=0, le=10_000)
+    quality_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to

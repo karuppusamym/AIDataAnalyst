@@ -41,8 +41,10 @@ from tests.support.doubles import security_context
 
 
 @asynccontextmanager
-async def task_agent_session() -> AsyncIterator[AsyncSession]:
-    """In-memory SQLite, with transactions made to behave like PostgreSQL's.
+async def task_agent_maker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """A session factory over one in-memory SQLite database, with transactions
+    made to behave like PostgreSQL's -- for code that opens its own sessions,
+    such as the scheduler pass.
 
     The pysqlite driver defers BEGIN until a DML statement, so a SAVEPOINT
     issued before any write becomes the outermost transaction and its RELEASE
@@ -61,12 +63,17 @@ async def task_agent_session() -> AsyncIterator[AsyncSession]:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        async with maker() as active:
-            yield active
+        yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
+
+
+@asynccontextmanager
+async def task_agent_session() -> AsyncIterator[AsyncSession]:
+    """One session over `task_agent_maker`'s database."""
+    async with task_agent_maker() as maker, maker() as active:
+        yield active
 
 
 def agent_settings(**overrides: object) -> Settings:

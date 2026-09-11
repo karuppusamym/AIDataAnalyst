@@ -27941,6 +27941,10 @@
             "title": "Capabilities",
             "type": "array"
           },
+          "interval_minutes": {
+            "title": "Interval Minutes",
+            "type": "integer"
+          },
           "kill_engaged": {
             "anyOf": [
               {
@@ -28057,6 +28061,7 @@
           "max_pending_proposals",
           "pending_proposals",
           "wall_clock_seconds_cap",
+          "interval_minutes",
           "outcomes"
         ],
         "title": "TaskAgentStateRead",

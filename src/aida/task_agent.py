@@ -133,12 +133,15 @@ class TaskAgentRefused(RuntimeError):
     Raised before the first write, or -- for a withdrawal noticed mid-run --
     after some. The caller rolls the transaction back in both cases, so a
     refused run leaves no proposal and no task behind. `reason_code` is stable
-    and operator-facing.
+    and operator-facing. `ai_asset_version_id` is set when the refusal came
+    after the agent's authority resolved -- a kill switch, a withdrawn tier --
+    so the refusal is counted against the version whose run it stopped.
     """
 
-    def __init__(self, reason_code: str) -> None:
+    def __init__(self, reason_code: str, *, ai_asset_version_id: UUID | None = None) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+        self.ai_asset_version_id = ai_asset_version_id
 
 
 def mode_for(autonomy_tier: str) -> Mode:
@@ -181,8 +184,8 @@ OutcomeReader = Callable[[AsyncSession, UUID, str], Awaitable[list["TaskAgentOut
 @dataclass(frozen=True, slots=True)
 class TaskAgentSpec:
     """An agent's identity and capabilities. Its settings are named by `key`:
-    `<key>_agent_principal_id`, `<key>_agent_max_proposals_per_run` and
-    `<key>_agent_max_pending_proposals`."""
+    `<key>_agent_principal_id`, `<key>_agent_max_proposals_per_run`,
+    `<key>_agent_max_pending_proposals` and `<key>_agent_interval_minutes`."""
 
     key: str
     #: Roles on the audit context of the agent's own writes.
@@ -218,6 +221,15 @@ class TaskAgentSpec:
 
     def max_pending_proposals(self, settings: Settings) -> int:
         return int(getattr(settings, f"{self.key}_agent_max_pending_proposals"))
+
+    def interval_minutes(self, settings: Settings) -> int:
+        """How often the scheduler starts it; 0, the default, means never."""
+        return int(getattr(settings, f"{self.key}_agent_interval_minutes", 0))
+
+    @property
+    def run_action(self) -> str:
+        """The audit action every run is recorded as, completed or refused."""
+        return f"{self.key}_agent.run"
 
     @property
     def capability_keys(self) -> tuple[str, ...]:
@@ -898,6 +910,37 @@ async def run_task_agent(
     authority = await resolve_task_agent_authority(
         session, organization_id, spec=spec, settings=settings
     )
+    try:
+        return await _run_under_authority(
+            session,
+            organization_id,
+            authority,
+            spec=spec,
+            work=work,
+            request=request,
+            settings=settings,
+            triggered_by=triggered_by,
+            requested=tuple(requested),
+        )
+    except TaskAgentRefused as exc:
+        # Refused after its authority resolved -- a kill switch, a withdrawn
+        # tier: the refusal is counted against the version whose run it stopped.
+        exc.ai_asset_version_id = exc.ai_asset_version_id or authority.version.id
+        raise
+
+
+async def _run_under_authority(
+    session: AsyncSession,
+    organization_id: UUID,
+    authority: TaskAgentAuthority,
+    *,
+    spec: TaskAgentSpec,
+    work: Mapping[str, CapabilityWork],
+    request: TaskAgentRunRequest,
+    settings: Settings,
+    triggered_by: SecurityContext,
+    requested: tuple[str, ...],
+) -> TaskAgentOutcome:
     blocking = await agent_kill_blocking_reason(session, authority.contract)
     if blocking is not None:
         raise TaskAgentRefused(blocking)
@@ -937,7 +980,7 @@ async def run_task_agent(
     record_audit(
         session,
         replace(triggered_by, organization_id=organization_id),
-        action=f"{spec.key}_agent.run",
+        action=spec.run_action,
         resource_type="agent_contract",
         resource_id=str(authority.version.id),
         outcome="SUCCESS",
@@ -968,15 +1011,19 @@ def record_task_agent_refusal(
     spec: TaskAgentSpec,
     triggered_by: SecurityContext,
     reason_code: str,
+    ai_asset_version_id: UUID | None = None,
 ) -> None:
     """The DENIED audit row for a refused run. Written by the caller in a fresh
-    transaction, after the refused run's own writes were rolled back."""
+    transaction, after the refused run's own writes were rolled back. Carries
+    the version when the refusal came after authority resolved
+    (`TaskAgentRefused.ai_asset_version_id`), so it counts against that
+    version's runs the way a completed run's row does."""
     record_audit(
         session,
         replace(triggered_by, organization_id=organization_id),
-        action=f"{spec.key}_agent.run",
+        action=spec.run_action,
         resource_type="agent_contract",
-        resource_id=None,
+        resource_id=str(ai_asset_version_id) if ai_asset_version_id else None,
         outcome="DENIED",
         correlation_id=get_correlation_id(),
         details={"reason": reason_code},
