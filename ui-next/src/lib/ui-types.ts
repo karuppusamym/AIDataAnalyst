@@ -283,16 +283,18 @@ export interface AssetDescriptionDraftListResponse {
   total: number;
 }
 
-/** The five parser-produced lineage edge tables `GET
+/** The parser-produced lineage edge tables `GET
  *  /v1/lineage/parsed-edges/review-queue` spans. The generator emits this
  *  union inline on every field that carries it
  *  (`ParsedLineageEdgeReviewQueueItemRead.edge_type`,
  *  `ParsedLineageEdgeDecisionRequest.edge_type`) but never names it, so a
  *  call site that wants to hold one in a variable needs this alias. Keep the
- *  members identical to what the generated file emits inline. */
+ *  members identical to what the generated file emits inline. `PROCEDURE` is
+ *  pasted procedure SQL; `ROUTINE` is a captured routine's body (2026-09-11). */
 export type ParsedLineageEdgeType =
   | "VIEW"
   | "PROCEDURE"
+  | "ROUTINE"
   | "DBT"
   | "OPENLINEAGE_TABLE"
   | "OPENLINEAGE_COLUMN";

@@ -32,7 +32,9 @@ describe("LineageAgentScreen (ADR-0029)", () => {
   it("asks for the lineage agent's state and shows that a person decides its edges", async () => {
     render(<LineageAgentScreen />);
 
-    await waitFor(() => expect(screen.getByText("human review")).toBeInTheDocument());
+    // Both capabilities -- views and procedures -- are decided in a queue no
+    // agent reads from, so neither carries an ADR-0027 tier.
+    await waitFor(() => expect(screen.getAllByText("human review")).toHaveLength(2));
     expect(fetchTaskAgentState.mock.calls[0]!.slice(0, 2)).toEqual([ORG, "lineage"]);
     expect(screen.getByText("agent:lineage")).toBeInTheDocument();
   });
@@ -49,7 +51,7 @@ describe("LineageAgentScreen (ADR-0029)", () => {
       expect(runTaskAgent).toHaveBeenCalledWith(
         ORG,
         "lineage",
-        expect.objectContaining({ capabilities: ["VIEW_LINEAGE"] }),
+        expect.objectContaining({ capabilities: ["VIEW_LINEAGE", "PROCEDURE_LINEAGE"] }),
       ),
     );
     const list = await screen.findByRole("list", { name: "What the run looked at" });

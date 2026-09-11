@@ -139,24 +139,27 @@ async def _persist_edges(
         delete_stmt = delete_stmt.where(model.review_status == "PROPOSED")
     await session.execute(delete_stmt)
 
-    # In require_review mode, fold the existing ACTIVE rows this re-parse
-    # would collide with (same natural key) into a set so we can skip
-    # them -- inserting a duplicate would raise on the natural-key
-    # unique constraint. Leaving the human-approved row untouched is the
-    # explicit idempotency guarantee the ADR calls for.
-    existing_active_keys: set[tuple[str, str, str, str, str]] = set()
+    # In require_review mode, fold the rows this re-parse would collide with
+    # (same natural key) into a set so we can skip them -- inserting a
+    # duplicate would raise on the natural-key unique constraint. Every row
+    # the delete above kept is a decided one: ACTIVE, approved by a person or
+    # activated by the threshold, or REJECTED, an answer a reviewer already
+    # gave. Leaving it untouched is the explicit idempotency guarantee the
+    # ADR calls for. Until 2026-09-11 only ACTIVE rows were folded, so a
+    # re-parse after a rejection failed on the constraint.
+    decided_keys: set[tuple[str, str, str, str, str]] = set()
     if review_mode == "require_review":
         existing_rows = (
             await session.scalars(
                 select(model).where(
                     model.datasource_id == datasource.id,
                     model.target_table.in_(target_tables),
-                    model.review_status == "ACTIVE",
+                    model.review_status != "PROPOSED",
                 )
             )
         ).all()
         for row in cast("Sequence[Any]", existing_rows):
-            existing_active_keys.add(
+            decided_keys.add(
                 (
                     row.source_table,
                     row.source_column,
@@ -175,8 +178,8 @@ async def _persist_edges(
             edge.target_column,
             edge.transformation_type,
         )
-        if key in existing_active_keys:
-            # An earlier human-approved edge already covers this exact
+        if key in decided_keys:
+            # A decided edge already covers this exact
             # source/target/column/transform triple -- leave it alone.
             continue
         source_name = _persistable_source_table(edge)

@@ -60,6 +60,7 @@ from aida.models import (
     RelationshipCandidate,
     ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.unified_lineage import UnifiedLink
 
 SuggestionStatus = Literal["ALL", "PENDING", "APPROVED", "REJECTED"]
@@ -258,9 +259,14 @@ async def collect_foreign_keys(
     graph.note_scan_bound(constraints, graph.edge_limit, "EDGE_LIMIT")
 
 
+#: A row `_register_definition_edges` folds: a view's parsed edge, or a
+#: procedure's -- from pasted SQL, or from a captured routine's body.
+DefinitionEdgeRow = ViewLineageEdge | ProcedureLineageEdge | DeepProcedureLineageEdge
+
+
 def _register_definition_edges(
     graph: BoundedGraph,
-    rows: Sequence[ViewLineageEdge] | Sequence[ProcedureLineageEdge],
+    rows: Sequence[DefinitionEdgeRow],
     edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION"],
     view_definitions_by_table_id: dict[UUID, tuple[str, str]] | None = None,
 ) -> None:
@@ -280,7 +286,7 @@ def _register_definition_edges(
     Takes each model concretely (rather than as a `type[X | Y]` parameter) so
     the ORM row type stays precise for the type checker.
     """
-    grouped: dict[tuple[UUID, UUID], list[ViewLineageEdge | ProcedureLineageEdge]] = {}
+    grouped: dict[tuple[UUID, UUID], list[DefinitionEdgeRow]] = {}
     for row in rows:
         if row.source_table_id is None or row.target_table_id is None:
             continue
@@ -307,7 +313,18 @@ def _register_definition_edges(
         # ProcedureLineageEdge carries no identity back to a specific
         # MetadataRoutine row (no FK, no specific_name -- see
         # `mcp_server.py::_view_definition_transformation_detail`), so no
-        # reference is fabricated here.
+        # reference is fabricated here. A row from the routine-aware table
+        # (`DeepProcedureLineageEdge`) does know its routine, so an edge such
+        # rows establish names those routines instead.
+        routine_ids = sorted(
+            {
+                str(edge.routine_id)
+                for edge in edges
+                if isinstance(edge, DeepProcedureLineageEdge)
+            }
+        )
+        if routine_ids:
+            evidence["routine_ids"] = routine_ids
         if view_definitions_by_table_id is not None:
             found = view_definitions_by_table_id.get(target_table_id)
             if found is not None:
@@ -374,11 +391,13 @@ async def collect_definition_lineage(
     *,
     include_pending_edges: bool,
 ) -> None:
-    """View and stored-procedure SQL-parsed lineage (LN-2).
+    """View and stored-procedure SQL-parsed lineage (LN-2), and the lineage
+    parsed from captured routine bodies (N3).
 
     P1-05: PROPOSED rows are parser output nobody has reviewed. They belong in
     the review queue, not in the shared graph, so they render only for a caller
-    that asked for them explicitly.
+    that asked for them explicitly. That includes every edge the lineage agent
+    (ADR-0029) writes, until a person approves it.
     """
     if not table_ids:
         return
@@ -417,7 +436,26 @@ async def collect_definition_lineage(
         procedure_stmt = procedure_stmt.where(ProcedureLineageEdge.review_status == "ACTIVE")
     procedure_rows = (await session.scalars(procedure_stmt)).all()
     graph.note_scan_bound(procedure_rows, graph.edge_limit, "EDGE_LIMIT")
-    _register_definition_edges(graph, procedure_rows, "PROCEDURE_DEFINITION")
+
+    # The routine-aware procedure table, under the same review filter. A hop
+    # into a temp table is the procedure's own plumbing and never folds in.
+    routine_stmt = (
+        select(DeepProcedureLineageEdge)
+        .where(
+            DeepProcedureLineageEdge.datasource_id == datasource.id,
+            DeepProcedureLineageEdge.source_table_id.in_(table_ids),
+            DeepProcedureLineageEdge.target_table_id.in_(table_ids),
+            DeepProcedureLineageEdge.is_intermediate.is_(False),
+        )
+        .order_by(DeepProcedureLineageEdge.id)
+        .limit(graph.edge_limit)
+    )
+    if not include_pending_edges:
+        routine_stmt = routine_stmt.where(DeepProcedureLineageEdge.review_status == "ACTIVE")
+    routine_rows = (await session.scalars(routine_stmt)).all()
+    graph.note_scan_bound(routine_rows, graph.edge_limit, "EDGE_LIMIT")
+    # One PROCEDURE_DEFINITION edge per table pair, whichever table states it.
+    _register_definition_edges(graph, [*procedure_rows, *routine_rows], "PROCEDURE_DEFINITION")
 
 
 async def collect_relationship_candidates(

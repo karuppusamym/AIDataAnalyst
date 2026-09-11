@@ -31,22 +31,24 @@ from atlas.platform.config import Settings, get_settings
 
 router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 
-#: Who may start a run: exactly the roles that may already parse view SQL into
-#: lineage by hand (`view_lineage_api._LINEAGE_WRITER_ROLES`).
+#: Who may start a run: exactly the roles that may already parse a view or a
+#: captured routine into lineage by hand (`_LINEAGE_WRITER_ROLES` in
+#: `view_lineage_api` and `procedure_lineage_api`).
 LINEAGE_AGENT_OPERATORS = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
 
-LineageCapability = Literal["VIEW_LINEAGE"]
+LineageCapability = Literal["VIEW_LINEAGE", "PROCEDURE_LINEAGE"]
 
 
 def _every_capability() -> list[LineageCapability]:
-    return ["VIEW_LINEAGE"]
+    return ["VIEW_LINEAGE", "PROCEDURE_LINEAGE"]
 
 
 class LineageAgentRunRequest(ApiModel):
     capabilities: list[LineageCapability] = Field(
-        default_factory=_every_capability, min_length=1, max_length=1
+        default_factory=_every_capability, min_length=1, max_length=2
     )
-    #: Views per run, clamped server-side to `lineage_agent_max_proposals_per_run`.
+    #: Views, and routines, proposed from per capability, clamped server-side
+    #: to `lineage_agent_max_proposals_per_run`.
     limit: int = Field(default=10, ge=1, le=200)
     datasource_id: UUID | None = None
     #: Report what the agent would propose and write nothing, whatever its tier.

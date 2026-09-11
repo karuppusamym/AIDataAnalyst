@@ -27,9 +27,10 @@ is both safer to add and strictly more capable: `DeepProcedureLineageEdge`
 is the identity-bearing procedure lineage table AT-19 wished existed.
 """
 
+from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aida.db import Base
@@ -67,6 +68,8 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
             "via_temp_table",
             name="uq_deep_procedure_lineage_edge_natural_key",
         ),
+        # ADR-0026's review lifecycle -- see `models.OpenLineageTableEdge`.
+        Index("ix_deep_procedure_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -120,6 +123,21 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
     # resolved *through*. NULL for every direct, single-statement edge.
     via_temp_table: Mapped[str | None] = mapped_column(String(500))
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # ADR-0026's review lifecycle: the same six columns the P1-05 edge tables
+    # carry, added on 2026-09-11 (migration d81f5a2c9e47) so an edge here can
+    # wait for a person -- the lineage agent (ADR-0029) writes only PROPOSED
+    # rows. `created_by` is the maker the per-edge queue's maker-checker
+    # compares; NULL on a row written before the column existed.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("deep_procedure_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class ProcedureToolGenerationRecord(Base, TimestampMixin):

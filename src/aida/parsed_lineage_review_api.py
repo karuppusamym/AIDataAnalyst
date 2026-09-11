@@ -156,7 +156,7 @@ async def get_parsed_lineage_review_queue(
             detail=(
                 "edge_type must be one of "
                 + ", ".join(EDGE_TYPES)
-                + " (or omitted to span all five)"
+                + " (or omitted to span every one)"
             ),
         )
     if context.organization_id is None:

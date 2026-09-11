@@ -1983,6 +1983,7 @@ export interface DeepProcedureLineageEdgeRead {
   control_flow_context?: string | null;
   unparsed_reason?: string | null;
   via_temp_table?: string | null;
+  review_status?: string | null;
 }
 
 export interface DeepProcedureLineageParseResponse {
@@ -2763,7 +2764,7 @@ export interface LineOfBusinessRead {
 }
 
 export interface LineageAgentRunRequest {
-  capabilities?: "VIEW_LINEAGE"[];
+  capabilities?: ("VIEW_LINEAGE" | "PROCEDURE_LINEAGE")[];
   limit?: number;
   datasource_id?: string | null;
   dry_run?: boolean;
@@ -3472,7 +3473,7 @@ export interface Page {
 
 export interface ParsedLineageEdgeBulkDecisionItem {
   edge_id: string;
-  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
 }
 
 export interface ParsedLineageEdgeBulkDecisionItemRead {
@@ -3507,7 +3508,7 @@ export interface ParsedLineageEdgeDecisionRead {
 
 /** Decision on one PROPOSED parsed-lineage edge. */
 export interface ParsedLineageEdgeDecisionRequest {
-  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
   decision: "APPROVED" | "REJECTED";
   reason: string;
 }
@@ -3515,7 +3516,7 @@ export interface ParsedLineageEdgeDecisionRequest {
 /** One PROPOSED parsed-lineage edge as it appears in the review queue. */
 export interface ParsedLineageEdgeReviewQueueItemRead {
   edge_id: string;
-  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
   organization_id: string;
   created_at: string;
   created_by: string | null;

@@ -58,8 +58,8 @@ from aida.procedure_lineage import (
     parse_procedure_lineage,
     walk_procedure_statements,
 )
-from aida.procedure_lineage_api import require_eligible_routine_body
 from aida.relationship_naming import physical_type_family
+from aida.routine_lineage_edges import require_eligible_routine_body
 from aida.schemas import ToolParameterDefinition
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
 from aida.view_tool_blueprint import _PARAMETER_TYPE_BY_PHYSICAL_FAMILY
@@ -268,7 +268,7 @@ async def resolve_procedure_tool_source(
     dialect: str,
 ) -> tuple[MetadataRoutine, exp.Expr, ProcedureParseResult, list[RoutineInParameter]]:
     """Fetch `routine_id`'s own captured body, gate it exactly like
-    `procedure_lineage_api.require_eligible_routine_body`, prove it
+    `routine_lineage_edges.require_eligible_routine_body`, prove it
     read-only with exactly one result statement, and load its declared
     IN/INOUT parameters -- everything `build_procedure_tool_blueprint`
     needs, resolved from real catalog/envelope state.

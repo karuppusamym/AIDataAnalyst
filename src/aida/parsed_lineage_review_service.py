@@ -10,6 +10,11 @@ do NOT share a supertype (see ADR-0026 for the rationale); this module
 composes across them at read time instead, and shares the "should this
 new row land ACTIVE or PROPOSED" decision so every parser applies the
 same rule.
+
+A sixth table joined on 2026-09-11: `DeepProcedureLineageEdge`, the
+routine-aware procedure table, edge type `ROUTINE` (migration
+`d81f5a2c9e47`). It was the one parser-produced table with no review state,
+which kept the lineage agent (ADR-0029) from proposing procedure lineage.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from aida.models import (
     ProcedureLineageEdge,
     ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 
 # Confidence values on ViewLineageEdge / ProcedureLineageEdge / DbtLineageEdge
 # are string enums (FULL/PARTIAL/LOW), not floats -- see the parser's own
@@ -36,14 +42,16 @@ from aida.models import (
 # unified-lineage projection together.
 _STRING_CONFIDENCE_TO_FLOAT = {"FULL": 1.0, "PARTIAL": 0.6, "LOW": 0.3}
 
-# The five edge tables under review. Kept as a stable list so the queue
+# The edge tables under review. Kept as a stable list so the queue
 # service, the review endpoint dispatch, and the auditing details all
-# agree on the identifier vocabulary. VIEW / PROCEDURE / DBT /
+# agree on the identifier vocabulary. VIEW / PROCEDURE / ROUTINE / DBT /
 # OPENLINEAGE_TABLE / OPENLINEAGE_COLUMN is what the client-facing
-# `edge_type` field on the decision endpoint accepts.
+# `edge_type` field on the decision endpoint accepts. PROCEDURE is the
+# raw-SQL procedure table; ROUTINE is the one keyed to a captured routine.
 EDGE_TYPE_TO_MODEL: dict[str, Any] = {
     "VIEW": ViewLineageEdge,
     "PROCEDURE": ProcedureLineageEdge,
+    "ROUTINE": DeepProcedureLineageEdge,
     "DBT": DbtLineageEdge,
     "OPENLINEAGE_TABLE": OpenLineageTableEdge,
     "OPENLINEAGE_COLUMN": OpenLineageColumnEdge,
@@ -210,6 +218,32 @@ def _row_to_item(edge_type: str, row: Any) -> ParsedLineageReviewItem | None:
                 "sql_hash": row.sql_hash,
                 "dialect": row.dialect,
             },
+        )
+    if edge_type == "ROUTINE":
+        # The routine and the statement within it, so a reviewer can find the
+        # exact line; and, for an edge the parser resolved through a temp
+        # table, which one.
+        reference = {
+            "kind": "ROUTINE_BODY",
+            "datasource_id": str(row.datasource_id),
+            "routine_id": str(row.routine_id),
+            "statement_ordinal": str(row.statement_ordinal),
+            "sql_hash": row.sql_hash,
+            "dialect": row.dialect,
+        }
+        if row.via_temp_table:
+            reference["via_temp_table"] = row.via_temp_table
+        return ParsedLineageReviewItem(
+            edge_id=row.id,
+            edge_type=edge_type,
+            organization_id=row.organization_id,
+            created_at=row.created_at,
+            created_by=row.created_by,
+            confidence=row.confidence,
+            source_label=f"{row.source_table}.{row.source_column}",
+            target_label=f"{row.target_table}.{row.target_column}",
+            transformation_type=row.transformation_type,
+            source_sql_reference=reference,
         )
     if edge_type == "DBT":
         return ParsedLineageReviewItem(

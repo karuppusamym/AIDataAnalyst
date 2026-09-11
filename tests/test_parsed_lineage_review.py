@@ -16,8 +16,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import aida.envelope_models  # noqa: F401 -- registers metadata_view_definition
 from aida.db import Base
+from aida.envelope_models import MetadataRoutine
 from aida.models import (
     DataDomain,
     DataSource,
@@ -34,7 +34,12 @@ from aida.parsed_lineage_review_api import (
     bulk_decide_parsed_lineage_edges,
     decide_parsed_lineage_edge,
 )
-from aida.parsed_lineage_review_service import resolve_review_status_for_new_edge
+from aida.parsed_lineage_review_service import (
+    list_parsed_lineage_review_queue,
+    resolve_review_status_for_new_edge,
+)
+from aida.procedure_lineage_api import parse_deep_procedure_lineage_endpoint
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.schemas import (
     ParsedLineageEdgeBulkDecisionItem,
     ParsedLineageEdgeBulkDecisionRequest,
@@ -500,6 +505,208 @@ class TestReparseIdempotency:
         assert len(rows) == 1
         assert rows[0].review_status == "ACTIVE"
         assert rows[0].reviewed_by == "reviewer"
+
+    async def test_reparse_after_a_rejection_keeps_the_rejection(
+        self, session, monkeypatch
+    ):
+        # A reviewer's REJECTED is an answer already given. Re-parsing the
+        # same definition must neither propose the edge again nor collide
+        # with the natural key the rejected row still holds.
+        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
+        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
+        monkeypatch.setenv(
+            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
+        )
+        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
+        author = _context(datasource, principal_id="author")
+        sql = "CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"
+        await parse_view_lineage_endpoint(
+            datasource.id, _request(sql), context=author, session=session
+        )
+        edge = (await session.scalars(select(ViewLineageEdge))).one()
+        await decide_parsed_lineage_edge(
+            edge.id,
+            ParsedLineageEdgeDecisionRequest(
+                edge_type="VIEW", decision="REJECTED", reason="wrong source"
+            ),
+            context=_context(datasource, principal_id="reviewer"),
+            session=session,
+        )
+
+        await parse_view_lineage_endpoint(
+            datasource.id, _request(sql), context=author, session=session
+        )
+        await session.flush()
+
+        rows = (await session.scalars(select(ViewLineageEdge))).all()
+        assert [(row.review_status, row.reviewed_by) for row in rows] == [
+            ("REJECTED", "reviewer")
+        ]
+
+
+_ROUTINE_INSERT = (
+    "INSERT INTO public.order_totals (customer_id, total) "
+    "SELECT o.customer_id, o.amount FROM public.orders o"
+)
+
+
+async def _seed_routine(
+    session: AsyncSession, *, body: str = _ROUTINE_INSERT, dialect: str = "postgres"
+):
+    datasource, tables = await _seed(session, table_names=["orders", "order_totals"])
+    datasource.dialect = dialect
+    routine = MetadataRoutine(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        schema_id=tables["orders"].schema_id,
+        name="load_totals",
+        routine_type="PROCEDURE",
+        body_sql_redacted=body,
+        fingerprint="fp",
+    )
+    session.add(routine)
+    await session.flush()
+    return datasource, routine
+
+
+async def _routine_edges(session: AsyncSession) -> list[DeepProcedureLineageEdge]:
+    return list(
+        (
+            await session.scalars(
+                select(DeepProcedureLineageEdge).order_by(
+                    DeepProcedureLineageEdge.transformation_type,
+                    DeepProcedureLineageEdge.source_column,
+                )
+            )
+        ).all()
+    )
+
+
+class TestRoutineEdgesUnderReview:
+    """The routine-aware procedure table joined ADR-0026's review on
+    2026-09-11: a person's parse of a captured routine is written under the
+    review mode, and its edges are decided in the same queue as the rest."""
+
+    async def test_auto_active_lands_active_and_records_its_author(
+        self, session, monkeypatch
+    ):
+        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
+        datasource, routine = await _seed_routine(session)
+
+        await parse_deep_procedure_lineage_endpoint(
+            datasource.id, routine.id, context=_context(datasource), session=session
+        )
+
+        rows = await _routine_edges(session)
+        assert [(row.review_status, row.created_by) for row in rows] == [
+            ("ACTIVE", "author"),
+            ("ACTIVE", "author"),
+        ]
+
+    async def test_require_review_queues_the_edge_for_someone_else(
+        self, session, monkeypatch
+    ):
+        from fastapi import HTTPException
+
+        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
+        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
+        monkeypatch.setenv(
+            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
+        )
+        datasource, routine = await _seed_routine(session)
+        await parse_deep_procedure_lineage_endpoint(
+            datasource.id, routine.id, context=_context(datasource), session=session
+        )
+
+        items, total = await list_parsed_lineage_review_queue(
+            session, datasource.organization_id, edge_type="ROUTINE"
+        )
+
+        assert total == 2
+        assert {item.source_sql_reference["routine_id"] for item in items} == {
+            str(routine.id)
+        }
+        decision = ParsedLineageEdgeDecisionRequest(
+            edge_type="ROUTINE", decision="APPROVED", reason="matches the body"
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            await decide_parsed_lineage_edge(
+                items[0].edge_id,
+                decision,
+                context=_context(datasource, principal_id="author"),
+                session=session,
+            )
+        assert excinfo.value.status_code == 409
+        result = await decide_parsed_lineage_edge(
+            items[0].edge_id,
+            decision,
+            context=_context(datasource, principal_id="reviewer"),
+            session=session,
+        )
+        assert result.review_status == "ACTIVE"
+
+    async def test_an_unparsed_marker_is_never_queued(self, session, monkeypatch):
+        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
+        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
+        monkeypatch.setenv(
+            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
+        )
+        datasource, routine = await _seed_routine(
+            session,
+            body=(
+                "CREATE PROCEDURE dbo.load_totals AS BEGIN "
+                + _ROUTINE_INSERT
+                + "; EXEC(@dynamic_sql); END"
+            ),
+            dialect="tsql",
+        )
+
+        await parse_deep_procedure_lineage_endpoint(
+            datasource.id, routine.id, context=_context(datasource), session=session
+        )
+
+        rows = await _routine_edges(session)
+        assert [(row.transformation_type, row.review_status) for row in rows] == [
+            ("DIRECT", "PROPOSED"),
+            ("DIRECT", "PROPOSED"),
+            ("UNPARSED", "ACTIVE"),
+        ]
+
+    async def test_a_reparse_keeps_every_decision_and_writes_nothing_twice(
+        self, session, monkeypatch
+    ):
+        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
+        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
+        monkeypatch.setenv(
+            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
+        )
+        datasource, routine = await _seed_routine(session)
+        author = _context(datasource)
+        await parse_deep_procedure_lineage_endpoint(
+            datasource.id, routine.id, context=author, session=session
+        )
+        amount, customer = await _routine_edges(session)
+        reviewer = _context(datasource, principal_id="reviewer")
+        for edge, verdict in ((amount, "APPROVED"), (customer, "REJECTED")):
+            await decide_parsed_lineage_edge(
+                edge.id,
+                ParsedLineageEdgeDecisionRequest(
+                    edge_type="ROUTINE", decision=verdict, reason="checked"
+                ),
+                context=reviewer,
+                session=session,
+            )
+
+        response = await parse_deep_procedure_lineage_endpoint(
+            datasource.id, routine.id, context=author, session=session
+        )
+        await session.flush()
+
+        assert response.persisted_edge_count == 0
+        assert [row.review_status for row in await _routine_edges(session)] == [
+            "ACTIVE",
+            "REJECTED",
+        ]
 
 
 class TestUnifiedReadFilter:

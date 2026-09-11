@@ -3,13 +3,15 @@
 The runtime properties every task agent shares are exercised in
 `tests/test_steward_agent.py`. What is specific to this agent, and tested here:
 
-* it parses the view definitions ingestion captured -- and only eligible ones;
+* it parses the view definitions and routine bodies ingestion captured -- and
+  only eligible ones -- and proposes only a routine's table-to-table lineage;
 * its edges are PROPOSED, always, whatever the organization's auto-activation
   settings say, and a person decides them in ADR-0026's per-edge queue, which
   refuses the agent as reviewer of its own edge;
-* a view with any lineage -- including lineage a reviewer rejected -- is left
-  alone, and a definition it cannot use is recorded once until it changes;
-* its backlog bound and its outcome measure count edges in that queue.
+* a view or routine with any lineage -- including lineage a reviewer rejected --
+  is left alone, and what it cannot use is recorded once until it changes;
+* its backlog bound and its outcome measure count edges in that queue, from
+  both tables it writes.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -24,8 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import REASON_CONTRACT_MISSING
-from aida.envelope_models import MetadataViewDefinition
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.lineage_agent import (
+    CAPABILITY_PROCEDURE_LINEAGE,
     LINEAGE_AGENT,
     SKIP_NO_LINEAGE,
     SKIP_UNPARSEABLE,
@@ -50,6 +53,8 @@ from aida.models import (
     ViewLineageEdge,
 )
 from aida.parsed_lineage_review_api import decide_parsed_lineage_edge
+from aida.parsed_lineage_review_service import list_parsed_lineage_review_queue
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.schemas import ParsedLineageEdgeDecisionRequest
 from aida.task_agent import (
     ACTION_PROPOSED,
@@ -368,8 +373,13 @@ async def test_the_state_endpoint_names_the_dedicated_queue(session: AsyncSessio
     )
 
     assert (state.agent_key, state.registered, state.pending_proposals) == ("lineage", True, 2)
-    [capability] = state.capabilities
-    assert (capability.review_queue, capability.risk_tier) == (QUEUE_PARSED_LINEAGE, None)
+    assert {
+        (capability.capability, capability.review_queue, capability.risk_tier)
+        for capability in state.capabilities
+    } == {
+        ("VIEW_LINEAGE", QUEUE_PARSED_LINEAGE, None),
+        ("PROCEDURE_LINEAGE", QUEUE_PARSED_LINEAGE, None),
+    }
 
 
 async def test_an_unregistered_lineage_agent_is_refused(session: AsyncSession) -> None:
@@ -450,3 +460,240 @@ async def test_a_dedicated_queue_must_be_human_only(session: AsyncSession) -> No
     assert excinfo.value.reason_code == REASON_QUEUE_NOT_PERMITTED
     with pytest.raises(ValueError):
         await run.open_review("X", object_id=uuid4(), requested_action="X", details={})
+
+
+# ---------------------------------------------------------------------------
+# PROCEDURE_LINEAGE: captured routine bodies.
+# ---------------------------------------------------------------------------
+
+#: A hop through a temp table, then a gap. The parser states `orders ->
+#: order_totals` as a transitive edge through `#stage`, and marks the dynamic
+#: SQL UNPARSED; only the transitive edges are table-to-table lineage.
+PROCEDURE_BODY = (
+    "CREATE PROCEDURE public.load_totals AS BEGIN "
+    "SELECT o.customer_id, o.amount INTO #stage FROM public.orders o; "
+    "INSERT INTO public.order_totals (customer_id, total) "
+    "SELECT s.customer_id, s.amount FROM #stage s; "
+    "EXEC(@dynamic_sql); END"
+)
+
+
+async def _procedure_estate(
+    session: AsyncSession,
+) -> tuple[Organization, DataSource, MetadataSchema, MetadataTable, MetadataTable]:
+    org, datasource, schema, _customers = await _estate(session, dialect="tsql")
+    orders = await seed_table(session, org, datasource, schema, name="orders")
+    totals = await seed_table(session, org, datasource, schema, name="order_totals")
+    return org, datasource, schema, orders, totals
+
+
+async def _routine(
+    session: AsyncSession,
+    org: Organization,
+    datasource: DataSource,
+    schema: MetadataSchema,
+    *,
+    name: str = "load_totals",
+    body: str | None = PROCEDURE_BODY,
+    **overrides: Any,
+) -> MetadataRoutine:
+    values: dict[str, Any] = {
+        "organization_id": org.id,
+        "datasource_id": datasource.id,
+        "schema_id": schema.id,
+        "name": name,
+        "routine_type": "PROCEDURE",
+        "body_sql_redacted": body,
+        "body_fingerprint": uuid4().hex,
+        "redaction_status": "PARSED",
+        "screening_status": "CLEAN",
+        "availability": "AVAILABLE",
+        "status": "ACTIVE",
+        "fingerprint": "fp",
+    }
+    values.update(overrides)
+    routine = MetadataRoutine(**values)
+    session.add(routine)
+    await session.flush()
+    return routine
+
+
+async def test_a_captured_procedure_gets_its_table_lineage_proposed(
+    session: AsyncSession,
+) -> None:
+    """The end-to-end edges only: not the hops into and out of `#stage`, and
+    not the marker for the dynamic SQL."""
+    org, datasource, schema, orders, totals = await _procedure_estate(session)
+    routine = await _routine(session, org, datasource, schema)
+    await register_agent(session, org, principal=AGENT)
+
+    outcome = await _run(session, org)
+
+    [item] = outcome.items
+    assert (item.capability, item.action, item.subject_name, item.confidence) == (
+        CAPABILITY_PROCEDURE_LINEAGE,
+        ACTION_PROPOSED,
+        "public.load_totals",
+        0.6,
+    )
+    edges = (await session.scalars(select(DeepProcedureLineageEdge))).all()
+    assert {(edge.source_column, edge.target_column) for edge in edges} == {
+        ("customer_id", "customer_id"),
+        ("amount", "total"),
+    }
+    assert {edge.review_status for edge in edges} == {"PROPOSED"}
+    assert {edge.created_by for edge in edges} == {AGENT}
+    assert {edge.routine_id for edge in edges} == {routine.id}
+    assert {edge.via_temp_table for edge in edges} == {"stage"}
+    assert {(edge.source_table_id, edge.target_table_id) for edge in edges} == {
+        (orders.id, totals.id)
+    }
+    task = await session.get(AgentTask, item.task_id)
+    assert task is not None
+    assert (task.proposal_ref_type, task.proposal_ref_id) == ("ROUTINE", routine.id)
+    assert (task.evidence["edge_count"], task.evidence["withheld_edges"]) == (2, 5)
+    assert task.evidence["is_fully_parsed"] is False
+
+
+async def test_a_routine_with_any_lineage_is_left_alone_even_rejected_lineage(
+    session: AsyncSession,
+) -> None:
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    routine = await _routine(session, org, datasource, schema)
+    session.add(
+        DeepProcedureLineageEdge(
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            routine_id=routine.id,
+            statement_ordinal=1,
+            source_table="public.orders",
+            source_column="amount",
+            target_table="public.order_totals",
+            target_column="total",
+            transformation_type="DERIVED",
+            confidence="PARTIAL",
+            dialect="tsql",
+            sql_hash="h" * 64,
+            review_status="REJECTED",
+            created_by="steward-2",
+        )
+    )
+    await session.flush()
+    await register_agent(session, org, principal=AGENT)
+
+    outcome = await _run(session, org)
+
+    assert outcome.items == []
+    assert await count_rows(session, DeepProcedureLineageEdge) == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"screening_status": "QUARANTINED"},
+        {"availability": "UNAVAILABLE", "body_sql_redacted": None},
+        {"status": "DEPRECATED"},
+    ],
+    ids=["quarantined", "unavailable", "retired"],
+)
+async def test_ineligible_routines_are_never_candidates(
+    session: AsyncSession, overrides: dict[str, Any]
+) -> None:
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    await _routine(session, org, datasource, schema, **overrides)
+    await register_agent(session, org, principal=AGENT)
+
+    outcome = await _run(session, org)
+
+    assert outcome.items == []
+
+
+async def test_a_body_with_no_table_lineage_is_declined_once_until_it_changes(
+    session: AsyncSession,
+) -> None:
+    """A result set is not a table: a read-only routine has nothing to propose."""
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    routine = await _routine(
+        session, org, datasource, schema, body="SELECT o.customer_id FROM public.orders o"
+    )
+    await register_agent(session, org, principal=AGENT)
+
+    first = await _run(session, org)
+    second = await _run(session, org)
+    routine.body_sql_redacted = PROCEDURE_BODY
+    routine.updated_at = datetime.now(UTC) + timedelta(seconds=1)
+    await session.flush()
+    third = await _run(session, org)
+
+    assert [(item.action, item.reason) for item in first.items] == [
+        (ACTION_SKIPPED, SKIP_NO_LINEAGE)
+    ]
+    assert second.items == [], "the same body was examined twice"
+    assert [item.action for item in third.items] == [ACTION_PROPOSED]
+
+
+async def test_a_t0_contract_observes_and_writes_no_routine_edge(session: AsyncSession) -> None:
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    await _routine(session, org, datasource, schema)
+    await register_agent(session, org, principal=AGENT, tier="T0")
+
+    outcome = await _run(session, org)
+
+    assert [item.action for item in outcome.items] == [ACTION_WOULD_PROPOSE]
+    assert await count_rows(session, DeepProcedureLineageEdge) == 0
+
+
+async def test_a_person_decides_the_agents_routine_edge_and_the_agent_cannot(
+    session: AsyncSession,
+) -> None:
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    routine = await _routine(session, org, datasource, schema)
+    routine_id = str(routine.id)
+    await register_agent(session, org, principal=AGENT)
+    await _run(session, org)
+
+    items, total = await list_parsed_lineage_review_queue(session, org.id, edge_type="ROUTINE")
+
+    assert total == 2
+    assert {item.created_by for item in items} == {AGENT}
+    reference = items[0].source_sql_reference
+    assert (reference["kind"], reference["routine_id"], reference["via_temp_table"]) == (
+        "ROUTINE_BODY",
+        routine_id,
+        "stage",
+    )
+    edge_id = items[0].edge_id
+    decision = ParsedLineageEdgeDecisionRequest(
+        edge_type="ROUTINE", decision="APPROVED", reason="The procedure loads totals from orders."
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        await decide_parsed_lineage_edge(
+            edge_id, decision, context=human(org, AGENT, REVIEWER_ROLES), session=session
+        )
+    assert excinfo.value.status_code == 409
+
+    await decide_parsed_lineage_edge(
+        edge_id, decision, context=human(org, "reviewer-1", REVIEWER_ROLES), session=session
+    )
+    decided = await session.get(DeepProcedureLineageEdge, edge_id)
+    assert decided is not None
+    assert (decided.review_status, decided.reviewed_by) == ("ACTIVE", "reviewer-1")
+
+
+async def test_outcomes_and_the_backlog_count_both_tables(session: AsyncSession) -> None:
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    await _view(session, org, datasource, schema)
+    await _routine(session, org, datasource, schema)
+    await register_agent(session, org, principal=AGENT)
+    await _run(session, org)
+
+    rows = await agent_outcomes(session, org.id, spec=LINEAGE_AGENT, agent_principal_id=AGENT)
+    state = await get_lineage_agent_state(
+        org.id, context=human(org), session=session, settings=agent_settings()
+    )
+
+    assert [(row.object_type, row.pending) for row in rows] == [
+        ("PROCEDURE_LINEAGE_EDGE", 2),
+        ("VIEW_LINEAGE_EDGE", 2),
+    ]
+    assert state.pending_proposals == 4

@@ -23,7 +23,6 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit
-from aida.procedure_lineage_api import RoutineNotEligibleError
 from aida.procedure_lineage_models import ProcedureToolGenerationRecord
 from aida.procedure_tool_blueprint import (
     ProcedureNotEligibleError,
@@ -31,6 +30,7 @@ from aida.procedure_tool_blueprint import (
     build_procedure_tool_blueprint,
     resolve_procedure_tool_source,
 )
+from aida.routine_lineage_edges import RoutineNotEligibleError
 from aida.schemas import ApiModel, GovernedToolVersionCreate, GovernedToolVersionRead
 from aida.security import SecurityContext, require_roles
 from aida.tool_api import _load_project_and_datasource, _persist_tool_version_draft

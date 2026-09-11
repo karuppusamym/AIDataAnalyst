@@ -11831,6 +11831,17 @@
             "title": "Is Write",
             "type": "boolean"
           },
+          "review_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Status"
+          },
           "source_column": {
             "title": "Source Column",
             "type": "string"
@@ -16430,10 +16441,13 @@
         "properties": {
           "capabilities": {
             "items": {
-              "const": "VIEW_LINEAGE",
+              "enum": [
+                "VIEW_LINEAGE",
+                "PROCEDURE_LINEAGE"
+              ],
               "type": "string"
             },
-            "maxItems": 1,
+            "maxItems": 2,
             "minItems": 1,
             "title": "Capabilities",
             "type": "array"
@@ -20813,6 +20827,7 @@
             "enum": [
               "VIEW",
               "PROCEDURE",
+              "ROUTINE",
               "DBT",
               "OPENLINEAGE_TABLE",
               "OPENLINEAGE_COLUMN"
@@ -21022,6 +21037,7 @@
             "enum": [
               "VIEW",
               "PROCEDURE",
+              "ROUTINE",
               "DBT",
               "OPENLINEAGE_TABLE",
               "OPENLINEAGE_COLUMN"
@@ -21087,6 +21103,7 @@
             "enum": [
               "VIEW",
               "PROCEDURE",
+              "ROUTINE",
               "DBT",
               "OPENLINEAGE_TABLE",
               "OPENLINEAGE_COLUMN"
@@ -48590,7 +48607,7 @@
     },
     "/v1/datasources/{datasource_id}/procedures/{routine_id}/lineage/parse": {
       "post": {
-        "description": "N3: procedure-aware column-level lineage extraction for one captured\n`MetadataRoutine`. Refuses (422) rather than guesses when the routine's\nown body is missing, withheld, unparsed, or quarantined -- see\n`require_eligible_routine_body`. The SQL is never executed.",
+        "description": "N3: procedure-aware column-level lineage extraction for one captured\n`MetadataRoutine`. Refuses (422) rather than guesses when the routine's\nown body is missing, withheld, unparsed, or quarantined -- see\n`require_eligible_routine_body`. The SQL is never executed. The edges are\nstored under the deployment's review mode (`persist_routine_edges`).",
         "operationId": "parse_deep_procedure_lineage_endpoint_v1_datasources__datasource_id__procedures__routine_id__lineage_parse_post",
         "parameters": [
           {

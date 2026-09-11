@@ -5,14 +5,15 @@ import { buildRelativeLink } from "../lib/routes";
 /* ---------------------------------------------------------------------------
    Lineage agent — ADR-0029.
 
-   Parses the view definitions ingestion captured — nothing else ever did — and
-   proposes the lineage it finds. Its edges are decided one by one in the
-   parsed-lineage review queue (ADR-0026), never activated by the agent, so a
-   proposal links there rather than to the shared review queue.
+   Parses the view definitions and routine bodies ingestion captured — nothing
+   else ever did — and proposes the lineage it finds. Its edges are decided one
+   by one in the parsed-lineage review queue (ADR-0026), never activated by the
+   agent, so a proposal links there rather than to the shared review queue.
 --------------------------------------------------------------------------- */
 
 const CAPABILITY_LABELS: Record<string, string> = {
   VIEW_LINEAGE: "View lineage",
+  PROCEDURE_LINEAGE: "Procedure lineage",
 };
 
 const SKIP_LABELS: Record<string, string> = {
@@ -30,11 +31,11 @@ export function LineageAgentScreen() {
     <TaskAgentConsole
       kind="lineage"
       title="Lineage agent"
-      description="Parses the view definitions captured at ingestion and proposes the column lineage it finds. Every edge waits in the parsed-lineage review queue for a person; the agent activates nothing, and it calls no model."
+      description="Parses the view definitions and stored procedure bodies captured at ingestion and proposes the column lineage it finds. Every edge waits in the parsed-lineage review queue for a person; the agent activates nothing, and it calls no model."
       capabilityLabels={CAPABILITY_LABELS}
       skipLabels={SKIP_LABELS}
       supervisorPersona="STEWARD"
-      emptyRunHint="Every eligible view already has lineage, or its definition was examined and could not be used."
+      emptyRunHint="Every eligible view and procedure already has lineage, or what was captured was examined and could not be used."
       reviewLink={parsedLineageQueue}
     />
   );

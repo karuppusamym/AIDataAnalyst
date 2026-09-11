@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from aida.config import Settings
 from aida.db import Base
-from aida.envelope_models import MetadataViewDefinition
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.main import app
 from aida.mcp_server import _transformation_detail
 from aida.models import (
@@ -42,6 +42,7 @@ from aida.models import (
     QueryExecution,
     ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security_types import SecurityContext
 from aida.unified_lineage import UnifiedLink, expand_frontier, traverse
@@ -887,6 +888,65 @@ async def test_view_definition_edge_carries_a_resolvable_transformation_referenc
     procedure_edge = edges_by_source["PROCEDURE_DEFINITION"]
     assert "transformation_reference" not in procedure_edge.evidence
     assert "redaction_status" not in procedure_edge.evidence
+
+
+@pytest.mark.asyncio
+async def test_a_routine_edge_folds_into_the_graph_once_a_person_approves_it(
+    db_session,
+) -> None:
+    """The routine-aware procedure table joined ADR-0026's review on
+    2026-09-11. Its ACTIVE rows fold into PROCEDURE_DEFINITION edges that name
+    the routine behind them; a PROPOSED row -- every edge the lineage agent
+    writes, until a person approves it -- stays out of the graph."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    raw_orders = await _seed_table(db_session, datasource, schema, "raw_orders")
+    fct_orders = await _seed_table(db_session, datasource, schema, "fct_orders")
+    agg_orders = await _seed_table(db_session, datasource, schema, "agg_orders")
+    routine = MetadataRoutine(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        schema_id=schema.id,
+        name="load_orders",
+        routine_type="PROCEDURE",
+        body_sql_redacted="-- redacted body",
+        fingerprint="fp",
+    )
+    db_session.add(routine)
+    await db_session.flush()
+
+    def routine_edge(target: MetadataTable, review_status: str) -> DeepProcedureLineageEdge:
+        return DeepProcedureLineageEdge(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            routine_id=routine.id,
+            statement_ordinal=0,
+            source_table="public.raw_orders",
+            source_column="id",
+            target_table=f"public.{target.name}",
+            target_column="order_id",
+            source_table_id=raw_orders.id,
+            target_table_id=target.id,
+            transformation_type="DIRECT",
+            confidence="FULL",
+            dialect="postgres",
+            is_write=True,
+            sql_hash="h3",
+            review_status=review_status,
+            created_by="agent:lineage",
+        )
+
+    db_session.add_all(
+        [routine_edge(fct_orders, "ACTIVE"), routine_edge(agg_orders, "PROPOSED")]
+    )
+    await db_session.flush()
+
+    graph = await build_unified_lineage_graph_payload(db_session, datasource, settings=None)
+
+    [procedure_edge] = [
+        edge for edge in graph.edges if edge.edge_source == "PROCEDURE_DEFINITION"
+    ]
+    assert procedure_edge.evidence["routine_ids"] == [str(routine.id)]
+    assert graph.counts_by_source["PROCEDURE_DEFINITION"] == 1
 
 
 @pytest.mark.asyncio

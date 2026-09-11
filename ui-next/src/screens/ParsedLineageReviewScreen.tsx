@@ -33,8 +33,8 @@ import { useUrlState } from "../lib/useUrlState";
    P1-05 / ADR-0026 — parsed-lineage-edge review queue.
 
    First-cut, functional table view of PROPOSED lineage edges across the
-   five non-governed parser-produced edge tables (view / procedure /
-   dbt-column / OpenLineage-table / OpenLineage-column). Approve / Reject
+   non-governed parser-produced edge tables (view / procedure SQL / captured
+   routine / dbt-column / OpenLineage-table / OpenLineage-column). Approve / Reject
    post to the same maker-checker endpoint the RelationshipCandidate
    review flow uses. Single and bulk decisions require a reason; the queue
    supports pagination and filtering by edge type and confidence.
@@ -43,6 +43,7 @@ import { useUrlState } from "../lib/useUrlState";
 const EDGE_TYPES: ParsedLineageEdgeType[] = [
   "VIEW",
   "PROCEDURE",
+  "ROUTINE",
   "DBT",
   "OPENLINEAGE_TABLE",
   "OPENLINEAGE_COLUMN",
@@ -67,7 +68,7 @@ function confidenceFloat(raw: string | number | null): number | null {
   return CONFIDENCE_STRING_TO_FLOAT[key] ?? null;
 }
 
-/** One edge's stable key across the five parser tables. `edge_id` alone is not
+/** One edge's stable key across the parser tables. `edge_id` alone is not
  *  unique: each table has its own id space, which is why every selection in
  *  this screen is `${edge_type}:${edge_id}`. */
 const edgeKey = (item: { edge_type: string; edge_id: string }) =>
@@ -204,9 +205,10 @@ export function ParsedLineageReviewScreen() {
       <header style={{ marginBottom: "1rem" }}>
         <h1 id="parsed-lineage-review-title">Parsed lineage review</h1>
         <p style={{ maxWidth: "60ch" }}>
-          PROPOSED lineage edges from the five non-governed parsers — view,
-          procedure, dbt, OpenLineage table, OpenLineage column. Approve to
-          fold into the shared graph; reject to keep out and record why.
+          PROPOSED lineage edges from the non-governed parsers — view,
+          procedure SQL, captured routine, dbt, OpenLineage table, OpenLineage
+          column. Approve to fold into the shared graph; reject to keep out and
+          record why.
           Maker-checker enforced: you cannot decide an edge you created.
         </p>
       </header>
@@ -395,7 +397,7 @@ export function ParsedLineageReviewScreen() {
             </p>
           }
           evidence={
-            /* The type-specific slot. Each of the five parser tables carries a
+            /* The type-specific slot. Each of the parser tables carries a
                different natural key back to its source SQL, so what establishes
                the edge differs by kind -- that is exactly what the shell must
                not flatten. */

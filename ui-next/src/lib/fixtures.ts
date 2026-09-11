@@ -6491,6 +6491,13 @@ const TASK_AGENT_FIXTURE_CAPABILITIES: Record<
       risk_tier: null,
       producer: "sql_lineage_parser: view definitions captured at ingestion",
     },
+    {
+      capability: "PROCEDURE_LINEAGE",
+      object_type: "PROCEDURE_LINEAGE_EDGE",
+      review_queue: "PARSED_LINEAGE_REVIEW",
+      risk_tier: null,
+      producer: "procedure_lineage: routine bodies captured at ingestion",
+    },
   ],
   quality: [
     {
@@ -6522,7 +6529,8 @@ const TASK_AGENT_FIXTURE_RUN: Record<
   },
   lineage: {
     skipReason: "unparseable_definition",
-    subjects: ["reporting.v_card_spend", "reporting.v_branch_totals", "reporting.v_customer_360"],
+    // The third is the second capability's subject: a routine, not a view.
+    subjects: ["reporting.v_card_spend", "reporting.v_branch_totals", "reporting.usp_load_branch_totals"],
   },
   quality: {
     skipReason: "rule_or_proposal_exists",

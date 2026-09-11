@@ -2656,6 +2656,9 @@ class DeepProcedureLineageEdgeRead(ApiModel):
     control_flow_context: str | None = None
     unparsed_reason: str | None = None
     via_temp_table: str | None = None
+    #: The stored row's ADR-0026 review state, on a listed edge. A parse
+    #: response reports what the parser found, and leaves it unset.
+    review_status: str | None = None
 
 
 class DeepProcedureLineageParseResponse(ApiModel):
@@ -3797,10 +3800,16 @@ class StudioContextProductMaterializationRead(ApiModel):
 PARSED_LINEAGE_EDGE_TYPES = (
     "VIEW",
     "PROCEDURE",
+    "ROUTINE",
     "DBT",
     "OPENLINEAGE_TABLE",
     "OPENLINEAGE_COLUMN",
 )
+#: `ROUTINE` is the routine-aware procedure table (`DeepProcedureLineageEdge`),
+#: under review since 2026-09-11; `PROCEDURE` is the raw-SQL one.
+ParsedLineageEdgeType = Literal[
+    "VIEW", "PROCEDURE", "ROUTINE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
+]
 PARSED_LINEAGE_BULK_DECISION_MAX_ITEMS = 100
 
 
@@ -3813,7 +3822,7 @@ class ParsedLineageEdgeReviewQueueItemRead(ApiModel):
     the reviewer's UI dereferences on demand)."""
 
     edge_id: UUID
-    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
+    edge_type: ParsedLineageEdgeType
     organization_id: UUID
     created_at: datetime
     created_by: str | None
@@ -3834,7 +3843,7 @@ class ParsedLineageEdgeReviewQueueRead(ApiModel):
 class ParsedLineageEdgeDecisionRequest(ApiModel):
     """Decision on one PROPOSED parsed-lineage edge."""
 
-    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
+    edge_type: ParsedLineageEdgeType
     decision: Literal["APPROVED", "REJECTED"]
     reason: str = Field(min_length=1, max_length=2000)
 
@@ -3850,7 +3859,7 @@ class ParsedLineageEdgeDecisionRead(ApiModel):
 
 class ParsedLineageEdgeBulkDecisionItem(ApiModel):
     edge_id: UUID
-    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
+    edge_type: ParsedLineageEdgeType
 
 
 class ParsedLineageEdgeBulkDecisionRequest(ApiModel):
