@@ -7640,10 +7640,13 @@ export async function makeFixtureAssetTermLinks(
    property F13 is about -- a broken screen is not an honest demo state, it is
    an error the viewer has to diagnose.
 
-   The three edges below are the three shapes the screen renders differently:
-   a column-level DBT edge with a transformation, a table-level VIEW edge with
-   none, and an OpenLineage column edge whose confidence arrives as a string
-   (the backend serialises `Numeric` that way, and the screen coerces it).
+   The edges below are the shapes the screen renders differently: a DBT edge
+   with a transformation; a VIEW edge from a parsed definition, a column pair
+   with its VIEW_DEFINITION reference, as the backend returns it; a captured
+   routine's edge the lineage agent proposed (ADR-0029), resolved through a
+   temp table; and an OpenLineage column edge whose confidence arrives as a
+   string (the backend serialises `Numeric` that way, and the screen coerces
+   it).
 --------------------------------------------------------------------------- */
 export async function makeFixtureParsedLineageReviewQueue(query: {
   edgeType?: string | null;
@@ -7672,10 +7675,35 @@ export async function makeFixtureParsedLineageReviewQueue(query: {
       created_at: "2026-09-04T10:41:00Z",
       created_by: "view-lineage-parser",
       confidence: 0.74,
-      source_label: "analytics.core.customers",
-      target_label: "analytics.core.v_active_customers",
-      transformation_type: null,
-      source_sql_reference: { view: "v_active_customers" },
+      source_label: "analytics.core.customers.customer_id",
+      target_label: "analytics.core.v_active_customers.customer_id",
+      transformation_type: "DIRECT",
+      source_sql_reference: {
+        kind: "VIEW_DEFINITION",
+        datasource_id: "d5000000-0000-0000-0000-000000000001",
+        sql_hash: "9c1f0e7b2a4d",
+        dialect: "postgres",
+      },
+    },
+    {
+      edge_id: "ple_routine_1",
+      edge_type: "ROUTINE",
+      organization_id: ORG_ID,
+      created_at: "2026-09-11T08:20:00Z",
+      created_by: "agent:lineage",
+      confidence: 0.6,
+      source_label: "warehouse.dbo.orders.amount",
+      target_label: "warehouse.dbo.order_totals.total",
+      transformation_type: "DERIVED",
+      source_sql_reference: {
+        kind: "ROUTINE_BODY",
+        datasource_id: "d5000000-0000-0000-0000-000000000002",
+        routine_id: "a7000000-0000-0000-0000-000000000001",
+        statement_ordinal: "1",
+        sql_hash: "4be2d91c07aa",
+        dialect: "tsql",
+        via_temp_table: "stage",
+      },
     },
     {
       edge_id: "ple_ol_col_1",
