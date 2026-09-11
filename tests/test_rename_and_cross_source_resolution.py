@@ -33,7 +33,8 @@ from aida.connectors.base import (
     DiscoveredTable,
 )
 from aida.db import Base
-from aida.identity_merge import merge_table_identity
+from aida.envelope_models import MetadataRoutine
+from aida.identity_merge import TABLE_IDENTITY_DOWNSTREAM_LINKS, merge_table_identity
 from aida.models import (
     AnalysisRun,
     AssetTag,
@@ -45,6 +46,8 @@ from aida.models import (
     Project,
     RenameCandidate,
 )
+from aida.parsed_lineage_review_service import EDGE_TYPE_TO_MODEL
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.workflows.activities import detect_rename_candidates, persist_discovery_snapshot
 
 
@@ -344,6 +347,84 @@ async def test_merge_table_identity_reassigns_downstream_links_and_is_idempotent
         session, old_table_id=old_table.id, new_table_id=new_table.id
     )
     assert again == {}
+
+
+async def test_merge_table_identity_moves_a_captured_routines_lineage(
+    session: AsyncSession,
+) -> None:
+    """The routine-aware procedure table's edges follow a merged rename. Until
+    2026-09-11 they stayed on the tombstoned table, and since that day its
+    approved edges fold into the unified graph -- so the renamed table lost
+    the lineage a captured routine gave it."""
+    datasource = await _datasource(session)
+    run1 = await _run(session, datasource)
+    await persist_discovery_snapshot(session, run1, datasource, _catalog("customer_account"))
+    await session.commit()
+    old_table = await session.scalar(
+        select(MetadataTable).where(MetadataTable.name == "customer_account")
+    )
+    assert old_table is not None
+    routine = MetadataRoutine(
+        organization_id=old_table.organization_id,
+        datasource_id=datasource.id,
+        schema_id=old_table.schema_id,
+        name="load_accounts",
+        routine_type="PROCEDURE",
+        body_sql_redacted="-- redacted body",
+        fingerprint="fp",
+    )
+    session.add(routine)
+    await session.flush()
+    edge = DeepProcedureLineageEdge(
+        organization_id=old_table.organization_id,
+        datasource_id=datasource.id,
+        routine_id=routine.id,
+        statement_ordinal=0,
+        source_table="banking.customer_account",
+        source_column="balance",
+        target_table="banking.account_totals",
+        target_column="total",
+        source_table_id=old_table.id,
+        transformation_type="DIRECT",
+        confidence="FULL",
+        dialect="postgres",
+        sql_hash="h" * 64,
+    )
+    session.add(edge)
+    await session.flush()
+
+    run2 = await _run(session, datasource)
+    await persist_discovery_snapshot(session, run2, datasource, _catalog("cust_account"))
+    await session.commit()
+    new_table = await session.scalar(
+        select(MetadataTable).where(MetadataTable.name == "cust_account")
+    )
+    assert new_table is not None
+
+    reassigned = await merge_table_identity(
+        session, old_table_id=old_table.id, new_table_id=new_table.id
+    )
+    await session.commit()
+
+    assert reassigned == {"deep_procedure_lineage_edge.source_table_id": 1}
+    await session.refresh(edge)
+    assert edge.source_table_id == new_table.id
+
+
+def test_every_reviewed_lineage_edge_table_follows_a_merged_rename() -> None:
+    """ADR-0026's accepted cost, pinned: an edge table added to the review set
+    later has to be remembered in every list, and the routine-aware table was
+    missed here. Every column of a reviewed edge table that refers to a catalog
+    table must be in the merge's allowlist."""
+    listed = {(model, column) for model, column in TABLE_IDENTITY_DOWNSTREAM_LINKS}
+    missing = [
+        f"{model.__tablename__}.{column.name}"
+        for model in EDGE_TYPE_TO_MODEL.values()
+        for column in model.__table__.columns
+        if any(fk.target_fullname == "metadata_table.id" for fk in column.foreign_keys)
+        and (model, column.name) not in listed
+    ]
+    assert missing == []
 
 
 # --------------------------------------------------------------------------------------------

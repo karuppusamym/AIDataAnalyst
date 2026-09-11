@@ -51,6 +51,7 @@ from aida.models import (
     UnownedAssetEscalation,
     ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 
 # (model, column name) for every downstream reference to a table's stable ID that
 # should follow a merged rename. See the module docstring for what is deliberately
@@ -80,6 +81,11 @@ TABLE_IDENTITY_DOWNSTREAM_LINKS: tuple[tuple[type[Any], str], ...] = (
     (ViewLineageEdge, "target_table_id"),
     (ProcedureLineageEdge, "source_table_id"),
     (ProcedureLineageEdge, "target_table_id"),
+    # The routine-aware procedure table. Missing until 2026-09-11, when its
+    # approved edges began to fold into the unified graph: a merged rename left
+    # them on the tombstoned table, so the renamed table lost its lineage.
+    (DeepProcedureLineageEdge, "source_table_id"),
+    (DeepProcedureLineageEdge, "target_table_id"),
     (DbtResource, "matched_table_id"),
     (BiMetricColumnEdge, "matched_table_id"),
     (CrossSourceResolutionCandidate, "source_table_id"),
