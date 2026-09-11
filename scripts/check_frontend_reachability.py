@@ -295,6 +295,26 @@ def discover_entry_points(ui_root: Path, src_root: Path) -> tuple[dict[str, str]
                 "without it this gate would walk an empty graph."
             )
 
+    # Every other top-level page is an entry too. Vite builds each `*.html` in
+    # `build.rollupOptions.input` as its own page -- the Excel add-in's task
+    # pane and sign-in dialog are two -- and a walker that only read index.html
+    # would report everything behind them as dead code the day they shipped.
+    # Unlike index.html they are optional, but one that names a script that
+    # does not exist is a problem, not a smaller graph.
+    for page in sorted(ui_root.glob("*.html")):
+        if page.name == "index.html":
+            continue
+        for src in HTML_MODULE_SCRIPT.findall(page.read_text(encoding="utf-8")):
+            candidate = (ui_root / src.lstrip("/")).resolve()
+            if candidate.is_file():
+                entries[candidate.relative_to(src_root).as_posix()] = (
+                    f"browser entry point ({page.name} <script type=module>)"
+                )
+            else:
+                problems.append(
+                    f"{page} declares a module script {src!r} that does not exist."
+                )
+
     vitest_config = ui_root / "vitest.config.ts"
     if vitest_config.is_file():
         match = VITEST_SETUP_FILES.search(vitest_config.read_text(encoding="utf-8"))

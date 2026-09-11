@@ -10,12 +10,32 @@ const runtimeEnvironment = (
   }
 ).process?.env;
 
+/* HTTPS for the dev server, opt-in. The Excel add-in's pages must be served
+   over HTTPS -- Office refuses a plain-HTTP task pane, localhost included -- so
+   `VITE_DEV_HTTPS_CERT` / `VITE_DEV_HTTPS_KEY` name a certificate and key the
+   developer created and trusted themselves (`ui-next/excel-addin/README.md`).
+   Unset, the dev server stays on plain HTTP exactly as before, which is what
+   the in-app browser preview expects. The files are read through a non-literal
+   dynamic import for the same reason `runtimeEnvironment` is narrowly typed:
+   this browser-only project does not carry `@types/node`. */
+async function devHttps(): Promise<{ cert: string; key: string } | undefined> {
+  const certPath = runtimeEnvironment?.VITE_DEV_HTTPS_CERT;
+  const keyPath = runtimeEnvironment?.VITE_DEV_HTTPS_KEY;
+  if (!certPath || !keyPath) return undefined;
+  const specifier = "node:fs/promises";
+  const fs = (await import(/* @vite-ignore */ specifier)) as {
+    readFile(path: string, encoding: "utf8"): Promise<string>;
+  };
+  return { cert: await fs.readFile(certPath, "utf8"), key: await fs.readFile(keyPath, "utf8") };
+}
+
 // The API runs as a modular monolith on :8000. In dev we proxy rather than turn
 // on CORS server-side, so the browser sees one origin and cookie/OIDC behaviour
 // matches production, where nginx serves the SPA and the API from one host.
-export default defineConfig({
+export default defineConfig(async () => ({
   plugins: [react()],
   server: {
+    https: await devHttps(),
     // `VITE_API_PROXY_TARGET` lets the same configuration work on the host
     // (`localhost`) and inside the Docker development network (`api`).
     // Bind explicitly so Docker can publish the dev server, and use polling
@@ -45,5 +65,16 @@ export default defineConfig({
       },
     },
   },
-  build: { outDir: "dist", sourcemap: true },
-});
+  build: {
+    outDir: "dist",
+    sourcemap: true,
+    rollupOptions: {
+      // The shell, plus the two pages the Excel add-in loads inside Office.
+      input: {
+        main: "index.html",
+        excelAddin: "excel-addin.html",
+        excelAddinAuth: "excel-addin-auth.html",
+      },
+    },
+  },
+}));

@@ -35,6 +35,7 @@ from check_frontend_reachability import (  # noqa: E402
     ALLOWLIST,
     analyse,
     build_graph,
+    discover_entry_points,
     specifiers_in,
 )
 
@@ -230,3 +231,39 @@ def test_all_ui_modules_reachable_or_allowlisted() -> None:
         "delete it, or -- only for a genuine, already-tracked item -- add it to "
         "ALLOWLIST with the row that owns it. Do not add it just to make this pass."
     )
+
+
+def test_every_top_level_page_is_an_entry_point(tmp_path: Path) -> None:
+    """A second Vite page (the Excel add-in's task pane) seeds the graph too.
+
+    Without this, everything behind `excel-addin.html` would read as dead code
+    the moment it shipped -- the ProposalCard failure in reverse, where the gate
+    is wrong and a working module gets deleted to satisfy it.
+    """
+    ui = tmp_path / "ui"
+    (ui / "src" / "addin").mkdir(parents=True)
+    (ui / "index.html").write_text('<script type="module" src="/src/main.tsx"></script>')
+    (ui / "src" / "main.tsx").write_text("export {};\n")
+    (ui / "addin.html").write_text(
+        '<script src="https://cdn.example/office.js"></script>'
+        '<script type="module" src="/src/addin/main.tsx"></script>'
+    )
+    (ui / "src" / "addin" / "main.tsx").write_text("export {};\n")
+
+    entries, problems = discover_entry_points(ui, (ui / "src").resolve())
+
+    assert "addin/main.tsx" in entries
+    assert "main.tsx" in entries
+    assert problems == []
+
+
+def test_a_page_naming_a_missing_script_is_a_problem(tmp_path: Path) -> None:
+    ui = tmp_path / "ui"
+    (ui / "src").mkdir(parents=True)
+    (ui / "index.html").write_text('<script type="module" src="/src/main.tsx"></script>')
+    (ui / "src" / "main.tsx").write_text("export {};\n")
+    (ui / "addin.html").write_text('<script type="module" src="/src/addin/gone.tsx"></script>')
+
+    _, problems = discover_entry_points(ui, (ui / "src").resolve())
+
+    assert any("addin.html" in problem for problem in problems)

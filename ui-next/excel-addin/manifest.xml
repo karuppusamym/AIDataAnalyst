@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Atlas for Excel - add-in manifest, development build.
+
+  Every URL here points at the ui-next dev server on https://localhost:5174. For
+  another host, replace that origin everywhere in this file (the test in
+  tests/test_excel_addin_manifest.py checks they all agree), and register
+  <origin>/excel-addin-auth.html as a redirect URI with your identity provider
+  if the build signs in with OIDC. See excel-addin/README.md.
+-->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>6f0c3a8e-2b7d-4c1e-9a55-3d8b7e2f41c9</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Atlas</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Atlas model workbook"/>
+  <Description DefaultValue="Open a datasource's model workbook from Atlas, edit descriptions in Excel, and save your edits back for review."/>
+  <IconUrl DefaultValue="https://localhost:5174/excel-addin/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:5174/excel-addin/icon-64.png"/>
+  <SupportUrl DefaultValue="https://localhost:5174/"/>
+  <AppDomains>
+    <AppDomain>https://localhost:5174</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="ExcelApi" MinVersion="1.8"/>
+    </Sets>
+  </Requirements>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:5174/excel-addin.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="Atlas.Group">
+                <Label resid="Atlas.Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Atlas.Icon.16"/>
+                  <bt:Image size="32" resid="Atlas.Icon.32"/>
+                  <bt:Image size="80" resid="Atlas.Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="Atlas.OpenPane">
+                  <Label resid="Atlas.OpenPane.Label"/>
+                  <Supertip>
+                    <Title resid="Atlas.OpenPane.Label"/>
+                    <Description resid="Atlas.OpenPane.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Atlas.Icon.16"/>
+                    <bt:Image size="32" resid="Atlas.Icon.32"/>
+                    <bt:Image size="80" resid="Atlas.Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Atlas.Pane</TaskpaneId>
+                    <SourceLocation resid="Atlas.Pane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Atlas.Icon.16" DefaultValue="https://localhost:5174/excel-addin/icon-16.png"/>
+        <bt:Image id="Atlas.Icon.32" DefaultValue="https://localhost:5174/excel-addin/icon-32.png"/>
+        <bt:Image id="Atlas.Icon.80" DefaultValue="https://localhost:5174/excel-addin/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Atlas.Pane.Url" DefaultValue="https://localhost:5174/excel-addin.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Atlas.Group.Label" DefaultValue="Atlas"/>
+        <bt:String id="Atlas.OpenPane.Label" DefaultValue="Save to Atlas"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Atlas.OpenPane.Tooltip" DefaultValue="Open the Atlas pane to load a model workbook, or save this one's edits back to Atlas for review."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>
