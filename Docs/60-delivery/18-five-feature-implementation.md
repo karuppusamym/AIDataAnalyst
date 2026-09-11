@@ -23,7 +23,9 @@ the editor; closing unsaved edits requires a discard choice. Blank cells cannot
 silently withdraw approved descriptions.
 
 Worksheet saves accept up to 1,000 edited columns per request. Existing workbook
-limits still apply. This is an in-browser alternative to the manual Excel round
+limits still apply. Column loading now paginates completely up to a 10,000-column
+browser limit and refuses incomplete, inconsistent or wrong-table responses.
+This is an in-browser alternative to the manual Excel round
 trip, not a claim that an arbitrary local Excel file is monitored for changes.
 There is also separate Excel-add-in work in the repository; live deployment and
 verification of that integration are not established by this pass.
@@ -46,6 +48,10 @@ is unchanged. Those advanced capabilities are beyond this first implementation.
 ## Automated validation
 
 - Full UI suite: **624 tests passed in 84 files**; production UI build passed.
+- Subsequent focused validation: **47 tests passed in 4 files**, including the
+  new complete-column pagination checks. A build caught the concurrently added
+  Data Dictionaries screen mid-edit; the repeat production build then passed,
+  including that screen.
 - New UI tests cover worksheet save/retry/discard/version binding, review-preview
   failures and wrong-review responses, ontology draft/submit/JSON errors/history
   baselines, and natural-language aliases with ambiguity/depth/statement refusal.
@@ -78,3 +84,10 @@ then verify ontology create/review/publication in the running environment.
 Until that is verified, ontology deployment is **pending**, even though its code
 and automated lifecycle tests are implemented. Live 100% zoom/multi-screen visual
 acceptance also remains unverified. This document does not label either complete.
+
+Rechecked on the user's request: the database remains at `d5e8a2c7f9b1`, and
+neither `ontology_head` nor `ontology_version` is visible as a committed table.
+Database session `54640` is waiting to create the ontology version table and is
+blocked by session `10760`, running a metadata-table SELECT. No local Python
+Alembic upgrade/downgrade process was found at that check. Repository edits are
+still arriving from another session. No other session was cancelled or terminated.
