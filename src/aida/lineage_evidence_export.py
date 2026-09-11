@@ -30,7 +30,8 @@ landed on this branch today, not re-derived:
   one.
 - **Per-edge transformation reference**: AT-19's `evidence.
   transformation_reference` / `evidence.redaction_status` on `VIEW_DEFINITION`
-  edges, carried through `evidence` verbatim (never re-resolved or
+  edges, and on a `PROCEDURE_DEFINITION` edge one captured routine
+  establishes, carried through `evidence` verbatim (never re-resolved or
   re-derived here).
 - **Asserting principal for human edges**: the only edge kind in this graph
   that is a human assertion rather than a mechanical read of a database

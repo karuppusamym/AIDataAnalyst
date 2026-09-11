@@ -42,7 +42,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.envelope_models import MetadataViewDefinition
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.models import (
     DataSource,
     DbtArtifactImport,
@@ -269,6 +269,7 @@ def _register_definition_edges(
     rows: Sequence[DefinitionEdgeRow],
     edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION"],
     view_definitions_by_table_id: dict[UUID, tuple[str, str]] | None = None,
+    routine_references_by_id: dict[UUID, tuple[str, str]] | None = None,
 ) -> None:
     """Collapse column-level parser rows into one table-level edge per pair.
 
@@ -314,8 +315,10 @@ def _register_definition_edges(
         # MetadataRoutine row (no FK, no specific_name -- see
         # `mcp_server.py::_view_definition_transformation_detail`), so no
         # reference is fabricated here. A row from the routine-aware table
-        # (`DeepProcedureLineageEdge`) does know its routine, so an edge such
-        # rows establish names those routines instead.
+        # (`DeepProcedureLineageEdge`) does know its routine: an edge such rows
+        # establish names those routines, and when exactly one routine -- still
+        # captured -- establishes it, the edge carries the same resolvable
+        # reference a VIEW_DEFINITION edge does, to that routine's own body.
         routine_ids = sorted(
             {
                 str(edge.routine_id)
@@ -325,6 +328,17 @@ def _register_definition_edges(
         )
         if routine_ids:
             evidence["routine_ids"] = routine_ids
+        if len(routine_ids) == 1 and routine_references_by_id is not None:
+            found_routine = routine_references_by_id.get(UUID(routine_ids[0]))
+            if found_routine is not None:
+                redaction_status, availability = found_routine
+                evidence["transformation_reference"] = {
+                    "tool": "get_transformation_detail",
+                    "entity_id": routine_ids[0],
+                    "kind": "ROUTINE_BODY",
+                }
+                evidence["redaction_status"] = redaction_status
+                evidence["availability"] = availability
         if view_definitions_by_table_id is not None:
             found = view_definitions_by_table_id.get(target_table_id)
             if found is not None:
@@ -380,6 +394,34 @@ async def _load_view_definition_references(
     return {
         table_id: (redaction_status, availability)
         for table_id, redaction_status, availability in rows
+    }
+
+
+async def _load_routine_references(
+    session: AsyncSession,
+    datasource: DataSource,
+    routine_rows: Sequence[DeepProcedureLineageEdge],
+) -> dict[UUID, tuple[str, str]]:
+    """The routine-aware counterpart of `_load_view_definition_references`:
+    the two narrow columns a routine's reference carries, never its body."""
+    routine_ids = {row.routine_id for row in routine_rows}
+    if not routine_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MetadataRoutine.id,
+                MetadataRoutine.redaction_status,
+                MetadataRoutine.availability,
+            ).where(
+                MetadataRoutine.datasource_id == datasource.id,
+                MetadataRoutine.id.in_(routine_ids),
+            )
+        )
+    ).all()
+    return {
+        routine_id: (redaction_status, availability)
+        for routine_id, redaction_status, availability in rows
     }
 
 
@@ -455,7 +497,14 @@ async def collect_definition_lineage(
     routine_rows = (await session.scalars(routine_stmt)).all()
     graph.note_scan_bound(routine_rows, graph.edge_limit, "EDGE_LIMIT")
     # One PROCEDURE_DEFINITION edge per table pair, whichever table states it.
-    _register_definition_edges(graph, [*procedure_rows, *routine_rows], "PROCEDURE_DEFINITION")
+    _register_definition_edges(
+        graph,
+        [*procedure_rows, *routine_rows],
+        "PROCEDURE_DEFINITION",
+        routine_references_by_id=await _load_routine_references(
+            session, datasource, routine_rows
+        ),
+    )
 
 
 async def collect_relationship_candidates(

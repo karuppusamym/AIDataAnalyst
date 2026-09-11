@@ -22,10 +22,13 @@ AT-19: a `VIEW_DEFINITION` edge's `evidence` also carries a bounded, resolvable
 kind}`) plus `redaction_status`/`availability`, sourced from envelope 1.1's
 `MetadataViewDefinition` (unique per `table_id`, so the lookup is exact, not
 guessed) -- never the DDL text itself, keeping this graph response's size
-bound (ADR-0010) intact. `PROCEDURE_DEFINITION` edges deliberately do NOT get
-one: `ProcedureLineageEdge` carries no identity back to the specific
-`MetadataRoutine` row it was parsed from, so no reference is fabricated for
-it (see `mcp_server.py::_view_definition_transformation_detail`).
+bound (ADR-0010) intact. A `PROCEDURE_DEFINITION` edge gets one only when a
+single captured routine establishes it -- the routine-aware
+`DeepProcedureLineageEdge` carries `routine_id`, since 2026-09-11 -- and then
+`entity_id` is that routine and `kind` is `ROUTINE_BODY`. `ProcedureLineageEdge`,
+the pasted-SQL table, carries no identity back to a routine, so no reference
+is fabricated for an edge it alone establishes (see
+`mcp_server.py::_transformation_detail`).
 """
 
 from collections import Counter

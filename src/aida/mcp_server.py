@@ -89,7 +89,7 @@ from aida.context_product_policy import (
     was_previously_authorized_consumer,
 )
 from aida.db import get_session
-from aida.envelope_models import MetadataViewDefinition
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.mcp_budget import (
@@ -250,12 +250,13 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "slug": "get_transformation_detail",
         "description": (
             "Return value-safe transformation evidence -- the code that produced a lineage "
-            "edge -- for a dbt resource, a matched table, or a view. dbt-matched entities "
-            "get redacted compiled SQL, dependencies, tests, materialization and source "
-            "artifact hash; a view table (AT-19, envelope 1.1) gets its redacted definition "
-            "SQL, redaction status and screening status. Answers 'why do you say so' for a "
-            "VIEW_DEFINITION or DBT_DEPENDENCY edge from get_lineage_graph -- not just that "
-            "the edge exists."
+            "edge -- for a dbt resource, a matched table, a view, or a captured routine. "
+            "dbt-matched entities get redacted compiled SQL, dependencies, tests, "
+            "materialization and source artifact hash; a view table (AT-19, envelope 1.1) "
+            "gets its redacted definition SQL, redaction status and screening status; a "
+            "routine gets its redacted body the same way. Answers 'why do you say so' for a "
+            "VIEW_DEFINITION, PROCEDURE_DEFINITION or DBT_DEPENDENCY edge from "
+            "get_lineage_graph -- not just that the edge exists."
         ),
         "inputSchema": {
             "type": "object",
@@ -263,7 +264,11 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "datasource_id": {"type": "string", "description": "Datasource UUID"},
                 "entity_id": {
                     "type": "string",
-                    "description": "Table UUID or dbt-resource UUID returned by resolve_entity",
+                    "description": (
+                        "Table UUID or dbt-resource UUID returned by resolve_entity, or the "
+                        "entity_id of an edge's transformation_reference (a view's table "
+                        "UUID, or a routine UUID)"
+                    ),
                 },
             },
             "required": ["datasource_id", "entity_id"],
@@ -998,15 +1003,15 @@ async def _transformation_detail(
        edge and this tool can never present two disconnected representations
        of the same fact.
 
-       Stored-procedure bodies (`MetadataRoutine`) are deliberately NOT
-       resolved here: `ProcedureLineageEdge` carries no FK, specific_name, or
-       any other identity field back to the `MetadataRoutine` row a given
-       edge was parsed from (`view_lineage_api.py`'s `_persist_edges` takes
-       only raw SQL text with no routine-identity parameter), so there is no
-       stable per-edge link to follow -- fabricating one here would present
-       an unverifiable guess as fact. `PROCEDURE_DEFINITION` edges keep their
-       existing `sql_hash`/`dialect` evidence and do not get a
-       `transformation_reference`. See AT-19's tracker note.
+    3. A captured routine's body (`MetadataRoutine`), since 2026-09-11 --
+       `entity_id` is the routine's own id. `ProcedureLineageEdge`, the
+       pasted-SQL table, still carries no FK, specific_name or other identity
+       back to a routine, so an edge it alone establishes gets no reference
+       and none is fabricated. The routine-aware table
+       (`DeepProcedureLineageEdge`) carries `routine_id`, and a
+       `PROCEDURE_DEFINITION` edge exactly one routine establishes names it as
+       `transformation_reference.entity_id`; see
+       `_routine_transformation_detail`.
     """
     resource = await session.scalar(
         select(DbtResource)
@@ -1021,7 +1026,10 @@ async def _transformation_detail(
         .limit(1)
     )
     if resource is None:
-        return await _view_definition_transformation_detail(session, datasource, entity_id)
+        view_detail = await _view_definition_transformation_detail(session, datasource, entity_id)
+        if view_detail is not None:
+            return view_detail
+        return await _routine_transformation_detail(session, datasource, entity_id)
     artifact = await session.get(DbtArtifactImport, resource.artifact_import_id)
     # `resource.description` is source-controlled free text pulled from a dbt manifest
     # (a model/source `description:` in someone's YAML) and this tool call hands it
@@ -1135,6 +1143,57 @@ async def _view_definition_transformation_detail(
             "value_free": True,
             "definition_sql_literals_redacted": True,
             "raw_definition_persisted": False,
+        },
+    }
+
+
+async def _routine_transformation_detail(
+    session: AsyncSession,
+    datasource: DataSource,
+    entity_id: UUID,
+) -> dict[str, Any] | None:
+    """A captured routine's body, for an entity the dbt and view lookups did
+    not match: `entity_id` is a `MetadataRoutine.id` in this datasource.
+
+    It is what a routine-backed `PROCEDURE_DEFINITION` edge names in
+    `evidence.transformation_reference` (`unified_lineage_builder`), so the
+    edge and this read describe the same row. The body is released under the
+    gate a person's parse applies to it -- literal-redacted (`PARSED`) and
+    screened clean (`is_eligible_for_model_context`). Otherwise it is
+    withheld, and the statuses still say why.
+    """
+    routine = await session.get(MetadataRoutine, entity_id)
+    if (
+        routine is None
+        or routine.datasource_id != datasource.id
+        or routine.organization_id != datasource.organization_id
+    ):
+        return None
+    body = routine.body_sql_redacted
+    if routine.redaction_status != "PARSED" or not is_eligible_for_model_context(
+        routine.screening_status
+    ):
+        body = None
+    return {
+        "transformation_source": "ROUTINE_BODY",
+        "routine_id": str(routine.id),
+        "name": routine.name,
+        "signature": routine.signature,
+        "routine_type": routine.routine_type,
+        "language": routine.language,
+        "status": routine.status,
+        "body_sql_redacted": body,
+        "body_fingerprint": routine.body_fingerprint,
+        "redaction_status": routine.redaction_status,
+        "screening_status": routine.screening_status,
+        "screening_reason_codes": routine.screening_reason_codes,
+        "truncated": routine.truncated,
+        "availability": routine.availability,
+        "unavailable_reason": routine.unavailable_reason,
+        "governance": {
+            "value_free": True,
+            "body_sql_literals_redacted": True,
+            "raw_body_persisted": False,
         },
     }
 

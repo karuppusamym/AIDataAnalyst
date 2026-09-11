@@ -57,7 +57,8 @@ It now carries the same six columns and index (migration `d81f5a2c9e47`). The qu
 
 * **A person's parse** of a captured routine is written under the same review mode as every other parser's. Under `require_review`, a re-parse replaces only PROPOSED rows and UNPARSED markers, and leaves every decided row alone.
 * **An UNPARSED marker** records a gap in the parse, not an edge, so it is never queued. It is ACTIVE in either mode.
-* **The unified graph** folds ACTIVE rows into `PROCEDURE_DEFINITION` edges together with the raw-SQL table's, one edge per table pair. Such an edge names the routines behind it.
+* **The unified graph** folds ACTIVE rows into `PROCEDURE_DEFINITION` edges together with the raw-SQL table's, one edge per table pair. Such an edge names the routines behind it. When one routine establishes it, the edge also carries AT-19's `get_transformation_detail` reference to that routine's body.
+* **A merged rename** (CT-4) moves the table's edges to the renamed table, as it does the other edge tables'.
 * **Fixed on the way.** Under `require_review`, re-parsing a view or pasted procedure SQL failed on the natural-key constraint when a reviewer had rejected one of its edges. Every decided row is now left alone, not only an ACTIVE one.
 
 The lineage agent ([ADR-0029](ADR-0029-steward-agent.md)) writes PROPOSED rows to this table.

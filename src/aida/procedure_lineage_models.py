@@ -15,9 +15,10 @@ module's new tables arrive as one reviewable, isolated file.
 table (AT-D2/AT-D5) is populated by `sql_lineage_parser.parse_procedure_lineage`
 via `view_lineage_api.py`'s raw-SQL parse endpoint -- a flat, non-procedure-
 aware parse with no identity back to a specific `MetadataRoutine` at all
-(AT-19 documents this as the reason `PROCEDURE_DEFINITION` unified-lineage
-edges cannot carry a `transformation_reference` the way `VIEW_DEFINITION`
-edges do). Overloading that same table with statement-ordinal, control-flow,
+(AT-19 documented this as the reason `PROCEDURE_DEFINITION` unified-lineage
+edges could not carry a `transformation_reference` the way `VIEW_DEFINITION`
+edges do; since 2026-09-11 an edge one routine establishes through this
+table does). Overloading that same table with statement-ordinal, control-flow,
 UNPARSED-marker and routine-identity columns this module's richer parse
 needs would either break its existing natural-key uniqueness (AT-D2) and its
 existing callers, or require touching `models.py`'s already-declared class

@@ -141,6 +141,10 @@
   UNPARSED marker. Its backlog bound and outcome measure count both tables.
 - Approved routine edges fold into the unified graph as
   `PROCEDURE_DEFINITION` edges, one per table pair, naming their routines.
+- AT-19 for procedures: an edge one captured routine establishes carries a
+  `get_transformation_detail` reference, and the tool returns that
+  routine's redacted body when it is literal-redacted and screened clean.
+  An edge two routines establish names both and references neither.
 - The console labels the capability, and the review screen filters on
   `ROUTINE`.
 - Tests: `tests/test_lineage_agent.py`, `tests/test_parsed_lineage_review.py`
@@ -158,6 +162,12 @@
   reviewer had rejected one of its edges, so the person got a 500. A decided
   row in any state is now left alone. Test:
   `tests/test_parsed_lineage_review.py`.
+- **A merged rename lost a routine's lineage (defect).** CT-4's merge step
+  repointed the view and pasted-procedure edge tables but not the
+  routine-aware one, so a captured routine's edges stayed on the tombstoned
+  table (`b43d86d`). They move now. A structural test holds every reviewed
+  edge table's catalog-table columns to the merge list. Test:
+  `tests/test_rename_and_cross_source_resolution.py`.
 - **Governed ontology v1** (bc6ab78) is wired in (`56f0476`):
   - the router is mounted;
   - migration `7c2d94e1b8a3` creates its tables;

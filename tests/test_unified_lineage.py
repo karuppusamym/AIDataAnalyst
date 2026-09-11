@@ -947,6 +947,127 @@ async def test_a_routine_edge_folds_into_the_graph_once_a_person_approves_it(
     ]
     assert procedure_edge.evidence["routine_ids"] == [str(routine.id)]
     assert graph.counts_by_source["PROCEDURE_DEFINITION"] == 1
+    # AT-19, for procedures: one routine establishes the edge, so it carries a
+    # reference that resolves to that routine's own body.
+    assert procedure_edge.evidence["transformation_reference"] == {
+        "tool": "get_transformation_detail",
+        "entity_id": str(routine.id),
+        "kind": "ROUTINE_BODY",
+    }
+
+    detail = await _transformation_detail(db_session, datasource, routine.id)
+
+    assert detail is not None
+    assert detail["transformation_source"] == "ROUTINE_BODY"
+    assert detail["body_sql_redacted"] == "-- redacted body"
+    assert detail["redaction_status"] == procedure_edge.evidence["redaction_status"]
+    assert detail["availability"] == procedure_edge.evidence["availability"]
+
+
+async def _seed_routine(
+    db_session: AsyncSession,
+    datasource: DataSource,
+    schema: MetadataSchema,
+    name: str,
+    **overrides: Any,
+) -> MetadataRoutine:
+    values: dict[str, Any] = {
+        "organization_id": datasource.organization_id,
+        "datasource_id": datasource.id,
+        "schema_id": schema.id,
+        "name": name,
+        "routine_type": "PROCEDURE",
+        "body_sql_redacted": f"-- body of {name}",
+        "fingerprint": "fp",
+    }
+    values.update(overrides)
+    routine = MetadataRoutine(**values)
+    db_session.add(routine)
+    await db_session.flush()
+    return routine
+
+
+def _approved_routine_edge(
+    datasource: DataSource,
+    routine: MetadataRoutine,
+    source: MetadataTable,
+    target: MetadataTable,
+) -> DeepProcedureLineageEdge:
+    return DeepProcedureLineageEdge(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        routine_id=routine.id,
+        statement_ordinal=0,
+        source_table=f"public.{source.name}",
+        source_column="id",
+        target_table=f"public.{target.name}",
+        target_column="order_id",
+        source_table_id=source.id,
+        target_table_id=target.id,
+        transformation_type="DIRECT",
+        confidence="FULL",
+        dialect="postgres",
+        is_write=True,
+        sql_hash="h4",
+        review_status="ACTIVE",
+        created_by="reviewer-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_procedure_edge_two_routines_establish_names_both_and_references_neither(
+    db_session,
+) -> None:
+    """No fabrication: with two routines behind one table pair, no single body
+    establishes the edge, so it names both and resolves to neither."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    raw_orders = await _seed_table(db_session, datasource, schema, "raw_orders")
+    fct_orders = await _seed_table(db_session, datasource, schema, "fct_orders")
+    first = await _seed_routine(db_session, datasource, schema, "load_orders")
+    second = await _seed_routine(db_session, datasource, schema, "reload_orders")
+    db_session.add_all(
+        [
+            _approved_routine_edge(datasource, first, raw_orders, fct_orders),
+            _approved_routine_edge(datasource, second, raw_orders, fct_orders),
+        ]
+    )
+    await db_session.flush()
+
+    graph = await build_unified_lineage_graph_payload(db_session, datasource, settings=None)
+
+    [procedure_edge] = [
+        edge for edge in graph.edges if edge.edge_source == "PROCEDURE_DEFINITION"
+    ]
+    assert procedure_edge.evidence["routine_ids"] == sorted([str(first.id), str(second.id)])
+    assert "transformation_reference" not in procedure_edge.evidence
+
+
+@pytest.mark.asyncio
+async def test_a_routine_transformation_detail_withholds_an_unscreened_body_in_its_own_datasource(
+    db_session,
+) -> None:
+    """The body is released under the gate a person's parse applies to it.
+    A quarantined body is withheld while its statuses still say why, and
+    another datasource cannot read the routine at all."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    other_datasource, _other_schema = await _seed_org_and_datasource(db_session)
+    routine = await _seed_routine(
+        db_session,
+        datasource,
+        schema,
+        "load_orders",
+        screening_status="QUARANTINED",
+        screening_reason_codes=["INJECTION_DEFENSE:MULTILINGUAL_INJECTION"],
+    )
+
+    detail = await _transformation_detail(db_session, datasource, routine.id)
+    elsewhere = await _transformation_detail(db_session, other_datasource, routine.id)
+
+    assert detail is not None
+    assert detail["transformation_source"] == "ROUTINE_BODY"
+    assert detail["body_sql_redacted"] is None
+    assert detail["screening_status"] == "QUARANTINED"
+    assert elsewhere is None
 
 
 @pytest.mark.asyncio
