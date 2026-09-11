@@ -12,6 +12,7 @@
 |---|---|---|
 | Where the governing rules of a task agent live | inside `steward_agent.py` | `task_agent.py`, shared by three agents |
 | View definitions captured at ingestion that anything parsed | none | every eligible one the lineage agent reaches; each edge PROPOSED for a person |
+| Routine bodies captured at ingestion that anything parsed | none | every eligible one the lineage agent reaches; each table-to-table edge PROPOSED for a person |
 | Quality rules anything suggested | none | row-count floors and null-rate ceilings from profile history, each a T2 review a person decides |
 | How high an agent may *propose* / *decide* | T1 / T1 | T1 by default, T2 by declaration, never T3 / T1, unchanged |
 
@@ -121,6 +122,30 @@
   exactly as before.
 - Tests: `tests/test_side_car_steward_contract.py`.
 
+### AG-18 -- procedure lineage under the lineage agent (P1)
+
+- `deep_procedure_lineage_edge`, the routine-aware procedure table, gets
+  ADR-0026's six review columns and index (migration `d81f5a2c9e47`). It was
+  the one parser-produced edge table without them.
+- The per-edge queue, the decision endpoint and the bulk endpoint accept it as
+  edge type `ROUTINE`. A queue item names the routine and the statement.
+- A person's parse of a captured routine is written under the review mode, like
+  every other parser's. Under `require_review` a re-parse replaces only
+  undecided rows, and an UNPARSED marker is never queued.
+- `routine_lineage_edges.py` holds the routine gate and the table's writes,
+  moved out of `procedure_lineage_api` so the agent does not import a router.
+  The router's private copy of the table-name resolver is gone.
+- The lineage agent's second capability, PROCEDURE_LINEAGE, parses eligible
+  routine bodies that have no routine-aware lineage. It proposes only
+  table-to-table edges: never a temp table's own hops, a result set or an
+  UNPARSED marker. Its backlog bound and outcome measure count both tables.
+- Approved routine edges fold into the unified graph as
+  `PROCEDURE_DEFINITION` edges, one per table pair, naming their routines.
+- The console labels the capability, and the review screen filters on
+  `ROUTINE`.
+- Tests: `tests/test_lineage_agent.py`, `tests/test_parsed_lineage_review.py`
+  and `tests/test_unified_lineage.py`.
+
 ### Fixed on the way
 
 - **GL-9 cross-source lineage names (defect).** Table drafts named upstream
@@ -128,6 +153,11 @@
   (ADR-0017), and cited edges a reviewer had rejected. Both are gone. Tests:
   `tests/test_gl9_lineage_same_source.py`.
 - **The roster** lists each task agent's completed runs from its audit rows.
+- **Re-parse after a rejection (defect).** Under `require_review`, re-parsing
+  a view or pasted procedure SQL failed on the natural-key constraint when a
+  reviewer had rejected one of its edges, so the person got a 500. A decided
+  row in any state is now left alone. Test:
+  `tests/test_parsed_lineage_review.py`.
 - **Governed ontology v1** (bc6ab78) is wired in (`56f0476`):
   - the router is mounted;
   - migration `7c2d94e1b8a3` creates its tables;
@@ -157,11 +187,9 @@
    default, so a person starts every run until an operator sets one.
 2. **The roster lists completed task-agent runs, not refused ones.** The inbox
    counts those.
-3. **The lineage agent parses views only, by decision.** The routine-aware
-   procedure edge table has no review state, and the reviewable one has no
-   routine identity. An agent must not write lineage no person reviews.
-   Procedures wait for a review state on the routine-aware table; dbt models
-   keep their own path.
+3. **The lineage agent parses views and captured routine bodies.** dbt models
+   keep their own manifest path, and a procedure's hops through its own temp
+   tables are left to a person's parse.
 4. **The quality agent proposes two rule types.** Profiles store no values,
    so there is nothing to derive a range or distribution rule from.
 5. **Nothing measured on a real estate.** Every acceptance rate is `None`.
@@ -195,3 +223,11 @@ AG-15 (scheduling and counting) was verified separately, in a clean worktree
 at `b0eaccd`. Its tests and the steward, lineage and quality agent tests
 passed, 83 in all. Only the same two ontology failures appeared, in the
 reachability and tier-table tests. Its commit message records the runs.
+
+AG-18 (procedure lineage) was verified in a clean worktree at `2169b20` plus
+the change. The whole suite gave 9,399 passed, 23 skipped and 1 xfailed. One
+test failed: the S3 archive's legal-hold test ("the retain until date must be
+in the future"), a timing flake whose file passes alone. The drift gate
+applied `d81f5a2c9e47` on PostgreSQL. Ruff, mypy, lint-imports (12 kept), the
+docs checks, the UI typecheck and 632 UI tests were clean. Re-based onto
+`1ed26b6`, the 153 tests nearest the change passed again.

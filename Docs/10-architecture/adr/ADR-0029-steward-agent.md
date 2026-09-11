@@ -129,6 +129,24 @@ So a person decides every T2 proposal, and no agent ever asks to move the trust 
 * Any spec other than the quality agent's is proposed with a proposal ceiling above T1.
 * A second dedicated queue is proposed for the runtime's human-only list.
 
+## Amendment (2026-09-11, later the same day): procedure lineage
+
+The lineage agent first parsed views only. No table could hold a procedure edge that was both reviewable and tied to its routine: `procedure_lineage_edge` had ADR-0026's review state but no routine identity, and `deep_procedure_lineage_edge` had the routine identity but no review state. An agent must not write lineage that no person reviews, so procedures waited.
+
+The routine-aware table now has the same six review columns as the other five (migration `d81f5a2c9e47`). The per-edge queue decides its edges as edge type `ROUTINE`; see [ADR-0026](ADR-0026-per-edge-type-lineage-review.md)'s amendment. With that, the lineage agent has a second capability, PROCEDURE_LINEAGE:
+
+* **What it parses.** The captured body of each eligible routine — the same gate a person's parse applies — that has no row in the routine-aware table, in any review state.
+* **What it proposes.** Table-to-table lineage only:
+  * An edge into or out of a temp table or table variable is the procedure's own plumbing. The parser's transitive edge through it is proposed instead.
+  * An edge into a result set is not table lineage.
+  * An UNPARSED marker is a gap, not an edge.
+* **What it shares with the view capability:**
+  * edges are PROPOSED whatever the auto-activation settings say, authored by the agent, and decided by a person;
+  * an unusable body is recorded once;
+  * the backlog bound and the outcome measure count both tables.
+
+Once approved, a routine edge folds into the unified graph as a `PROCEDURE_DEFINITION` edge that names its routine.
+
 ## Implementation status (2026-09-11)
 
 **Implemented:**
@@ -142,13 +160,14 @@ So a person decides every T2 proposal, and no agent ever asks to move the trust 
 * **Column descriptions:** the steward agent's third capability, COLUMN_DESCRIPTION. It drafts the columns of its worklist tables that have no approved or retired description and no open draft. Drafts come from evidence only (`column_description_service`), and each is submitted as the agent's own request.
 * **The ingest side-car under the contract:** where an organization has registered the steward agent, `newly_created_table_drafter` drafts as that agent. The agent's kill switch or a T0 contract stops it; a reviewable draft becomes the agent's request, and each draft gets a ledger row. An organization that never registered the agent sees no change. That removes the behaviour change the Alternatives table deferred on.
 * **An evidence fix:** GL-9 names only same-source lineage that no reviewer rejected, which closes the ADR-0017 gap recorded in the 2026-09-10 status.
+* **Procedure lineage:** the lineage agent's PROCEDURE_LINEAGE capability, and review state on `deep_procedure_lineage_edge` (migration `d81f5a2c9e47`). The routine gate and the table's writes moved out of the router into `routine_lineage_edges.py`, and a person's parse is now written under the review mode. Approved routine edges fold into the unified graph.
 
-Tests: `tests/test_lineage_agent.py`, `tests/test_quality_agent.py`, `tests/test_task_agent_schedule.py`, `tests/test_steward_column_descriptions.py`, `tests/test_side_car_steward_contract.py` and `tests/test_gl9_lineage_same_source.py`, alongside the steward agent's.
+Tests: `tests/test_lineage_agent.py`, `tests/test_quality_agent.py`, `tests/test_task_agent_schedule.py`, `tests/test_steward_column_descriptions.py`, `tests/test_side_car_steward_contract.py` and `tests/test_gl9_lineage_same_source.py`, alongside the steward agent's. The routine table's review cases are in `tests/test_parsed_lineage_review.py` and `tests/test_unified_lineage.py`.
 
 **Not done, stated plainly:**
 
 * Scheduled runs are off. Every `<key>_agent_interval_minutes` is 0 by default, so a person starts every run until an operator sets one.
 * The roster lists a task agent's completed runs, not its refused ones; the agent inbox counts those.
-* The lineage agent parses views only, by decision. The routine-aware procedure edge table (`deep_procedure_lineage_edge`) has no review state. The reviewable one (`procedure_lineage_edge`) carries no routine identity. An agent must not write lineage that no person reviews, so procedures wait until the routine-aware table has a review state. dbt models keep their own manifest path.
+* The lineage agent parses views and captured routine bodies. dbt models keep their own manifest path. A procedure's hops through its own temp tables are left to a person's parse.
 * The quality agent proposes floors and null-rate ceilings only. Profiles store no values, so it has nothing to derive a range or distribution rule from without breaking INV-6.
 * Nothing has been measured on a real estate.

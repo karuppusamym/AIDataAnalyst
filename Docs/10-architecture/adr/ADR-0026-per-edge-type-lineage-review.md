@@ -49,6 +49,19 @@ Every existing read path — `unified_lineage_api._build_unified_graph`, the dom
 | Reuse `GovernanceReview` for parsed lineage edges | `GovernanceReview` is scoped to the semantic/annotation/description/glossary domain (see ADR-0025) and its schema, its RBAC, its supersede semantics, and its queue read model were shaped around those artifact types. Shoehorning lineage edges into it would either dilute those semantics or require enough new columns and case branches on `object_type` that we'd effectively have built ADR-0026 inside `GovernanceReview` — with the extra cost of a table that now serves two very different workflows. |
 | Off by default, per-tenant flag only | The config knob IS off by default (`auto_active`), and per-tenant opt-in is a natural follow-up ADR building on the same columns; not doing it now is a scoping choice, not a design choice. |
 
+## Amendment (2026-09-11): a sixth table
+
+`deep_procedure_lineage_edge` is the routine-aware procedure table (N3). It arrived after this ADR, and it was the one parser-produced edge table without a review state. That is the cost the Negative consequences above named: a table added later has to remember all six columns, and this one had not.
+
+It now carries the same six columns and index (migration `d81f5a2c9e47`). The queue, the decision endpoint and the bulk endpoint accept it as edge type `ROUTINE`, and its queue item names the routine and the statement within it. `PROCEDURE` stays the raw-SQL table.
+
+* **A person's parse** of a captured routine is written under the same review mode as every other parser's. Under `require_review`, a re-parse replaces only PROPOSED rows and UNPARSED markers, and leaves every decided row alone.
+* **An UNPARSED marker** records a gap in the parse, not an edge, so it is never queued. It is ACTIVE in either mode.
+* **The unified graph** folds ACTIVE rows into `PROCEDURE_DEFINITION` edges together with the raw-SQL table's, one edge per table pair. Such an edge names the routines behind it.
+* **Fixed on the way.** Under `require_review`, re-parsing a view or pasted procedure SQL failed on the natural-key constraint when a reviewer had rejected one of its edges. Every decided row is now left alone, not only an ACTIVE one.
+
+The lineage agent ([ADR-0029](ADR-0029-steward-agent.md)) writes PROPOSED rows to this table.
+
 ## Related
 
 - `ADR-0025-auto-approve-escape-hatch.md` — the high-confidence auto-active threshold in `require_review` mode mirrors ADR-0025's spirit for lineage: a reviewer would rubber-stamp a FULL-confidence parse anyway.
