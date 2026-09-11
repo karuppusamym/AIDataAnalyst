@@ -1392,7 +1392,7 @@ async def compose_governance_review_diff(
     after: dict[str, Any] | None = None
     message: str | None = None
 
-    if review.object_type in {"CONTEXT_PRODUCT_VERSION", "MODEL_IMPORT_BATCH"}:
+    if review.object_type in {"CONTEXT_PRODUCT_VERSION", "MODEL_IMPORT_BATCH", "ONTOLOGY_VERSION"}:
         from aida.review_detail_snapshots import detail_snapshots
 
         before, after, message = await detail_snapshots(session, review)
@@ -2835,6 +2835,7 @@ async def _decide_query_history_metric_candidate(
 #: reviewer_agent -> semantic_api` cycle the review recorded (R03) cannot
 #: re-form through the automation path.
 _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
+    "ONTOLOGY_VERSION": decide_ontology_version,
     "SEMANTIC_MODEL_VERSION": _decide_semantic_model_version,
     "GOVERNED_TOOL_VERSION": _decide_governed_tool_version,
     "MODEL_ROUTE_CONFIGURATION": _decide_model_route_configuration,
@@ -2864,8 +2865,6 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     # ADR-0029: the quality agent's proposals. The adapter lives beside the
     # rules they are derived by rather than here.
     "QUALITY_RULE_PROPOSAL": decide_quality_rule_proposal,
-    # Governed ontology v1: publish or reject one ontology version.
-    "ONTOLOGY_VERSION": decide_ontology_version,
 }
 
 register_target_adapters(_TARGET_EFFECT_ADAPTERS)

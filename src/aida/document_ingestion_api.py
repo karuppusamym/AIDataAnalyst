@@ -324,6 +324,26 @@ async def extract_claims(
         raise HTTPException(
             status_code=409, detail="document must be in MAPPED status before extracting claims"
         )
+    # Extraction leaves the document MAPPED, so the status check alone let a
+    # second call (a double click, a second steward) raise every claim and its
+    # review again. The row lock makes a concurrent pair take turns, and the
+    # second then finds the first one's claims.
+    await session.execute(select(Document.id).where(Document.id == document.id).with_for_update())
+    proposed = await session.scalar(
+        select(func.count())
+        .select_from(DocumentClaim)
+        .where(
+            DocumentClaim.document_section_id.in_(
+                select(DocumentSection.id).where(DocumentSection.document_id == document.id)
+            )
+        )
+    )
+    if proposed:
+        raise HTTPException(
+            status_code=409,
+            detail="descriptions were already proposed for this document; "
+            "decide them in the review queue",
+        )
     claims = await extract_description_claims(session, document, requested_by=context.principal_id)
     record_audit(
         session,

@@ -38,6 +38,34 @@ async def detail_snapshots(
         object_id = UUID(review.object_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="review target is unavailable") from exc
+    if review.object_type == "ONTOLOGY_VERSION":
+        from aida.ontology_models import OntologyVersion
+
+        ontology = await session.get(OntologyVersion, object_id)
+        if (
+            ontology is None
+            or ontology.organization_id != review.organization_id
+            or ontology.governance_review_id != review.id
+        ):
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        previous = (
+            await session.scalar(
+                select(OntologyVersion).where(
+                    OntologyVersion.ontology_id == ontology.ontology_id,
+                    OntologyVersion.organization_id == ontology.organization_id,
+                    OntologyVersion.version == ontology.base_version,
+                )
+            )
+            if ontology.base_version
+            else None
+        )
+        if ontology.base_version and previous is None:
+            raise HTTPException(status_code=409, detail="ontology baseline is unavailable")
+        return (
+            previous.definition if previous else {},
+            ontology.definition,
+            "Versioned ontology definition; approval does not grant data access or enable Neo4j.",
+        )
     if review.object_type == "CONTEXT_PRODUCT_VERSION":
         version = await session.get(ContextProductVersion, object_id)
         if version is None or version.organization_id != review.organization_id:
@@ -57,8 +85,7 @@ async def detail_snapshots(
             {field: getattr(base, field) for field in CONTEXT_FIELDS} if base else {},
             {field: getattr(version, field) for field in CONTEXT_FIELDS},
             "Compared with the declared base version; no base means a new definition. "
-            "Lifecycle action: "
-            + review.requested_action,
+            "Lifecycle action: " + review.requested_action,
         )
     batch = await session.get(ModelImportBatch, object_id)
     if (
@@ -87,8 +114,16 @@ async def detail_snapshots(
     before: dict[str, Any] = {}
     after: dict[str, Any] = {}
     omitted: dict[str, Any] = {}
+    row_context: dict[str, Any] = {}
     for row in rows:
         key = f"{row.subject_label} / {row.field} / row {row.row_number} / {row.id}"
+        row_context[key] = {
+            "subject_type": row.subject_type,
+            "subject_id": row.subject_id,
+            "expected_version": row.expected_version,
+            "status": row.status,
+            "skip_reason": row.skip_reason,
+        }
         if row.status in {"REJECTED", "EXCLUDED"}:
             omitted[key] = {
                 "status": row.status,
@@ -99,8 +134,8 @@ async def detail_snapshots(
         before[key] = row.old_value
         after[key] = row.new_value
     return (
-        {"changes": before, "not_included": omitted},
-        {"changes": after, "not_included": omitted},
+        {"changes": before, "not_included": omitted, "row_context": row_context},
+        {"changes": after, "not_included": omitted, "row_context": row_context},
         f"{batch.filename}: {len(before)} included rows; {len(omitted)} rejected/excluded rows. "
         "Values reflect the saved proposal, not a claim that source data changed. "
         "Stale versions are checked at approval.",

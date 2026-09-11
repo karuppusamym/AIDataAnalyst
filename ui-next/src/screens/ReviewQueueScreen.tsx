@@ -39,7 +39,7 @@ import "../components/EvidencePane.css";
 import "./ReviewQueueScreen.css";
 import { ReviewChangePreview } from "../components/ReviewChangePreview";
 
-const FULL_PREVIEW_TYPES = new Set(["MODEL_IMPORT_BATCH", "CONTEXT_PRODUCT_VERSION"]);
+const FULL_PREVIEW_TYPES = new Set(["MODEL_IMPORT_BATCH", "CONTEXT_PRODUCT_VERSION", "ONTOLOGY_VERSION"]);
 
 /* ---------------------------------------------------------------------------
    Review queue — UX-15, migrated onto UX-17's real read model.
@@ -96,6 +96,7 @@ const OBJECT_TYPES = [
   "COLUMN_CLASSIFICATION_PROMOTION",
   "CONTEXT_PRODUCT_VERSION",
   "MODEL_IMPORT_BATCH",
+  "ONTOLOGY_VERSION",
 ] as const;
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
@@ -201,6 +202,9 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
 }
 
 function DiffEntries({ proposal }: { proposal: ReviewQueueProposalRead }) {
+  if (FULL_PREVIEW_TYPES.has(proposal.object_type)) {
+    return <p>Select this proposal to load its complete version or workbook change preview.</p>;
+  }
   if (!proposal.diff.diffable) {
     return <p className="prop__nodiff">{proposal.diff.message ?? "No structured diff for this object type."}</p>;
   }

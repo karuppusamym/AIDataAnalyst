@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import Field, model_validator
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,6 +94,8 @@ class OntologyCreate(ApiModel):
 
 class OntologyRead(ApiModel):
     id: UUID
+    ontology_key: str = ""
+    published_version: int = 0
     ontology_id: UUID
     version: int
     base_version: int
@@ -149,6 +151,35 @@ async def authorized_version(
     return version
 
 
+async def decide_ontology_version(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Queue adapter, preserving the existing versioned publication events."""
+    version = await decide_ontology(session, review, decision, context)
+    event_type = (
+        "ontology.version_published.v1"
+        if version.status == "APPROVED"
+        else "ontology.version_rejected.v1"
+    )
+    return TargetEffect(
+        event_type,
+        "ontology_version",
+        str(version.id),
+        {
+            "ontology_version_id": str(version.id),
+            "ontology_id": str(version.ontology_id),
+            "version": version.version,
+            "review_id": str(review.id),
+        },
+    )
+
+
 @router.get("/organizations/{organization_id}/ontology-versions", response_model=list[OntologyRead])
 async def list_ontology_versions(
     organization_id: UUID,
@@ -172,7 +203,24 @@ async def list_ontology_versions(
         await validate_mappings(
             session, OntologyDefinition.model_validate(row.definition), context, settings
         )
-    return [OntologyRead.model_validate(row) for row in rows]
+    heads = {
+        head.id: head
+        for head in await session.scalars(
+            select(OntologyHead).where(
+                OntologyHead.id.in_([row.ontology_id for row in rows]),
+                OntologyHead.organization_id == organization_id,
+            )
+        )
+    }
+    return [
+        OntologyRead.model_validate(row).model_copy(
+            update={
+                "ontology_key": heads[row.ontology_id].ontology_key,
+                "published_version": heads[row.ontology_id].published_version,
+            }
+        )
+        for row in rows
+    ]
 
 
 @router.post("/organizations/{organization_id}/ontology-versions", response_model=OntologyRead)
@@ -256,7 +304,12 @@ async def create_ontology_version(
         correlation_id=get_correlation_id(),
     )
     await session.commit()
-    return OntologyRead.model_validate(version)
+    return OntologyRead.model_validate(version).model_copy(
+        update={
+            "ontology_key": head.ontology_key,
+            "published_version": head.published_version,
+        }
+    )
 
 
 @router.post("/ontology-versions/{version_id}/submit", response_model=OntologyRead)
@@ -274,15 +327,13 @@ async def submit_ontology_version(
     await validate_mappings(
         session, OntologyDefinition.model_validate(version.definition), context, settings
     )
-    result = cast(
-        CursorResult[Any],
-        await session.execute(
-            update(OntologyVersion)
-            .where(OntologyVersion.id == version.id, OntologyVersion.status == "DRAFT")
-            .values(status="PENDING_APPROVAL")
-        ),
+    result = await session.execute(
+        update(OntologyVersion)
+        .where(OntologyVersion.id == version.id, OntologyVersion.status == "DRAFT")
+        .values(status="PENDING_APPROVAL")
+        .returning(OntologyVersion.id)
     )
-    if result.rowcount != 1:
+    if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="ontology version is not a draft")
     review = GovernanceReview(
         organization_id=version.organization_id,
@@ -322,19 +373,17 @@ async def decide_ontology(
         await validate_mappings(
             session, OntologyDefinition.model_validate(version.definition), context, get_settings()
         )
-        result = cast(
-            CursorResult[Any],
-            await session.execute(
-                update(OntologyHead)
-                .where(
-                    OntologyHead.id == version.ontology_id,
-                    OntologyHead.organization_id == version.organization_id,
-                    OntologyHead.published_version == version.base_version,
-                )
-                .values(published_version=version.version)
-            ),
+        result = await session.execute(
+            update(OntologyHead)
+            .where(
+                OntologyHead.id == version.ontology_id,
+                OntologyHead.organization_id == version.organization_id,
+                OntologyHead.published_version == version.base_version,
+            )
+            .values(published_version=version.version)
+            .returning(OntologyHead.id)
         )
-        if result.rowcount != 1:
+        if result.scalar_one_or_none() is None:
             raise HTTPException(
                 status_code=409,
                 detail="ontology base changed; create a new draft against the published version",
@@ -344,35 +393,3 @@ async def decide_ontology(
     else:
         version.status = "REJECTED"
     return version
-
-
-async def decide_ontology_version(
-    session: AsyncSession,
-    review: GovernanceReview,
-    *,
-    decision: str,
-    reason: str | None,
-    context: SecurityContext,
-    now: datetime,
-) -> TargetEffect:
-    """The governance-queue adapter for `ONTOLOGY_VERSION`, registered by
-    `semantic_api` like every other governed object's. The decision is
-    `decide_ontology`'s: approval publishes the version only while the
-    ontology's published version is still the one this draft was based on."""
-    version = await decide_ontology(session, review, decision, context)
-    event_type = (
-        "ontology.version_published.v1"
-        if version.status == "APPROVED"
-        else "ontology.version_rejected.v1"
-    )
-    return TargetEffect(
-        event_type,
-        "ontology_version",
-        str(version.id),
-        {
-            "ontology_version_id": str(version.id),
-            "ontology_id": str(version.ontology_id),
-            "version": version.version,
-            "review_id": str(review.id),
-        },
-    )

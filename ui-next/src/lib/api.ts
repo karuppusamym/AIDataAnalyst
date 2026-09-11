@@ -58,3 +58,4 @@ export * from "./api/sources";
 export * from "./api/administration";
 export * from "./api/tools";
 export * from "./api/transformations";
+export * from "./api/documents";

@@ -301,3 +301,41 @@ export type ParsedLineageEdgeType =
  *  `ParsedLineageEdgeDecisionRequest.decision`. */
 export type ParsedLineageEdgeDecision = "APPROVED" | "REJECTED";
 
+/** `DocumentSectionRead`, `DocumentMappingRead` and `DocumentClaimRead` --
+ *  `src/aida/document_ingestion_api.py`. Its list routes declare
+ *  `response_model=Page` un-parameterized, so these schemas never reach the
+ *  OpenAPI document and are hand-written here, as `PageOf` is. */
+export interface DocumentSectionRead {
+  id: string;
+  document_id: string;
+  ordinal: number;
+  raw_schema_name: string | null;
+  raw_table_name: string;
+  raw_column_name: string | null;
+  raw_description: string;
+}
+
+export interface DocumentMappingRead {
+  id: string;
+  document_section_id: string;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string | null;
+  mapping_kind: "STRUCTURAL" | "UNMATCHED";
+  confidence: number;
+}
+
+export interface DocumentClaimRead {
+  id: string;
+  document_section_id: string;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string;
+  predicate: string;
+  object_value: string;
+  confidence: number;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  governance_review_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+}
+

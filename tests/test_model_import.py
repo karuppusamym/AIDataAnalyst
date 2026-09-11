@@ -307,6 +307,74 @@ def test_the_readme_promises_exactly_the_fields_the_import_reads_back() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_browser_worksheet_saves_a_draft_then_uses_the_existing_review_gate(session):
+    from aida.model_import_api import WorksheetSave, save_column_worksheet
+    from aida.models import GovernanceReview, ModelImportBatch
+    from aida.review_detail_snapshots import detail_snapshots
+
+    datasource, table, column = await _seed(session)
+    result = await save_column_worksheet(
+        table.id,
+        WorksheetSave(
+            changes=[
+                {
+                    "column_id": column.id,
+                    "description": "Browser-authored customer identifier.",
+                    "expected_version": None,
+                }
+            ]
+        ),
+        _context(datasource.organization_id, _MAKER),
+        session,
+        _SETTINGS,
+    )
+    assert result.status == "DRAFT"
+    assert result.change_count == 1
+    assert not await current_descriptions_by_column_id(session, [column.id])
+    batch = await session.get(ModelImportBatch, result.id)
+    await submit_batch_for_review(session, batch, requested_by=_MAKER)
+    review = await session.get(GovernanceReview, batch.governance_review_id)
+    before, after, message = await detail_snapshots(session, review)
+    assert list(before["changes"].values()) == [None]
+    assert list(after["changes"].values()) == ["Browser-authored customer identifier."]
+    assert "browser-column-worksheet" in message
+    with pytest.raises(HTTPException) as denied:
+        await decide_governance_review(
+            review.id,
+            GovernanceDecisionRequest(decision="APPROVE"),
+            _context(datasource.organization_id, _MAKER),
+            session,
+        )
+    assert denied.value.status_code == 409
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(datasource.organization_id, _CHECKER),
+        session,
+    )
+    assert (await current_descriptions_by_column_id(session, [column.id]))[
+        column.id
+    ].description == "Browser-authored customer identifier."
+
+
+async def test_browser_worksheet_rejects_duplicate_and_wrong_table_columns(session):
+    from aida.model_import_api import WorksheetSave, save_column_worksheet
+
+    datasource, table, column = await _seed(session)
+    edit = {"column_id": column.id, "description": "A definition", "expected_version": None}
+    for edits in ([edit, edit], [{**edit, "column_id": uuid4()}]):
+        with pytest.raises(HTTPException) as denied:
+            await save_column_worksheet(
+                table.id,
+                WorksheetSave(changes=edits),
+                _context(datasource.organization_id, _MAKER),
+                session,
+                _SETTINGS,
+            )
+        assert denied.value.status_code == 422
+
+
 async def test_an_unedited_workbook_changes_nothing(session) -> None:
     datasource, _, _ = await _seed(session)
     batch = await _upload(session, datasource, await _export(session, datasource))
@@ -787,9 +855,7 @@ async def test_excluding_a_row_drops_it_from_what_a_reviewer_is_asked_to_decide(
 
     changes = await _changes(session, batch.id)
     dropped = next(c for c in changes if c.subject_id == str(second.id))
-    remaining = await set_change_exclusion(
-        session, batch, change_ids=[dropped.id], excluded=True
-    )
+    remaining = await set_change_exclusion(session, batch, change_ids=[dropped.id], excluded=True)
 
     assert remaining == 1
     assert batch.change_count == 1
@@ -826,9 +892,7 @@ async def test_an_excluded_row_can_be_put_back(session) -> None:
     dropped = next(c for c in changes if c.subject_id == str(second.id))
 
     await set_change_exclusion(session, batch, change_ids=[dropped.id], excluded=True)
-    remaining = await set_change_exclusion(
-        session, batch, change_ids=[dropped.id], excluded=False
-    )
+    remaining = await set_change_exclusion(session, batch, change_ids=[dropped.id], excluded=False)
 
     assert remaining == 2
     await session.refresh(dropped)

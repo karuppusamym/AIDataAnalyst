@@ -1,5 +1,6 @@
 import { layoutTopology } from "../lib/lineageLayout";
 import { resolveGraphQuestion } from "../lib/graphQuestion";
+import { OntologyManager } from "../components/OntologyManager";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   UnifiedLineageEdgeRead,
@@ -208,6 +209,7 @@ function ImpactRow({ direction, item }: { direction: "Upstream" | "Downstream"; 
 
 export function UnifiedLineageScreen() {
   const ORG = useOrgId();
+  const [ontologyOpen, setOntologyOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [detailsVisible, setDetailsVisible] = useState(true);
   const [maximized, setMaximized] = useState(false);
@@ -431,6 +433,8 @@ export function UnifiedLineageScreen() {
   return (
     <div className={`ult${maximized ? " ult--maximized" : ""}`}>
       <header className="ult__head">
+        <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
+        {ontologyOpen ? <OntologyManager key={ORG} organizationId={ORG} onClose={() => setOntologyOpen(false)} /> : null}
         <div>
           <h1 className="ult__h1">Unified lineage</h1>
           <p className="ult__lede">

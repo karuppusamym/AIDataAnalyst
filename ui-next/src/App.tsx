@@ -38,6 +38,7 @@ import "./App.css";
 
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
 const DescriptionDraftsScreen = lazy(() => import("./screens/DescriptionDraftsScreen").then((module) => ({ default: module.DescriptionDraftsScreen })));
+const DataDictionariesScreen = lazy(() => import("./screens/DataDictionariesScreen").then((module) => ({ default: module.DataDictionariesScreen })));
 const ReviewQueueScreen = lazy(() => import("./screens/ReviewQueueScreen").then((module) => ({ default: module.ReviewQueueScreen })));
 const ParsedLineageReviewScreen = lazy(() => import("./screens/ParsedLineageReviewScreen").then((module) => ({ default: module.ParsedLineageReviewScreen })));
 const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then((module) => ({ default: module.MarketplaceScreen })));

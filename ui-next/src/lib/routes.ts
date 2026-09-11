@@ -53,6 +53,7 @@ export const SCREEN_IDS = [
   "negative-knowledge",
   "meaning",
   "description-drafts",
+  "data-dictionaries",
   "relationships",
   "cross-source",
   "transformations",

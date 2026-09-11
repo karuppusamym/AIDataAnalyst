@@ -3270,6 +3270,8 @@ export interface OntologyMapping {
 
 export interface OntologyRead {
   id: string;
+  ontology_key?: string;
+  published_version?: number;
   ontology_id: string;
   version: number;
   base_version: number;
