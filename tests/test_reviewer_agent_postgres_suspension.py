@@ -38,14 +38,14 @@ not have. The measurement is deliberately in *items*, not seconds: the operator-
 visible question is "how many more things can this agent decide after I hit
 suspend", and seconds are a property of the machine the test ran on.
 
-**Scope, stated rather than implied.** Each worker gets its own organization,
-and the suspension is committed for every organization from one connection at
-one moment. That isolates the property under test -- a re-read seeing another
-connection's committed write -- from row contention between workers competing
-for the *same* organization's queue. Contention is real and is NOT covered
-here: two workers racing for one review, the loser's conflict handling, and
-whether a lost race aborts a batch or skips an item, are separate open work.
-This file measures the stop delay, not the fleet's behaviour under contention.
+**Scope.** In the suspension experiment each worker gets its own
+organization, and the suspension is committed for every organization from one
+connection at one moment. That isolates the property under test -- a re-read
+seeing another connection's committed write -- from row contention between
+workers competing for the *same* organization's queue. Contention is measured
+separately, at the end of this file: several committing workers on one queue,
+whether every item is decided exactly once, and whether a lost race skips an
+item or aborts a batch.
 
 Pointing this at a PostgreSQL: `AIDA_REVIEWER_SUSPENSION_TEST_DATABASE_URL`,
 or let it derive a scratch database from `Settings.database_url`. It uses its
@@ -64,7 +64,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -79,6 +80,7 @@ from aida.config import Settings, get_settings
 from aida.db import Base
 from aida.models import (
     AssetDescriptionDraft,
+    AuditEvent,
     DataDomain,
     DataSource,
     GovernanceReview,
@@ -240,8 +242,15 @@ def _sessions(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 # --- seeding -----------------------------------------------------------------
 
 
-async def _seed_worker_org(engine: AsyncEngine, items: int) -> UUID:
+async def _seed_worker_org(
+    engine: AsyncEngine, items: int, *, table_per_item: bool = False
+) -> UUID:
     """One organization with `items` genuinely pre-reviewed APPROVE rows.
+
+    With `table_per_item`, each draft describes its own table. The contention
+    experiment needs that: drafts sharing a table would also collide on that
+    table's documentation row as each approval publishes, which is a different
+    race from the one it measures.
 
     The full catalog chain (organization -> LOB -> domain -> project ->
     datasource -> catalog -> schema -> table) is built because
@@ -311,19 +320,24 @@ async def _seed_worker_org(engine: AsyncEngine, items: int) -> UUID:
         for row in (catalog, schema):
             setup.add(row)
             await setup.flush()
-        table = MetadataTable(
-            id=uuid4(),
-            organization_id=org.id,
-            datasource_id=datasource.id,
-            schema_id=schema.id,
-            name=f"customer_master_{uuid4().hex[:8]}",
-            object_type="TABLE",
-            fingerprint=f"fp-table-{uuid4().hex[:8]}",
-        )
-        setup.add(table)
-        await setup.flush()
+        async def new_table() -> MetadataTable:
+            table = MetadataTable(
+                id=uuid4(),
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                schema_id=schema.id,
+                name=f"customer_master_{uuid4().hex[:8]}",
+                object_type="TABLE",
+                fingerprint=f"fp-table-{uuid4().hex[:8]}",
+            )
+            setup.add(table)
+            await setup.flush()
+            return table
+
+        shared_table = None if table_per_item else await new_table()
 
         for _ in range(items):
+            table = shared_table if shared_table is not None else await new_table()
             review = GovernanceReview(
                 organization_id=org.id,
                 object_type="ASSET_DESCRIPTION_DRAFT",
@@ -545,3 +559,115 @@ async def test_ar04_a_suspension_committed_before_the_batch_stops_it_at_entry(
     async with _recording(recorder):
         assert await _run_worker(engine, org_id, recorder) == "suspended"
     assert recorder.decisions == []
+
+
+# --- contention: several workers on one organization's queue ------------------
+
+#: Workers racing for one organization's queue.
+CONTENDING_WORKERS = 3
+
+#: Items in that queue.
+CONTENDED_ITEMS = 12
+
+#: PostgreSQL's SQLSTATE for "could not serialize access due to concurrent
+#: update".
+SERIALIZATION_FAILURE = "40001"
+
+
+def _sqlstate(error: BaseException) -> str | None:
+    """The SQLSTATE behind a driver error, wherever the driver put it."""
+    origin = getattr(error, "orig", None)
+    for candidate in (error, origin, getattr(origin, "__cause__", None)):
+        code = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
+        if code:
+            return str(code)
+    return None
+
+
+async def _run_committing_worker(engine: AsyncEngine, org_id: UUID) -> tuple[str, int]:
+    """One reviewer-agent batch that commits, as a real caller does.
+
+    `_run_worker` above never commits, which is right for measuring when a
+    worker stops; contention only exists once decisions land. Returns how the
+    batch ended -- `"committed"`, or `"aborted:<SQLSTATE>"` -- and how many
+    decisions it committed.
+    """
+    async with _sessions(engine)() as session:
+        try:
+            outcomes = await auto_decide_tier0_tier1(session, org_id, settings=_settings())
+            await session.commit()
+        except DBAPIError as exc:
+            await session.rollback()
+            return (f"aborted:{_sqlstate(exc)}", 0)
+        return ("committed", len(outcomes))
+
+
+async def _decided(engine: AsyncEngine, org_id: UUID) -> tuple[int, int]:
+    """Reviews in the terminal state, and the reviewer agent's audit rows."""
+    async with _sessions(engine)() as reader:
+        approved = await reader.scalar(
+            select(func.count())
+            .select_from(GovernanceReview)
+            .where(
+                GovernanceReview.organization_id == org_id,
+                GovernanceReview.status == "APPROVED",
+            )
+        )
+        audited = await reader.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(
+                AuditEvent.organization_id == org_id,
+                AuditEvent.action == "reviewer_agent.decide",
+            )
+        )
+    return int(approved or 0), int(audited or 0)
+
+
+async def test_ar04_workers_racing_one_organization_decide_each_item_exactly_once(
+    engine: AsyncEngine, isolation_level: str
+) -> None:
+    """AR-04's contention half: several committing workers on one queue.
+
+    `auto_decide_tier0_tier1` takes no row locks and claims each review with a
+    compare-and-set, each item in its own savepoint, catching only the decision
+    service's own refusal. This measures what that does under a real race:
+    whether every item is still decided exactly once, and whether a worker that
+    loses a race skips the item or loses its whole batch.
+    """
+    org_id = await _seed_worker_org(engine, CONTENDED_ITEMS, table_per_item=True)
+    started = time.monotonic()
+    results = await asyncio.gather(
+        *[_run_committing_worker(engine, org_id) for _ in range(CONTENDING_WORKERS)]
+    )
+    elapsed = time.monotonic() - started
+    approved, audited = await _decided(engine, org_id)
+    outcomes = [outcome for outcome, _count in results]
+    committed = [count for _outcome, count in results]
+    print(
+        f"\n[AR-04 contention] {isolation_level}: {CONTENDING_WORKERS} workers on one "
+        f"organization's {CONTENDED_ITEMS} items in {elapsed:.2f}s; outcomes = {outcomes}; "
+        f"decisions committed per worker = {committed}; "
+        f"reviews approved = {approved}, reviewer-agent audit rows = {audited}"
+    )
+
+    # Exactly once, at both isolation levels: every item decided, none twice,
+    # and one audit row per decision.
+    assert approved == CONTENDED_ITEMS
+    assert audited == CONTENDED_ITEMS
+    assert sum(committed) == CONTENDED_ITEMS
+
+    if isolation_level == "READ COMMITTED":
+        # A lost race is a skipped item, never a lost batch: once the winner
+        # commits, the loser's compare-and-set finds the row no longer PENDING
+        # and the decision service refuses it inside the item's savepoint.
+        assert outcomes == ["committed"] * CONTENDING_WORKERS, outcomes
+    else:
+        # REPEATABLE READ: the loser's claim meets a row a concurrent
+        # transaction changed, which PostgreSQL refuses outright. Only the
+        # service's own refusal is caught, so the loser's whole batch rolls
+        # back; nothing it decided lands, and the winner's decisions stand.
+        assert "committed" in outcomes, outcomes
+        assert all(
+            outcome in ("committed", f"aborted:{SERIALIZATION_FAILURE}") for outcome in outcomes
+        ), outcomes
