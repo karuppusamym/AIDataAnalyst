@@ -5,14 +5,30 @@ it enters the model context window.  All detection is pattern-based and
 deterministic -- no model calls required.
 
 Detection categories:
-- Instruction override attempts
+- Instruction override attempts, including text that addresses the model
+  directly, gives it a new identity, or changes what it answers
+- System-prompt extraction
 - Credential/key extraction directives
 - Policy/security bypass commands
 - Privilege escalation
 - Data exfiltration commands
 - Encoded/obfuscated payloads (base64, hex, URL encoding)
-- Unicode normalization evasion (homoglyphs, zero-width chars)
+- Unicode evasion: homoglyphs, zero-width and other invisible characters,
+  soft hyphens, and tag characters that spell hidden text
+- Letter-spacing and leetspeak, matched on normalised variants of the text
 - Multi-language injection attempts
+
+**v2 (2026-09-11, AR-10)** was driven by `tests/test_ar10_screening_benchmark.py`,
+which measures the screen against attacks its own corpus does not contain and
+against the benign catalog text it actually runs on. v1 missed 31 of those 40
+attacks and quarantined 10 of 46 benign texts: a data steward's "Owner: Dan
+Smith" matched the DAN jailbreak, "Run by the billing system nightly" matched
+a shell command, and "Grant access to the reporting role" matched privilege
+escalation. v2 understands more override phrasings, reads through invisible
+characters and letter-spacing, covers six more languages, and narrows the
+patterns that were matching ordinary catalog language. The benchmark pins
+what it still misses and still flags. It remains a pattern matcher, evadable
+by paraphrase; INV-3 is the load-bearing control.
 """
 
 from __future__ import annotations
@@ -23,7 +39,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-INJECTION_DEFENSE_VERSION = "injection-defense-v1"
+INJECTION_DEFENSE_VERSION = "injection-defense-v2"
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +75,46 @@ def _pat(threat_type: str, pattern: str, confidence: float) -> _InjectionPattern
     )
 
 
+# Verbs that set the model's instructions aside, and the nouns that name them.
+_OVERRIDE_VERBS = (
+    r"ignore|ignoring|disregard|disregarding|forget|forgetting|override|overlook|"
+    r"set aside|pay no attention to|stop following|do not (?:follow|obey)|don'?t (?:follow|obey)"
+)
+_INSTRUCTION_NOUNS = (
+    r"instructions?|rules?|messages?|controls?|prompts?|directions?|directives?|"
+    r"guidance|guidelines|constraints?"
+)
+
 # Instruction override patterns
 INSTRUCTION_OVERRIDE_PATTERNS: list[_InjectionPattern] = [
     _pat(
         "INSTRUCTION_OVERRIDE",
-        r"\b(?:ignore|disregard|forget|override)\b.{0,60}\b(?:previous|prior|system|developer|all|above)\b.{0,40}\b(?:instructions?|rules?|messages?|controls?|prompts?)\b",
+        r"\b(?:" + _OVERRIDE_VERBS + r")\b.{0,60}"
+        r"\b(?:previous|prior|preceding|earlier|original|system|developer|all|above|your|its|"
+        r"any|these|those)\b.{0,40}\b(?:" + _INSTRUCTION_NOUNS + r")\b",
         0.95,
+    ),
+    # "Disregard the guidance above", "set aside the rules you were given":
+    # the qualifier follows the noun.
+    _pat(
+        "INSTRUCTION_OVERRIDE",
+        r"\b(?:" + _OVERRIDE_VERBS + r")\b.{0,20}\b(?:" + _INSTRUCTION_NOUNS + r")\b.{0,20}"
+        r"(?:\babove\b|\bso far\b|\bbefore this\b|\byou (?:were|have been) (?:given|told)\b|"
+        r"\bgiven to you\b)",
+        0.95,
+    ),
+    _pat(
+        "INSTRUCTION_OVERRIDE",
+        r"\b(?:ignore|disregard|forget)\s+(?:everything|anything)\s+"
+        r"(?:above|before|previously|so far|you (?:were|have been) told)\b"
+        r"|\b(?:ignore|disregard|forget)\s+what you (?:were|have been) told\b",
+        0.90,
+    ),
+    _pat(
+        "INSTRUCTION_OVERRIDE",
+        r"\b(?:rather|instead) (?:than|of) (?:what )?"
+        r"(?:you (?:were|have been) told|your (?:instructions|rules)|the system prompt)\b",
+        0.85,
     ),
     _pat(
         "INSTRUCTION_OVERRIDE",
@@ -77,20 +127,75 @@ INSTRUCTION_OVERRIDE_PATTERNS: list[_InjectionPattern] = [
         r"\bdo not follow\b.{0,30}\b(?:previous|original|system)\b",
         0.90,
     ),
+    # A new identity for the model. Narrowed in v2: "starting now ... new"
+    # matched "Starting now, the column is populated by the new core system".
     _pat(
         "INSTRUCTION_OVERRIDE",
-        r"\b(?:you are now|from now on|starting now)\b.{0,50}\b(?:different|new|my)\b",
+        r"\b(?:you are now|from now on|starting now|henceforth)\b.{0,50}"
+        r"\b(?:different|new|my|unrestricted)\b.{0,20}"
+        r"\b(?:ai|assistant|model|bot|persona|role|character|identity|instructions?|rules?|"
+        r"master|owner|purpose)\b",
+        0.85,
+    ),
+    # Changing what the model answers.
+    _pat(
+        "INSTRUCTION_OVERRIDE",
+        r"\b(?:from now on|starting now|henceforth|going forward)\b.{0,30}"
+        r"\b(?:answer|respond|reply)\b"
+        r"|\b(?:answer|respond|reply)\s+(?:to\s+)?(?:every|all|any|each)\s+"
+        r"(?:questions?|quer(?:y|ies)|requests?|prompts?|messages?)\b",
+        0.85,
+    ),
+    # Text addressed to the model rather than describing data.
+    _pat(
+        "INSTRUCTION_OVERRIDE",
+        r"\b(?:note|message|instructions?|attention|reminder|rule|task)\s+(?:to|for)\s+"
+        r"(?:the\s+)?(?:ai|assistant|model|llm|chatbot|copilot|language model)\b"
+        r"|\byour\s+(?:new|real|actual|true|only|first)\s+"
+        r"(?:task|job|goal|instructions?|role|purpose|mission|priority)\b"
+        r"|\b(?:highest|top|first)[- ]priority\s+(?:instructions?|commands?|rules?)\b"
+        r"|\btreat\s+(?:this|the following|these)\b.{0,40}\bas\s+(?:your|an?|the)\s+"
+        r"(?:[a-z-]+\s+)?(?:instructions?|commands?|system (?:prompt|message)|rules?)\b",
+        0.85,
+    ),
+    # Chat-template role markers. A bare "System:" label is ordinary catalog
+    # text ("System: SAP ECC"), so the colon form needs a directive after it.
+    _pat(
+        "INSTRUCTION_OVERRIDE",
+        r"\[(?:system|assistant|developer)\]"
+        r"|<\|?(?:im_start|im_end|system|endoftext)\|?>"
+        r"|###\s*(?:system|instruction)"
+        r"|(?:^|[.;!?]\s+)(?:system|assistant|developer)\s*:\s*"
+        r"(?:you|the user|ignore|from now|always|never)\b",
         0.85,
     ),
 ]
 
-# Credential extraction patterns
+# System-prompt extraction
+PROMPT_EXTRACTION_PATTERNS: list[_InjectionPattern] = [
+    _pat(
+        "PROMPT_EXTRACTION",
+        r"\b(?:reveal|print|dump|return|expose|repeat|show|describe|output|tell me|"
+        r"what (?:is|are))\b.{0,40}"
+        r"\b(?:system ?prompt|developer message|hidden (?:instructions?|rules|prompt)|"
+        r"initial instructions?|your (?:instructions|prompt|rules))\b",
+        0.90,
+    ),
+]
+
+# Credential extraction patterns. v2: a credential word followed by one of
+# its attributes is a column being described ("show password reset date"),
+# not a secret being asked for.
+_NOT_A_CREDENTIAL_ATTRIBUTE = (
+    r"(?!\s*(?:reset|hash(?:es|ed)?|expir\w*|chang\w*|updat\w*|polic\w*|length|dates?|salt|"
+    r"strength|flags?|attempts?|rotat\w*|age|history|column|field|creat\w*|count|issued|type)\b)"
+)
 CREDENTIAL_EXTRACTION_PATTERNS: list[_InjectionPattern] = [
     _pat(
         "CREDENTIAL_EXTRACTION",
         r"\b(?:reveal|print|dump|return|expose|output|show|give)\b.{0,50}\b"
         r"(?:api[_ ]?keys?|passwords?|credentials?|access[_ ]?tokens?|secrets?|"
-        r"private[_ ]?keys?|connection[_ ]?strings?)\b",
+        r"private[_ ]?keys?|connection[_ ]?strings?)\b" + _NOT_A_CREDENTIAL_ATTRIBUTE,
         0.95,
     ),
     _pat(
@@ -106,13 +211,33 @@ POLICY_BYPASS_PATTERNS: list[_InjectionPattern] = [
         "POLICY_BYPASS",
         r"\b(?:bypass|disable|evade|circumvent|turn off|skip|ignore)\b.{0,50}\b"
         r"(?:authorization|policy|policies|security|guardrails?|controls?|"
-        r"audit|masking|filtering|validation|sandbox)\b",
+        r"audit|masking|sandbox|safety)\b",
+        0.95,
+    ),
+    # v2: validation and filtering are ordinary data-quality words ("skip
+    # validation for null rows"); only the stronger verbs make them a bypass.
+    _pat(
+        "POLICY_BYPASS",
+        r"\b(?:bypass|disable|evade|circumvent|turn off)\b.{0,50}\b"
+        r"(?:validation|filtering|filters?|restrictions?)\b",
+        0.90,
+    ),
+    # v2: "DAN" alone matched a steward named Dan, and "developer mode" alone
+    # matched a mobile build flag.
+    _pat(
+        "POLICY_BYPASS",
+        r"\b(?:jailbreak|jailbroken|do anything now|unrestricted mode|god mode|dan mode)\b"
+        r"|\byou are (?:now )?dan\b"
+        r"|\b(?:enter|enable|activate|switch to|turn on|you are in)\s+developer mode\b",
         0.95,
     ),
     _pat(
         "POLICY_BYPASS",
-        r"\b(?:jailbreak|DAN|developer mode|unrestricted mode|god mode)\b",
-        0.95,
+        r"\b(?:act as|you are|pretend to be|roleplay as|behave as|become)\b.{0,40}"
+        r"\b(?:unrestricted|unfiltered|uncensored|jailbroken|"
+        r"without (?:any )?(?:rules|restrictions|limits|filters)|"
+        r"with no (?:rules|restrictions|limits|filters))\b",
+        0.90,
     ),
 ]
 
@@ -125,23 +250,39 @@ PRIVILEGE_ESCALATION_PATTERNS: list[_InjectionPattern] = [
         r"(?:root|administrator|admin|platform[_ ]?admin|superuser|security[_ ]?officer|sudo)\b",
         0.90,
     ),
+    # v2: "grant ... access|role" matched "Grant access to the reporting
+    # role". A grant is an escalation when it is to the model itself or of
+    # administrator-level rights.
     _pat(
         "PRIVILEGE_ESCALATION",
-        r"\b(?:grant|escalate|elevate)\b.{0,30}\b(?:privileges?|permissions?|access|role)\b",
+        r"\b(?:escalate|elevate)\b.{0,30}\b(?:privileges?|permissions?|access|rights|role)\b"
+        r"|\bgrant\b.{0,20}\b(?:me|us|yourself|this session|the (?:ai|assistant|model)|"
+        r"elevated|admin(?:istrator)?|root|superuser|full|unrestricted)\b.{0,25}"
+        r"\b(?:privileges?|permissions?|access|rights|roles?|control)\b",
         0.85,
     ),
 ]
 
-# Data exfiltration patterns
+# Data exfiltration patterns. v2: moving data is what catalog text describes
+# ("Export all rows to the warehouse nightly", "Email the report to finance@").
+# It is exfiltration when the data goes somewhere outside, or when it is the
+# whole database.
 DATA_EXFILTRATION_PATTERNS: list[_InjectionPattern] = [
     _pat(
         "DATA_EXFILTRATION",
-        r"\b(?:send|post|transmit|upload|forward|email)\b.{0,50}\b(?:to|at)\b.{0,30}\b(?:https?://|ftp://|[a-z0-9._%+-]+@[a-z0-9.-]+)\b",
+        r"\b(?:send|post|transmit|upload|forward|email|exfiltrate|leak)\b.{0,50}"
+        r"\b(?:data|records?|rows?|results?|tables?|credentials?|passwords?|keys?|tokens?|"
+        r"everything)\b.{0,30}\b(?:to|at)\b.{0,30}"
+        r"(?:https?://|ftp://|[a-z0-9._%+-]+@[a-z0-9.-]+)",
         0.90,
     ),
     _pat(
         "DATA_EXFILTRATION",
-        r"\b(?:dump|export|extract)\b.{0,30}\b(?:all|every|entire|complete)\b.{0,40}\b(?:data|records?|rows?|table|database)\b",
+        r"\b(?:dump|export|extract|copy)\b.{0,30}\b(?:all|every|entire|complete|whole)\b.{0,40}"
+        r"\b(?:data|records?|rows?|tables?|database)\b.{0,40}"
+        r"\b(?:external|outside|remote|third[- ]party|personal|attacker|pastebin)\b"
+        r"|\b(?:dump|export|extract)\b.{0,20}\b(?:the )?(?:entire|whole|complete)\s+"
+        r"(?:database|schema|warehouse)\b",
         0.85,
     ),
     _pat(
@@ -151,11 +292,13 @@ DATA_EXFILTRATION_PATTERNS: list[_InjectionPattern] = [
     ),
 ]
 
-# System command injection patterns
+# System command injection patterns. v2: "system" alone matched "Run by the
+# billing system nightly".
 SYSTEM_COMMAND_PATTERNS: list[_InjectionPattern] = [
     _pat(
         "SYSTEM_COMMAND",
-        r"\b(?:execute|run|eval|exec)\b.{0,30}\b(?:command|shell|bash|system|os\.|subprocess)\b",
+        r"\b(?:execute|run|eval|exec)\b.{0,30}\b(?:shell|bash|powershell|cmd\.exe|os\.system|"
+        r"subprocess|(?:system|shell|terminal|os) commands?)\b",
         0.90,
     ),
     _pat(
@@ -167,8 +310,21 @@ SYSTEM_COMMAND_PATTERNS: list[_InjectionPattern] = [
 
 # Multi-language injection patterns
 MULTILINGUAL_PATTERNS: list[_InjectionPattern] = [
-    # Chinese: "ignore previous instructions"
+    # Chinese: "ignore previous instructions", verb first and object first
     _pat("MULTILINGUAL_INJECTION", r"(?:忽略|无视|不理).{0,20}(?:指令|规则|指示|说明)", 0.85),
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"(?:指令|规则|指示|说明|提示).{0,20}(?:忽略|无视|不理|忘记)",
+        0.85,
+    ),
+    # Japanese: object first (the usual order) and verb first
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"(?:指示|命令|ルール|規則|指令).{0,20}(?:無視|忘れ)|(?:無視|忘れ).{0,20}(?:指示|命令|ルール|規則)",
+        0.85,
+    ),
+    # Korean: "ignore the instructions"
+    _pat("MULTILINGUAL_INJECTION", r"(?:지시|명령|규칙|지침).{0,20}(?:무시|잊어)", 0.85),
     # Arabic: "ignore instructions"
     _pat("MULTILINGUAL_INJECTION", r"(?:تجاهل|أهمل).{0,20}(?:التعليمات|الأوامر)", 0.85),
     # Russian/Cyrillic: "ignore instructions"
@@ -193,16 +349,53 @@ MULTILINGUAL_PATTERNS: list[_InjectionPattern] = [
         r"\b(?:pr[eé]c[eé]dentes|du syst[eè]me)\b",
         0.85,
     ),
+    # German
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"\b(?:ignorier(?:e|en|t)?|vergiss|vergessen sie|missachte|missachten sie)\b.{0,40}"
+        r"\b(?:anweisungen|anweisung|regeln|vorgaben|instruktionen|befehle)\b",
+        0.85,
+    ),
+    # Italian
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"\b(?:ignora|ignorate|dimentica|dimenticate)\b.{0,30}"
+        r"\b(?:istruzioni|regole|indicazioni)\b",
+        0.85,
+    ),
+    # Portuguese
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"\b(?:ignore|ignora|esqueça|esqueca|desconsidere)\b.{0,30}"
+        r"\b(?:instruções|instrucoes|regras|orientações|orientacoes)\b",
+        0.85,
+    ),
+    # Dutch
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"\b(?:negeer|vergeet)\b.{0,30}\b(?:instructies|regels|aanwijzingen)\b",
+        0.85,
+    ),
 ]
 
 ALL_PATTERNS: list[_InjectionPattern] = (
     INSTRUCTION_OVERRIDE_PATTERNS
+    + PROMPT_EXTRACTION_PATTERNS
     + CREDENTIAL_EXTRACTION_PATTERNS
     + POLICY_BYPASS_PATTERNS
     + PRIVILEGE_ESCALATION_PATTERNS
     + DATA_EXFILTRATION_PATTERNS
     + SYSTEM_COMMAND_PATTERNS
     + MULTILINGUAL_PATTERNS
+)
+
+# The override phrase with every separator removed, for text whose letters were
+# spaced apart one gap at a time ("i g n o r e a l l p r e v i o u s ..."),
+# which leaves no word boundary for the patterns above to use.
+_SQUASHED_SIGNATURES = re.compile(
+    r"(?:ignore|disregard|forget)(?:all|any|every)?(?:the)?"
+    r"(?:previous|prior|above|earlier|your|system)(?:instructions?|rules|prompts?|directions|guidance)"
+    r"|(?:reveal|print|show|repeat)(?:me)?(?:your|the)?(?:systemprompt|hiddeninstructions)"
 )
 
 
@@ -214,24 +407,48 @@ _BASE64_RE = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
 _HEX_RE = re.compile(r"(?:(?:0x|\\x)[0-9a-fA-F]{2}){4,}")
 _URL_ENCODED_RE = re.compile(r"(?:%[0-9a-fA-F]{2}){4,}")
 
-# Zero-width characters that can be used to evade detection
+# Characters that render as nothing and can split a word a pattern would
+# otherwise match. v2 adds the soft hyphen, the combining grapheme joiner, the
+# Mongolian vowel separator and the Hangul fillers.
 _ZERO_WIDTH_CHARS = frozenset(
-    "​‌‍‎‏‪‫‬‭‮"
-    "⁠⁡⁢⁣⁤⁦⁧⁨⁩﻿"
+    "\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2060\u2061\u2062\u2063\u2064\u2066\u2067\u2068\u2069\ufeff"
+    "\u00ad\u034f\u180e\u115f\u1160\u3164"
 )
 
 # Common homoglyph mappings (Cyrillic/Greek -> Latin)
 _HOMOGLYPH_MAP: dict[str, str] = {
-    "А": "A", "В": "B", "С": "C", "Е": "E",
-    "Н": "H", "К": "K", "М": "M", "О": "O",
-    "Р": "P", "Т": "T", "Х": "X",
-    "а": "a", "е": "e", "о": "o", "р": "p",
-    "с": "c", "у": "y", "х": "x",
-    "Α": "A", "Β": "B", "Ε": "E", "Η": "H",
-    "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N",
-    "Ο": "O", "Ρ": "P", "Τ": "T", "Χ": "X",
-    "α": "a", "ε": "e", "ο": "o", "ρ": "p",
+    "\u0410": "A", "\u0412": "B", "\u0421": "C", "\u0415": "E",
+    "\u041d": "H", "\u041a": "K", "\u041c": "M", "\u041e": "O",
+    "\u0420": "P", "\u0422": "T", "\u0425": "X", "\u0430": "a",
+    "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c",
+    "\u0443": "y", "\u0445": "x", "\u0391": "A", "\u0392": "B",
+    "\u0395": "E", "\u0397": "H", "\u0399": "I", "\u039a": "K",
+    "\u039c": "M", "\u039d": "N", "\u039f": "O", "\u03a1": "P",
+    "\u03a4": "T", "\u03a7": "X", "\u03b1": "a", "\u03b5": "e",
+    "\u03bf": "o", "\u03c1": "p",
+    # v2: the Cyrillic letters that pass for Latin i, j, s, h, d, q, w and l,
+    # and the Greek ones for i, v, k, x and u.
+    "\u0456": "i", "\u0406": "I", "\u0458": "j", "\u0408": "J",
+    "\u0455": "s", "\u0405": "S", "\u04bb": "h", "\u04ba": "H",
+    "\u0501": "d", "\u051b": "q", "\u051d": "w", "\u04cf": "l",
+    "\u03b9": "i", "\u03bd": "v", "\u03ba": "k", "\u03c7": "x",
+    "\u03c5": "u",
 }
+
+# Unicode tag characters U+E0020-U+E007E mirror printable ASCII and render as
+# nothing: a whole instruction can ride invisibly behind innocent text.
+_TAG_OFFSET = 0xE0000
+_PRINTABLE_TAGS = range(0xE0020, 0xE007F)
+_ALL_TAGS = range(0xE0000, 0xE0080)
+# Emoji subdivision flags are the one legitimate use, and spell at most six
+# characters; hidden text longer than this is flagged on its own.
+_HIDDEN_TAG_TEXT_FLAG_LENGTH = 8
+
+# Letters an attacker spaced apart ("i g n o r e", "i.g.n.o.r.e").
+_SPACED_SEPARATORS = re.compile(r"[ .\-*\u00b7]")
+_SPACED_RUN = re.compile(r"(?<!\w)(?:\w[ .\-*\u00b7]){2,}\w(?!\w)")
+_LEET = str.maketrans("013457@$", "oieastas")
 
 
 def _strip_zero_width(text: str) -> str:
@@ -239,22 +456,58 @@ def _strip_zero_width(text: str) -> str:
     return "".join(ch for ch in text if ch not in _ZERO_WIDTH_CHARS)
 
 
+def _is_variation_selector(ch: str) -> bool:
+    code = ord(ch)
+    return 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
+
+
+def _strip_invisible(text: str) -> str:
+    """Remove zero-width characters and variation selectors."""
+    return "".join(
+        ch for ch in text if ch not in _ZERO_WIDTH_CHARS and not _is_variation_selector(ch)
+    )
+
+
+def _decode_tag_characters(text: str) -> tuple[str, int]:
+    """Replace tag characters with the ASCII they spell; count the hidden ones."""
+    decoded: list[str] = []
+    hidden = 0
+    for ch in text:
+        code = ord(ch)
+        if code in _PRINTABLE_TAGS:
+            decoded.append(chr(code - _TAG_OFFSET))
+            hidden += 1
+        elif code not in _ALL_TAGS:
+            decoded.append(ch)
+    return "".join(decoded), hidden
+
+
 def _normalize_homoglyphs(text: str) -> str:
     """Replace known homoglyphs with their Latin equivalents."""
     return "".join(_HOMOGLYPH_MAP.get(ch, ch) for ch in text)
 
 
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _base_form(text: str) -> tuple[str, int]:
+    """NFKC, hidden tag text decoded, invisible characters removed, homoglyphs
+    replaced -- whitespace left as it was, because letter-spacing is read from it."""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized, hidden = _decode_tag_characters(normalized)
+    normalized = _strip_invisible(normalized)
+    return _normalize_homoglyphs(normalized), hidden
+
+
 def _normalize_text(text: str) -> str:
     """Full normalization pipeline for detection."""
-    # Unicode NFKC normalization
-    normalized = unicodedata.normalize("NFKC", text)
-    # Strip zero-width chars
-    normalized = _strip_zero_width(normalized)
-    # Replace homoglyphs
-    normalized = _normalize_homoglyphs(normalized)
-    # Collapse whitespace
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
+    return _collapse(_base_form(text)[0])
+
+
+def _despace(text: str) -> str:
+    """Join letters spaced apart: 'i g n o r e   a l l' -> 'ignore   all'."""
+    return _SPACED_RUN.sub(lambda match: _SPACED_SEPARATORS.sub("", match.group()), text)
 
 
 def _detect_encoded_payloads(text: str) -> list[str]:
@@ -345,34 +598,51 @@ def screen_metadata(
     evasion_evidence.extend(_detect_homoglyph_evasion(text))
     evasion_evidence.extend(_detect_encoded_payloads(text))
 
-    # Normalize for pattern matching
-    normalized = _normalize_text(text)
+    base, hidden_tag_count = _base_form(text)
+    if hidden_tag_count:
+        evasion_evidence.append(f"tag_characters_detected:count={hidden_tag_count}")
 
-    # Also prepare a version without homoglyph replacement for multilingual
-    # patterns (replacing Cyrillic->Latin would break Cyrillic regex).
-    normalized_no_homoglyph = re.sub(
-        r"\s+",
-        " ",
-        _strip_zero_width(unicodedata.normalize("NFKC", text)),
-    ).strip()
+    # Patterns run on the normalized text and on two variants of it: letters
+    # an attacker spaced apart joined back up, and then leetspeak read as
+    # letters. A match found only in a variant is itself evidence of evasion.
+    normalized = _collapse(base)
+    despaced = _collapse(_despace(base))
+    variants: dict[str, str] = {"normalized": normalized}
+    if despaced != normalized:
+        variants["despaced"] = despaced
+    leet = despaced.translate(_LEET)
+    if leet not in variants.values():
+        variants["leetspeak"] = leet
 
-    # Pattern matching on normalized text
+    # Multilingual patterns run on text without homoglyph replacement
+    # (replacing Cyrillic->Latin would break Cyrillic regex).
+    normalized_no_homoglyph = _collapse(
+        _strip_invisible(_decode_tag_characters(unicodedata.normalize("NFKC", text))[0])
+    )
+
     max_confidence = 0.0
     threat_type = "NONE"
     pattern_evidence: list[str] = []
 
     for pat in ALL_PATTERNS:
-        # Multilingual patterns run on text without homoglyph replacement
-        search_text = (
-            normalized_no_homoglyph
-            if pat.threat_type == "MULTILINGUAL_INJECTION"
-            else normalized
-        )
-        if pat.pattern.search(search_text):
-            if pat.confidence > max_confidence:
-                max_confidence = pat.confidence
-                threat_type = pat.threat_type
-            pattern_evidence.append(f"pattern_match:{pat.threat_type}")
+        if pat.threat_type == "MULTILINGUAL_INJECTION":
+            matched_in = ["normalized"] if pat.pattern.search(normalized_no_homoglyph) else []
+        else:
+            matched_in = [name for name, variant in variants.items() if pat.pattern.search(variant)]
+        if not matched_in:
+            continue
+        if pat.confidence > max_confidence:
+            max_confidence = pat.confidence
+            threat_type = pat.threat_type
+        pattern_evidence.append(f"pattern_match:{pat.threat_type}")
+        if "normalized" not in matched_in and f"evasion:{matched_in[0]}" not in evasion_evidence:
+            evasion_evidence.append(f"evasion:{matched_in[0]}")
+
+    if max_confidence == 0.0 and _SQUASHED_SIGNATURES.search(re.sub(r"[^a-z]", "", leet.lower())):
+        max_confidence = 0.85
+        threat_type = "INSTRUCTION_OVERRIDE"
+        pattern_evidence.append("pattern_match:INSTRUCTION_OVERRIDE")
+        evasion_evidence.append("evasion:squashed")
 
     # Evasion techniques themselves increase confidence
     encoded_injection = any("base64_encoded_injection" in e for e in evasion_evidence)
@@ -382,6 +652,10 @@ def screen_metadata(
         # Base64-encoded injection content is high-confidence on its own
         max_confidence = 0.90
         threat_type = "INSTRUCTION_OVERRIDE"
+    elif hidden_tag_count >= _HIDDEN_TAG_TEXT_FLAG_LENGTH:
+        # Text nobody can see has no business in a catalog, whatever it says.
+        max_confidence = 0.80
+        threat_type = "OBFUSCATION_DETECTED"
     elif evasion_evidence and max_confidence == 0:
         # Evasion detected without pattern match -- still suspicious
         # but only flag if multiple evasion techniques are used

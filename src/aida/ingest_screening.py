@@ -12,12 +12,14 @@ are both designed to read.
 repeatedly, on the latency-sensitive path, and getting it wrong everywhere a new consumer
 is added. Screening once at ingestion is cheaper, complete by construction, and leaves a
 durable verdict a steward can review. The cost is that a classifier upgrade does not
-retroactively re-screen -- so `screened_with_version` is recorded, and re-screening is a
-bulk job like any other projection rebuild. Not every consumer has a stored verdict to
-read, though (a dbt resource's free-text `description` has none -- see `mcp_server.py`'s
-`_transformation_detail`), so `screen_text` is also cheap enough to run directly on a
-single, low-volume read path; what it must never do is run again over the same text on
-every row of a bulk projection.
+reach a verdict already stored. What is stored is a status and its reason codes, not the
+classifier version that produced them (an earlier version of this note said otherwise);
+every metadata scan screens view and routine text again with the rules in force, so an
+upgrade reaches a source's stored verdicts at its next scan and not before. Not every
+consumer has a stored verdict to read, though (a dbt resource's free-text `description`
+has none -- see `mcp_server.py`'s `_transformation_detail`), so `screen_text` is also
+cheap enough to run directly on a single, low-volume read path; what it must never do is
+run again over the same text on every row of a bulk projection.
 
 **Quarantine, not deletion.** Text that fails is stored and marked, never dropped. A
 procedure whose body trips the classifier is far more likely to be an awkward comment than

@@ -213,15 +213,29 @@ def build_model_draft_request(
             withheld.append(evidence.column_id)
             continue
         asked[evidence.column_name] = evidence.column_id
+        origin = f"{where}.{evidence.column_name}"
         entries.append(
             {
                 "name": evidence.column_name,
-                "type": evidence.physical_type,
+                # A user-defined type is a name the source chose, and the
+                # relationship targets are other tables' names: source text,
+                # screened like the column's own name (AR-10).
+                "type": evidence.physical_type
+                if clean(evidence.physical_type, f"physical_type:{origin}")
+                else WITHHELD,
                 "nullable": evidence.nullable,
                 "primary_key": evidence.primary_key_width > 0,
-                "references": list(evidence.references),
-                "related_to": list(evidence.related_to),
-                "referenced_by": list(evidence.referenced_by),
+                "references": [
+                    name for name in evidence.references if clean(name, f"references:{origin}")
+                ],
+                "related_to": [
+                    name for name in evidence.related_to if clean(name, f"related_to:{origin}")
+                ],
+                "referenced_by": [
+                    name
+                    for name in evidence.referenced_by
+                    if clean(name, f"referenced_by:{origin}")
+                ],
                 "classification": evidence.classification,
             }
         )

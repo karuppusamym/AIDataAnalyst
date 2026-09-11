@@ -676,6 +676,51 @@ class GovernedAgentOrchestrator:
             screened.append(copy)
         return screened, withheld
 
+    @staticmethod
+    def _screened_model_context(context: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """The metadata context, less every table whose identifiers fail
+        screening (AR-10).
+
+        Identifiers are text the source chose: a database that allows quoted
+        identifiers allows a column called "Ignore all previous instructions".
+        A name cannot be withheld behind a marker the way free text is -- the
+        model writes SQL against the real identifiers -- so the whole table
+        goes, with every constraint that names it. The model cannot query a
+        table it was not shown, and the count joins the other withheld
+        fragments in plan evidence.
+        """
+        verdicts: dict[str, bool] = {}
+
+        def clean(text: str) -> bool:
+            if text not in verdicts:
+                verdicts[text] = screen_text(
+                    text, content_origin="metadata_context:identifier"
+                ).is_clean
+            return verdicts[text]
+
+        kept: list[dict[str, Any]] = []
+        dropped: set[str] = set()
+        for table in context.get("tables", []):
+            columns = table.get("columns", [])
+            identifiers = [
+                str(table.get("qualified_name") or ""),
+                *(str(column.get("name") or "") for column in columns),
+                *(str(column.get("physical_type") or "") for column in columns),
+            ]
+            if all(clean(identifier) for identifier in identifiers if identifier):
+                kept.append(table)
+            else:
+                dropped.add(str(table.get("qualified_name")))
+        if not dropped:
+            return context, 0
+        constraints = [
+            constraint
+            for constraint in context.get("constraints", [])
+            if constraint.get("source_table") not in dropped
+            and constraint.get("target_table") not in dropped
+        ]
+        return {**context, "tables": kept, "constraints": constraints}, len(dropped)
+
     async def run(
         self,
         session: AsyncSession,
@@ -1242,8 +1287,10 @@ class GovernedAgentOrchestrator:
             approved_routes = await self._approved_model_routes(
                 session, request.organization_id
             )
-            model_context = await self._model_context(
-                session, datasource=request.datasource, retrieval_hits=retrieved.hits
+            model_context, withheld_tables = self._screened_model_context(
+                await self._model_context(
+                    session, datasource=request.datasource, retrieval_hits=retrieved.hits
+                )
             )
             system_instruction = (
                 "Return exactly one read-only SQL SELECT statement for the supplied "
@@ -1256,12 +1303,7 @@ class GovernedAgentOrchestrator:
             model_evidence_hits, withheld_fragments = self._screened_evidence_for_model(
                 retrieved.evidence
             )
-            if withheld_fragments:
-                ledger.plan_evidence["withheld_context_fragments"] = {
-                    "count": withheld_fragments,
-                    "reason": "INDIRECT_INJECTION_SCREENING",
-                    "screening_version": SCREENING_VERSION,
-                }
+            withheld_fragments += withheld_tables
             payload: dict[str, Any] = {
                 "question": request.question,
                 "datasource_id": str(request.datasource.id),
@@ -1269,6 +1311,16 @@ class GovernedAgentOrchestrator:
                 "retrieval_evidence": model_evidence_hits,
                 "metadata_context": model_context,
             }
+            # Prior SQL is another person's text on its way to this model.
+            # Redaction removes its literals, but a quoted identifier or alias
+            # survives it (AR-10). SQL that fails screening is left out, not
+            # sent withheld -- a query shape with a hole in it teaches nothing --
+            # and the run records that it answered without the template.
+            if memory_match is not None and not screen_text(
+                memory_match.normalized_sql, content_origin="query_memory_template"
+            ).is_clean:
+                memory_match = None
+                withheld_fragments += 1
             if memory_match is not None:
                 system_instruction += (
                     " A structurally similar prior successful query is supplied as "
@@ -1309,6 +1361,16 @@ class GovernedAgentOrchestrator:
                     if memory_match is None
                     or e.memory_evidence_id != memory_match.memory_evidence_id
                 ]
+                # The template's rule, for the same reason.
+                screened_exemplars = [
+                    e
+                    for e in exemplars
+                    if screen_text(
+                        e.normalized_sql, content_origin="confirmed_query_example"
+                    ).is_clean
+                ]
+                withheld_fragments += len(exemplars) - len(screened_exemplars)
+                exemplars = screened_exemplars
                 if exemplars:
                     system_instruction += (
                         " confirmed_query_examples contains prior queries a human "
@@ -1326,6 +1388,12 @@ class GovernedAgentOrchestrator:
                         for exemplar in exemplars
                     ]
                     fewshot_ids = [e.memory_evidence_id for e in exemplars]
+            if withheld_fragments:
+                ledger.plan_evidence["withheld_context_fragments"] = {
+                    "count": withheld_fragments,
+                    "reason": "INDIRECT_INJECTION_SCREENING",
+                    "screening_version": SCREENING_VERSION,
+                }
             # AG-10 / AR-05: the contract's budget caps, enforced here because
             # this is the last point before the platform spends anything. The
             # payload is final -- every exemplar, template and context fragment
