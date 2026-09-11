@@ -96,6 +96,7 @@ from aida.models import (
     SemanticModelVersion,
     TermSemanticBinding,
 )
+from aida.ontology_api import decide_ontology_version
 from aida.product_marketplace_api import approve_access_request
 from aida.quality_rule_proposals import decide_quality_rule_proposal
 from aida.query_history_miner import apply_query_history_metric_candidate_decision
@@ -2863,6 +2864,8 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     # ADR-0029: the quality agent's proposals. The adapter lives beside the
     # rules they are derived by rather than here.
     "QUALITY_RULE_PROPOSAL": decide_quality_rule_proposal,
+    # Governed ontology v1: publish or reject one ontology version.
+    "ONTOLOGY_VERSION": decide_ontology_version,
 }
 
 register_target_adapters(_TARGET_EFFECT_ADAPTERS)

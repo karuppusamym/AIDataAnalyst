@@ -1231,6 +1231,14 @@ export interface CompositeRelationshipCandidateRead {
   updated_at: string;
 }
 
+export interface Concept {
+  key: string;
+  name: string;
+  description: string;
+  aliases?: string[];
+  deprecated?: boolean;
+}
+
 export interface ConnectorCapabilityRead {
   connector_type: string;
   display_name: string;
@@ -3236,6 +3244,49 @@ export interface NotificationTestResult {
   organization_id: string;
   enabled: boolean;
   outcomes: Record<string, string>;
+}
+
+export interface OntologyCreate {
+  ontology_key: string;
+  base_version?: number;
+  definition: OntologyDefinition;
+}
+
+export interface OntologyDefinition {
+  name: string;
+  owner: string;
+  provenance: string;
+  lifecycle?: "ACTIVE" | "DEPRECATED";
+  concepts: Concept[];
+  relations?: OntologyRelation[];
+  mappings?: OntologyMapping[];
+}
+
+export interface OntologyMapping {
+  concept: string;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string;
+}
+
+export interface OntologyRead {
+  id: string;
+  ontology_id: string;
+  version: number;
+  base_version: number;
+  status: string;
+  definition: OntologyDefinition;
+  created_by: string;
+  approved_by?: string | null;
+  governance_review_id?: string | null;
+}
+
+export interface OntologyRelation {
+  key: string;
+  source: string;
+  target: string;
+  description: string;
+  cardinality: "ONE_TO_ONE" | "ONE_TO_MANY" | "MANY_TO_ONE" | "MANY_TO_MANY";
+  deprecated?: boolean;
 }
 
 export interface OpenLineageColumnEdgeRead {

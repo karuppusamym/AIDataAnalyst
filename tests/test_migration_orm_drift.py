@@ -67,6 +67,7 @@ from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
     envelope_models,
     graph_store,
     models,
+    ontology_models,
     procedure_lineage_models,
     quality_rule_proposal_model,
 )

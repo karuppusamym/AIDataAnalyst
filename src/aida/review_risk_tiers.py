@@ -136,6 +136,10 @@ _TIERS: Final[Mapping[str, str]] = {
     # so the same tier. The quality agent proposes these (ADR-0029); no agent
     # decides them.
     "QUALITY_RULE_PROPOSAL": TIER_T2,
+    # A published ontology version is published meaning -- the concepts, the
+    # relations between them and the tables they map to -- the same kind of
+    # change as a glossary term version.
+    "ONTOLOGY_VERSION": TIER_T2,
     # --- T3: the trust boundary itself ------------------------------------
     "MODEL_ROUTE_CONFIGURATION": TIER_T3,
     "AI_ASSET": TIER_T3,

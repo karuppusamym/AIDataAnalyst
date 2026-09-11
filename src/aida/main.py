@@ -65,6 +65,7 @@ from aida.observability import (
     traced,
 )
 from aida.observability_api import router as observability_router
+from aida.ontology_api import router as ontology_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
 from aida.parsed_lineage_review_api import router as parsed_lineage_review_router
@@ -463,6 +464,8 @@ app.include_router(review_queue_router)
 app.include_router(steward_agent_router)
 app.include_router(lineage_agent_router)
 app.include_router(quality_agent_router)
+# Governed ontology v1: typed definitions, decided in the governance queue.
+app.include_router(ontology_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

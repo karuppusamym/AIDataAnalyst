@@ -5,16 +5,18 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-# `envelope_models`/`graph_store`/`procedure_lineage_models`/`quality_rule_proposal_model`
-# are imported for their side effect of registering additional tables on
-# `aida.db.Base.metadata` (Group J's `GraphStoreOrganizationSetting`, Group I's
-# `DeepProcedureLineageEdge`/`ProcedureToolGenerationRecord`, ADR-0029's
-# `QualityRuleProposal`, same pattern envelope_models already used) so
-# autogenerate/create_all see them.
+# `envelope_models`/`graph_store`/`ontology_models`/`procedure_lineage_models`/
+# `quality_rule_proposal_model` are imported for their side effect of registering
+# additional tables on `aida.db.Base.metadata` (Group J's
+# `GraphStoreOrganizationSetting`, the governed ontology's `OntologyHead`/
+# `OntologyVersion`, Group I's `DeepProcedureLineageEdge`/
+# `ProcedureToolGenerationRecord`, ADR-0029's `QualityRuleProposal`, same pattern
+# envelope_models already used) so autogenerate/create_all see them.
 from aida import (  # noqa: F401
     envelope_models,
     graph_store,
     models,
+    ontology_models,
     procedure_lineage_models,
     quality_rule_proposal_model,
 )

@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **480**
-- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 429, SDK 1
+- Surfaces covered: **483**
+- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 432, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -270,6 +270,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/metric-suggestions` | REST | `aida.metric_suggestion_api.list_metric_suggestion_proposals` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/model-routes` | REST | `aida.ai_governance_api.list_model_routes` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/notifications/governance` | REST | `aida.retrieval_ops_api.list_governance_notifications` | Analyst, Auditor, DataSteward, MetadataAdmin, Operations, PlatformAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/ontology-versions` | REST | `aida.ontology_api.list_ontology_versions` | DataSteward, MetadataAdmin, PlatformAdmin, Reviewer | yes | yes | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/outbox-events` | REST | `aida.operational_api.list_outbox_events` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/ownership-assignments` | REST | `aida.stewardship_api.list_ownership_assignments` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/ownership-rules` | REST | `aida.stewardship_api.list_ownership_rules` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -430,6 +431,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/notification-rules` | REST | `aida.notification_api.create_notification_rule` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/notifications/{notification_id}/acknowledge` | REST | `aida.notification_api.acknowledge_notification` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/observability/slo` | REST | `atlas.modules.observability_audit.router.create_slo_definition` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/ontology-versions/{version_id}/submit` | REST | `aida.ontology_api.submit_ontology_version` | DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/access-policies` | REST | `atlas.modules.identity_tenancy.router.create_access_policy` | OrganizationAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/agent-contract-requests` | REST | `aida.agent_contract_request_api.submit_agent_contract_request` | AgentDeveloper, ModelRiskManager, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/agent-evaluations` | REST | `aida.api.run_agent_evaluation` | AgentDeveloper, Auditor, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -456,6 +458,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/metric-suggestions/generate` | REST | `aida.metric_suggestion_api.generate_metric_suggestion_proposals` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/model-routes` | REST | `aida.ai_governance_api.create_model_route` | AgentDeveloper, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/notifications/governance/test` | REST | `aida.retrieval_ops_api.send_test_governance_notification` | MetadataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/organizations/{organization_id}/ontology-versions` | REST | `aida.ontology_api.create_ontology_version` | DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/ownership-rules` | REST | `aida.stewardship_api.create_ownership_rule` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/playbooks` | REST | `aida.playbooks_api.create_playbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/retrieval/vector-index/rebuild` | REST | `aida.retrieval_ops_api.rebuild_vector_index_endpoint` | MetadataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
