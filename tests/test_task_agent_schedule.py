@@ -189,10 +189,16 @@ async def test_the_inbox_counts_task_agent_runs_and_refusals(
     assert (agent.runs_recent, agent.success_rate) == (2, 0.5)
 
 
-async def test_the_roster_says_where_a_task_agents_runs_are(
+async def test_the_roster_lists_a_task_agents_completed_runs(
     maker: async_sessionmaker[Any],
 ) -> None:
     org_id, _contract = await _registered_org(maker)
+    await run_task_agent_schedule_pass(
+        agent_settings(steward_agent_interval_minutes=60),
+        now=T0,
+        session_maker=maker,
+        last_run_at={},
+    )
 
     async with maker() as session:
         roster = await compose_agent_roster(
@@ -201,4 +207,7 @@ async def test_the_roster_says_where_a_task_agents_runs_are(
 
     [entry] = roster.agents
     assert "steward_agent.run" in entry.method.note
-    assert entry.method.sampled_runs == 0
+    assert entry.method.sampled_runs == 0, "planned-run figures do not apply"
+    assert entry.recent_results_total == 1
+    [result] = entry.recent_results
+    assert (result.status, result.generation_source) == ("COMPLETED", "DETERMINISTIC")

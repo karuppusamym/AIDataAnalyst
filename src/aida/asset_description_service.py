@@ -260,11 +260,20 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         1 for constraint in constraints if constraint.constraint_type == "FOREIGN_KEY"
     )
 
+    # Only same-source lineage a reviewer has not rejected is evidence. A draft
+    # is text anyone who can read this table will read, and naming a table in
+    # another datasource would disclose it past the per-read cross-source grant
+    # check (ADR-0017) -- the line `column_description_service` already draws.
+    # An edge a reviewer rejected (ADR-0026) is evidence of nothing.
+    lineage_filters = (
+        OpenLineageTableEdge.review_status == "ACTIVE",
+        MetadataTable.datasource_id == table.datasource_id,
+    )
     upstream_rows = (
         await session.execute(
             select(OpenLineageTableEdge.id, MetadataTable.name)
             .join(MetadataTable, MetadataTable.id == OpenLineageTableEdge.input_table_id)
-            .where(OpenLineageTableEdge.output_table_id == table.id)
+            .where(OpenLineageTableEdge.output_table_id == table.id, *lineage_filters)
             .limit(_LINEAGE_QUERY_LIMIT)
         )
     ).all()
@@ -272,7 +281,7 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         await session.execute(
             select(OpenLineageTableEdge.id, MetadataTable.name)
             .join(MetadataTable, MetadataTable.id == OpenLineageTableEdge.output_table_id)
-            .where(OpenLineageTableEdge.input_table_id == table.id)
+            .where(OpenLineageTableEdge.input_table_id == table.id, *lineage_filters)
             .limit(_LINEAGE_QUERY_LIMIT)
         )
     ).all()
