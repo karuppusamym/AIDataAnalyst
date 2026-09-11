@@ -12311,3 +12311,26 @@ looping worker so the migration could not queue behind it again. `migrate` appli
   a very large source holds that transaction for the whole pass; committing per batch would bound
   it.
 - AR-09 and the measurement halves of AR-03, AR-04, AR-06, AR-10, AR-11 and AR-12, unchanged.
+
+
+## 2026-09-11 — The ingest drafter commits each batch
+
+Commit `a206c9c`. It follows `cc98493`, which made the drafter's semantic-inference pass end but
+left it running every batch of a completed scan inside the one transaction the Kafka consumer
+opens per message. On a large source that held the datasource's row lock and a snapshot for the
+whole pass, so a migration touching those tables waited for all of it: the pile-up that wedged the
+dev stack earlier the same day, only shorter.
+
+The consumer now gives each batch of 100 tables its own transaction
+(`enqueue_semantics_in_batches`). A failure keeps the batches before it, and since the Kafka
+message is not acknowledged, a replay resumes where it stopped: tables already proposed are
+skipped. The single-table path from `handle_newly_created_table`, and any caller that owns its
+transaction, still runs every batch inside it (`enqueue_semantics_for_source`).
+
+### Verified
+
+- A new test runs the consumer's path with a batch size of one over two tables and gets two
+  batches, each in its own session.
+- All 20 tests in the three files that exercise the drafter (`test_auto_enqueue_on_ingest.py`,
+  `test_side_car_steward_contract.py`, `test_workflow_revalidation.py`), ruff and mypy.
+- Live: the metadata-worker image was rebuilt from `a206c9c` and the container recreated. Its Temporal worker and the drafter's Kafka consumer both started, it logged no errors, and no transaction in the database has stayed open longer than 30 seconds since.
