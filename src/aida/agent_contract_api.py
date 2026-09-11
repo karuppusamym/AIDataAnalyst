@@ -52,12 +52,15 @@ from aida.models import (
 )
 from aida.review_risk_tiers import effective_agent_ceiling, risk_tier_for
 from aida.reviewer_agent import (
+    REASON_AUDIT_BACKLOG,
     ReviewerAgentUnavailable,
     auto_decide_tier0_tier1,
     organization_suspended,
     pre_review_pending,
+    record_audit_backlog_refusal,
     resolve_audit_sample,
     set_suspended,
+    unresolved_audit_samples,
 )
 from aida.reviewer_agent_metrics import (
     REVISIT_TRIGGER_WINDOW_DAYS,
@@ -283,6 +286,13 @@ class ReviewerAgentStateRead(ApiModel):
     sampling_rate: float
     agent_principal_id: str
     evidence_max_age_minutes: int
+    #: AR-11: sampled decisions no human has read, the bound at which the agent
+    #: stops deciding, and whether it is stopped by it now. The licence to
+    #: decide is contingent on this backlog, so the state an operator sees
+    #: includes it.
+    unresolved_samples: int
+    max_unresolved_samples: int
+    audit_backlog_exceeded: bool
 
 
 # ---------------------------------------------------------------------------
@@ -927,6 +937,62 @@ async def get_agent_inbox(
 # ---------------------------------------------------------------------------
 
 
+async def _reviewer_agent_state(
+    session: AsyncSession, organization_id: UUID, settings: Settings, *, suspended: bool
+) -> ReviewerAgentStateRead:
+    ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)
+    unresolved = await unresolved_audit_samples(session, organization_id)
+    limit = settings.reviewer_agent_max_unresolved_samples
+    return ReviewerAgentStateRead(
+        organization_id=organization_id,
+        enabled=settings.reviewer_agent_enabled,
+        suspended=suspended,
+        max_tier=ceiling,
+        configured_max_tier=settings.reviewer_agent_max_tier,
+        max_tier_clamped=ceiling != settings.reviewer_agent_max_tier,
+        sampling_rate=settings.reviewer_agent_sampling_rate,
+        agent_principal_id=settings.reviewer_agent_principal_id,
+        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
+        unresolved_samples=unresolved,
+        max_unresolved_samples=limit,
+        # A zero bound disables the check, as it does in `auto_decide_tier0_tier1`.
+        audit_backlog_exceeded=bool(limit) and unresolved >= limit,
+    )
+
+
+async def _record_backlog_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+) -> None:
+    """AR-11: the agent stopping for want of human attention is an event.
+
+    Recorded after the caller's rollback, so it survives it, then pushed to
+    the governance channel: a backlog nobody is told about is a backlog
+    nobody clears.
+    """
+    unresolved = await unresolved_audit_samples(session, organization_id)
+    limit = settings.reviewer_agent_max_unresolved_samples
+    record_audit_backlog_refusal(
+        session, organization_id, context=context, unresolved=unresolved, limit=limit
+    )
+    await session.commit()
+    await notify_safely(
+        session,
+        organization_id,
+        "REVIEWER_AGENT_AUDIT_BACKLOG",
+        {
+            "object_type": "REVIEWER_AGENT",
+            "object_id": str(organization_id),
+            "object_name": f"{unresolved} sampled decisions unread; the bound is {limit}",
+            "principal_id": context.principal_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
+
+
 @router.get(
     "/organizations/{organization_id}/reviewer-agent", response_model=ReviewerAgentStateRead
 )
@@ -937,20 +1003,12 @@ async def get_reviewer_agent_state(
     settings: Settings = Depends(get_settings),
 ) -> ReviewerAgentStateRead:
     enforce_organization(context, organization_id)
-    return ReviewerAgentStateRead(
-        organization_id=organization_id,
-        enabled=settings.reviewer_agent_enabled,
+    return await _reviewer_agent_state(
+        session,
+        organization_id,
+        settings,
         suspended=settings.reviewer_agent_suspended
         or await organization_suspended(session, organization_id),
-        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
-        configured_max_tier=settings.reviewer_agent_max_tier,
-        max_tier_clamped=(
-            effective_agent_ceiling(settings.reviewer_agent_max_tier)
-            != settings.reviewer_agent_max_tier
-        ),
-        sampling_rate=settings.reviewer_agent_sampling_rate,
-        agent_principal_id=settings.reviewer_agent_principal_id,
-        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
     )
 
 
@@ -996,6 +1054,8 @@ async def run_reviewer_agent(
         )
     except ReviewerAgentUnavailable as exc:
         await session.rollback()
+        if exc.reason_code == REASON_AUDIT_BACKLOG:
+            await _record_backlog_refusal(session, organization_id, context, settings)
         raise HTTPException(status_code=409, detail=exc.reason_code) from exc
     await session.commit()
     return ReviewerAgentRunResult(
@@ -1023,20 +1083,7 @@ async def suspend_reviewer_agent(
         session, organization_id, suspended=True, context=context, reason=body.reason
     )
     await session.commit()
-    return ReviewerAgentStateRead(
-        organization_id=organization_id,
-        enabled=settings.reviewer_agent_enabled,
-        suspended=True,
-        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
-        configured_max_tier=settings.reviewer_agent_max_tier,
-        max_tier_clamped=(
-            effective_agent_ceiling(settings.reviewer_agent_max_tier)
-            != settings.reviewer_agent_max_tier
-        ),
-        sampling_rate=settings.reviewer_agent_sampling_rate,
-        agent_principal_id=settings.reviewer_agent_principal_id,
-        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
-    )
+    return await _reviewer_agent_state(session, organization_id, settings, suspended=True)
 
 
 @router.post(
@@ -1055,19 +1102,8 @@ async def resume_reviewer_agent(
         session, organization_id, suspended=False, context=context, reason=body.reason
     )
     await session.commit()
-    return ReviewerAgentStateRead(
-        organization_id=organization_id,
-        enabled=settings.reviewer_agent_enabled,
-        suspended=settings.reviewer_agent_suspended,
-        max_tier=effective_agent_ceiling(settings.reviewer_agent_max_tier),
-        configured_max_tier=settings.reviewer_agent_max_tier,
-        max_tier_clamped=(
-            effective_agent_ceiling(settings.reviewer_agent_max_tier)
-            != settings.reviewer_agent_max_tier
-        ),
-        sampling_rate=settings.reviewer_agent_sampling_rate,
-        agent_principal_id=settings.reviewer_agent_principal_id,
-        evidence_max_age_minutes=settings.reviewer_agent_evidence_max_age_minutes,
+    return await _reviewer_agent_state(
+        session, organization_id, settings, suspended=settings.reviewer_agent_suspended
     )
 
 
@@ -1085,6 +1121,31 @@ class DisagreementRateRead(ApiModel):
     breaches_revisit_trigger: bool
 
 
+class RiskTierDisagreementRateRead(ApiModel):
+    risk_tier: str
+    sampled: int
+    resolved: int
+    agreed: int
+    disagreed: int
+    pending: int
+    #: Only approvals are sampled, so this is the sampled false-approval rate
+    #: for the tier. None, never 0, when nothing has been resolved.
+    disagreement_rate: float | None
+    sufficient_sample: bool
+
+
+class AuditResolutionTimeRead(ApiModel):
+    #: Samples taken in the window that a human has since resolved, and the
+    #: hours each waited for its verdict. None when nothing is resolved.
+    resolved: int
+    median_hours: float | None
+    p90_hours: float | None
+    max_hours: float | None
+    #: Every unread sample the organization has, and the oldest one's age.
+    pending: int
+    oldest_pending_hours: float | None
+
+
 class DisagreementReportRead(ApiModel):
     window_days: int
     computed_at: datetime
@@ -1097,6 +1158,10 @@ class DisagreementReportRead(ApiModel):
     minimum_resolved_for_signal: int
     breaching_object_types: list[str]
     by_object_type: list[DisagreementRateRead]
+    #: AR-11: the same samples cut by risk tier.
+    by_risk_tier: list[RiskTierDisagreementRateRead]
+    #: AR-11: how long the sample waits for a human.
+    resolution: AuditResolutionTimeRead
 
 
 @router.get(
@@ -1141,6 +1206,27 @@ async def get_disagreement_rates(
             )
             for row in report.by_object_type
         ],
+        by_risk_tier=[
+            RiskTierDisagreementRateRead(
+                risk_tier=row.risk_tier,
+                sampled=row.sampled,
+                resolved=row.resolved,
+                agreed=row.agreed,
+                disagreed=row.disagreed,
+                pending=row.pending,
+                disagreement_rate=row.disagreement_rate,
+                sufficient_sample=row.sufficient_sample,
+            )
+            for row in report.by_risk_tier
+        ],
+        resolution=AuditResolutionTimeRead(
+            resolved=report.resolution.resolved,
+            median_hours=report.resolution.median_hours,
+            p90_hours=report.resolution.p90_hours,
+            max_hours=report.resolution.max_hours,
+            pending=report.resolution.pending,
+            oldest_pending_hours=report.resolution.oldest_pending_hours,
+        ),
     )
 
 
@@ -1231,6 +1317,23 @@ async def resolve_sample(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await session.commit()
+    if body.human_outcome == "DISAGREED":
+        # AR-11: a human saying the agent was wrong starts a correction, and
+        # the correction belongs to whoever owns the object. The procedure is
+        # Docs/40-engineering/11-reviewer-agent-oversight-runbook.md.
+        await notify_safely(
+            session,
+            organization_id,
+            "REVIEWER_AGENT_SAMPLE_DISAGREED",
+            {
+                "object_type": sample.object_type,
+                "object_id": str(sample.governance_review_id),
+                "risk_tier": sample.risk_tier,
+                "principal_id": context.principal_id,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            settings=get_settings(),
+        )
     return ReviewAuditSampleRead(
         sample_id=sample.id,
         governance_review_id=sample.governance_review_id,

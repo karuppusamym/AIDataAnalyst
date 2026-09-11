@@ -4051,6 +4051,73 @@
         "title": "AssetTermLinkRead",
         "type": "object"
       },
+      "AuditResolutionTimeRead": {
+        "additionalProperties": false,
+        "properties": {
+          "max_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Hours"
+          },
+          "median_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Median Hours"
+          },
+          "oldest_pending_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Pending Hours"
+          },
+          "p90_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P90 Hours"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "resolved",
+          "median_hours",
+          "p90_hours",
+          "max_hours",
+          "pending",
+          "oldest_pending_hours"
+        ],
+        "title": "AuditResolutionTimeRead",
+        "type": "object"
+      },
       "AuthorizationProbeRead": {
         "additionalProperties": false,
         "properties": {
@@ -12419,6 +12486,13 @@
             "title": "By Object Type",
             "type": "array"
           },
+          "by_risk_tier": {
+            "items": {
+              "$ref": "#/components/schemas/RiskTierDisagreementRateRead"
+            },
+            "title": "By Risk Tier",
+            "type": "array"
+          },
           "computed_at": {
             "format": "date-time",
             "title": "Computed At",
@@ -12431,6 +12505,9 @@
           "minimum_resolved_for_signal": {
             "title": "Minimum Resolved For Signal",
             "type": "integer"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/AuditResolutionTimeRead"
           },
           "threshold": {
             "title": "Threshold",
@@ -12448,7 +12525,9 @@
           "threshold",
           "minimum_resolved_for_signal",
           "breaching_object_types",
-          "by_object_type"
+          "by_object_type",
+          "by_risk_tier",
+          "resolution"
         ],
         "title": "DisagreementReportRead",
         "type": "object"
@@ -24889,6 +24968,10 @@
             "title": "Agent Principal Id",
             "type": "string"
           },
+          "audit_backlog_exceeded": {
+            "title": "Audit Backlog Exceeded",
+            "type": "boolean"
+          },
           "configured_max_tier": {
             "title": "Configured Max Tier",
             "type": "string"
@@ -24909,6 +24992,10 @@
             "title": "Max Tier Clamped",
             "type": "boolean"
           },
+          "max_unresolved_samples": {
+            "title": "Max Unresolved Samples",
+            "type": "integer"
+          },
           "organization_id": {
             "format": "uuid",
             "title": "Organization Id",
@@ -24921,6 +25008,10 @@
           "suspended": {
             "title": "Suspended",
             "type": "boolean"
+          },
+          "unresolved_samples": {
+            "title": "Unresolved Samples",
+            "type": "integer"
           }
         },
         "required": [
@@ -24932,9 +25023,68 @@
           "max_tier_clamped",
           "sampling_rate",
           "agent_principal_id",
-          "evidence_max_age_minutes"
+          "evidence_max_age_minutes",
+          "unresolved_samples",
+          "max_unresolved_samples",
+          "audit_backlog_exceeded"
         ],
         "title": "ReviewerAgentStateRead",
+        "type": "object"
+      },
+      "RiskTierDisagreementRateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agreed": {
+            "title": "Agreed",
+            "type": "integer"
+          },
+          "disagreed": {
+            "title": "Disagreed",
+            "type": "integer"
+          },
+          "disagreement_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disagreement Rate"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "integer"
+          },
+          "risk_tier": {
+            "title": "Risk Tier",
+            "type": "string"
+          },
+          "sampled": {
+            "title": "Sampled",
+            "type": "integer"
+          },
+          "sufficient_sample": {
+            "title": "Sufficient Sample",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "risk_tier",
+          "sampled",
+          "resolved",
+          "agreed",
+          "disagreed",
+          "pending",
+          "disagreement_rate",
+          "sufficient_sample"
+        ],
+        "title": "RiskTierDisagreementRateRead",
         "type": "object"
       },
       "ScanPolicyRead": {

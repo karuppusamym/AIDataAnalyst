@@ -5,7 +5,7 @@ repeatedly: a governance platform nobody opens governs nothing. Atlan's own
 differentiation claim is collaboration-hub UX rather than catalog depth, and
 Genie shipped to Slack and Teams before it shipped anywhere else.
 
-This is the cheapest credible version of that: the seven governance events a
+This is the cheapest credible version of that: the governance events a
 human actually needs to react to, pushed to Slack or Teams with a deep link
 back into the portal. It is not a chat integration and deliberately not a
 second control surface -- every message is a notification plus a link, never
@@ -86,6 +86,8 @@ GovernanceEventKind = Literal[
     "KILL_SWITCH_ENGAGED",
     "KILL_SWITCH_RELEASED",
     "CERTIFICATION_EXPIRING",
+    "REVIEWER_AGENT_AUDIT_BACKLOG",
+    "REVIEWER_AGENT_SAMPLE_DISAGREED",
 ]
 
 #: Every event kind this module knows how to render. A kind not listed here is
@@ -99,6 +101,11 @@ EVENT_KINDS: Final[tuple[str, ...]] = (
     "KILL_SWITCH_ENGAGED",
     "KILL_SWITCH_RELEASED",
     "CERTIFICATION_EXPIRING",
+    # AR-11: the reviewer agent's oversight depends on humans reading its
+    # sample. The agent stopping because they have not, and a human
+    # disputing a decision it made, are both things someone has to act on.
+    "REVIEWER_AGENT_AUDIT_BACKLOG",
+    "REVIEWER_AGENT_SAMPLE_DISAGREED",
 )
 
 #: Which portal screen each kind deep-links to. `ui-next` routes on
@@ -111,6 +118,8 @@ _SCREEN_BY_KIND: Final[dict[str, str]] = {
     "KILL_SWITCH_ENGAGED": "agents",
     "KILL_SWITCH_RELEASED": "agents",
     "CERTIFICATION_EXPIRING": "stewardship",
+    "REVIEWER_AGENT_AUDIT_BACKLOG": "reviewer-agent",
+    "REVIEWER_AGENT_SAMPLE_DISAGREED": "reviewer-agent",
 }
 
 _HEADLINE_BY_KIND: Final[dict[str, str]] = {
@@ -121,6 +130,8 @@ _HEADLINE_BY_KIND: Final[dict[str, str]] = {
     "KILL_SWITCH_ENGAGED": "AI kill switch ENGAGED",
     "KILL_SWITCH_RELEASED": "AI kill switch released",
     "CERTIFICATION_EXPIRING": "Certification expiring",
+    "REVIEWER_AGENT_AUDIT_BACKLOG": "Reviewer agent stopped: its audit sample is unread",
+    "REVIEWER_AGENT_SAMPLE_DISAGREED": "A reviewer-agent decision was disputed",
 }
 
 STATUS_SENT = "SENT"

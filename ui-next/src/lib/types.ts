@@ -692,6 +692,15 @@ export interface AssetTermLinkRead {
   created_at: string;
 }
 
+export interface AuditResolutionTimeRead {
+  resolved: number;
+  median_hours: number | null;
+  p90_hours: number | null;
+  max_hours: number | null;
+  pending: number;
+  oldest_pending_hours: number | null;
+}
+
 export interface AuthorizationProbeRead {
   allowed: boolean;
   reason_code: string;
@@ -2083,6 +2092,8 @@ export interface DisagreementReportRead {
   minimum_resolved_for_signal: number;
   breaching_object_types: string[];
   by_object_type: DisagreementRateRead[];
+  by_risk_tier: RiskTierDisagreementRateRead[];
+  resolution: AuditResolutionTimeRead;
 }
 
 export interface DocumentCreate {
@@ -4186,6 +4197,20 @@ export interface ReviewerAgentStateRead {
   sampling_rate: number;
   agent_principal_id: string;
   evidence_max_age_minutes: number;
+  unresolved_samples: number;
+  max_unresolved_samples: number;
+  audit_backlog_exceeded: boolean;
+}
+
+export interface RiskTierDisagreementRateRead {
+  risk_tier: string;
+  sampled: number;
+  resolved: number;
+  agreed: number;
+  disagreed: number;
+  pending: number;
+  disagreement_rate: number | null;
+  sufficient_sample: boolean;
 }
 
 export interface ScanPolicyRead {

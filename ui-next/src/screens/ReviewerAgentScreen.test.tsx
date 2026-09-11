@@ -160,6 +160,15 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
       minimum_resolved_for_signal: 20,
       breaching_object_types: [],
       by_object_type: [],
+      by_risk_tier: [],
+      resolution: {
+        resolved: 0,
+        median_hours: null,
+        p90_hours: null,
+        max_hours: null,
+        pending: 0,
+        oldest_pending_hours: null,
+      },
     });
     render(<ReviewerAgentScreen />);
 
@@ -208,5 +217,38 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
     expect(await screen.findByText(/marked the .* sample as agreed/i)).toBeInTheDocument();
     expect(fetchReviewerAgentSamples).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  /* AR-11: the oversight the agent's licence depends on, where an operator
+     looks. */
+  it("shows the unread audit sample against its bound, and says when it has stopped the agent", async () => {
+    fetchReviewerAgentState.mockResolvedValue({
+      ...makeFixtureReviewerAgentState(ORG),
+      unresolved_samples: 50,
+      audit_backlog_exceeded: true,
+    });
+    render(<ReviewerAgentScreen />);
+
+    expect(await screen.findByText("50 of 50")).toBeInTheDocument();
+    expect(screen.getByText("stopped: audit sample unread")).toBeInTheDocument();
+  });
+
+  it("shows the false-approval rate by risk tier and how long the sample waits", async () => {
+    render(<ReviewerAgentScreen />);
+
+    expect(await screen.findByText("By risk tier")).toBeInTheDocument();
+    expect(screen.getAllByText(/false-approval rate/)).toHaveLength(2);
+    expect(screen.getByText("15%")).toBeInTheDocument(); // T1, 4 of 27
+    expect(screen.getByText("6.5h")).toBeInTheDocument(); // median
+    expect(screen.getByText("3d")).toBeInTheDocument(); // oldest unread, 71 hours
+  });
+
+  it("links each sampled decision to the review it decided", async () => {
+    render(<ReviewerAgentScreen />);
+
+    const links = await screen.findAllByRole("link", { name: "Open the review" });
+    expect(links[0]!.getAttribute("href")).toBe(
+      "?review=bbbbbbbb-1111-1111-1111-111111111111#/governance",
+    );
   });
 });

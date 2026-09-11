@@ -6457,6 +6457,10 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
     sampling_rate: 0.1,
     agent_principal_id: "agent:reviewer",
     evidence_max_age_minutes: 60,
+    // AR-11: the unread audit sample, and the bound at which the agent stops.
+    unresolved_samples: 8,
+    max_unresolved_samples: 50,
+    audit_backlog_exceeded: false,
   };
 }
 
@@ -6753,6 +6757,38 @@ export function makeFixtureDisagreementRates(windowDays: number): DisagreementRe
         breaches_revisit_trigger: false,
       },
     ],
+    // AR-11: the same samples by risk tier. Only approvals are sampled, so a
+    // tier's disagreement rate is its sampled false-approval rate.
+    by_risk_tier: [
+      {
+        risk_tier: "T0",
+        sampled: 40,
+        resolved: 38,
+        agreed: 36,
+        disagreed: 2,
+        pending: 2,
+        disagreement_rate: 0.0526,
+        sufficient_sample: true,
+      },
+      {
+        risk_tier: "T1",
+        sampled: 33,
+        resolved: 27,
+        agreed: 23,
+        disagreed: 4,
+        pending: 6,
+        disagreement_rate: 0.1481,
+        sufficient_sample: true,
+      },
+    ],
+    resolution: {
+      resolved: 65,
+      median_hours: 6.5,
+      p90_hours: 30,
+      max_hours: 52,
+      pending: 8,
+      oldest_pending_hours: 71,
+    },
   };
 }
 

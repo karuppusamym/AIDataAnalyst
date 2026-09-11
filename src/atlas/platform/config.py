@@ -421,7 +421,7 @@ class Settings(BaseSettings):
     slack_webhook_url: str | None = None
     teams_webhook_url: str | None = None
     governance_notification_timeout_seconds: float = Field(default=5.0, gt=0.0)
-    #: Which of the seven kinds to deliver. Narrowing this is how an
+    #: Which kinds to deliver. Narrowing this is how an
     #: organization stops a noisy channel without turning the feature off.
     governance_notification_events: list[str] = Field(
         default_factory=lambda: [
@@ -432,6 +432,8 @@ class Settings(BaseSettings):
             "KILL_SWITCH_ENGAGED",
             "KILL_SWITCH_RELEASED",
             "CERTIFICATION_EXPIRING",
+            "REVIEWER_AGENT_AUDIT_BACKLOG",
+            "REVIEWER_AGENT_SAMPLE_DISAGREED",
         ]
     )
     #: Base URL of the portal, used to build the deep link in a message. A

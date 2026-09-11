@@ -56,3 +56,11 @@
   .revagent__head { flex-direction: column; align-items: flex-start; }
   .revagent__panelhead { flex-direction: column; align-items: flex-start; }
 }
+
+/* AR-11: the risk-tier cut and the time-to-verdict clock under the
+   disagreement report. */
+.revagent__subhead {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}

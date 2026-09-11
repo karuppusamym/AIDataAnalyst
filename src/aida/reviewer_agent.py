@@ -699,6 +699,43 @@ async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID)
     return int(count or 0)
 
 
+def record_audit_backlog_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    context: SecurityContext,
+    unresolved: int,
+    limit: int,
+) -> None:
+    """Make the backlog refusal an event, not only a 409 (AR-11).
+
+    `auto_decide_tier0_tier1` raises before it writes anything and its caller
+    rolls back, so the agent stopping for want of human attention used to
+    leave no trace but a response code. The caller records it after the
+    rollback: an audit row naming who asked, and an outbox event that a
+    notification or a dashboard can act on.
+    """
+    details = {"unresolved_samples": unresolved, "max_unresolved_samples": limit}
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action="reviewer_agent.run",
+        resource_type="reviewer_agent_state",
+        resource_id=str(organization_id),
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={"reason": REASON_AUDIT_BACKLOG, **details},
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="reviewer_agent_state",
+        aggregate_id=str(organization_id),
+        event_type="reviewer_agent.audit_backlog_exceeded.v1",
+        payload=details,
+    )
+
+
 async def organization_suspended(session: AsyncSession, organization_id: UUID) -> bool:
     state = await session.scalar(
         select(ReviewerAgentState)

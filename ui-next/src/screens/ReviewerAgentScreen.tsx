@@ -4,6 +4,7 @@ import type {
   DisagreementReportRead,
   ReviewAuditSampleRead,
   ReviewerAgentStateRead,
+  RiskTierDisagreementRateRead,
 } from "../lib/types";
 import {
   ApiError,
@@ -41,7 +42,10 @@ import "./ReviewerAgentScreen.css";
      2. manual triggers for pre-review and the actual auto-decide run, each
         showing the real counts the endpoint returned;
      3. the disagreement-rate report — ADR-0027's 5% revisit trigger, as a
-        number per object type, reporting only, never suspending by itself;
+        number per object type, reporting only, never suspending by itself —
+        with the same samples by risk tier (AR-11: only approvals are
+        sampled, so that is the sampled false-approval rate) and how long
+        the sample waits for a human verdict;
      4. the sampled-decision audit queue, where a human resolves one sampled
         auto-decision at a time with a mandatory rationale.
 --------------------------------------------------------------------------- */
@@ -53,6 +57,13 @@ const SAMPLES_LIMIT = 20;
 
 function percent(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;
+}
+
+/** A duration in hours as a person would say it: hours up to two days, then days. */
+function hours(value: number | null): string {
+  if (value === null) return "—";
+  if (value < 48) return `${Number(value.toFixed(1))}h`;
+  return `${Math.round(value / 24)}d`;
 }
 
 function relative(iso: string): string {
@@ -107,6 +118,25 @@ function DisagreementRow({ row }: { row: DisagreementRateRead }) {
   );
 }
 
+function TierRow({ row }: { row: RiskTierDisagreementRateRead }) {
+  return (
+    <li className="revagent__row">
+      <span className="revagent__rowhead">
+        <Pill tone={tierTone(row.risk_tier)}>{row.risk_tier}</Pill>
+        {!row.sufficient_sample && <Pill tone="mute">insufficient sample</Pill>}
+      </span>
+      <span className="revagent__meta">
+        <span>resolved {row.resolved}</span>
+        <span>disagreed {row.disagreed}</span>
+        <span>pending {row.pending}</span>
+        <span>
+          false-approval rate <b>{percent(row.disagreement_rate)}</b>
+        </span>
+      </span>
+    </li>
+  );
+}
+
 function SampleRow({
   sample,
   onResolve,
@@ -125,6 +155,9 @@ function SampleRow({
       <span className="revagent__meta">
         <span>by {sample.agent_principal_id}</span>
         <span>{relative(sample.sampled_at)}</span>
+        <a href={`?review=${encodeURIComponent(sample.governance_review_id)}#/governance`}>
+          Open the review
+        </a>
         {sample.human_rationale && <span className="revagent__muted">{sample.human_rationale}</span>}
       </span>
       {sample.human_outcome === "PENDING" && (
@@ -375,6 +408,9 @@ export function ReviewerAgentScreen() {
                   {state.suspended ? "suspended" : "active"}
                 </Pill>
                 <Pill tone={tierTone(state.max_tier)}>max tier {state.max_tier}</Pill>
+                {state.audit_backlog_exceeded && (
+                  <Pill tone="bad">stopped: audit sample unread</Pill>
+                )}
               </div>
               <dl className="revagent__facts">
                 <div>
@@ -384,6 +420,14 @@ export function ReviewerAgentScreen() {
                 <div>
                   <dt>Acts as</dt>
                   <dd className="revagent__mono">{state.agent_principal_id}</dd>
+                </div>
+                <div>
+                  <dt>Unread audit sample</dt>
+                  <dd>
+                    {state.max_unresolved_samples > 0
+                      ? `${state.unresolved_samples} of ${state.max_unresolved_samples}`
+                      : `${state.unresolved_samples} (no bound)`}
+                  </dd>
                 </div>
               </dl>
               <div className="revagent__actions">
@@ -457,11 +501,34 @@ export function ReviewerAgentScreen() {
               hint="This is not evidence the reviewer agent is performing well — it means no sampled decision has a human verdict yet."
             />
           ) : disagreement ? (
-            <ul className="revagent__list">
-              {disagreement.by_object_type.map((row) => (
-                <DisagreementRow key={row.object_type} row={row} />
-              ))}
-            </ul>
+            <>
+              <ul className="revagent__list">
+                {disagreement.by_object_type.map((row) => (
+                  <DisagreementRow key={row.object_type} row={row} />
+                ))}
+              </ul>
+              <h3 className="revagent__subhead">By risk tier</h3>
+              <ul className="revagent__list">
+                {disagreement.by_risk_tier.map((row) => (
+                  <TierRow key={row.risk_tier} row={row} />
+                ))}
+              </ul>
+              <h3 className="revagent__subhead">Time to a human verdict</h3>
+              <dl className="revagent__facts">
+                <div>
+                  <dt>Median</dt>
+                  <dd>{hours(disagreement.resolution.median_hours)}</dd>
+                </div>
+                <div>
+                  <dt>90th percentile</dt>
+                  <dd>{hours(disagreement.resolution.p90_hours)}</dd>
+                </div>
+                <div>
+                  <dt>Oldest unread</dt>
+                  <dd>{hours(disagreement.resolution.oldest_pending_hours)}</dd>
+                </div>
+              </dl>
+            </>
           ) : null}
         </div>
       </section>
