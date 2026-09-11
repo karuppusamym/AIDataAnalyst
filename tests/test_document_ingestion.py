@@ -566,6 +566,34 @@ async def test_extract_claims_refuses_a_document_not_yet_mapped(session: AsyncSe
     assert exc_info.value.status_code == 409
 
 
+async def test_extract_claims_refuses_to_propose_a_document_twice(session: AsyncSession) -> None:
+    """Extraction leaves the document MAPPED, so before this guard a second
+    call raised every claim, and every review, a second time."""
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    table = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, table, name="customer_id")
+    await _seed_column(session, table, name="ssn")
+    context = _context(project)
+    document = await upload_document(
+        project.id,
+        DocumentCreate(filename="dictionary.csv", content=_DICTIONARY_CSV),
+        context,
+        session,
+    )
+    await map_document(document.id, context, session)
+    first = await extract_claims(document.id, context, session)
+    assert first.total == 2
+
+    with pytest.raises(HTTPException) as exc_info:
+        await extract_claims(document.id, context, session)
+
+    assert exc_info.value.status_code == 409
+    assert "already proposed" in str(exc_info.value.detail)
+    claims = await list_document_claims(document.id, 100, 0, context, session)
+    assert claims.total == 2
+
+
 async def test_get_document_rejects_cross_organization_access(session: AsyncSession) -> None:
     project = await _seed_project(session)
     context = _context(project)

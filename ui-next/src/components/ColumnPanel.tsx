@@ -12,6 +12,7 @@ import {
 } from "./DescriptionActionDialog";
 import { ColumnDescriptionDrafts } from "./ColumnDescriptionDrafts";
 import { ColumnWorksheet } from "./ColumnWorksheet";
+import { useSession } from "../lib/session";
 import { CrossLinks } from "./CrossLinks";
 import { Button, Field, Pill } from "./primitives";
 import "./ColumnPanel.css";
@@ -171,6 +172,8 @@ export function ColumnPanel({
   const [table, setTable] = useState<TableDescriptionRead | null>(null);
   const [query, setQuery] = useState("");
   const [worksheet, setWorksheet] = useState(false);
+  const roles = useSession().me?.roles;
+  const canEditWorksheet = roles === undefined || roles.some(role => ["PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward"].includes(role));
   const request = useRef<AbortController | null>(null);
   const [pending, setPending] = useState<
     { action: "WITHDRAW" | "REINSTATE"; subject: DescriptionActionSubject } | null
@@ -369,7 +372,7 @@ export function ColumnPanel({
           describe. Mounted here rather than folded into ColumnRow so a column
           and its draft stay separately labelled claims (rule 1 above). */}
       {columns.length > 0 ? <>
-        <Button onClick={() => setWorksheet(true)}>Open column worksheet</Button>
+        <Button disabled={!canEditWorksheet} title="Editing requires Data Steward, Metadata Admin, Data Admin or Platform Admin access." onClick={() => setWorksheet(true)}>Open column worksheet</Button>
         {worksheet ? <ColumnWorksheet key={tableId} tableId={tableId} columns={columns} onClose={() => setWorksheet(false)} /> : null}
         <ColumnDescriptionDrafts tableId={tableId} />
       </> : null}

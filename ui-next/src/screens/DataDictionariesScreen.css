@@ -1,0 +1,35 @@
+/* Data dictionaries. Colours come from the shared tokens only; small text uses
+   `--ink-3`, the token the WCAG AA audit (App.css header) measured as passing. */
+.ddict{display:grid;gap:16px;max-width:1180px}
+.ddict__head{display:grid;gap:6px}
+.ddict__h1{margin:0;font-size:20px}
+.ddict__lede{margin:0;max-width:78ch;font-size:13px;line-height:1.5;color:var(--ink-3)}
+.ddict__grid{display:grid;grid-template-columns:minmax(260px,340px) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:900px){.ddict__grid{grid-template-columns:minmax(0,1fr)}}
+.ddict__side{display:grid;gap:16px;min-width:0}
+.ddict__card{min-width:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.ddict__card h2{margin:0 0 8px;font-size:14px}
+.ddict__upload{display:grid;gap:8px;justify-items:start}
+.ddict__upload .field{width:100%}
+.ddict__hint{margin:6px 0 0;font-size:12px;line-height:1.45;color:var(--ink-3)}
+.ddict__docs{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.ddict__docbtn{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:4px 8px;width:100%;padding:8px 10px;border:1px solid var(--line-soft, var(--line));border-radius:7px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.ddict__docbtn[aria-current="true"]{border-color:var(--ink-3);background:var(--sunk)}
+.ddict__docname{font-weight:600;overflow-wrap:anywhere}
+.ddict__docmeta{grid-column:1 / -1;font-size:12px;color:var(--ink-3)}
+.ddict__title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ddict__title h2{margin:0;overflow-wrap:anywhere}
+.ddict__summary{margin:6px 0 0;font-size:12.5px;line-height:1.45;color:var(--ink-3)}
+.ddict__step{display:grid;gap:8px;justify-items:start;margin:12px 0;padding:10px 12px;border-radius:7px;background:var(--sunk)}
+.ddict__step p{margin:0;max-width:78ch;font-size:13px;line-height:1.5}
+/* The rows table scrolls inside its own box so a long description never widens the page. */
+.ddict__tablewrap{overflow-x:auto;margin-top:12px}
+.ddict__rows{width:100%;border-collapse:collapse;font-size:12.5px}
+.ddict__caption{padding:0 0 6px;text-align:left;font-size:12px;color:var(--ink-3)}
+.ddict__rows th,.ddict__rows td{padding:6px 8px;border-bottom:1px solid var(--line-soft, var(--line));text-align:left;vertical-align:top}
+.ddict__rows th{font-weight:600;color:var(--ink-3);white-space:nowrap}
+.ddict__rows code{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.ddict__kind{display:block;font-size:11.5px;color:var(--ink-3)}
+.ddict__text{min-width:220px;line-height:1.45;overflow-wrap:anywhere}
+.ddict__review{display:grid;gap:4px;justify-items:start}
+.ddict__muted{color:var(--ink-3)}

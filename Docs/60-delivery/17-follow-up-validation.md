@@ -1,5 +1,8 @@
 # Follow-up validation and remaining work
 
+Later implementation: the [five-feature report](18-five-feature-implementation.md)
+supersedes the feature-gap statuses below and records the separate deployment checkpoint.
+
 Date: 2026-09-10. Scope: revalidate the user's layout, column documentation,
 source workbook, reviewer, graph and architecture concerns. This is not a
 statement that the whole request is complete.

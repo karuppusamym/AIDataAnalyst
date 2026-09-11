@@ -4,10 +4,24 @@ const { get } = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("./transport", () => ({
   USE_FIXTURES: false, get, postJson: vi.fn(), requestBlob: vi.fn(), requestRawBody: vi.fn(),
 }));
-import { fetchModelImportChanges } from "./columnDocumentation";
+import { fetchColumnDocumentation, fetchModelImportChanges } from "./columnDocumentation";
 
 beforeEach(() => get.mockReset());
 const row = (id: string) => ({ id, batch_id: "b1" });
+
+it("loads all column pages instead of silently stopping at a thousand", async () => {
+  get.mockResolvedValueOnce({items: Array.from({length: 1000}, (_, i) => ({column_id: String(i), table_id: "t1"})), total: 1001});
+  get.mockResolvedValueOnce({items: [{column_id: "last", table_id: "t1"}], total: 1001});
+  expect(await fetchColumnDocumentation("t1")).toHaveLength(1001);
+  expect(get).toHaveBeenNthCalledWith(2, "/v1/tables/t1/column-documentation?limit=1000&offset=1000", undefined);
+});
+
+it("does not accept a missing page or wrong-table column as a complete list", async () => {
+  get.mockResolvedValueOnce({items: [], total: 1});
+  await expect(fetchColumnDocumentation("t1")).rejects.toThrow("incomplete");
+  get.mockResolvedValueOnce({items: [{column_id: "c1", table_id: "other"}], total: 1});
+  await expect(fetchColumnDocumentation("t1")).rejects.toThrow("inconsistent");
+});
 
 it("loads every preview page, including rows after the first thousand", async () => {
   const first = Array.from({ length: 1000 }, (_, i) => row(String(i)));

@@ -141,6 +141,7 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   "negative-knowledge": ["assertion_type", "subject", "suppression"],
   meaning: ["asset", "ds", "node", "q", "view"],
   "description-drafts": ["focus", "type"],
+  "data-dictionaries": ["document"],
   relationships: ["candidate", "ds"],
   "cross-source": ["dom", "status"],
   transformations: ["dbtProject", "import", "match", "project", "resource", "type"],

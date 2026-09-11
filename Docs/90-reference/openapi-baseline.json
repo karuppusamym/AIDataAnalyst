@@ -19706,6 +19706,16 @@
             "title": "Ontology Id",
             "type": "string"
           },
+          "ontology_key": {
+            "default": "",
+            "title": "Ontology Key",
+            "type": "string"
+          },
+          "published_version": {
+            "default": 0,
+            "title": "Published Version",
+            "type": "integer"
+          },
           "status": {
             "title": "Status",
             "type": "string"

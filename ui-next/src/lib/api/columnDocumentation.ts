@@ -160,11 +160,26 @@ export async function fetchColumnDocumentation(
   signal?: AbortSignal,
 ): Promise<ColumnDocumentationRead[]> {
   if (USE_FIXTURES) return makeFixtureColumnDocumentation(tableId);
-  const page = await readJson<PageOf<ColumnDocumentationRead>>(
-    `/v1/tables/${encodeURIComponent(tableId)}/column-documentation?limit=1000`,
-    signal,
-  );
-  return page.items ?? [];
+  const columns: ColumnDocumentationRead[] = [];
+  const seen = new Set<string>();
+  let total: number | null = null;
+  while (true) {
+    const page = await readJson<PageOf<ColumnDocumentationRead>>(
+      `/v1/tables/${encodeURIComponent(tableId)}/column-documentation?limit=1000${columns.length ? `&offset=${columns.length}` : ""}`,
+      signal,
+    );
+    if (!Number.isInteger(page.total) || page.total < 0 || page.total > 10000 || (total !== null && page.total !== total)) {
+      throw new Error("Column count changed or exceeds the 10,000-column browser limit. Refresh or use a source export.");
+    }
+    total = page.total;
+    if (!page.items.length && columns.length < total) throw new Error("Column documentation is incomplete. Retry loading the table.");
+    for (const column of page.items) {
+      if (column.table_id !== tableId || seen.has(column.column_id)) throw new Error("Column documentation has inconsistent rows. Retry loading the table.");
+      seen.add(column.column_id); columns.push(column);
+    }
+    if (columns.length > total) throw new Error("Column documentation has an inconsistent count.");
+    if (columns.length === total) return columns;
+  }
 }
 
 function filenameFromDisposition(header: string | null, fallback: string): string {

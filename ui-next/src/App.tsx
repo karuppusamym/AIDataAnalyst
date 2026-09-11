@@ -134,6 +134,7 @@ const NAV: NavItem[] = [
   { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
   { id: "description-drafts", label: "Description drafts", group: "Steward", icon: "✎", keywords: "asset description draft generate submit steward" },
+  { id: "data-dictionaries", label: "Data dictionaries", group: "Steward", icon: "⇪", keywords: "data dictionary csv import upload column table descriptions document claims" },
   { id: "relationships", label: "Relationships", group: "Steward", icon: "⌁", keywords: "keys graph links" },
   { id: "cross-source", label: "Cross-source", group: "Steward", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
   { id: "transformations", label: "Transformations", group: "Steward", icon: "▤", keywords: "dbt models sql transforms manifest" },
@@ -190,6 +191,7 @@ function Screen({
     case "governance": return <ReviewQueueScreen />;
     case "parsed-lineage-review": return <ParsedLineageReviewScreen />;
     case "description-drafts": return <DescriptionDraftsScreen />;
+    case "data-dictionaries": return <DataDictionariesScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;
     case "reviewer-agent": return <ReviewerAgentScreen />;

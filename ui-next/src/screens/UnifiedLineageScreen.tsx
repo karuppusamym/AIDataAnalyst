@@ -433,8 +433,6 @@ export function UnifiedLineageScreen() {
   return (
     <div className={`ult${maximized ? " ult--maximized" : ""}`}>
       <header className="ult__head">
-        <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
-        {ontologyOpen ? <OntologyManager key={ORG} organizationId={ORG} onClose={() => setOntologyOpen(false)} /> : null}
         <div>
           <h1 className="ult__h1">Unified lineage</h1>
           <p className="ult__lede">
@@ -442,6 +440,8 @@ export function UnifiedLineageScreen() {
             bounded, value-free graph — pick a node to see its bounded upstream/downstream impact.
           </p>
         </div>
+        <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
+        {ontologyOpen ? <OntologyManager key={ORG} organizationId={ORG} onClose={() => setOntologyOpen(false)} /> : null}
       </header>
 
       <div className="ult__controls">

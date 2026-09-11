@@ -1,5 +1,10 @@
 # Graph exploration and query review
 
+Update 2026-09-11: see the [five-feature implementation report](../60-delivery/18-five-feature-implementation.md)
+for expanded language support, ontology governance, worksheet and review details,
+including the unresolved database deployment checkpoint. The original assessment
+below records the earlier scope, not the latest feature inventory.
+
 Review date: 2026-09-10. This is an implementation-level supplement to the
 [agent architecture review](15-agent-architecture-critical-review.md), not a
 certification of enterprise readiness.
