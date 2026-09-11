@@ -61,7 +61,10 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select
 
+from aida.agent_contracts import REASON_CONTRACT_MISSING, agent_kill_blocking_reason
+from aida.agent_tasks import record_agent_task
 from aida.asset_description_service import (
+    MINIMUM_EVIDENCE_FOR_REVIEW,
     compose_draft_text,
     evidence_payload,
     gather_evidence,
@@ -77,6 +80,7 @@ from aida.models import (
     AssetDocumentation,
     AssetDocumentationVersion,
     DataSource,
+    GovernanceReview,
     MetadataEnrichmentProposal,
     MetadataTable,
     SemanticInferenceRun,
@@ -84,6 +88,13 @@ from aida.models import (
 from aida.schemas import SemanticInferenceRequest
 from aida.security import SecurityContext
 from aida.semantic_inference_service import generate_semantic_inference
+from aida.steward_agent import STEWARD_AGENT
+from aida.task_agent import (
+    TaskAgentAuthority,
+    TaskAgentRefused,
+    mode_for,
+    resolve_task_agent_authority,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -101,9 +112,64 @@ _OPEN_DRAFT_STATUSES = ("DRAFT", "PENDING_APPROVAL")
 _APPROVED_DOC_STATUS = "APPROVED"
 
 
+#: ADR-0029: the ledger intent of a draft made on ingest by an organization's
+#: registered steward agent, and the stop reason when its contract is T0.
+INTENT_DRAFT_ON_INGEST = "steward.draft_table_description_on_ingest"
+REASON_STEWARD_OBSERVES_ONLY = "steward_agent_observes_only"
+
+
 @dataclass(slots=True)
 class DrafterConsumerState:
     stopping: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class StewardGovernance:
+    """Whether this side-car drafts under the steward agent's contract (ADR-0029).
+
+    An organization that registered the steward agent -- a contract for its
+    principal on an approved version -- has put automated table drafting under
+    that contract, and the side-car honours it: it drafts as the agent, stops
+    when the agent's kill switch is engaged or its contract only observes (T0),
+    and puts a reviewable draft in the queue as the agent's own request, the way
+    the agent's own runs do. `authority` is then set, and `stopped_reason` when
+    the contract forbids drafting now -- including a registration the runtime
+    refuses (an unapproved version, two contracts).
+
+    An organization with no contract at all has not opted in, and both stay
+    unset: the side-car behaves exactly as it did before ADR-0029. That is what
+    keeps this from being the behaviour change the ADR declined -- failing
+    closed in every organization that never registered the agent.
+    """
+
+    authority: TaskAgentAuthority | None = None
+    stopped_reason: str | None = None
+
+
+async def steward_governance(session: Any, organization_id: UUID) -> StewardGovernance:
+    try:
+        authority = await resolve_task_agent_authority(
+            session, organization_id, spec=STEWARD_AGENT, settings=get_settings()
+        )
+    except TaskAgentRefused as exc:
+        if exc.reason_code == REASON_CONTRACT_MISSING:
+            return StewardGovernance()
+        return StewardGovernance(stopped_reason=exc.reason_code)
+    blocking = await agent_kill_blocking_reason(session, authority.contract)
+    if blocking is not None:
+        return StewardGovernance(authority=authority, stopped_reason=blocking)
+    if mode_for(authority.contract.autonomy_tier) != "PROPOSE":
+        return StewardGovernance(authority=authority, stopped_reason=REASON_STEWARD_OBSERVES_ONLY)
+    return StewardGovernance(authority=authority)
+
+
+def _steward_context(organization_id: UUID, authority: TaskAgentAuthority) -> SecurityContext:
+    return SecurityContext(
+        principal_id=authority.principal_id,
+        principal_type="AGENT",
+        organization_id=organization_id,
+        roles=STEWARD_AGENT.audit_roles,
+    )
 
 
 def _worker_context(organization_id: UUID) -> SecurityContext:
@@ -205,7 +271,9 @@ async def enqueue_description_draft_for_table(
     `score_evidence`, `text_fingerprint`, `evidence_payload`). Returns
     the persisted draft, or `None` when it was intentionally skipped
     (APPROVED description already exists, open draft in review already
-    exists, handler already produced one for this table).
+    exists, handler already produced one for this table, or the
+    organization's steward agent contract stops it -- see
+    `StewardGovernance`).
     """
     if await _table_has_approved_description(session, table.id):
         logger.info(
@@ -225,10 +293,33 @@ async def enqueue_description_draft_for_table(
             table_id=str(table.id),
         )
         return None
+    governance = await steward_governance(session, organization_id)
+    if governance.stopped_reason is not None:
+        logger.info(
+            "auto_enqueue_stopped_by_steward_agent",
+            table_id=str(table.id),
+            reason=governance.stopped_reason,
+        )
+        record_audit(
+            session,
+            _worker_context(organization_id),
+            action="AUTO_ENQUEUE_DRAFTS_ON_INGEST",
+            resource_type="TABLE",
+            resource_id=str(table.id),
+            outcome="SKIPPED",
+            correlation_id=str(table.id),
+            details={"reason": governance.stopped_reason, "steward_agent_contract": True},
+        )
+        return None
+    authority = governance.authority
     evidence = await gather_evidence(session, table)
     drafted_text = compose_draft_text(evidence)
     fingerprint = text_fingerprint(drafted_text)
     scores = score_evidence(evidence)
+    # Under the steward agent's contract a reviewable draft is its request for
+    # review, exactly as in the agent's own runs; a thin one stays a DRAFT, as
+    # it always did, because it could never be submitted.
+    submitting = authority is not None and scores.overall >= MINIMUM_EVIDENCE_FOR_REVIEW
     draft = AssetDescriptionDraft(
         organization_id=organization_id,
         table_id=table.id,
@@ -240,11 +331,88 @@ async def enqueue_description_draft_for_table(
         completeness_score=scores.completeness,
         overall_score=scores.overall,
         evidence=evidence_payload(evidence),
-        created_by=_AUTO_ENQUEUE_PRINCIPAL,
+        status="PENDING_APPROVAL" if submitting else "DRAFT",
+        created_by=authority.principal_id if authority is not None else _AUTO_ENQUEUE_PRINCIPAL,
     )
     session.add(draft)
     await session.flush()
+    if authority is not None:
+        await _record_under_steward_contract(
+            session,
+            organization_id=organization_id,
+            authority=authority,
+            draft=draft,
+            submitting=submitting,
+        )
     return draft
+
+
+async def _record_under_steward_contract(
+    session: Any,
+    *,
+    organization_id: UUID,
+    authority: TaskAgentAuthority,
+    draft: AssetDescriptionDraft,
+    submitting: bool,
+) -> None:
+    """The review request and the ledger row the steward agent's own runs write,
+    so a draft made on its behalf at ingest is decided, counted and sampled
+    like one it proposed. `ASSET_DESCRIPTION_DRAFT` is T0, inside every agent's
+    proposal ceiling."""
+    review: GovernanceReview | None = None
+    if submitting:
+        review = GovernanceReview(
+            organization_id=organization_id,
+            object_type="ASSET_DESCRIPTION_DRAFT",
+            object_id=str(draft.id),
+            requested_action="PUBLISH",
+            requested_by=authority.principal_id,
+        )
+        session.add(review)
+        await session.flush()
+        draft.governance_review_id = review.id
+        record_audit(
+            session,
+            _steward_context(organization_id, authority),
+            action=f"{STEWARD_AGENT.key}_agent.propose",
+            resource_type="governance_review",
+            resource_id=str(review.id),
+            outcome="SUCCESS",
+            correlation_id=str(draft.table_id),
+            details={
+                "object_type": "ASSET_DESCRIPTION_DRAFT",
+                "object_id": str(draft.id),
+                "trigger": NEWLY_CREATED_TABLE_EVENT_TYPE,
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="governance_review",
+            aggregate_id=str(review.id),
+            event_type="governance.review_requested.v1",
+            payload={
+                "review_id": str(review.id),
+                "object_type": "ASSET_DESCRIPTION_DRAFT",
+                "object_id": str(draft.id),
+                "requested_action": "PUBLISH",
+            },
+        )
+    await record_agent_task(
+        session,
+        organization_id=organization_id,
+        agent_principal_id=authority.principal_id,
+        intent=INTENT_DRAFT_ON_INGEST,
+        inputs={
+            "table_id": str(draft.table_id),
+            "text_fingerprint": draft.text_fingerprint,
+            "trigger": NEWLY_CREATED_TABLE_EVENT_TYPE,
+        },
+        ai_asset_version_id=authority.version.id,
+        proposal_ref_type="GOVERNANCE_REVIEW" if review is not None else "ASSET_DESCRIPTION_DRAFT",
+        proposal_ref_id=review.id if review is not None else draft.id,
+        sampling_rate=authority.contract.sampling_rate,
+    )
 
 
 async def handle_newly_created_table(session: Any, payload: dict[str, Any]) -> None:
