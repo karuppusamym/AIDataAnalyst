@@ -391,9 +391,12 @@ export function ParsedLineageReviewScreen() {
           }
           impact={
             <p className="rvd__none">
-              {focused.edge_type === "OPENLINEAGE_COLUMN" || focused.edge_type === "DBT"
-                ? "A column-level edge. Approving affects column lineage and any impact answer that traverses it."
-                : "A table-level edge. Approving affects table lineage and any impact answer that traverses it."}
+              {/* Every parser here states column pairs except OpenLineage's
+                  run-level table edges; view, procedure and routine edges were
+                  once described as table-level here too. */}
+              {focused.edge_type === "OPENLINEAGE_TABLE"
+                ? "A table-level edge. Approving affects table lineage and any impact answer that traverses it."
+                : "A column-level edge. Approving affects column lineage and any impact answer that traverses it."}
             </p>
           }
           evidence={
