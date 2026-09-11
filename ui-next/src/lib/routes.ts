@@ -148,7 +148,7 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   quality: ["ds", "incident", "severity", "status"],
   studio: ["cs", "status"],
   governance: ["review", "status", "type"],
-  "parsed-lineage-review": ["review", "status"],
+  "parsed-lineage-review": ["review", "status", "type"],
   refusals: ["run"],
   "reviewer-agent": ["offset", "outcome", "window"],
   sources: ["q", "source", "status"],

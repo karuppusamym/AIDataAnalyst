@@ -23,8 +23,20 @@ const SKIP_LABELS: Record<string, string> = {
   lineage_already_known: "every edge is already known",
 };
 
+/* The edge type each capability writes, so a proposal opens the per-edge queue
+   already filtered to it: a view's edges, or a captured routine's. */
+const QUEUE_EDGE_TYPE: Record<string, string> = {
+  VIEW_LINEAGE: "VIEW",
+  PROCEDURE_LINEAGE: "ROUTINE",
+};
+
 const parsedLineageQueue: ReviewLink = (item) =>
-  item.action === "PROPOSED" ? buildRelativeLink({ screen: "parsed-lineage-review" }) : null;
+  item.action === "PROPOSED"
+    ? buildRelativeLink({
+        screen: "parsed-lineage-review",
+        params: { type: QUEUE_EDGE_TYPE[item.capability] ?? null },
+      })
+    : null;
 
 export function LineageAgentScreen() {
   return (

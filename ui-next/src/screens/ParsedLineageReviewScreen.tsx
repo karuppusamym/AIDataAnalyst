@@ -87,7 +87,14 @@ export function ParsedLineageReviewScreen() {
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [edgeType, setEdgeType] = useState<ParsedLineageEdgeType | "">("");
+  /* The edge-type filter lives in the URL too, so a link -- the lineage
+     agent's "Open in review queue" -- can open the queue already filtered. */
+  const typeParam = params.get("type");
+  const edgeType: ParsedLineageEdgeType | "" = EDGE_TYPES.includes(
+    typeParam as ParsedLineageEdgeType,
+  )
+    ? (typeParam as ParsedLineageEdgeType)
+    : "";
   const [minConfidence, setMinConfidence] = useState<string>("");
   const [inflight, setInflight] = useState<string | null>(null);
   const [ackMessage, setAckMessage] = useState<string | null>(null);
@@ -219,7 +226,7 @@ export function ParsedLineageReviewScreen() {
         <Field label="Edge type">
           <select
             value={edgeType}
-            onChange={(event) => { setOffset(0); setEdgeType(event.target.value as ParsedLineageEdgeType | ""); }}
+            onChange={(event) => { setOffset(0); setParams({ type: event.target.value || null }); }}
           >
             <option value="">All</option>
             {EDGE_TYPES.map((type) => (

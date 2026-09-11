@@ -192,3 +192,30 @@ describe("ParsedLineageReviewScreen queue", () => {
     expect(await screen.findByText(/Maker-checker refusal/)).toBeInTheDocument();
   });
 });
+
+describe("ParsedLineageReviewScreen edge-type filter", () => {
+  it("takes its edge type from the URL, so a link can open the queue filtered", async () => {
+    history.replaceState(null, "", "/?type=ROUTINE#/parsed-lineage-review");
+    const ParsedLineageReviewScreen = await loadScreen();
+    render(<ParsedLineageReviewScreen />);
+
+    await waitFor(() =>
+      expect(listParsedLineageReviewQueue).toHaveBeenCalledWith(
+        expect.objectContaining({ edgeType: "ROUTINE" }),
+        expect.anything(),
+      ),
+    );
+    const select = screen.getByLabelText("Edge type") as HTMLSelectElement;
+    expect(select.value).toBe("ROUTINE");
+
+    fireEvent.change(select, { target: { value: "" } });
+
+    await waitFor(() =>
+      expect(listParsedLineageReviewQueue).toHaveBeenLastCalledWith(
+        expect.objectContaining({ edgeType: null }),
+        expect.anything(),
+      ),
+    );
+    expect(new URLSearchParams(location.search).get("type")).toBeNull();
+  });
+});

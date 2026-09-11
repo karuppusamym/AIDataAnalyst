@@ -55,8 +55,13 @@ describe("LineageAgentScreen (ADR-0029)", () => {
       ),
     );
     const list = await screen.findByRole("list", { name: "What the run looked at" });
-    const [link] = within(list).getAllByRole("link", { name: "Open in review queue" });
-    expect(link!.getAttribute("href")).toContain("#/parsed-lineage-review");
+    // Each proposal opens the per-edge queue filtered to the table it wrote.
+    const [viewLink, routineLink] = within(list).getAllByRole("link", {
+      name: "Open in review queue",
+    });
+    expect(viewLink!.getAttribute("href")).toContain("#/parsed-lineage-review");
+    expect(viewLink!.getAttribute("href")).toContain("type=VIEW");
+    expect(routineLink!.getAttribute("href")).toContain("type=ROUTINE");
     expect(within(list).getByText("the definition could not be parsed")).toBeInTheDocument();
   });
 });
