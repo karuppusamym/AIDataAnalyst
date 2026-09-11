@@ -12407,7 +12407,7 @@ Each now passes `screen_text`, with a test that fails without it.
 
 `10-architecture/18-agent-capability-enforcement-matrix.md` is the matrix the row asked for.
 
-It found the orchestrator's contract enforcement unreachable. Contract existence, the kill switch, `tool_slugs` and the token caps were never applied, because neither MCP `tools/call` nor REST `agent-analyses` told the orchestrator which contract applied. Both now resolve the caller's contract.
+It found the orchestrator's contract enforcement unreachable. Contract existence, the kill switch, `tool_slugs` and the token caps were never applied, because neither MCP `tools/call` nor REST `POST /datasources/{id}/agent-analyses` told the orchestrator which contract applied. Both now resolve the caller's contract.
 
 **Operator action:** a contract with an empty `tool_slugs` list now refuses every governed tool call its agent makes.
 
@@ -12423,7 +12423,7 @@ Everything was verified in a clean worktree at `600b8d1`:
 The three failures were gates this batch had not run on its own:
 
 - The event-catalog gate found `reviewer_agent.audit_backlog_exceeded.v1` published but not catalogued.
-- The doc-claims gate twice read a backticked `agent-analyses` as a cited import-linter contract name.
+- The doc-claims gate twice read a backticked kebab-case route name, on a line that also mentioned a contract, as a cited import-linter contract name.
 
 `482807f` catalogues the event and gives the route in full. After it, both gate files pass (4,522 tests).
 
