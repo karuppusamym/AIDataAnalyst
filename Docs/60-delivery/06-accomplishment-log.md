@@ -12138,3 +12138,77 @@ machine and tenant changes for the owner; the steps are in `ui-next/excel-addin/
 
 - The drafting gap on thin catalogs: feed evidence, or model-assisted drafting for thin columns.
 - Document ingestion, the fourth write path for column descriptions, still has no UI.
+
+
+## 2026-09-11 — Model-assisted drafting for thin columns
+
+Follows the 2026-09-10 finding that evidence-only drafting produced 0 submittable drafts out of
+196 columns on the dev catalog, because it carries no dbt column docs, source comments or approved
+relationships. The owner chose model drafting for the thin columns only.
+
+### Where it landed
+
+Another session on this branch committed the code, tests and doc 17 inside `dd0e609`
+("feat(lineage-agent): implement lineage agent API…"), together with its own lineage-agent work.
+That commit's message does not mention them. They are the same files, byte for byte, as the ones
+verified before it landed. This entry is the record of what `dd0e609` carries for column drafting.
+
+`dd0e609` also committed stale generated files, rolling back the ones `6641451` had just
+regenerated. `ui-next/src/lib/types.ts` went back to the `StewardAgent*` names, lost the new
+`model_assist` fields and failed the UI-types drift gate; the OpenAPI baseline lost `agent_key`.
+`ac137db` regenerated all three from the code. They are byte-identical to an independent
+regeneration from `dd0e609`, and both drift checks pass on them.
+
+### What it does
+
+`aida.column_description_model` drafts only the columns whose catalog evidence is too thin to clear
+the review bar, and only on request (`model_assist`; *Use the model for thin columns* in the column
+panel). Columns with enough evidence are still drafted from it, and the model is never asked about
+them. An answer about a column it was not asked about is ignored. It may replace a thin evidence
+draft nobody has touched, but never one a person edited, one already in review, or another model
+draft.
+
+### The controls
+
+- **Metadata only, screened both ways.** Names, types, keys, references, classification and the
+  table's approved description pass `ingest_screening.screen_text` before they are sent. Every
+  answer is screened after. Quarantined input is withheld, and a quarantined answer is dropped: the
+  column falls back to its evidence draft.
+- **Labelled and capped.** A model draft records `origin = MODEL_INFERRED`, the basis the model gave,
+  and the call's route, model and fingerprints. Its confidence is capped at 0.70, and at 0.5 for a
+  guess from the name alone. An edit keeps the label (`MODEL_INFERRED_WITH_HUMAN_EDITS`).
+- **A person always decides.** The reviewer agent abstains on every model-inferred draft, whatever
+  its approve threshold says.
+- **The governed gateway only:** kill switch, approved route, credential, input-token cap, timeout
+  and output schema, and the route must be approved for `CLASSIFICATION`. Per-agent contract budgets
+  (AR-05) bind agent runs, not this call.
+
+### Verified
+
+- **On `ac137db`** (the code of `dd0e609` plus the regenerated files): ui-next typecheck clean,
+  605 tests passed in 80 files, and the production build succeeds. The UI types match the OpenAPI
+  schema, and the API has no breaking change; every difference is an addition.
+- **On `dd0e609`:** `ruff check`, `mypy` on the six changed modules, and all 12 import-linter
+  contracts pass. The full backend suite: 9,242 passed, 4 failed, 23 skipped, 1 xfailed. One of the
+  four is the stale OpenAPI baseline, which passes on `ac137db`. The other three still fail there.
+- **Before it landed**, on `6641451` plus this work: 204 targeted backend tests passed, including
+  nine new model-drafting tests. They cover refusal with its reason and nothing written, questioning
+  only thin columns, source comments never sent, both caps, hostile names withheld and hostile
+  answers dropped, fallback on a failed call, replacing only untouched thin drafts, agent abstention
+  after an edit, the five-table bound, and `draft_origin` in the workbook.
+
+### Failing, and not from this work
+
+Three gates fail on `ac137db`, all from `bc6ab78`'s ontology work, committed by another session.
+`ontology_head` and `ontology_version` have no migration (the migration/ORM drift gate).
+`aida.ontology_api` is not wired into the app (the reachability gate). `ONTOLOGY_VERSION` has no
+risk tier (the reviewer-agent classification test). None of them touches column drafting, and they
+are left for that work to close.
+
+### Not verified
+
+No real model has been called. The dev database has no route approved for `CLASSIFICATION`:
+`AIDA_MODEL_ROUTE` names `openai-bank-sql`, which does not exist there, and the routes that do exist
+use a provider with no adapter. The tests drive the whole path with a deterministic provider. The
+first real call needs a route keyed `openai-bank-sql` with `CLASSIFICATION`, created on *AI
+governance*, submitted, and approved in the review queue by someone other than its author.
