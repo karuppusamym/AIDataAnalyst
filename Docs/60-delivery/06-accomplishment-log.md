@@ -12334,3 +12334,121 @@ transaction, still runs every batch inside it (`enqueue_semantics_for_source`).
 - All 20 tests in the three files that exercise the drafter (`test_auto_enqueue_on_ingest.py`,
   `test_side_car_steward_contract.py`, `test_workflow_revalidation.py`), ruff and mypy.
 - Live: the metadata-worker image was rebuilt from `a206c9c` and the container recreated. Its Temporal worker and the drafter's Kafka consumer both started, it logged no errors, and no transaction in the database has stayed open longer than 30 seconds since.
+
+
+## 2026-09-11 — Provider-billed budgets, and the measured half of six review findings
+
+Commits `94babdf`, `d716694`, `b440a39`, `ac2ac7e`, `8a7dc8a`, `9676047` and `600b8d1`.
+
+The 2026-09-09 architecture review (`10-architecture/15`) left AR-03, AR-04, AR-06, AR-10, AR-11 and AR-12 partial, and in each case the missing half was a measurement. This pass took every one of those rows as far as it can go on this machine.
+
+None of the P0 or P1 rows closes. What changed is that each row now states a measured result where it used to state a suspicion, and in two places the measurement found something worse than the row had said.
+
+### Budgets charge what the provider billed (`94babdf`)
+
+Until this commit no one read OpenAI's `usage` or Gemini's `usageMetadata`, so every budget figure was the gateway's four-bytes-per-token estimate.
+
+- The adapters now return what the provider reports, and Gemini's thinking tokens are counted as output.
+- A completed run is charged the billed tokens of the attempt that answered, plus the input estimate of any attempt that failed before it (`run_token_charge`). Its `budget_evidence` names the basis.
+- The agent inbox reports what today's budget window was charged, which is the figure the cap is enforced against.
+
+### AR-04: two workers on one queue, measured (`d716694`)
+
+Three committing reviewer agents raced for one organization's twelve pre-reviewed items on a real PostgreSQL.
+
+- At READ COMMITTED, every item was decided exactly once (12 approvals, 12 audit rows). The losers skipped every contended item. No batch aborted, and none added throughput either, because the losers waited on the winner's row locks.
+- At REPEATABLE READ, every item was still decided exactly once, but each loser's claim was refused with 40001 and its whole batch rolled back.
+
+### AR-12: competitive claims carry a source and an expiry (`b440a39`)
+
+Product docs 01, 03, 04 and 05 now carry a machine-readable claims line, with an assessment date, a scope, a re-verify-by date and a source. Doc 08 is marked historical.
+
+`tests/test_competitive_claims.py` enforces the rule. From 2026-11-29 it fails until someone re-checks the claims.
+
+### AR-03: what the reviewer agent approves when a proposal is wrong (`ac2ac7e`)
+
+`tests/test_ar03_false_approval_benchmark.py` puts *twins* through each producer's own scoring function and the agent's real decision function. A twin pair is two proposals of one type with the same evidence, one true and one false.
+
+- **Result:** of 12 pairs across 7 object types, the agent tells **none** apart. It approved the false twin in 11 pairs before this pass and in 7 after it.
+- **Three resolvers went**, because their number says nothing about truth:
+  - `DOCUMENT_CLAIM`: a name-match certainty, which is 1.0 for every matched row;
+  - `GLOSSARY_LINK_PROPOSAL`: two name-equality constants, 1.0 and 0.92, both over the threshold;
+  - model-inferred `METADATA_ENRICHMENT_PROPOSAL`: the model's confidence in its own answer.
+- **`QUERY_HISTORY_METRIC_CANDIDATE` moved to T2.** Approving one publishes a `SemanticMetric`.
+- **A matching bug in data-dictionary import.** Columns were matched with `ILIKE`, so a `%` cell matched an arbitrary column at confidence 1.0.
+
+### AR-10: indirect-injection screening, measured and widened (`8a7dc8a`)
+
+`tests/test_ar10_screening_benchmark.py` runs `screen_text` on 40 attacks outside its corpus and on 46 benign catalog texts, pinned by case id.
+
+- **Classifier v1** missed 31 of the 40 attacks and quarantined 10 of the 46 benign texts. For example, "Owner: Dan Smith" matched the DAN jailbreak.
+- **`injection-defense-v2`** misses 2 attacks, both kept as residuals on purpose, and quarantines none.
+
+The path audit found five more model-context ingresses unscreened:
+
+- the orchestrator's prior-query template and confirmed examples;
+- its metadata-context identifiers;
+- semantic inference's names;
+- marketplace domain names;
+- the column-description model's type and relationship names.
+
+Each now passes `screen_text`, with a test that fails without it.
+
+### AR-11: the reviewer agent's oversight, measured and acted on (`9676047`)
+
+- **Measured:** disagreement is reported by risk tier as well as by object type, and each tier's rate is its sampled false-approval rate. Time to a human verdict is reported, along with the age of the oldest unread sample.
+- **Reported:** the backlog appears on the state endpoint and on the screen.
+- **Acted on:**
+  - A backlog refusal is now an audited event, recorded as an outbox event and sent as a notification.
+  - A disputed sample sends its own notification.
+  - `Docs/40-engineering/11-reviewer-agent-oversight-runbook.md` is the correction procedure, per object type.
+
+### AR-06: the contract reaches the live paths (`600b8d1`)
+
+`10-architecture/18-agent-capability-enforcement-matrix.md` is the matrix the row asked for.
+
+It found the orchestrator's contract enforcement unreachable. Contract existence, the kill switch, `tool_slugs` and the token caps were never applied, because neither MCP `tools/call` nor REST `agent-analyses` told the orchestrator which contract applied. Both now resolve the caller's contract.
+
+**Operator action:** a contract with an empty `tool_slugs` list now refuses every governed tool call its agent makes.
+
+### Verified
+
+Everything was verified in a clean worktree at `600b8d1`:
+
+- **Drift gates** — OpenAPI (no breaking changes, baseline current), generated UI types, and the surface-control matrix: no drift.
+- **Lint and types** — ruff and mypy were clean on every changed source file, and import-linter kept all 12 contracts.
+- **UI** — the typecheck passed, 637 tests in 85 files passed, and the production build succeeded.
+- **Full backend suite** — 9,534 passed, 22 skipped, 1 xfailed, and 3 failed.
+
+The three failures were gates this batch had not run on its own:
+
+- The event-catalog gate found `reviewer_agent.audit_backlog_exceeded.v1` published but not catalogued.
+- The doc-claims gate twice read a backticked `agent-analyses` as a cited import-linter contract name.
+
+`482807f` catalogues the event and gives the route in full. After it, both gate files pass (4,522 tests).
+
+**Live.** The images were rebuilt from `482807f` and the stack restarted:
+
+- **Health** — the API is healthy, ui-next is serving on :3001, and nothing logged an error in the first minutes.
+- **Contract** — the live OpenAPI carries `by_risk_tier`, `audit_backlog_exceeded` and both new schemas.
+- **Reviewer-agent state** — against Northwind, `GET .../reviewer-agent` reports 0 unresolved samples out of an allowed 50, with the bound not exceeded. The agent is disabled in this environment.
+- **Disagreement rates** — `GET .../reviewer-agent/disagreement-rates` returns an empty tier cut and a clock of nulls rather than zeros. No audit sample exists in this database, and the report says so instead of claiming a measurement.
+
+### Still open
+
+- **AR-03:** 7 false approvals remain. Stopping them needs evidence that is independent of the proposal, so unattended review stays off.
+- **AR-06:** the remaining gaps are:
+  - context products are not checked on resource reads, prompts or the REST paths;
+  - the kill switch does not reach native MCP tools;
+  - an external agent holding the Reviewer role can decide reviews;
+  - agents can edit other agents' contracts.
+- **AR-10:** what MCP sends out to external agents is unscreened.
+- **AR-11:**
+  - downstream harm is not measured;
+  - annotations and bulk links have no withdrawal path;
+  - a correction is not linked back to its sample.
+- **AR-09:** not attempted. It needs load and recovery runs against an agreed estate size, and nothing measured on one machine would support a capacity claim.
+- **Waiting on the owner:**
+  - the `openai-bank-sql` model route (review `c63bc4b8`, T3) needs a person's approval;
+  - the Excel add-in has not been loaded;
+  - the three verification-organization claims are undecided.
