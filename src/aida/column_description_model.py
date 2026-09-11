@@ -278,6 +278,8 @@ def _call_record(call: ModelCallEvidence) -> dict[str, Any]:
         "schema_name": call.schema_name,
         "estimated_input_tokens": call.estimated_input_tokens,
         "estimated_output_tokens": call.estimated_output_tokens,
+        "provider_input_tokens": call.provider_input_tokens,
+        "provider_output_tokens": call.provider_output_tokens,
     }
 
 

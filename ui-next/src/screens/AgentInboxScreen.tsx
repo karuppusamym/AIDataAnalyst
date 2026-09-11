@@ -63,8 +63,10 @@ function percent(value: number | null): string {
 }
 
 function BudgetBar({ agent }: { agent: AgentInboxAgent }) {
-  const { daily_token_cap: cap, daily_tokens_estimated: used } = agent.budget;
+  const { daily_token_cap: cap, daily_tokens_estimated: estimated } = agent.budget;
+  const charged = agent.budget.daily_tokens_charged ?? null;
   if (cap === null) return <span className="aiinbox__muted">no cap</span>;
+  const used = charged ?? estimated;
   if (used === null) {
     // Not "no usage" — no run today reached a model call at all. Saying zero
     // would read as "this agent is idle" when it may have been busy on
@@ -72,18 +74,24 @@ function BudgetBar({ agent }: { agent: AgentInboxAgent }) {
     return <span className="aiinbox__muted">{cap.toLocaleString()} cap · no model call today</span>;
   }
   const share = Math.min(used / cap, 1);
-  // "≈" is load-bearing: no provider adapter reports usage, so this is the
-  // gateway's own estimate — the same one the cap is enforced against, which
-  // is what makes the comparison meaningful rather than decorative.
+  const pct = Math.round(share * 100);
+  // The bar shows the figure the cap is enforced against: today's budget
+  // window, which each run reconciles to what the provider billed where it
+  // reported that. With no window it falls back to the gateway's estimate, and
+  // "≈" is load-bearing there: an estimate is never shown as billed.
+  const title =
+    charged !== null
+      ? `${charged.toLocaleString()} of ${cap.toLocaleString()} charged today` +
+        (estimated !== null ? ` (the gateway estimated ≈${estimated.toLocaleString()})` : "")
+      : `≈${used.toLocaleString()} of ${cap.toLocaleString()} today (estimated, not provider-reported)`;
   return (
-    <span
-      className="aiinbox__budget"
-      title={`≈${used.toLocaleString()} of ${cap.toLocaleString()} today (estimated, not provider-reported)`}
-    >
+    <span className="aiinbox__budget" title={title}>
       <span className="aiinbox__budgetbar">
         <span className="aiinbox__budgetfill" style={{ width: `${share * 100}%` }} />
       </span>
-      <span className="aiinbox__muted">≈{Math.round(share * 100)}% of today's cap</span>
+      <span className="aiinbox__muted">
+        {charged !== null ? `${pct}% of today's cap` : `≈${pct}% of today's cap`}
+      </span>
     </span>
   );
 }

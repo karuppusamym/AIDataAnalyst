@@ -3,12 +3,13 @@
 The agent inbox used to render a cap with "usage not tracked" under it,
 because nothing attributed model consumption to the agent that caused it.
 
-The number this closes it with is an **estimate**, and every test here holds
-that line. No provider adapter in `build_model_providers` returns a usage
-block, so the only figure available is the 4-bytes-per-token heuristic
-`ProviderNeutralModelGateway` already enforces the approved input cap
-against. That is also the *right* figure to show: consumption measured any
-other way would not be comparable to the cap it is drawn beside.
+The per-run figure is an **estimate**, by the 4-bytes-per-token heuristic
+`ProviderNeutralModelGateway` enforces the approved input cap against before a
+call, and the tests on it hold that line. The daily cap is enforced against
+the budget window instead, which reconciliation charges with the tokens the
+provider reported it billed, where it did. The inbox reports that beside the
+estimate (`daily_tokens_charged`), so the bar drawn against the cap is the
+number the cap was enforced against.
 
 Three properties:
 
@@ -44,6 +45,7 @@ from aida.model_gateway import (
 )
 from aida.models import (
     AGENT_SAMPLING_RATE_FLOOR,
+    AgentBudgetWindow,
     AgentContract,
     AgentRun,
     AiAsset,
@@ -384,3 +386,51 @@ async def test_an_agent_with_no_cap_still_reports_its_consumption(
     agent = next(a for a in inbox.agents if a.version_id == version.id)
     assert agent.budget.daily_token_cap is None
     assert agent.budget.daily_tokens_estimated == 1_000
+
+
+async def test_the_inbox_reports_what_todays_window_was_charged(
+    session: AsyncSession,
+) -> None:
+    """The cap is enforced against the budget window, which reconciliation
+    charges with billed tokens where the provider reported them. That figure is
+    reported beside the estimate, and the two can differ."""
+    org, datasource = await _seed_org_and_datasource(session)
+    version = await _seed_agent_with_cap(session, org, cap=100_000)
+    now = datetime.now(UTC)
+    session.add(_run(org, datasource, version.id, created_at=now, tokens=(1_000, 200)))
+    session.add(
+        AgentBudgetWindow(
+            organization_id=org.id,
+            ai_asset_version_id=version.id,
+            window_date=now.date(),
+            reserved_tokens=940,
+            run_count=1,
+        )
+    )
+    await session.flush()
+
+    inbox = await _inbox(session, org)
+
+    agent = next(a for a in inbox.agents if a.version_id == version.id)
+    assert agent.budget.daily_tokens_estimated == 1_200
+    assert agent.budget.daily_tokens_charged == 940
+
+
+async def test_yesterdays_window_is_not_todays_charge(session: AsyncSession) -> None:
+    org, _datasource = await _seed_org_and_datasource(session)
+    version = await _seed_agent_with_cap(session, org, cap=100_000)
+    session.add(
+        AgentBudgetWindow(
+            organization_id=org.id,
+            ai_asset_version_id=version.id,
+            window_date=(datetime.now(UTC) - timedelta(days=1)).date(),
+            reserved_tokens=90_000,
+            run_count=4,
+        )
+    )
+    await session.flush()
+
+    inbox = await _inbox(session, org)
+
+    agent = next(a for a in inbox.agents if a.version_id == version.id)
+    assert agent.budget.daily_tokens_charged is None

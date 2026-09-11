@@ -306,6 +306,52 @@ async def _compute_grounding_fragment_digests(
     return entries
 
 
+@dataclass(frozen=True, slots=True)
+class RunTokenCharge:
+    """What a completed generation is charged against its agent's budget.
+
+    `estimated` is the gateway's heuristic across the attempt chain, the figure
+    the caps were checked against before the call. `billed` is what the
+    provider reported for the attempt that answered, or None when it reported
+    nothing. `charged` is what the budget window is reconciled to, and `basis`
+    names which of those it rests on.
+    """
+
+    charged: int
+    estimated: int
+    billed: int | None
+    basis: str
+
+
+def run_token_charge(evidence: ModelCallEvidence, attempt_count: int) -> RunTokenCharge:
+    """Every attempt in the chain sent the same payload, so each costs its
+    input; only the attempt that answered produced output. When that attempt
+    reports what it billed, the report replaces its estimate. Attempts that
+    failed before it report nothing, so each is still charged its input
+    estimate."""
+    attempts = max(attempt_count, 1)
+    estimated = evidence.estimated_input_tokens * attempts + evidence.estimated_output_tokens
+    if evidence.provider_input_tokens is None or evidence.provider_output_tokens is None:
+        return RunTokenCharge(
+            charged=estimated,
+            estimated=estimated,
+            billed=None,
+            basis="ESTIMATED_NOT_PROVIDER_REPORTED",
+        )
+    billed = evidence.provider_input_tokens + evidence.provider_output_tokens
+    failed = attempts - 1
+    return RunTokenCharge(
+        charged=billed + evidence.estimated_input_tokens * failed,
+        estimated=estimated,
+        billed=billed,
+        basis=(
+            "PROVIDER_REPORTED"
+            if failed == 0
+            else "PROVIDER_REPORTED_PLUS_ESTIMATED_FAILED_ATTEMPTS"
+        ),
+    )
+
+
 class GovernedAgentOrchestrator:
     """Framework-neutral orchestrator with deterministic gates around model output."""
 
@@ -1338,31 +1384,38 @@ class GovernedAgentOrchestrator:
                 "schema_name": model_evidence.schema_name,
                 "estimated_input_tokens": model_evidence.estimated_input_tokens,
                 "estimated_output_tokens": model_evidence.estimated_output_tokens,
+                "provider_input_tokens": model_evidence.provider_input_tokens,
+                "provider_output_tokens": model_evidence.provider_output_tokens,
             }
             # AG-10 budget attribution. Every attempt in the chain sent the
             # same payload, so a fallback that fired after a 503 cost its input
             # estimate again; only the attempt that answered produced output.
-            # Estimated, never provider-reported -- see
-            # `AgentRun.estimated_input_tokens`.
+            # These columns stay estimates -- see `AgentRun.estimated_input_tokens`
+            # -- so they compare like for like with the caps checked before the call.
             agent_run.estimated_input_tokens = model_evidence.estimated_input_tokens * max(
                 len(model_call_attempts), 1
             )
             agent_run.estimated_output_tokens = model_evidence.estimated_output_tokens
+            # What the run is charged: billed where the provider reported it,
+            # estimated where it did not (`run_token_charge`).
+            charge = run_token_charge(model_evidence, len(model_call_attempts))
+            spent = charge.charged
             # AR-05: reconcile the reservation down (or up) to what this run
-            # actually cost, then apply the per-run cap to the total. The cap
-            # check cannot prevent the spend it detects -- the provider has
-            # already answered -- so it fails the run instead, which is what
-            # makes an overrun attributable rather than silent.
-            spent = int(agent_run.estimated_input_tokens or 0) + int(
-                agent_run.estimated_output_tokens or 0
-            )
+            # cost, then apply the per-run cap to the total. The cap check cannot
+            # prevent the spend it detects -- the provider has already answered --
+            # so it fails the run instead, which is what makes an overrun
+            # attributable rather than silent.
             try:
                 await reconcile_run_budget(session, reservation, actual_tokens=spent)
             except AgentBudgetExceeded as exc:
                 await self._persist_rejection(session, request, ledger, exc.reason_code)
                 raise AgentPolicyRejected(exc.reason_code) from exc
             ledger.plan_evidence["budget_evidence"] = {
-                "estimated_tokens": spent,
+                # What the budget window was charged, on `basis`. The estimate
+                # beside it is what the caps were checked against before the call.
+                "charged_tokens": charge.charged,
+                "estimated_tokens": charge.estimated,
+                "provider_reported_tokens": charge.billed,
                 "per_run_token_cap": (
                     screened.agent_contract.per_run_token_cap
                     if screened.agent_contract is not None
@@ -1373,8 +1426,9 @@ class GovernedAgentOrchestrator:
                     if screened.agent_contract is not None
                     else None
                 ),
-                # Named so nobody reads this block as billable spend.
-                "basis": "ESTIMATED_NOT_PROVIDER_REPORTED",
+                # Which figure `charged_tokens` is, so nobody reads an estimate
+                # as billable spend.
+                "basis": charge.basis,
             }
             overrun = per_run_violation(screened.agent_contract, tokens=spent)
             if overrun is not None:

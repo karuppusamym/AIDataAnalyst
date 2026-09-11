@@ -1454,16 +1454,9 @@
             "type": "string"
           },
           "run_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Run Id"
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
           },
           "status": {
             "title": "Status",
@@ -15797,6 +15790,17 @@
               }
             ],
             "title": "Daily Token Cap"
+          },
+          "daily_tokens_charged": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Tokens Charged"
           },
           "daily_tokens_estimated": {
             "anyOf": [

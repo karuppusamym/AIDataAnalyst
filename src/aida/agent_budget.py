@@ -28,12 +28,14 @@ because they answer different questions:
   provider call takes; the provider call has its own timeout
   (`Settings.model_timeout_seconds`, `route.timeout_seconds`).
 
-**What this does not do, stated plainly.** Every number here is an
-*estimate*, by the same 4-bytes-per-token heuristic the gateway uses. No
-provider adapter in this codebase reports billable usage, so these caps bound
-a modelled quantity. When an adapter starts returning real usage, the
-reconciliation step below is the single place that has to change: pass the
-provider's number to `reconcile_run_budget` instead of the estimate.
+**What is estimated, stated plainly.** Everything checked *before* a call is
+an estimate, by the same 4-bytes-per-token heuristic the gateway uses, because
+nothing has been billed yet. After the call, the OpenAI and Gemini adapters
+report what the provider billed (`model_gateway.ProviderUsage`), and the
+orchestrator passes that to `reconcile_run_budget` for the attempt that
+answered. Attempts that failed before it report nothing and are still charged
+their input estimate, and a provider that reports no usage leaves the whole run
+on the estimate. The run's `budget_evidence.basis` says which.
 """
 
 from __future__ import annotations
@@ -250,8 +252,8 @@ async def reconcile_run_budget(
     the input estimate rather than with zero, because a timeout can follow
     work the provider already billed.
 
-    `actual_tokens` is an estimate today (see this module's docstring). It is
-    the single place a provider-reported figure would enter.
+    `actual_tokens` is what the provider reported it billed where it reported
+    that, and the estimate otherwise (see this module's docstring).
     """
     if actual_tokens < 0:
         raise ValueError("actual tokens must be nonnegative")

@@ -39,6 +39,7 @@ from aida.events import record_audit, record_outbox
 from aida.governance_notifications import notify_safely
 from aida.models import (
     AGENT_SAMPLING_RATE_FLOOR,
+    AgentBudgetWindow,
     AgentContract,
     AgentRun,
     AgentTask,
@@ -159,11 +160,16 @@ class AgentTaskRead(ApiModel):
 
 class InboxBudget(ApiModel):
     daily_token_cap: int | None
-    #: Estimated, not provider-reported -- the same 4-bytes-per-token figure
-    #: the gateway enforces `daily_token_cap` against, which is what makes the
-    #: two numbers comparable at all. `None` means no run in the last 24h
-    #: reached a model call, which is not the same as zero consumption.
+    #: The sum of the last 24 hours' per-run estimates, by the same
+    #: 4-bytes-per-token figure the caps are checked against before each call.
+    #: `None` means no run in that time reached a model call, which is not the
+    #: same as zero consumption.
     daily_tokens_estimated: int | None
+    #: What today's (UTC) budget window holds: the figure `daily_token_cap` is
+    #: enforced against. Runs reconcile it to the tokens the provider reported
+    #: it billed, where it reported them, and runs still in flight hold a
+    #: reservation in it. `None` when no run reserved against a cap today.
+    daily_tokens_charged: int | None = None
 
 
 class InboxAgent(ApiModel):
@@ -700,6 +706,25 @@ async def get_agent_inbox(
                 run_counts[version_id] = (int(total or 0), int(completed or 0))
                 tokens_today[version_id] = int(tokens or 0)
 
+    # What each version's daily window holds today (UTC): reconciled charges,
+    # billed where the provider reported them, plus reservations for runs still
+    # in flight. The daily cap is enforced against this, so it is the figure the
+    # inbox draws against the cap. One statement, like the counts above.
+    charged_today: dict[UUID, int] = {}
+    if version_ids:
+        for version_id, reserved in (
+            await session.execute(
+                select(
+                    AgentBudgetWindow.ai_asset_version_id, AgentBudgetWindow.reserved_tokens
+                ).where(
+                    AgentBudgetWindow.organization_id == organization_id,
+                    AgentBudgetWindow.ai_asset_version_id.in_(version_ids),
+                    AgentBudgetWindow.window_date == now.date(),
+                )
+            )
+        ).all():
+            charged_today[version_id] = int(reserved or 0)
+
     # ADR-0029: a task agent writes no `AgentRun`. Every run it makes, completed
     # or refused, leaves one `<key>_agent.run` audit row against its version, so
     # its runs are counted from those -- one more grouped statement.
@@ -753,6 +778,7 @@ async def get_agent_inbox(
                         contract.ai_asset_version_id
                     )
                     or None,
+                    daily_tokens_charged=charged_today.get(contract.ai_asset_version_id),
                 ),
                 kill_scope=contract.kill_scope,
                 kill_engaged=contract.kill_engaged,

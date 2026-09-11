@@ -70,9 +70,11 @@ class KillSwitchEngaged(ModelGatewayError):
 
 
 #: Bytes of serialized JSON the platform counts as one token. A heuristic,
-#: not a tokenizer: no provider adapter in this codebase reports real usage,
-#: and a number derived from one vendor's tokenizer would be no more accurate
-#: for the others. Named and exported so contract-budget enforcement
+#: not a tokenizer, and a number derived from one vendor's tokenizer would be
+#: no more accurate for the others. It is what the gateway checks a request
+#: against *before* the call, when nothing has been billed yet; what the
+#: provider reports it billed afterwards is carried separately
+#: (`ProviderUsage`). Named and exported so contract-budget enforcement
 #: (`aida.agent_budget`) bounds the *same* quantity this gateway measures,
 #: rather than a second estimate that could drift from it.
 BYTES_PER_ESTIMATED_TOKEN = 4
@@ -106,6 +108,25 @@ class ApprovedModelRoute:
     timeout_seconds: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderUsage:
+    """Tokens a provider reports it billed for one call."""
+
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCompletion:
+    """A provider adapter's answer: the structured output and, when the
+    provider reports it, what the call was billed. An adapter may instead return
+    the bare output dict, as test and fixture providers do; the gateway treats
+    that as a call that reported no usage."""
+
+    output: dict[str, Any]
+    usage: ProviderUsage | None = None
+
+
 class StructuredModelProvider(Protocol):
     async def __call__(
         self,
@@ -117,7 +138,42 @@ class StructuredModelProvider(Protocol):
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any] | ProviderCompletion: ...
+
+
+def _token_count(value: Any) -> int | None:
+    """A provider-reported count, or None for anything that is not one."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def openai_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usage` from an OpenAI Responses API answer. Its `output_tokens`
+    already includes reasoning tokens, which are billed as output."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("input_tokens"))
+    output_tokens = _token_count(usage.get("output_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    return ProviderUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def gemini_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usageMetadata` from a Gemini generateContent answer. Thinking tokens
+    are billed as output but reported apart from `candidatesTokenCount`, so
+    they are added to it."""
+    usage = response.get("usageMetadata")
+    if not isinstance(usage, dict):
+        return None
+    prompt = _token_count(usage.get("promptTokenCount"))
+    candidates = _token_count(usage.get("candidatesTokenCount"))
+    if prompt is None or candidates is None:
+        return None
+    thoughts = _token_count(usage.get("thoughtsTokenCount")) or 0
+    return ProviderUsage(input_tokens=prompt, output_tokens=candidates + thoughts)
 
 
 #: Longest provider reason a `ModelGatewayError` carries: enough for "Invalid
@@ -267,7 +323,7 @@ class OpenAIResponsesProvider:
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> ProviderCompletion:
         body = {
             "model": route.model_id,
             "instructions": system_instruction,
@@ -309,7 +365,7 @@ class OpenAIResponsesProvider:
                     except json.JSONDecodeError as exc:
                         raise ModelOutputInvalid("OpenAI structured output was not JSON") from exc
                     if isinstance(parsed, dict):
-                        return parsed
+                        return ProviderCompletion(parsed, openai_usage(response))
         raise ModelOutputInvalid("OpenAI response did not contain structured output")
 
 
@@ -330,7 +386,7 @@ class GeminiGenerateContentProvider:
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> ProviderCompletion:
         del schema_name
         body = {
             "system_instruction": {"parts": [{"text": system_instruction}]},
@@ -368,7 +424,7 @@ class GeminiGenerateContentProvider:
             raise ModelOutputInvalid("Gemini response did not contain structured output") from exc
         if not isinstance(parsed, dict):
             raise ModelOutputInvalid("Gemini structured output has an invalid shape")
-        return parsed
+        return ProviderCompletion(parsed, gemini_usage(response))
 
 
 def _resolve_endpoint_base_url(route: ApprovedModelRoute, settings: Settings, default: str) -> str:
@@ -457,13 +513,16 @@ class ModelCallEvidence:
     output_size_bytes: int
     schema_name: str
     #: Tokens *estimated* by the same 4-bytes-per-token heuristic this gateway
-    #: already enforces `model_max_input_tokens` against, not a provider-
-    #: reported count -- no adapter in `build_model_providers` returns usage.
-    #: They are reported because the cap is enforced against this number, so
-    #: consumption measured the same way is the only comparison that means
-    #: anything; every surface that renders them says "estimated".
+    #: enforces `model_max_input_tokens` against before the call. Kept even when
+    #: the provider reports usage: the cap is checked against this number, so it
+    #: stays the like-for-like comparison, and every surface that renders it
+    #: says "estimated".
     estimated_input_tokens: int = 0
     estimated_output_tokens: int = 0
+    #: What the provider reports it billed (`ProviderUsage`), or None when it
+    #: reported nothing: a fixture provider, or an answer without usage.
+    provider_input_tokens: int | None = None
+    provider_output_tokens: int | None = None
 
 
 class ProviderNeutralModelGateway:
@@ -543,12 +602,14 @@ class ProviderNeutralModelGateway:
                 ),
                 timeout=min(self.settings.model_timeout_seconds, route.timeout_seconds),
             )
-            output = output_schema.model_validate(raw)
+            completion = raw if isinstance(raw, ProviderCompletion) else ProviderCompletion(raw)
+            output = output_schema.model_validate(completion.output)
         except TimeoutError as exc:
             raise ModelGatewayError("model route timed out") from exc
         except ValidationError as exc:
             raise ModelOutputInvalid("model output failed its structured contract") from exc
         serialized_output = json.dumps(output.model_dump(mode="json"), sort_keys=True)
+        usage = completion.usage
         evidence = ModelCallEvidence(
             route=route.route_key,
             provider_type=route.provider_type,
@@ -561,13 +622,16 @@ class ProviderNeutralModelGateway:
             schema_name=output_schema.__name__,
             estimated_input_tokens=estimated_tokens,
             estimated_output_tokens=estimate_serialized_tokens(serialized_output),
+            provider_input_tokens=usage.input_tokens if usage is not None else None,
+            provider_output_tokens=usage.output_tokens if usage is not None else None,
         )
         return output, evidence
 
 
 class DeterministicTestProvider:
-    def __init__(self, response: dict[str, Any]) -> None:
+    def __init__(self, response: dict[str, Any], usage: ProviderUsage | None = None) -> None:
         self.response = response
+        self.usage = usage
 
     async def __call__(
         self,
@@ -579,7 +643,9 @@ class DeterministicTestProvider:
         output_schema: dict[str, Any],
         schema_name: str,
         max_output_tokens: int,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | ProviderCompletion:
         del route, credential, system_instruction, payload, output_schema, schema_name
         del max_output_tokens
-        return self.response
+        if self.usage is None:
+            return self.response
+        return ProviderCompletion(self.response, self.usage)

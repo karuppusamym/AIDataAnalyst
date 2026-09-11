@@ -267,7 +267,7 @@ export interface AgentRunGroundingReceiptsRead {
 
 /** One recent `AgentRun`'s outcome -- the "live results" half of this */
 export interface AgentRunOutcomeRead {
-  run_id: string | null;
+  run_id: string;
   status: string;
   strategy: string | null;
   confidence: number | null;
@@ -2653,6 +2653,7 @@ export interface InboxAutoApplied {
 export interface InboxBudget {
   daily_token_cap: number | null;
   daily_tokens_estimated: number | null;
+  daily_tokens_charged?: number | null;
 }
 
 export interface InboxPendingItem {

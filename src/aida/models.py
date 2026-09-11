@@ -5336,11 +5336,13 @@ class AgentBudgetWindow(Base, TimestampMixin):
     standing, which is the safe direction: the day is treated as more spent
     than it was until the window rolls over.
 
-    Every number here is *estimated* tokens, by the same
-    4-bytes-per-token heuristic `ProviderNeutralModelGateway` uses -- see
-    `AgentRun.estimated_input_tokens`. No provider adapter reports billable
-    usage, so this bounds a modelled quantity and must not be presented as
-    spend.
+    A reservation is an *estimate*, by the same 4-bytes-per-token heuristic
+    `ProviderNeutralModelGateway` uses, because nothing has been billed yet.
+    Reconciliation replaces it with what the provider reported it billed for
+    the attempt that answered, where the provider reported that (OpenAI and
+    Gemini do), plus the input estimate of any attempt that failed before it.
+    A run's `budget_evidence.basis` records which, so this row is billed
+    tokens only as far as the providers reported them.
     """
 
     __tablename__ = "agent_budget_window"
