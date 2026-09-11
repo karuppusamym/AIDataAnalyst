@@ -100,6 +100,47 @@
   schedule.
 - Tests: `tests/test_task_agent_schedule.py`.
 
+### AG-16 -- the steward agent drafts column descriptions (P1)
+
+- A third steward capability, COLUMN_DESCRIPTION. It works the columns of the
+  same worklist tables, in the same order, that have no approved description,
+  no deliberately retired one and no open draft.
+- Each draft comes from the column drafter's evidence path, never its model
+  path, and is submitted as the agent's own `COLUMN_DESCRIPTION_DRAFT` request
+  (T0). A column too thin for the review bar is passed over without an item,
+  and text a reviewer rejected is never raised again.
+- Tests: `tests/test_steward_column_descriptions.py`.
+
+### AG-17 -- the ingest side-car under the steward agent's contract (P2)
+
+- Where an organization registered the steward agent,
+  `newly_created_table_drafter` drafts as that agent. Its kill switch or a T0
+  contract stops it, a reviewable draft is submitted as the agent's request,
+  and every draft gets a ledger row.
+- An organization that never registered the agent sees the side-car behave
+  exactly as before.
+- Tests: `tests/test_side_car_steward_contract.py`.
+
+### Fixed on the way
+
+- **GL-9 cross-source lineage names (defect).** Table drafts named upstream
+  and downstream tables from other datasources, past the per-read grant check
+  (ADR-0017), and cited edges a reviewer had rejected. Both are gone. Tests:
+  `tests/test_gl9_lineage_same_source.py`.
+- **The roster** lists each task agent's completed runs from its audit rows.
+- **Governed ontology v1** (bc6ab78) is wired in (`56f0476`):
+  - the router is mounted;
+  - migration `7c2d94e1b8a3` creates its tables;
+  - `ONTOLOGY_VERSION` is T2;
+  - a decision adapter lets the governance queue decide it.
+
+  The module's own ruff and mypy errors are cleared, and the three gates it
+  had left red -- reachability, the tier table and ORM drift -- pass. The
+  session that owns the module was finishing it at the same time, with its
+  own tests and a screen. That session dropped its duplicate migration, so
+  the branch has one head. Its in-flight edits to the same files refine this
+  wiring when it commits. Tests: `tests/test_ontology_api.py`.
+
 ### UX-23 -- one console for every task agent (P1)
 
 - `TaskAgentConsole` renders any task agent. The steward, lineage and quality
@@ -114,10 +155,13 @@
 
 1. **Scheduled runs are off.** Every `<key>_agent_interval_minutes` is 0 by
    default, so a person starts every run until an operator sets one.
-2. **The roster still counts `AgentRun` rows only.** Each task agent's row now
-   says where its runs are counted instead; the inbox counts them.
-3. **The lineage agent parses views only.** Procedures and dbt models keep
-   their own parse paths.
+2. **The roster lists completed task-agent runs, not refused ones.** The inbox
+   counts those.
+3. **The lineage agent parses views only, by decision.** The routine-aware
+   procedure edge table has no review state, and the reviewable one has no
+   routine identity. An agent must not write lineage no person reviews.
+   Procedures wait for a review state on the routine-aware table; dbt models
+   keep their own path.
 4. **The quality agent proposes two rule types.** Profiles store no values,
    so there is nothing to derive a range or distribution rule from.
 5. **Nothing measured on a real estate.** Every acceptance rate is `None`.
@@ -143,6 +187,9 @@ check_docs_links / test_doc_claims             -> OK
 ui-next: npm run typecheck                     -> clean
 ui-next: npm run test                          -> 81 files, 607 passed
 ```
+
+AG-16, AG-17 and the fixes above were each verified in a clean worktree
+before they were committed; each commit message records its runs.
 
 AG-15 (scheduling and counting) was verified separately, in a clean worktree
 at `b0eaccd`. Its tests and the steward, lineage and quality agent tests

@@ -131,7 +131,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 | Certification | Reviewed bulk table certification with expiry | Automatic expiry state/event worker; additional asset types |
 | Coverage | Six dimensions, four scopes, snapshots/history, unowned IDs | Scheduled trend computation, routing/escalation, bank-scale benchmarks |
 | Description drafting | Deterministic evidence-scored drafts, minimum-evidence submission gate, reviewed publish/reject with retained negative knowledge | Column/table-type-specific templates, batch scan trigger, bank corpus calibration of the scoring weights |
-| Steward agent (ADR-0029) | A contracted `agent:steward` identity works the AT-5 worklist in its priority order and proposes GL-9 descriptions and GL-8 links as its own review requests; tier-gated (T0 previews), killable mid-run, bounded, ledgered, with a per-type acceptance rate; scheduled runs available and off by default | Column descriptions; bringing the ingest side-car under the same contract; measurement on a real estate |
+| Steward agent (ADR-0029) | A contracted `agent:steward` identity works the AT-5 worklist in its priority order and proposes GL-9 table descriptions, column descriptions and GL-8 links as its own review requests; tier-gated (T0 previews), killable mid-run, bounded, ledgered, with a per-type acceptance rate; the ingest side-car drafts under the same contract where the agent is registered; scheduled runs available and off by default | Measurement on a real estate |
 | User experience | Responsive Stewardship Control Center and asset accountability actions | Interactive WCAG/usability certification and very-large-selection patterns |
 
 ## 13. Open work

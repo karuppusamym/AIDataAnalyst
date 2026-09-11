@@ -138,14 +138,17 @@ So a person decides every T2 proposal, and no agent ever asks to move the trust 
 * **The quality agent:** `quality_agent.py`, `quality_agent_api.py`, `quality_rule_proposals.py`, `quality_rule_proposal_model.py` and migration `e3b8f14c6a92`.
 * **For every agent:** four settings, and a console built on one shared screen component.
 * **Scheduling:** `task_agent_registry.py` lists the agents for every surface that treats them as a class, and `task_agent_schedule.py` is a scheduler pass. A positive `<key>_agent_interval_minutes` starts that agent once per interval in every organization that registered it. A scheduled run is the governed run; only its trigger differs.
-* **Counting:** a refusal that came after authority resolved records the version it stopped. The agent inbox counts task-agent runs, completed and refused, from their audit rows.
+* **Counting:** a refusal that came after authority resolved records the version it stopped. The agent inbox counts task-agent runs, completed and refused, from their audit rows. The roster lists each task agent's completed runs from the same rows.
+* **Column descriptions:** the steward agent's third capability, COLUMN_DESCRIPTION. It drafts the columns of its worklist tables that have no approved or retired description and no open draft. Drafts come from evidence only (`column_description_service`), and each is submitted as the agent's own request.
+* **The ingest side-car under the contract:** where an organization has registered the steward agent, `newly_created_table_drafter` drafts as that agent. The agent's kill switch or a T0 contract stops it; a reviewable draft becomes the agent's request, and each draft gets a ledger row. An organization that never registered the agent sees no change. That removes the behaviour change the Alternatives table deferred on.
+* **An evidence fix:** GL-9 names only same-source lineage that no reviewer rejected, which closes the ADR-0017 gap recorded in the 2026-09-10 status.
 
-Tests: `tests/test_lineage_agent.py`, `tests/test_quality_agent.py` and `tests/test_task_agent_schedule.py`, alongside the steward agent's.
+Tests: `tests/test_lineage_agent.py`, `tests/test_quality_agent.py`, `tests/test_task_agent_schedule.py`, `tests/test_steward_column_descriptions.py`, `tests/test_side_car_steward_contract.py` and `tests/test_gl9_lineage_same_source.py`, alongside the steward agent's.
 
 **Not done, stated plainly:**
 
 * Scheduled runs are off. Every `<key>_agent_interval_minutes` is 0 by default, so a person starts every run until an operator sets one.
-* The roster's run counts still come from `AgentRun` rows, which no task agent writes. Each task agent's row now says so and points to where its runs are counted, instead of reading as an agent that never ran.
-* The lineage agent parses views only. Stored procedures and dbt models keep their own parse paths.
+* The roster lists a task agent's completed runs, not its refused ones; the agent inbox counts those.
+* The lineage agent parses views only, by decision. The routine-aware procedure edge table (`deep_procedure_lineage_edge`) has no review state. The reviewable one (`procedure_lineage_edge`) carries no routine identity. An agent must not write lineage that no person reviews, so procedures wait until the routine-aware table has a review state. dbt models keep their own manifest path.
 * The quality agent proposes floors and null-rate ceilings only. Profiles store no values, so it has nothing to derive a range or distribution rule from without breaking INV-6.
 * Nothing has been measured on a real estate.
