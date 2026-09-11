@@ -322,9 +322,12 @@ def context_product_violation(
 
     `capability_envelope.context_product_ids` was parsed and stored from the
     day AG-10 shipped and read by nothing -- the 2026-09-09 review found the
-    declaration but no enforcement. This is the enforcement, at the one
-    boundary where an agent actually consumes a context product: the MCP
-    server's resource and tool-list paths.
+    declaration but no enforcement. This is the enforcement, at the MCP
+    server's `tools/list` and `tools/call`, when the caller scopes a request
+    to a product with `contextProductUri`. An earlier version of this note
+    also claimed the resource path; `resources/read` and `prompts/get` do not
+    call it, and neither do the REST context-product routes -- see
+    `Docs/10-architecture/18-agent-capability-enforcement-matrix.md`.
 
     Either identifier matches, because a contract is written by a human who
     may reasonably name the product by its stable `product_key` or by its

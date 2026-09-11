@@ -1715,6 +1715,36 @@ async def _handle_tools_call(
             "content": [{"type": "text", "text": "Datasource not accessible."}],
         }
 
+    # AR-06: a contracted agent's contract applies on the path it actually
+    # calls. The orchestrator enforces contract existence, the kill switch,
+    # `tool_slugs` and the token caps -- but only for a contract it is given,
+    # and nothing on this path gave it one, so a contracted agent calling a
+    # governed tool here was treated as any holder of its roles. A human has
+    # no contract and is unaffected; an `agent:` identity with none, or with
+    # several, is refused (`load_contract_for_principal`).
+    try:
+        caller_contract = await load_contract_for_principal(
+            session,
+            organization_id=datasource.organization_id,
+            agent_principal_id=context.principal_id,
+        )
+    except AgentContractValidationError as exc:
+        record_audit(
+            session,
+            context,
+            action="mcp.tool_call.agent_contract_denied",
+            resource_type="governed_tool_version",
+            resource_id=str(version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={"tool_slug": slug, "reason": exc.code},
+        )
+        await session.commit()
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Blocked by agent contract: {exc.code}"}],
+        }
+
     # Execute through the full governed orchestration stack
     orchestrator = GovernedAgentOrchestrator(settings)
     try:
@@ -1728,6 +1758,9 @@ async def _handle_tools_call(
             preferred_tool_version_id=version.id,
             tool_parameters=arguments,
             requested_limit=None,
+            agent_asset_version_id=(
+                caller_contract.ai_asset_version_id if caller_contract is not None else None
+            ),
         )
     except AgentPolicyRejected as exc:
         return {

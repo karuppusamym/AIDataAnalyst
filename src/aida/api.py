@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aida.agent_contracts import AgentContractValidationError, load_contract_for_principal
 from aida.agent_evals import run_control_evaluation
 from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
 from aida.agent_orchestrator import (
@@ -1600,6 +1601,18 @@ async def run_agent_analysis(
         ensure_datasource_enabled(datasource)
     except RunAdmissionRejected as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # AR-06: an analysis requested by a contracted agent runs under its
+    # contract -- existence, kill switch, `tool_slugs`, token caps -- which the
+    # orchestrator enforces only for a contract it is given. A human has none
+    # and is unaffected; an `agent:` identity with none, or several, is refused.
+    try:
+        caller_contract = await load_contract_for_principal(
+            session,
+            organization_id=datasource.organization_id,
+            agent_principal_id=context.principal_id,
+        )
+    except AgentContractValidationError as exc:
+        raise HTTPException(status_code=403, detail=exc.code) from exc
     orchestrator = GovernedAgentOrchestrator(settings)
     try:
         result = await orchestrator.run(
@@ -1612,6 +1625,9 @@ async def run_agent_analysis(
             preferred_tool_version_id=body.preferred_tool_version_id,
             tool_parameters=body.tool_parameters,
             requested_limit=body.max_rows,
+            agent_asset_version_id=(
+                caller_contract.ai_asset_version_id if caller_contract is not None else None
+            ),
         )
     except AgentClarificationRequired as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
