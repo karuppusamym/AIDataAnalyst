@@ -12212,3 +12212,102 @@ No real model has been called. The dev database has no route approved for `CLASS
 use a provider with no adapter. The tests drive the whole path with a deterministic provider. The
 first real call needs a route keyed `openai-bank-sql` with `CLASSIFICATION`, created on *AI
 governance*, submitted, and approved in the review queue by someone other than its author.
+
+
+## 2026-09-11 — Open issues found end to end: a wedged database, owner routing, silent model errors, and a screen for data dictionaries
+
+Commits `2558550`, `cc98493`, `a84abd8` and `031d153`. The data-dictionary screen itself landed
+inside `04b7348` and `a1876ec`, another session's commits, alongside its own work; an early draft
+test of mine reached HEAD in `c732349` before the fix it tests.
+
+### The dev database was wedged by an infinite loop
+
+A proposal from the new screen hung. In PostgreSQL, the metadata worker had held one transaction
+for 7.4 hours. Another session's `alembic upgrade` (`CREATE TABLE ontology_version`) had queued
+behind it for 19 minutes, and every write to `governance_review` queued behind the migration, so
+no review could be created or decided anywhere in the stack.
+
+The transaction was `newly_created_table_drafter.enqueue_semantics_for_source`. It looped on
+"every table with no proposal for this scan", inside the one transaction its Kafka consumer opens
+per message. A table inference writes no proposal for stays in that set, so it was selected again
+on every pass, forever. The offset is never committed, so each worker restart replays the message
+and loops again; the 2026-09-10 entry's "semantic-inference run held one transaction for over an
+hour" was very likely this. A keyset cursor now tries each table once per call (`cc98493`), and a
+regression test feeds it an inference that writes nothing.
+
+### Owner routing had failed for every organization since the scheduler started
+
+The fleet scheduler logged `owner_routing_pass_failed` for every organization every ten seconds,
+10,584 times, with the exception redacted. Reproduced locally inside a rolled-back transaction:
+`AttributeError: 'MetadataBusinessAnnotation' object has no attribute 'tags'`. AT-6 (`6c8e340`)
+moved annotation content, tags included, onto the append-only
+`MetadataBusinessAnnotationVersion`. GL-6's routing pass, and `apply_ownership_rule`'s TAG match,
+kept reading the identity row, and their tests used fake sessions that returned `None` for the
+annotation. Both now join the APPROVED version (`031d153`). A real-query test covers both,
+including a tag that exists only on a superseded version.
+
+### A failed model call said only its status code
+
+Noted in R20 and left: `post_with_retry` kept only the HTTP status. The error now carries the
+provider's code, type and message, read from the error fields only, whitespace-collapsed, capped
+at 300 characters, and with key-shaped words (`sk-…`, `AIza…`) replaced (`2558550`). Column
+drafting's fallback note shows it.
+
+### Document ingestion has a screen
+
+Steward → Data dictionaries is the first caller of `document_ingestion_api.py`. A steward uploads
+a CSV data dictionary to a project, matches its rows to that project's catalog by exact name, and
+proposes the matched rows, each as its own review with a link to it. Proposing a document twice
+used to raise a second full set of claims and reviews, because extraction leaves the document
+MAPPED. It is now refused with 409 under a row lock on the document, and a real-PostgreSQL test
+proposes from two sessions at once and gets exactly one review per row. The screen has its own
+demo store for fixture mode.
+
+It ran once, live, against the running API in the verification organization "Local Verification
+Bank 1788668854": four rows kept and one skipped, three matched and one left unmatched, three
+claims proposed. Those three reviews are pending there.
+
+### Corrections to earlier claims
+
+- The left menu's group icons do have accessible names. The Review queue sat inside the collapsed
+  Reviewer group, which is how the menu works; an earlier message said otherwise.
+- The Organization selector taking the first organization is by design, and the browser remembers
+  the choice after that; an earlier message called it a problem.
+
+### Verified
+
+- The full backend suite on a clean checkout of `031d153`: 9,375 passed, 23 skipped, 1 xfailed,
+  0 failed. That includes the three gates `bc6ab78`'s ontology work had left red (migration/ORM
+  drift, reachability, risk-tier classification), which that work has since closed.
+- ui-next on `031d153`: typecheck clean, 632 tests passed in 85 files, and the production build.
+- Targeted runs: 15 gateway tests (7 new), 18 document-ingestion tests (1 new), 14 drafter and
+  auto-enqueue tests (1 new), 61 stewardship and owner-routing tests (2 new), and the new
+  concurrency test, which ran against a real PostgreSQL rather than skipping.
+- The drafter's regression test caught a first version of the fix that never advanced its
+  cursor, which would have looped exactly as before.
+
+### Live stack after the redeploy
+
+Every app image was rebuilt from `031d153` and the services recreated, after stopping the
+looping worker so the migration could not queue behind it again. `migrate` applied
+`e3b8f14c6a92` (quality rule proposals) and `7c2d94e1b8a3` (ontology definitions), and
+`alembic_version` is `7c2d94e1b8a3`. Then, against the running stack:
+
+- The new worker worked through its backlog of events in under a minute, past the message the
+  old image kept replaying, and no transaction has stayed open longer than 30 seconds since.
+- The scheduler has logged no `owner_routing_pass_failed` since the restart, over four
+  iterations; before it, every iteration failed for every organization.
+- Proposing the verification document a second time returns 409 ("descriptions were already
+  proposed for this document; decide them in the review queue"), and it still has three claims.
+- ui-next on :3001 serves the rebuilt build.
+
+### Still open
+
+- The `openai-bank-sql` route (created and submitted on 2026-09-11, review `c63bc4b8`) waits for a
+  person to approve it. It is T3, so no agent can. Model drafting has still not called a real
+  model.
+- The Excel add-in has not been loaded into Excel; the owner deferred it.
+- The drafter still processes a whole datasource in one transaction per message. It now ends, but
+  a very large source holds that transaction for the whole pass; committing per batch would bound
+  it.
+- AR-09 and the measurement halves of AR-03, AR-04, AR-06, AR-10, AR-11 and AR-12, unchanged.
