@@ -97,7 +97,6 @@ _TIERS: Final[Mapping[str, str]] = {
     "GLOSSARY_LINK_PROPOSAL": TIER_T1,
     "TERM_SEMANTIC_BINDING": TIER_T1,
     "COLUMN_CLASSIFICATION_PROMOTION": TIER_T1,
-    "QUERY_HISTORY_METRIC_CANDIDATE": TIER_T1,
     "DOCUMENT_CLAIM": TIER_T1,
     # Bulk stewardship is T1 only below the governance threshold; see
     # `risk_tier_for`, which reads the item count out of the payload.
@@ -120,6 +119,11 @@ _TIERS: Final[Mapping[str, str]] = {
     "SEMANTIC_MODEL_VERSION": TIER_T2,
     "SEMANTIC_METRIC": TIER_T2,
     "SEMANTIC_METRIC_PROPOSAL": TIER_T2,
+    # A mined query-history candidate publishes a real `SemanticMetric` when
+    # approved, exactly as a metric proposal does, so it is the same tier. It
+    # was T1, one below, which put a path to published meaning inside the
+    # reviewer agent's ceiling (AR-03).
+    "QUERY_HISTORY_METRIC_CANDIDATE": TIER_T2,
     "GLOSSARY_TERM": TIER_T2,
     "GLOSSARY_TERM_VERSION": TIER_T2,
     "GLOSSARY_CONFLICT": TIER_T2,

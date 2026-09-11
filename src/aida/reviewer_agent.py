@@ -82,8 +82,6 @@ from aida.models import (
     BulkStewardshipOperation,
     ColumnDescriptionDraft,
     DataQualityIncident,
-    DocumentClaim,
-    GlossaryLinkProposal,
     GovernanceReview,
     MetadataEnrichmentProposal,
     MetadataTable,
@@ -297,25 +295,6 @@ def _by_object_id(model: Any, attribute: str) -> Any:
     return resolve
 
 
-def _by_review_link(model: Any, attribute: str) -> Any:
-    """A resolver for the reverse shape: the review was created before its
-    subject existed (`object_id == "pending"`), and the subject points back
-    through `governance_review_id`."""
-
-    async def resolve(session: AsyncSession, review: GovernanceReview) -> ProposalEvidence:
-        row = await session.scalar(
-            select(model).where(
-                model.governance_review_id == review.id,
-                model.organization_id == review.organization_id,
-            )
-        )
-        if row is None:
-            return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
-        return _confidence_evidence(row, model, attribute)
-
-    return resolve
-
-
 def _confidence_evidence(row: Any, model: Any, attribute: str) -> ProposalEvidence:
     value = _as_float(getattr(row, attribute, None))
     source = f"{model.__tablename__}.{attribute}"
@@ -391,6 +370,46 @@ async def _column_description_draft_evidence(
     return _confidence_evidence(row, ColumnDescriptionDraft, "overall_score")
 
 
+#: `semantic_inference.enrich_with_optional_model` marks a proposal the model
+#: wrote with this engine type; the rules engine's are `RULES`.
+_MODEL_ENRICHMENT_ENGINE = "LLM_ASSISTED"
+
+
+async def _metadata_enrichment_evidence(
+    session: AsyncSession, review: GovernanceReview
+) -> ProposalEvidence:
+    """Evidence for an enrichment proposal -- unless a model inferred it.
+
+    The rule `_column_description_draft_evidence` applies to a model-written
+    column draft, for the same reason. On the rules path `confidence` is a fixed
+    function of the table's structure (0.82 with a primary key and a domain
+    keyword, else 0.66). On the model path it is what the model said about its
+    own answer, bounded to [0, 1] and checked by nothing: the false-approval
+    benchmark's model twin filed a customer table under Payments, claimed 0.95,
+    and was approved (AR-03).
+    """
+    try:
+        subject_id = UUID(review.object_id)
+    except (ValueError, AttributeError, TypeError):
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    row = await session.scalar(
+        select(MetadataEnrichmentProposal).where(
+            MetadataEnrichmentProposal.id == subject_id,
+            MetadataEnrichmentProposal.organization_id == review.organization_id,
+        )
+    )
+    if row is None:
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    if row.engine_type == _MODEL_ENRICHMENT_ENGINE:
+        return ProposalEvidence(
+            resolved=False,
+            reason=EVIDENCE_MODEL_INFERRED,
+            source="metadata_enrichment_proposal.engine_type",
+            details={"engine_type": row.engine_type},
+        )
+    return _confidence_evidence(row, MetadataEnrichmentProposal, "confidence")
+
+
 #: Object type -> the resolver that produces positive evidence for it.
 #:
 #: A type absent from this table is one the agent has no object-specific way
@@ -399,13 +418,25 @@ async def _column_description_draft_evidence(
 #: `ASSET_DOCUMENTATION_VERSION` are deliberately absent: both are human
 #: steward assertions with no computed score, and an agent agreeing with a
 #: human's unscored assertion adds no independent check.
+#:
+#: `DOCUMENT_CLAIM` is absent for a related reason. Its `confidence` is the
+#: certainty of the structural *name match* -- 1.0 for any data-dictionary row
+#: whose table and column names matched -- which says the claim is about the
+#: right column and nothing about whether its description is true. Nothing in
+#: the platform scores that. Read as evidence, it approved every matched row of
+#: any uploaded dictionary, wrong descriptions included (AR-03).
+#:
+#: `GLOSSARY_LINK_PROPOSAL` is absent for the same reason. Its producer emits
+#: exactly two confidences -- 1.0 when an annotation's business name equals a
+#: term's display name, 0.92 for any other label pair -- and both clear the
+#: approve threshold, so the number cannot separate a right link from a wrong
+#: one: a staging table whose name stem is "revenue" links to the Revenue term
+#: at 1.0. `tests/test_ar03_false_approval_benchmark.py` measures both.
 _EVIDENCE_RESOLVERS: dict[str, Any] = {
     "ASSET_DESCRIPTION_DRAFT": _by_object_id(AssetDescriptionDraft, "overall_score"),
     "COLUMN_DESCRIPTION_DRAFT": _column_description_draft_evidence,
-    "METADATA_ENRICHMENT_PROPOSAL": _by_object_id(MetadataEnrichmentProposal, "confidence"),
-    "GLOSSARY_LINK_PROPOSAL": _by_object_id(GlossaryLinkProposal, "confidence"),
+    "METADATA_ENRICHMENT_PROPOSAL": _metadata_enrichment_evidence,
     "QUERY_HISTORY_METRIC_CANDIDATE": _by_object_id(QueryHistoryMetricCandidate, "confidence"),
-    "DOCUMENT_CLAIM": _by_review_link(DocumentClaim, "confidence"),
     "BULK_STEWARDSHIP_OPERATION": _bulk_size_evidence,
     "MODEL_IMPORT_BATCH": _bulk_size_evidence,
 }

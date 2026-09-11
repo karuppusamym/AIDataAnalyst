@@ -203,6 +203,11 @@ async def resolve_structural_mappings(
         tables_by_name.setdefault(table.name.casefold(), []).append(table)
 
     mappings: list[DocumentMapping] = []
+    # Column names are matched the way table names are -- casefolded equality,
+    # in Python -- and never with `ILIKE`, which reads `%` and `_` in a
+    # spreadsheet cell as wildcards: a column cell of `%` matched whichever
+    # column the database returned first, at confidence 1.0 (AR-03).
+    columns_by_table: dict[UUID, dict[str, list[MetadataColumn]]] = {}
     for section in sections:
         table_key = (
             (section.raw_schema_name.casefold(), section.raw_table_name.casefold())
@@ -239,13 +244,21 @@ async def resolve_structural_mappings(
                 )
             )
             continue
-        column = await session.scalar(
-            select(MetadataColumn).where(
-                MetadataColumn.table_id == table.id,
-                MetadataColumn.status == "ACTIVE",
-                MetadataColumn.name.ilike(section.raw_column_name),
-            )
+        if table.id not in columns_by_table:
+            by_name: dict[str, list[MetadataColumn]] = {}
+            for candidate in await session.scalars(
+                select(MetadataColumn).where(
+                    MetadataColumn.table_id == table.id,
+                    MetadataColumn.status == "ACTIVE",
+                )
+            ):
+                by_name.setdefault(candidate.name.casefold(), []).append(candidate)
+            columns_by_table[table.id] = by_name
+        matched_columns = columns_by_table[table.id].get(
+            section.raw_column_name.casefold(), []
         )
+        # Two columns differing only by case are as ambiguous as two tables.
+        column = matched_columns[0] if len(matched_columns) == 1 else None
         if column is None:
             mappings.append(
                 DocumentMapping(
