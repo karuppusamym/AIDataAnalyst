@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **476**
-- By family: BULK 11, EXPORT 5, JOB 23, MCP 9, REST 427, SDK 1
+- Surfaces covered: **478**
+- By family: BULK 11, EXPORT 5, JOB 24, MCP 9, REST 428, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -92,6 +92,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/analysis-runs/{run_id}/resume` | JOB | `aida.api.resume_analysis_run` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/analysis-runs` | JOB | `aida.api.create_analysis_run` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/semantic-inference-runs` | JOB | `aida.semantic_intelligence_api.create_semantic_inference_run` | DataAdmin, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/organizations/{organization_id}/lineage-agent/run` | JOB | `aida.lineage_agent_api.start_lineage_agent_run` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/reviewer-agent/run` | JOB | `aida.agent_contract_api.run_reviewer_agent` | MetadataReviewer, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/steward-agent/run` | JOB | `aida.steward_agent_api.start_steward_agent_run` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/playbooks/{playbook_id}/run` | JOB | `aida.playbooks_api.run_playbook_now` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -262,6 +263,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/graph-perspectives` | REST | `aida.graph_perspectives_api.list_graph_perspectives` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/integration-policy` | REST | `aida.api.get_organization_integration_policy` | OrganizationAdmin, PlatformAdmin | yes | no | writes | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/kill-switch` | REST | `aida.ai_governance_api.list_kill_switch_state` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/lineage-agent` | REST | `aida.lineage_agent_api.get_lineage_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/lines-of-business` | REST | `atlas.modules.identity_tenancy.router.list_lines_of_business` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/metric-conflicts` | REST | `aida.semantic_api.list_metric_formula_collisions` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/metric-suggestions` | REST | `aida.metric_suggestion_api.list_metric_suggestion_proposals` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -278,7 +280,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/reviewer-agent/disagreement-rates` | REST | `aida.agent_contract_api.get_disagreement_rates` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent/samples` | REST | `aida.agent_contract_api.list_audit_samples` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent` | REST | `aida.agent_contract_api.get_reviewer_agent_state` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
-| `GET /v1/organizations/{organization_id}/steward-agent` | REST | `aida.steward_agent_api.get_steward_agent_state` | AgentDeveloper, Auditor, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/steward-agent` | REST | `aida.steward_agent_api.get_steward_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/stewardship/coverage/snapshots` | REST | `aida.stewardship_api.list_stewardship_coverage_snapshots` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/stewardship/coverage` | REST | `aida.stewardship_api.get_stewardship_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/stewardship/documentation-worklist` | REST | `aida.stewardship_api.list_documentation_worklist` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
