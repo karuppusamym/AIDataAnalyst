@@ -40,9 +40,18 @@ class ModelGatewayError(RuntimeError):
     "provider throttled, try again" instead of "no model route configured".
     """
 
-    def __init__(self, message: str, *, provider_status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_status_code: int | None = None,
+        provider_error: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.provider_status_code = provider_status_code
+        # The provider's own reason ("model not found", "invalid schema"), cleaned
+        # by `provider_error_summary`. None when the body carried no usable reason.
+        self.provider_error = provider_error
 
 
 class ModelRouteNotApproved(ModelGatewayError):
@@ -111,6 +120,50 @@ class StructuredModelProvider(Protocol):
     ) -> dict[str, Any]: ...
 
 
+#: Longest provider reason a `ModelGatewayError` carries: enough for "Invalid
+#: schema for response_format ...", short of echoing a request back.
+PROVIDER_ERROR_MAX_CHARS = 300
+# OpenAI keys start "sk-" (its 401 names a masked one); Gemini keys "AIza".
+_KEY_PREFIXES = ("sk-", "AIza")
+
+
+def provider_error_summary(response: httpx.Response) -> str | None:
+    """The provider's own reason for a failed call, safe to show and to store.
+
+    OpenAI and Gemini both answer errors with ``{"error": {"message": ...}}``;
+    OpenAI adds ``code``/``type`` and Gemini ``code``/``status``. Only those
+    fields are read, never the rest of the body. Whitespace is collapsed, any
+    word shaped like an API key is replaced, and the result is capped at
+    ``PROVIDER_ERROR_MAX_CHARS``. A body that is not JSON, or has no message,
+    gives None, and the status code is all the caller learns.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, list) and body and isinstance(body[0], dict):
+        body = body[0]
+    error = body.get("error") if isinstance(body, dict) else None
+    labels: list[str] = []
+    if isinstance(error, dict):
+        message = error.get("message")
+        labels = [str(error[key]) for key in ("code", "type", "status") if error.get(key)]
+    else:
+        message = error
+    if not isinstance(message, str) or not message.strip():
+        return None
+    words = [
+        "[redacted]" if word.lstrip("'\"(").startswith(_KEY_PREFIXES) else word
+        for word in message.split()
+    ]
+    summary = " ".join(words)
+    if labels:
+        summary = f"{'/'.join(dict.fromkeys(labels))}: {summary}"
+    if len(summary) > PROVIDER_ERROR_MAX_CHARS:
+        summary = summary[: PROVIDER_ERROR_MAX_CHARS - 1].rstrip() + "…"
+    return summary
+
+
 async def post_with_retry(
     *,
     client: httpx.AsyncClient,
@@ -138,9 +191,12 @@ async def post_with_retry(
             return value
         retryable = response.status_code in {408, 409, 429, 500, 502, 503, 504}
         if not retryable or attempt + 1 == attempts:
+            reason = provider_error_summary(response)
             raise ModelGatewayError(
-                f"model provider request failed with HTTP {response.status_code}",
+                f"model provider request failed with HTTP {response.status_code}"
+                + (f": {reason}" if reason else ""),
                 provider_status_code=response.status_code,
+                provider_error=reason,
             )
         retry_after = response.headers.get("retry-after")
         try:
