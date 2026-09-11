@@ -3,6 +3,7 @@
 > Status: **Proposal**, prepared 2026-09-04. Owner: Product + Architecture.
 > Baseline compared against: `00-product/03..05` (research baseline 2026-08-28), `review-2026-08/target/05-target-architecture.md`, `60-delivery/00-status.md` (verified 2026-09-02), the `UI_Audit_Report_2026-09-03.html`, the two Atlan deep-dive documents under `Docs/` and `Docs/competitors/`, and the working tree on `feature/snowflake-dbt-lineage-mcp` at 543 commits.
 > Boundary: vendor claims are taken from public announcements dated May–September 2026 and are listed in Appendix A. Statements about Atlas are taken from the code, not from earlier documents; where the two disagree this document says so.
+> Claims: historical as of 2026-09-09; the review correction in §0 applies to every competitive statement here, and none may be reused as current fact without fresh evidence; sources: Appendix A.
 
 ---
 

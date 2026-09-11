@@ -2,6 +2,7 @@
 
 > Status: Authoritative. Owner: Product.
 > Purpose: name the specific, defensible places where Atlas can be structurally better — and the specific places where trying to win would be a mistake.
+> Claims: assessed 2026-08-28 against vendor-stated public capability, written alongside `03` and `04` and resting on their research rather than sourced separately; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`, `00-product/08-market-deep-dive-and-target-architecture-2026-09.md` (which found some of these eroded by 2026-09-04). Absolute statements below ("every competitor", "nobody") are that assessment, not current fact.
 
 ## 1. The core thesis
 

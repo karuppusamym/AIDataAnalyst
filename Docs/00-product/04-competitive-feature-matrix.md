@@ -1,6 +1,7 @@
 # Competitive Feature Matrix
 
 > Status: Authoritative. Owner: Product. Baseline: 2026-08-28.
+> Claims: assessed 2026-08-28 against vendor-stated public capability; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`, `10-architecture/15-agent-architecture-critical-review.md` §5 (primary sources checked 2026-09-09). Competitor scores are that assessment; §9 says which have since moved.
 > Legend: `●` strong / mature · `◐` partial or preview · `○` weak or absent · `—` not applicable to that product's model.
 > Atlas column reflects **current implemented state** (see `60-delivery/00-status.md`), not roadmap.
 
@@ -127,9 +128,11 @@ This matrix has one purpose: decide what to build next. It is scored against ven
 | Ecosystem / MCP | **Behind** | Close fast — MCP is now the distribution channel |
 | Proof at scale | **Behind** | Benchmarks are a product feature, not a QA task |
 
-## 9. The seven capabilities nobody else has
+## 9. The seven capabilities scored as Atlas-only in the 2026-08-28 baseline
 
-These are the entries marked **DIFF** where Atlas scores `●` and every competitor scores `○` or `—`. They are the product.
+These are the entries marked **DIFF** where Atlas scored `●` and every competitor scored `○` or `—` in the 2026-08-28 assessment. They are the product thesis, not a current market fact.
+
+> **Moved since the baseline.** The 2026-09-04 deep dive (`00-product/08-market-deep-dive-and-target-architecture-2026-09.md`, finding 2) found the first of these, a single mandatory execution gateway, now enforced inside the warehouse boundary by Databricks' Unity AI Gateway; it stays absent only *across a heterogeneous estate*. The architecture review's §5 (`10-architecture/15-agent-architecture-critical-review.md`, sources checked 2026-09-09) is the narrower, dated primary-source comparison. Re-verify a row before quoting it.
 
 1. A **single mandatory execution gateway** every source query must pass — including tools, profilers, and admin queries.
 2. **Deterministic AST validation** of all SQL before execution, with catalog allowlists derived from parsed references.
