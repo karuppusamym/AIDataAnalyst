@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **468**
-- By family: BULK 11, EXPORT 5, JOB 22, MCP 9, REST 420, SDK 1
+- Surfaces covered: **473**
+- By family: BULK 11, EXPORT 5, JOB 22, MCP 9, REST 425, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -244,6 +244,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/catalog-bulk-actions/{run_id}` | REST | `atlas.modules.catalog.router.get_catalog_bulk_action_run` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/catalog-bulk-actions` | REST | `atlas.modules.catalog.router.list_catalog_bulk_action_runs` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/catalog/rows` | REST | `atlas.modules.catalog.router.list_catalog_rows` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/column-description-drafts` | REST | `aida.column_description_api.list_column_description_drafts` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/consumption-lineage/by-consumer` | REST | `aida.consumption_lineage_api.list_consumption_by_consumer` | none declared | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/consumption-lineage/by-resource` | REST | `aida.consumption_lineage_api.list_consumption_for_resource` | none declared | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/consumption-lineage/graph` | REST | `aida.consumption_lineage_api.list_consumption_graph` | none declared | yes | no | read | no | not cancellable |
@@ -347,6 +348,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/asset-documentation-versions/{version_id}/submit` | REST | `aida.glossary_api.submit_asset_documentation_version` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/authorization-probes` | REST | `atlas.modules.identity_tenancy.router.probe_authorization` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | mutating verb, no write found | no | not cancellable |
 | `POST /v1/bi-connections/{connection_id}/artifact-imports` | REST | `aida.bi_api.import_bi_artifact` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/column-description-drafts/{draft_id}/submit` | REST | `aida.column_description_api.submit_column_description_draft` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/compliance/packs/generate` | REST | `aida.compliance_api.generate_compliance_pack` | ComplianceOfficer, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/composite-key-candidates/{candidate_id}/decision` | REST | `aida.composite_key_api.decide_composite_key_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/composite-relationship-candidates/{group_id}/decision` | REST | `aida.intelligence_api.decide_composite_relationship_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -433,6 +435,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/asset-description-drafts/sample-review/draw` | REST | `aida.asset_description_api.draw_asset_description_sample_review` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/business-assignments` | REST | `atlas.modules.identity_tenancy.router.create_business_assignment` | DataAdmin, OrganizationAdmin, PlatformAdmin, Steward | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/business-nodes` | REST | `atlas.modules.identity_tenancy.router.create_business_node` | DataAdmin, OrganizationAdmin, PlatformAdmin, Steward | yes | no | writes | yes | not cancellable |
+| `POST /v1/organizations/{organization_id}/column-description-drafts/generate` | REST | `aida.column_description_api.generate_column_description_drafts` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/delegations` | REST | `aida.delegation_api.grant_delegation` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-categories` | REST | `aida.stewardship_api.create_glossary_category` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-conflicts/detect` | REST | `aida.stewardship_api.detect_glossary_conflicts` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
@@ -501,6 +504,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/table-family-candidates/{family_candidate_id}/canonical/override` | REST | `aida.intelligence_api.override_canonical_table` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/tables/{table_id}/certification/revoke` | REST | `atlas.modules.catalog.router.revoke_table_certification` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/tables/{table_id}/certification` | REST | `atlas.modules.catalog.router.certify_table_asset` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/tables/{table_id}/column-description-drafts/submit` | REST | `aida.column_description_api.submit_table_column_description_drafts` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/tables/{table_id}/composite-key-candidates/discover` | REST | `aida.composite_key_api.discover_composite_key_candidates` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/tool-plans/recommend` | REST | `aida.tool_plans_api.recommend_tool_plan` | DataEngineer, PlatformAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |
 | `POST /v1/tool-plans/{plan_id}/cancel` | REST | `aida.tool_plans_api.cancel_tool_plan` | PlatformAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |
@@ -516,6 +520,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/workspaces/{workspace_id}/source-bindings` | REST | `atlas.modules.identity_tenancy.router.request_source_binding` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | writes | yes | not cancellable |
 | `PUT /v1/ai-remediations/{remediation_id}` | REST | `aida.ai_registry_api.update_ai_remediation` | Auditor, ModelRiskManager, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `PUT /v1/asset-description-drafts/{draft_id}` | REST | `aida.asset_description_api.edit_asset_description_draft` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
+| `PUT /v1/column-description-drafts/{draft_id}` | REST | `aida.column_description_api.edit_column_description_draft` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `PUT /v1/context-product-versions/{version_id}` | REST | `aida.context_product_api.update_context_product_version` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/context-products/{product_id}/bindings/{consumer_principal_id}` | REST | `aida.context_product_api.set_context_product_consumer_binding` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/data-product-versions/{version_id}` | REST | `aida.product_marketplace_api.update_data_product_version` | DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
