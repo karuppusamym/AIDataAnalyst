@@ -45,6 +45,7 @@ from aida.glossary_api import router as glossary_router
 from aida.graph_perspectives_api import router as graph_perspectives_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
+from aida.lineage_agent_api import router as lineage_agent_router
 from aida.lineage_evidence_export_api import router as lineage_evidence_export_router
 from aida.logging import configure_logging
 from aida.marketplace_discovery import router as marketplace_discovery_router
@@ -457,8 +458,9 @@ app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
 app.include_router(review_queue_router)
-# ADR-0029: the steward agent.
+# ADR-0029: task agents.
 app.include_router(steward_agent_router)
+app.include_router(lineage_agent_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

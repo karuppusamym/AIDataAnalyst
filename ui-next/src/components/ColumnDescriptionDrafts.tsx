@@ -6,33 +6,36 @@ import {
   listTableColumnDescriptionDrafts,
   submitColumnDescriptionDraft,
   submitTableColumnDescriptionDrafts,
+  type ColumnDraftGenerateResult,
 } from "../lib/api/columnDescriptionDrafts";
 import { useOrgId } from "../lib/org";
-import type {
-  ColumnDescriptionDraftGenerateResult,
-  ColumnDescriptionDraftRead,
-} from "../lib/types";
+import type { ColumnDescriptionDraftRead } from "../lib/types";
 import { Button, Pill, type Tone } from "./primitives";
 import "./ColumnDescriptionDrafts.css";
 
 /* ---------------------------------------------------------------------------
    Column description drafts, where a steward looks at columns.
 
-   The drafts are composed on the server from catalog evidence only -- dbt
-   column docs, source comments, keys, approved relationships -- with no model
-   call, and published only when someone other than the submitter (and anyone
-   who edited it) approves each one in the review queue. This section generates
-   them, lets a steward fix the wording, and submits them; it cannot publish.
+   Drafts come from two places, and this section never lets them be confused:
 
-   Two things it says plainly rather than leaving a steward to discover:
+   - Catalog evidence (dbt column docs, source comments, keys, approved
+     relationships), composed on the server with no model call.
+   - The governed model, only when a steward asks and only for columns whose
+     evidence is too thin -- labelled Model-inferred, with the metadata it
+     worked from, and capped so the reviewer agent can never approve one.
 
-   - A thin draft is shown, not hidden, but it cannot be submitted. Its score
-     measures catalog evidence, not prose, so editing the wording does not help
-     -- the way to describe such a column is to write it, in the source model
-     workbook. Hiding thin drafts would leave a steward wondering why half the
-     columns never got one.
-   - Editing makes you an author. The server refuses an editor as approver,
-     and the item says so before the steward finds out in the queue.
+   Either way a draft is published only when someone other than the submitter
+   (and anyone who edited it) approves it in the review queue. This section
+   generates, lets a steward fix the wording, and submits; it cannot publish.
+
+   Three things it says plainly rather than leaving a steward to discover:
+
+   - A thin evidence draft is shown, not hidden, but cannot be submitted. Its
+     score measures catalog evidence, not prose, so rewording does not help;
+     the model or the source model workbook does.
+   - A model draft can be wrong in a way that reads as right. It says so on
+     the draft, not in a tooltip.
+   - Editing makes you an author, and the server refuses an editor as approver.
 --------------------------------------------------------------------------- */
 
 const STATUS: Record<string, { label: string; tone: Tone }> = {
@@ -45,6 +48,15 @@ const STATUS: Record<string, { label: string; tone: Tone }> = {
 
 const OPEN_STATUSES = new Set(["DRAFT", "PENDING_APPROVAL"]);
 
+const BASIS_LABEL: Record<string, string> = {
+  NAME: "name",
+  TYPE: "type",
+  KEY: "key",
+  FOREIGN_KEY: "foreign keys",
+  TABLE_CONTEXT: "table's description",
+  SIBLING_COLUMNS: "neighbouring columns",
+};
+
 function errorText(error: unknown): string {
   return error instanceof ApiError ? error.detail : (error as Error).message;
 }
@@ -53,8 +65,34 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
   return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
+function listed(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+function originOf(draft: ColumnDescriptionDraftRead): string {
+  const origin = draft.evidence?.origin;
+  return typeof origin === "string" ? origin : "METADATA";
+}
+
+export function isModelDraft(draft: ColumnDescriptionDraftRead): boolean {
+  return originOf(draft).startsWith("MODEL_INFERRED");
+}
+
+function basisOf(draft: ColumnDescriptionDraftRead): string[] {
+  const model = draft.evidence?.model;
+  if (typeof model !== "object" || model === null) return [];
+  const basis = (model as { basis?: unknown }).basis;
+  return Array.isArray(basis)
+    ? basis.map((code) => BASIS_LABEL[String(code)] ?? String(code).toLowerCase())
+    : [];
+}
+
 /** What a generation call did, including what it deliberately did not do. */
-export function describeGeneration(result: ColumnDescriptionDraftGenerateResult): string {
+export function describeGeneration(
+  result: ColumnDraftGenerateResult,
+  options: { modelAssist?: boolean } = {},
+): string {
   if (
     result.tables_skipped > 0 &&
     result.created === 0 &&
@@ -66,6 +104,12 @@ export function describeGeneration(result: ColumnDescriptionDraftGenerateResult)
   const parts = [
     result.created === 0 ? "No new drafts." : `Drafted ${plural(result.created, "column")}.`,
   ];
+  const modelDrafted = result.model_drafted ?? 0;
+  if (modelDrafted > 0) {
+    parts.push(`The model wrote ${modelDrafted}; each is labelled and needs a person's approval.`);
+  }
+  const replaced = result.replaced_thin_drafts ?? 0;
+  if (replaced > 0) parts.push(`Replaced ${plural(replaced, "thin draft")} nobody had touched.`);
   if (result.skipped_described > 0) {
     parts.push(`${result.skipped_described} already described or deliberately retired.`);
   }
@@ -77,10 +121,21 @@ export function describeGeneration(result: ColumnDescriptionDraftGenerateResult)
       `${result.skipped_duplicate_rejected} would repeat a draft a reviewer already rejected.`,
     );
   }
-  if (result.below_review_threshold > 0) {
+  const withheld = result.model_withheld ?? 0;
+  if (withheld > 0) parts.push(`${withheld} withheld by injection screening.`);
+  const fallbacks = result.model_fallbacks ?? 0;
+  if (fallbacks > 0) {
     parts.push(
-      `${result.below_review_threshold} rest on too little catalog evidence to submit; ` +
-        "write those in the source model workbook instead.",
+      `${fallbacks} fell back to evidence-only drafts${result.model_note ? `: ${result.model_note}` : ""}.`,
+    );
+  }
+  const thin = result.below_review_threshold;
+  if (thin > 0) {
+    parts.push(
+      options.modelAssist
+        ? `${thin} still cannot be submitted; write ${thin === 1 ? "that one" : "those"} in the source model workbook.`
+        : `${thin} rest on too little catalog evidence to submit; use the model for thin columns, ` +
+            "or write those in the source model workbook instead.",
     );
   }
   return parts.join(" ");
@@ -107,6 +162,8 @@ function DraftItem({
   useEffect(() => setText(draft.drafted_text), [draft.drafted_text]);
   const status = STATUS[draft.status] ?? { label: draft.status, tone: "mute" as Tone };
   const editors = editorsOf(draft);
+  const model = isModelDraft(draft);
+  const basis = basisOf(draft);
   const textId = `cdd-text-${draft.id}`;
 
   const save = async () => {
@@ -118,11 +175,16 @@ function DraftItem({
       <div className="cdd__row">
         <span className="cdd__col">{draft.column_name}</span>
         <Pill tone={status.tone}>{status.label}</Pill>
+        {model ? <Pill tone="warn">Model-inferred</Pill> : null}
         <span
           className="cdd__score"
-          title="How much catalog evidence this draft rests on. It orders review; it never replaces it."
+          title={
+            model
+              ? "The model's own confidence, capped at 70%. It orders review; it never replaces it."
+              : "How much catalog evidence this draft rests on. It orders review; it never replaces it."
+          }
         >
-          {`evidence ${Math.round(draft.overall_score * 100)}%`}
+          {`${model ? "model confidence" : "evidence"} ${Math.round(draft.overall_score * 100)}%`}
         </span>
       </div>
 
@@ -161,6 +223,13 @@ function DraftItem({
         <p className="cdd__text">{draft.drafted_text}</p>
       )}
 
+      {model ? (
+        <p className="cdd__model">
+          {`Inferred by a model from its ${basis.length > 0 ? listed(basis) : "metadata"}. ` +
+            "It can be wrong in a way that reads as right: check it against the data before you submit it."}
+        </p>
+      ) : null}
+
       {draft.status === "DRAFT" && !editing ? (
         <div className="cdd__itemactions">
           <Button disabled={busy} onClick={() => setEditing(true)}>
@@ -172,7 +241,7 @@ function DraftItem({
             title={
               draft.reviewable
                 ? "Send this draft to the review queue. Publishing needs someone else's approval."
-                : "Too little catalog evidence to submit this draft."
+                : "This draft cannot be submitted as it stands."
             }
           >
             Submit for review
@@ -182,9 +251,9 @@ function DraftItem({
 
       {draft.status === "DRAFT" && !draft.reviewable ? (
         <p className="cdd__warn">
-          Too little catalog evidence to submit. Rewording does not change that: the score measures
-          the evidence, not the prose. Write this column&apos;s description in the source model
-          workbook instead.
+          {model
+            ? "The model was not confident enough to submit this. Write this column's description in the source model workbook instead."
+            : "Too little catalog evidence to submit. Rewording does not change that: the score measures the evidence, not the prose. Use the model for thin columns, or write this column's description in the source model workbook."}
         </p>
       ) : null}
       {editors.length > 0 ? (
@@ -251,6 +320,14 @@ export function ColumnDescriptionDrafts({ tableId }: { tableId: string }) {
       describeGeneration(await generateColumnDescriptionDrafts(orgId, [tableId])),
     );
 
+  const generateWithModel = () =>
+    run("model", async () =>
+      describeGeneration(
+        await generateColumnDescriptionDrafts(orgId, [tableId], { modelAssist: true }),
+        { modelAssist: true },
+      ),
+    );
+
   const submitAll = () =>
     run("submit-all", async () => {
       const result = await submitTableColumnDescriptionDrafts(tableId);
@@ -295,6 +372,13 @@ export function ColumnDescriptionDrafts({ tableId }: { tableId: string }) {
           >
             {busy === "generate" ? "Drafting…" : "Draft undescribed columns"}
           </Button>
+          <Button
+            disabled={busy !== null}
+            onClick={() => void generateWithModel()}
+            title="Columns with too little catalog evidence are drafted by the governed model from metadata only; the rest are still drafted from evidence. Model drafts are labelled, capped below automatic approval, and always need a person."
+          >
+            {busy === "model" ? "Asking the model…" : "Use the model for thin columns"}
+          </Button>
           {ready > 0 ? (
             <Button variant="primary" disabled={busy !== null} onClick={() => void submitAll()}>
               {busy === "submit-all" ? "Submitting…" : `Submit ${ready} for review`}
@@ -303,8 +387,8 @@ export function ColumnDescriptionDrafts({ tableId }: { tableId: string }) {
         </div>
       </div>
       <p className="cdd__lede">
-        Drafted from catalog evidence only, and published only after someone other than you approves
-        each one in the review queue.
+        Drafted from catalog evidence, or by the model where you ask for it, and published only after
+        someone other than you approves each one in the review queue.
       </p>
 
       {notice ? (

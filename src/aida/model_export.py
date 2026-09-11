@@ -102,6 +102,7 @@ _COLUMN_HEADERS = [
     "drafted_description",
     "draft_score",
     "draft_status",
+    "draft_origin",
     "draft_id",
     "description_version",
     "approved_by",
@@ -286,6 +287,7 @@ async def _column_rows(
                 draft.drafted_text if draft else None,
                 round(draft.overall_score, 2) if draft else None,
                 draft.status if draft else None,
+                (draft.evidence or {}).get("origin") if draft else None,
                 str(draft.id) if draft else None,
                 documented.version if documented else None,
                 documented.approved_by if documented else None,
@@ -426,19 +428,24 @@ def _readme_sheet(
             ],
             [
                 "drafted_description",
-                "A machine-drafted proposal, composed only from catalog "
-                "evidence -- dbt column docs, source comments, keys and "
-                "reviewed relationships -- with no model call. Read-only here "
+                "A machine-drafted proposal: composed from catalog evidence "
+                "(dbt column docs, source comments, keys, reviewed "
+                "relationships) or, where the catalog had too little, by a "
+                "model from metadata -- see draft_origin. Read-only here "
                 "and never applied on its own. To use it, copy it into "
                 "business_description, fixing it as you go, and upload: that "
                 "is an ordinary edit, reviewed like any other.",
             ],
             [
-                "draft_score / draft_status",
+                "draft_score / draft_status / draft_origin",
                 "How much catalog evidence the draft rests on (0 to 1), and "
                 "where it is in review. A draft scored under 0.4 cannot be "
                 "submitted as a draft; copying its text into "
-                "business_description is still a normal, reviewed edit.",
+                "business_description is still a normal, reviewed edit. "
+                "draft_origin MODEL_INFERRED means a model wrote the draft from "
+                "metadata because the catalog had too little to say; its score "
+                "is the model's capped confidence, not evidence, and it can "
+                "be wrong in a way that reads as right.",
             ],
             [
                 "Tables: two descriptions",

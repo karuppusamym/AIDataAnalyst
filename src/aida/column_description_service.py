@@ -65,6 +65,12 @@ COLUMN_DESCRIPTION_DRAFT_OBJECT_TYPE = "COLUMN_DESCRIPTION_DRAFT"
 #: one draft per column may be in either (`uq_column_description_draft_open`).
 OPEN_DRAFT_STATUSES = ("DRAFT", "PENDING_APPROVAL")
 
+#: Where a draft's text came from, recorded as `evidence["origin"]`. An edit
+#: appends `_WITH_HUMAN_EDITS` and keeps the first half: a model's guess a steward
+#: reworded is still a model's guess, and `reviewer_agent` abstains on it.
+ORIGIN_METADATA = "METADATA"
+ORIGIN_MODEL_INFERRED = "MODEL_INFERRED"
+
 #: Ceiling on drafts one generation request may create. Refused, not sliced:
 #: see `column_description_api.generate_column_description_drafts`.
 GENERATE_COLUMN_LIMIT = 2_000
@@ -400,7 +406,7 @@ def column_evidence_payload(evidence: ColumnEvidence) -> dict[str, Any]:
     """
     return {
         "column": f"{evidence.schema_name}.{evidence.table_name}.{evidence.column_name}",
-        "origin": "METADATA",
+        "origin": ORIGIN_METADATA,
         "physical_type": evidence.physical_type,
         "nullable": evidence.nullable,
         "classification": evidence.classification,

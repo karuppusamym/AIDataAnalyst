@@ -180,6 +180,11 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
     const proposed = extractEvidenceValue(proposal, "proposed_description");
     const column = extractEvidenceValue(proposal, "column");
     const parts: string[] = [];
+    // Said first, where a reviewer skimming the queue cannot miss it: a
+    // model's text can be wrong in a way that reads as right.
+    if (extractEvidenceValue(proposal, "origin")?.startsWith("MODEL_INFERRED")) {
+      parts.push("model-inferred: check it against the data");
+    }
     if (proposed) parts.push(`“${proposed.length > 180 ? `${proposed.slice(0, 180)}…` : proposed}”`);
     if (proposal.confidence !== null && proposal.confidence !== undefined) {
       parts.push(`evidence ${pct(proposal.confidence)}`);

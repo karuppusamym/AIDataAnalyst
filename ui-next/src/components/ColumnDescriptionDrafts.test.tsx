@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../lib/api";
 import type { ColumnDescriptionDraftRead } from "../lib/types";
 
 /* ---------------------------------------------------------------------------
@@ -63,6 +64,16 @@ const THIN = draft({
   reviewable: false,
 });
 
+const COUNTS = {
+  drafts: [],
+  created: 0,
+  skipped_open: 0,
+  skipped_described: 0,
+  skipped_duplicate_rejected: 0,
+  below_review_threshold: 0,
+  tables_skipped: 0,
+};
+
 beforeEach(() => {
   for (const mock of [list, generate, edit, submitOne, submitAll]) mock.mockReset();
 });
@@ -84,13 +95,11 @@ describe("ColumnDescriptionDrafts", () => {
   it("reports what generation did, including what it deliberately skipped", async () => {
     list.mockResolvedValue([]);
     generate.mockResolvedValue({
-      drafts: [],
+      ...COUNTS,
       created: 4,
-      skipped_open: 0,
       skipped_described: 2,
       skipped_duplicate_rejected: 1,
       below_review_threshold: 2,
-      tables_skipped: 0,
     });
     render(<ColumnDescriptionDrafts tableId="t1" />);
     await screen.findByText("No open drafts for this table.");
@@ -160,20 +169,68 @@ describe("ColumnDescriptionDrafts", () => {
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("No open drafts for this table.")).toBeInTheDocument();
   });
+
+  it("labels a model draft on the draft itself and says it can be wrong", async () => {
+    list.mockResolvedValue([
+      draft({
+        column_name: "amt_ccy",
+        drafted_text: "Probably the currency of the order amount.",
+        overall_score: 0.7,
+        evidence: { origin: "MODEL_INFERRED", model: { basis: ["NAME", "TYPE"] } },
+      }),
+    ]);
+    render(<ColumnDescriptionDrafts tableId="t1" />);
+
+    const item = await screen.findByRole("listitem");
+    expect(within(item).getByText("Model-inferred")).toBeInTheDocument();
+    expect(within(item).getByText("model confidence 70%")).toBeInTheDocument();
+    expect(within(item).getByText(/Inferred by a model from its name and type\./)).toBeInTheDocument();
+    expect(within(item).getByText(/wrong in a way that reads as right/)).toBeInTheDocument();
+  });
+
+  it("asks the model only when told to, and shows why it cannot", async () => {
+    list.mockResolvedValue([]);
+    generate.mockRejectedValue(
+      new ApiError(
+        409,
+        "model drafting is not available: model route 'r' is not approved for CLASSIFICATION",
+      ),
+    );
+    render(<ColumnDescriptionDrafts tableId="t1" />);
+    await screen.findByText("No open drafts for this table.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Use the model for thin columns" }));
+
+    await waitFor(() =>
+      expect(generate).toHaveBeenCalledWith(expect.any(String), ["t1"], { modelAssist: true }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "model drafting is not available: model route 'r' is not approved for CLASSIFICATION",
+    );
+  });
 });
 
 describe("describeGeneration", () => {
   it("does not claim success for a table it could not draft", () => {
-    expect(
-      describeGeneration({
-        drafts: [],
-        created: 0,
-        skipped_open: 0,
-        skipped_described: 0,
-        skipped_duplicate_rejected: 0,
-        below_review_threshold: 0,
-        tables_skipped: 1,
-      }),
-    ).toMatch(/could not be drafted/);
+    expect(describeGeneration({ ...COUNTS, tables_skipped: 1 })).toMatch(/could not be drafted/);
+  });
+
+  it("says what the model did and what it fell back on", () => {
+    const text = describeGeneration(
+      {
+        ...COUNTS,
+        created: 3,
+        model_drafted: 2,
+        model_fallbacks: 1,
+        model_withheld: 1,
+        replaced_thin_drafts: 1,
+        model_note: "provider unavailable",
+      },
+      { modelAssist: true },
+    );
+    expect(text).toContain("The model wrote 2; each is labelled and needs a person's approval.");
+    expect(text).toContain("Replaced 1 thin draft nobody had touched.");
+    expect(text).toContain("1 withheld by injection screening.");
+    expect(text).toContain("1 fell back to evidence-only drafts: provider unavailable.");
   });
 });

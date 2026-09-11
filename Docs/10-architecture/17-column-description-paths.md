@@ -1,46 +1,82 @@
 # Column descriptions: where they come from, and where a user finds them
 
 First written 2026-09-10 as a call-graph trace, not a module inventory — the
-distinction AU-1 exists to enforce. Revised the same day, after column
-description drafting and Excel save-back were built.
+distinction AU-1 exists to enforce. Revised the same day twice: after evidence
+drafting and Excel save-back were built, and after model-assisted drafting was
+added for the columns evidence cannot describe.
 
-## Drafting now exists — and on today's dev catalog it drafts nothing submittable
+## Two ways a draft is written
 
-Column descriptions can now be drafted automatically, on the same contract as
-table drafts (GL-9): `aida.column_description_service` composes a draft for
-each undescribed column **from catalog evidence alone**. That means dbt column
-docs, the source system's comment, primary/foreign-key membership and approved
-same-source relationships, with **no model call**. It scores the evidence on the
-four dimensions table drafts use, and publishes only through an independent
-decision on the draft's `GovernanceReview` (`COLUMN_DESCRIPTION_DRAFT`, risk
-tier T0). A draft below `MINIMUM_EVIDENCE_FOR_REVIEW` (0.4, shared with tables)
-cannot be submitted. Nothing is read into a column's *name*: `amt_ccy` with no
-documentation is drafted as exactly what the catalog says, and scores below the
-bar, rather than as a guess about ISO 4217.
+### From catalog evidence
 
-Where a steward meets it: **Catalog → an asset → Columns → Column description
-drafts**. Generate, fix the wording, submit one or all reviewable drafts, then
-decide in the review queue. There the proposed text now leads the evidence list
-for both column *and* table drafts — before this pass, a reviewer working from
-the queue approved table-draft text the queue never showed them.
+`aida.column_description_service` drafts a description for each undescribed
+column from **catalog evidence alone**: dbt column docs, the source system's
+comment, primary- and foreign-key membership, and approved same-source
+relationships. There is no model call. It scores the evidence on the four
+dimensions table drafts use and shares their 0.4 submission bar. Nothing is read
+into a column's *name*. `amt_ccy` with no documentation is drafted as exactly
+what the catalog says, and scores below the bar, rather than as a guess about
+ISO 4217.
 
-**Measured against the dev catalog on 2026-09-10 (read-only):** 27 active
-tables, 196 columns, **0 reviewable drafts**. The catalog carries no dbt column
-docs, no source comments and no approved relationships, so every draft is
-structure-only and scores 0.15–0.31. This is the rule working as designed, not a
-defect. A primary key and a foreign key say what a column *joins to*, not what
-it *means*, and the contract refuses to guess the rest. The practical
-consequence, though, is that on this estate deterministic drafting alone does
-not meet the expectation that column descriptions get generated. Closing that
-gap is a choice, and it is still open:
+**Measured against the dev catalog on 2026-09-10 (read-only): 27 active tables,
+196 columns, 0 reviewable drafts.** The catalog has no dbt column docs, no
+source comments and no approved relationships, so every evidence draft is
+structure-only and scores 0.15–0.31. The rule was working. It just could not meet
+the expectation that column descriptions get generated, on this estate.
 
-1. **Feed it evidence.** Import dbt artifacts with column docs, add
-   `COMMENT ON COLUMN` in the source and rediscover, or approve relationship
-   candidates. Each moves real columns over the bar with no change to the rules.
-2. **Model-assisted drafting for the thin columns only.** Labelled
-   model-inferred, capped below agent auto-approval, under the agent budget and
-   ingress screening (AR-05, AR-10). This is the only option that produces text
-   for `amt_ccy`, and the only one that can produce *confidently wrong* text.
+### From the model, for thin columns only
+
+That measurement decided the second path. `aida.column_description_model`
+drafts **only** the columns whose evidence is too thin to clear the bar, and only
+when a steward asks for it (`model_assist`, from *Use the model for thin columns*
+in the column panel). Its constraints are the design:
+
+- **Thin columns only.** A column with enough evidence is still drafted from it,
+  and the model is never asked about it. An answer about a column it was not
+  asked about is ignored. The model may replace a thin evidence draft nobody has
+  touched. It never replaces one a person edited, one already in review, or
+  another model draft.
+- **Metadata only, screened both ways.** The payload is names, types,
+  nullability, keys, references, classification and the table's approved
+  description. It never contains row values or source comments (a column with a
+  comment is not thin). Every name and the table description go through
+  `ingest_screening.screen_text` first, and quarantined text is withheld, not
+  sent. The model's answers are screened the same way; a quarantined answer is
+  dropped and the column falls back to its evidence draft.
+- **Labelled and capped.** A model draft records `origin = MODEL_INFERRED`, the
+  basis the model gave (name, type, key, …), and the call's route, model and
+  input/output fingerprints. Its confidence is capped at 0.70, the platform's
+  bound for model judgements, and at 0.5 when the model says it inferred from the
+  name alone. The draft keeps its evidence score alongside, so a reviewer can see
+  the model was filling a gap rather than confirming a finding. An edit keeps the
+  label (`MODEL_INFERRED_WITH_HUMAN_EDITS`).
+- **A person always decides.** The reviewer agent **abstains** on every
+  model-inferred draft, edited or not. That doesn't rely on its approve threshold
+  (0.8 by default), which already sits above the cap. The review queue row and
+  the column panel both say "model-inferred" on the draft itself.
+- **The governed gateway, nothing else.** Calls go through
+  `ProviderNeutralModelGateway`: kill switch, approved route, credential,
+  input-token cap, timeout and output schema. The route must also be approved for
+  `CLASSIFICATION`, the capability semantic inference requires before catalog
+  metadata may go to a model. These are gateway controls. Per-agent contract
+  budgets (AR-05) bind agent runs, not this call.
+
+When the model can't run, the request is refused with the reason and nothing is
+written. That covers model calls switched off, no route configured, a route not
+approved for this organization, a route without `CLASSIFICATION`, and a route
+with no credential. A call that fails part way falls back to evidence drafts for
+the columns it would have covered, and says why.
+
+**What this cannot do is make the text true.** A description inferred from
+`amt_ccy` can read as exactly right and be wrong. The label, the cap, the hedging
+the instruction asks for and the human decision are the controls.
+
+**Not yet exercised against a real model.** On 2026-09-10 the dev database had
+no route approved for `CLASSIFICATION`. `AIDA_MODEL_ROUTE` names
+`openai-bank-sql`, which does not exist there, and the three routes that do exist
+use a provider with no adapter. The tests drive the full path with a
+deterministic provider. The first real call needs a route approved through the
+maker-checker flow.
 
 ## The write paths, and which ones a user can reach
 
@@ -50,7 +86,7 @@ review:
 
 | Caller | Trigger | Reachable in ui-next? |
 |---|---|---|
-| `column_description_service.apply_column_description_draft` | A column draft is approved | Yes: Catalog → column panel |
+| `column_description_service.apply_column_description_draft` | A column draft is approved (evidence or model) | Yes: Catalog → column panel |
 | `model_import.py` (`_apply_column_changes`) | An uploaded or saved-back workbook batch is approved | Yes: Sources → Model workbook, or Excel → Save to Atlas |
 | `document_ingestion.py` | A `DocumentClaim` with `subject_type == "COLUMN"` is approved | **No** |
 | `description_withdrawal.py` | A withdrawn description is reinstated | Yes: Catalog → column panel |
@@ -63,16 +99,12 @@ Two rules keep the paths from overwriting one another:
 
 - **A draft cannot overwrite what it did not see.** Each draft records the
   column's description version when it was composed, and approval refuses if it
-  has moved. Retirement counts as a move. It is the workbook's `*_version` rule,
-  applied to drafts.
+  has moved. Retirement counts as a move.
 - **A workbook edit supersedes the draft it replaces.** When a batch publishes a
   description, open DRAFT-status drafts for that column close as `SUPERSEDED`.
-  A draft already in review keeps its review; approving it is then refused on
-  the version check.
 
 One open draft per column is enforced by the database
-(`uq_column_description_draft_open`, a partial unique index), not by a
-read-then-insert two concurrent requests could both pass.
+(`uq_column_description_draft_open`, a partial unique index).
 
 ## Excel save-back
 
@@ -81,36 +113,29 @@ Save-back is the existing workbook import, reached from inside Excel by the
 The four things a save-back needs:
 
 - **Editing integration:** the add-in. *Open a model from Atlas* creates the
-  export as a new workbook; *Save to Atlas* sends the open workbook to the import
-  endpoint.
-- **Identity binding:** the export's README sheet names its datasource (and
-  organization). The add-in addresses the save from it, and the server now
-  **refuses** a workbook whose README names a different datasource
-  (`model_import._check_workbook_datasource`). The uploader is the signed-in
-  principal, recorded by the server — the development principal, or the OIDC
-  user from the add-in's sign-in dialog.
-- **Conflict handling:** unchanged. Every editable cell carries the version it
-  was exported against, and an edit to anything published since is
-  `SKIPPED_STALE` at approval.
-- **Approval gate:** unchanged. Saving creates a DRAFT batch; *Submit for
-  review* queues it; maker ≠ checker decides.
+  export as a new workbook; *Save to Atlas* sends the open workbook to the
+  import endpoint.
+- **Identity binding:** the export's README sheet names its datasource and
+  organization. The add-in addresses the save from it, and the server refuses a
+  workbook whose README names a different datasource. The uploader is the
+  signed-in principal, recorded by the server.
+- **Conflict handling:** unchanged. An edit to anything published after the
+  export is `SKIPPED_STALE` at approval.
+- **Approval gate:** unchanged. Saving creates a DRAFT batch, and maker ≠
+  checker decides.
 
-The workbook's Columns sheet now carries the open draft beside
+The workbook's Columns sheet carries the open draft beside
 `business_description` (`drafted_description`, `draft_score`, `draft_status`,
-`draft_id`, all read-only). Adopting a draft in Excel means copying it into
-`business_description`, which is an ordinary reviewed edit that keeps human
-authorship explicit.
+`draft_origin`, `draft_id`), all read-only. `draft_origin` says whether a model
+wrote it. Adopting a draft means copying it into `business_description`, an
+ordinary reviewed edit that keeps authorship explicit.
 
 **Not yet verified:** the add-in has not been loaded in a real Excel, and no
-sign-in has gone through a real identity provider from its dialog. Its logic is
-covered against a fake Office runtime, and the manifest is checked against the
-build. Loading it needs a trusted localhost certificate and a sideload, which
-are machine and tenant changes for the owner to make.
+sign-in has gone through a real identity provider from its dialog.
 
 ## Analyst versus source-level placement
 
 Unchanged. The workbook is source-level because it exports and imports every
 table and column under one datasource, and its upload is role-gated. Drafting
 is table-level, in the column panel, because that is where a steward reads
-columns. The column panel links to the workbook, and the workbook shows the
-drafts.
+columns.

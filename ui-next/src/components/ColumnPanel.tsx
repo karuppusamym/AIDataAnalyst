@@ -341,8 +341,8 @@ export function ColumnPanel({
           is how a documented feature stays undiscovered, so the cross-link
           carries the source id the way every other catalog cross-link does. */}
       <p className="colp__guidance">
-        Definitions and source comments come from discovery scans. Drafts below are composed
-        from catalog evidence and published only after review; to write descriptions yourself,
+        Definitions and source comments come from discovery scans. Drafts below come from catalog
+        evidence, or from a model where you ask for it, and publish only after review; to write descriptions yourself,
         or in bulk, use the source model workbook.
       </p>
       {datasourceId ? (

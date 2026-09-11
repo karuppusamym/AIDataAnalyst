@@ -72,6 +72,13 @@ def _coerce_confidence_to_float(confidence: str | float | int | None) -> float:
     return _STRING_CONFIDENCE_TO_FLOAT.get(str(confidence).upper(), 0.0)
 
 
+def edge_confidence_as_float(confidence: str | float | int | None) -> float:
+    """The same mapping, for callers outside the review queue -- the lineage
+    agent reports a parse's confidence as a number on the same 0..1 scale the
+    queue filters on, rather than keeping a second copy of the table above."""
+    return _coerce_confidence_to_float(confidence)
+
+
 def resolve_review_status_for_new_edge(
     *,
     review_mode: str,

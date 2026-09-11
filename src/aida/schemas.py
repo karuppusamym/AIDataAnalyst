@@ -1750,6 +1750,11 @@ class ColumnDescriptionDraftGenerate(ApiModel):
     #: proposed *replacement*, which a steward should ask for on purpose rather
     #: than receive as a side effect.
     include_described: bool = False
+    #: Draft the columns whose catalog evidence is too thin with the governed model
+    #: gateway instead (`aida.column_description_model`), replacing thin evidence
+    #: drafts nobody has touched. At most five tables per request, and refused
+    #: with the reason when no route is approved for it.
+    model_assist: bool = False
 
     @model_validator(mode="after")
     def validate_table_ids(self) -> "ColumnDescriptionDraftGenerate":
@@ -1809,6 +1814,18 @@ class ColumnDescriptionDraftGenerateResult(ApiModel):
     #: purpose: telling "unreadable" apart from "absent" would disclose which
     #: ids exist.
     tables_skipped: int
+    #: Drafts the model wrote. Each is labelled MODEL_INFERRED and capped.
+    model_drafted: int = 0
+    #: Thin columns the model was asked about that got an evidence-only draft
+    #: instead -- screened, omitted, or in a call that failed.
+    model_fallbacks: int = 0
+    #: Columns withheld from the model, plus answers quarantined from it, by
+    #: injection screening.
+    model_withheld: int = 0
+    #: Untouched thin evidence drafts superseded by a model draft.
+    replaced_thin_drafts: int = 0
+    #: The first reason a model call did not complete, when one did not.
+    model_note: str | None = None
 
 
 class ColumnDescriptionDraftEdit(ApiModel):

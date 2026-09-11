@@ -21,3 +21,6 @@
 .cdd__itemactions{display:flex;gap:8px;flex-wrap:wrap}
 .cdd__warn{margin:6px 0 0;font-size:12px;line-height:1.45;color:var(--ink-3)}
 .cdd__meta{margin:6px 0 0;font-size:12px;color:var(--ink-3)}
+/* A model draft's caveat sits on the draft itself, in body-size text with a
+   rule beside it -- not in a tooltip, because it is the part most worth reading. */
+.cdd__model{margin:6px 0 0;padding:4px 0 4px 8px;border-left:3px solid var(--warn, #b54708);font-size:12.5px;line-height:1.45}

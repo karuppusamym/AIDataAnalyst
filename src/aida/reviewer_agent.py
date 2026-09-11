@@ -66,6 +66,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.column_description_service import ORIGIN_MODEL_INFERRED
 from aida.config import Settings
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
@@ -234,6 +235,7 @@ EVIDENCE_NO_RESOLVER = "no_evidence_resolver_for_object_type"
 EVIDENCE_SUBJECT_MISSING = "proposal_object_not_found"
 EVIDENCE_VALUE_MISSING = "proposal_carries_no_confidence"
 EVIDENCE_SIZE_UNRESOLVED = "bulk_change_count_unresolvable"
+EVIDENCE_MODEL_INFERRED = "model_inferred_proposal_needs_a_human"
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +356,41 @@ async def _bulk_size_evidence(
     )
 
 
+async def _column_description_draft_evidence(
+    session: AsyncSession, review: GovernanceReview
+) -> ProposalEvidence:
+    """Evidence for a column draft -- unless a model wrote it.
+
+    An evidence draft's score measures catalog facts, so agreeing with it is at
+    least a check against something. A model draft's score is the model's
+    capped confidence in its own guess; an agent agreeing with that adds nothing
+    a person has not been asked to supply. So the agent abstains on every
+    MODEL_INFERRED draft, edited or not, whatever `reviewer_agent_approve_confidence`
+    says -- the cap already sits below the default, and this does not rely on it.
+    """
+    try:
+        subject_id = UUID(review.object_id)
+    except (ValueError, AttributeError, TypeError):
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    row = await session.scalar(
+        select(ColumnDescriptionDraft).where(
+            ColumnDescriptionDraft.id == subject_id,
+            ColumnDescriptionDraft.organization_id == review.organization_id,
+        )
+    )
+    if row is None:
+        return ProposalEvidence(resolved=False, reason=EVIDENCE_SUBJECT_MISSING)
+    origin = str((row.evidence or {}).get("origin") or "")
+    if origin.startswith(ORIGIN_MODEL_INFERRED):
+        return ProposalEvidence(
+            resolved=False,
+            reason=EVIDENCE_MODEL_INFERRED,
+            source="column_description_draft.evidence.origin",
+            details={"origin": origin},
+        )
+    return _confidence_evidence(row, ColumnDescriptionDraft, "overall_score")
+
+
 #: Object type -> the resolver that produces positive evidence for it.
 #:
 #: A type absent from this table is one the agent has no object-specific way
@@ -364,7 +401,7 @@ async def _bulk_size_evidence(
 #: human's unscored assertion adds no independent check.
 _EVIDENCE_RESOLVERS: dict[str, Any] = {
     "ASSET_DESCRIPTION_DRAFT": _by_object_id(AssetDescriptionDraft, "overall_score"),
-    "COLUMN_DESCRIPTION_DRAFT": _by_object_id(ColumnDescriptionDraft, "overall_score"),
+    "COLUMN_DESCRIPTION_DRAFT": _column_description_draft_evidence,
     "METADATA_ENRICHMENT_PROPOSAL": _by_object_id(MetadataEnrichmentProposal, "confidence"),
     "GLOSSARY_LINK_PROPOSAL": _by_object_id(GlossaryLinkProposal, "confidence"),
     "QUERY_HISTORY_METRIC_CANDIDATE": _by_object_id(QueryHistoryMetricCandidate, "confidence"),

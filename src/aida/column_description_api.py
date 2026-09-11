@@ -15,7 +15,8 @@ gate that makes the content trustworthy.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,14 +26,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_description_service import (
     MINIMUM_EVIDENCE_FOR_REVIEW,
+    ConfidenceBreakdown,
     ensure_reviewable,
     text_fingerprint,
 )
 from aida.authorization_gate import gate_read
+from aida.column_description_model import (
+    MODEL_DRAFT_TABLE_LIMIT,
+    ColumnDraftModelUnavailable,
+    ModelDraftResult,
+    approved_drafting_route,
+    draft_thin_columns,
+    model_evidence_payload,
+    table_context_for,
+)
 from aida.column_description_service import (
     COLUMN_DESCRIPTION_DRAFT_OBJECT_TYPE,
     GENERATE_COLUMN_LIMIT,
     OPEN_DRAFT_STATUSES,
+    ORIGIN_METADATA,
     column_evidence_payload,
     compose_column_draft_text,
     gather_table_column_evidence,
@@ -44,6 +56,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.description_withdrawal import withdrawn_column_versions
 from aida.events import record_audit, record_outbox
+from aida.model_gateway import ApprovedModelRoute, ProviderNeutralModelGateway
 from aida.models import (
     ColumnDescriptionDraft,
     ColumnDocumentationVersion,
@@ -128,6 +141,16 @@ def _draft_read(
     )
 
 
+def _edited_origin(evidence: dict[str, Any]) -> str:
+    """Where the text came from, kept through a person's edit.
+
+    A model draft a steward rewords becomes MODEL_INFERRED_WITH_HUMAN_EDITS,
+    not a human original: the reviewer still needs to know a model proposed it.
+    """
+    base = str(evidence.get("origin") or ORIGIN_METADATA).removesuffix("_WITH_HUMAN_EDITS")
+    return f"{base}_WITH_HUMAN_EDITS"
+
+
 async def _gate_table(
     session: AsyncSession,
     context: SecurityContext,
@@ -163,6 +186,52 @@ async def _table_and_column(
     return table, column
 
 
+def get_column_draft_gateway(
+    settings: Settings = Depends(get_settings),
+) -> ProviderNeutralModelGateway:
+    """The governed model gateway, as a dependency.
+
+    Constructed per request like every other gateway user, used only when a
+    request asks for `model_assist`, and injectable so tests can hand in a
+    provider that answers deterministically.
+    """
+    return ProviderNeutralModelGateway(settings)
+
+
+def _replaceable(draft: ColumnDescriptionDraft) -> bool:
+    """A thin evidence draft nobody has touched -- the only kind the model may
+    replace. An edited draft is a person's words, a submitted one is in
+    someone's queue, and a model draft is already the model's answer."""
+    evidence = draft.evidence or {}
+    return (
+        draft.status == "DRAFT"
+        and evidence.get("origin", ORIGIN_METADATA) == ORIGIN_METADATA
+        and not evidence.get("editors")
+        and draft.overall_score < MINIMUM_EVIDENCE_FOR_REVIEW
+    )
+
+
+@dataclass
+class _TablePlan:
+    table: MetadataTable
+    columns: list[MetadataColumn]
+    chosen: list[MetadataColumn]
+    descriptions: dict[UUID, ColumnDocumentationVersion]
+    replaceable: dict[UUID, ColumnDescriptionDraft] = field(default_factory=dict)
+
+
+@dataclass
+class _PlannedDraft:
+    column: MetadataColumn
+    drafted_text: str
+    fingerprint: str
+    scores: ConfidenceBreakdown
+    overall: float
+    evidence: dict[str, Any]
+    base_version: int | None
+    by_model: bool
+
+
 @router.post(
     "/organizations/{organization_id}/column-description-drafts/generate",
     response_model=ColumnDescriptionDraftGenerateResult,
@@ -173,6 +242,7 @@ async def generate_column_description_drafts(
     context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
+    gateway: ProviderNeutralModelGateway = Depends(get_column_draft_gateway),
 ) -> ColumnDescriptionDraftGenerateResult:
     """Draft descriptions for the columns of the requested tables.
 
@@ -182,8 +252,34 @@ async def generate_column_description_drafts(
     table-draft endpoint does, and which its client has to guard against --
     would hand back a subset that looks complete. The second pass composes and
     writes.
+
+    With `model_assist`, a column whose catalog evidence is too thin to clear
+    the review bar is drafted by the governed model gateway instead
+    (`aida.column_description_model`), and a thin evidence draft nobody has
+    touched is replaced by the model's. Columns with enough evidence are still
+    drafted from it; the model is never asked about them. Whether the model may
+    be used at all is settled before anything is read or written, so a refusal
+    names its reason and leaves nothing behind. A call that fails part way
+    falls back to evidence drafts for the columns it would have covered.
     """
     enforce_organization(context, organization_id)
+    route: ApprovedModelRoute | None = None
+    if body.model_assist:
+        if len(body.table_ids) > MODEL_DRAFT_TABLE_LIMIT:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"model-assisted drafting takes at most {MODEL_DRAFT_TABLE_LIMIT} tables "
+                    "per request, because each model call runs inside the request; send fewer"
+                ),
+            )
+        try:
+            route = await approved_drafting_route(session, organization_id, settings)
+        except ColumnDraftModelUnavailable as exc:
+            raise HTTPException(
+                status_code=409, detail=f"model drafting is not available: {exc.reason}"
+            ) from exc
+
     tables = (
         await session.scalars(
             select(MetadataTable)
@@ -207,9 +303,7 @@ async def generate_column_description_drafts(
     tables_skipped = len(body.table_ids) - len(readable)
 
     # Pass 1: decide which columns, and refuse before writing if too many.
-    plan: list[
-        tuple[MetadataTable, list[MetadataColumn], dict[UUID, ColumnDocumentationVersion]]
-    ] = []
+    plans: list[_TablePlan] = []
     skipped_open = 0
     skipped_described = 0
     for table in readable:
@@ -225,14 +319,17 @@ async def generate_column_description_drafts(
         if not columns:
             continue
         column_ids = [column.id for column in columns]
-        open_ids = set(
-            await session.scalars(
-                select(ColumnDescriptionDraft.column_id).where(
-                    ColumnDescriptionDraft.column_id.in_(column_ids),
-                    ColumnDescriptionDraft.status.in_(OPEN_DRAFT_STATUSES),
+        open_drafts = {
+            draft.column_id: draft
+            for draft in (
+                await session.scalars(
+                    select(ColumnDescriptionDraft).where(
+                        ColumnDescriptionDraft.column_id.in_(column_ids),
+                        ColumnDescriptionDraft.status.in_(OPEN_DRAFT_STATUSES),
+                    )
                 )
-            )
-        )
+            ).all()
+        }
         descriptions = await current_descriptions_by_column_id(session, column_ids)
         # A retired description is a decision, not a gap: "we looked and chose
         # to say nothing" (see `description_withdrawal`). Drafting over it by
@@ -240,19 +337,24 @@ async def generate_column_description_drafts(
         retired = await withdrawn_column_versions(
             session, [column_id for column_id in column_ids if column_id not in descriptions]
         )
-        chosen: list[MetadataColumn] = []
+        plan = _TablePlan(table=table, columns=columns, chosen=[], descriptions=descriptions)
         for column in columns:
-            if column.id in open_ids:
-                skipped_open += 1
+            open_draft = open_drafts.get(column.id)
+            if open_draft is not None:
+                if route is not None and _replaceable(open_draft):
+                    plan.replaceable[column.id] = open_draft
+                    plan.chosen.append(column)
+                else:
+                    skipped_open += 1
                 continue
             if not body.include_described and (column.id in descriptions or column.id in retired):
                 skipped_described += 1
                 continue
-            chosen.append(column)
-        if chosen:
-            plan.append((table, chosen, descriptions))
+            plan.chosen.append(column)
+        if plan.chosen:
+            plans.append(plan)
 
-    planned = sum(len(chosen) for _, chosen, _ in plan)
+    planned = sum(len(plan.chosen) for plan in plans)
     if planned > GENERATE_COLUMN_LIMIT:
         raise HTTPException(
             status_code=422,
@@ -262,14 +364,49 @@ async def generate_column_description_drafts(
             ),
         )
 
-    # Pass 2: compose and write.
+    # Pass 2: compose -- from evidence, or for thin columns from the model --
+    # then write.
     created: list[tuple[ColumnDescriptionDraft, str, str]] = []
     skipped_duplicate = 0
     below_threshold = 0
-    for table, chosen, descriptions in plan:
+    model_drafted = 0
+    model_fallbacks = 0
+    model_withheld = 0
+    replaced_thin = 0
+    model_note: str | None = None
+    model_stopped = False
+    for plan in plans:
+        table = plan.table
         evidence_by_column = await gather_table_column_evidence(
-            session, table, chosen, descriptions
+            session, table, plan.chosen, plan.descriptions
         )
+        scored = {
+            column.id: score_column_evidence(evidence_by_column[column.id])
+            for column in plan.chosen
+        }
+        model_results: dict[UUID, ModelDraftResult] = {}
+        asked_model: set[UUID] = set()
+        thin = [
+            evidence_by_column[column.id]
+            for column in plan.chosen
+            if scored[column.id].overall < MINIMUM_EVIDENCE_FOR_REVIEW
+        ]
+        if route is not None and not model_stopped and thin:
+            outcome = await draft_thin_columns(
+                session,
+                organization_id=organization_id,
+                gateway=gateway,
+                route=route,
+                thin=thin,
+                sibling_names=[column.name for column in plan.columns],
+                table_context=await table_context_for(session, table.id),
+            )
+            asked_model = {evidence.column_id for evidence in thin}
+            model_results = {result.column_id: result for result in outcome.results}
+            model_withheld += outcome.withheld
+            model_note = model_note or outcome.note
+            model_stopped = outcome.stop
+
         rejected = {
             (row[0], row[1])
             for row in (
@@ -278,42 +415,97 @@ async def generate_column_description_drafts(
                         ColumnDescriptionDraft.column_id,
                         ColumnDescriptionDraft.text_fingerprint,
                     ).where(
-                        ColumnDescriptionDraft.column_id.in_([column.id for column in chosen]),
+                        ColumnDescriptionDraft.column_id.in_([column.id for column in plan.chosen]),
                         ColumnDescriptionDraft.status == "REJECTED",
                     )
                 )
             ).all()
         }
-        for column in chosen:
+
+        planned_drafts: list[_PlannedDraft] = []
+        for column in plan.chosen:
             evidence = evidence_by_column[column.id]
-            drafted_text = compose_column_draft_text(evidence)
+            scores = scored[column.id]
+            model_result = model_results.get(column.id)
+            if model_result is None and column.id in plan.replaceable:
+                # The model did not draft it, so the thin draft already open stays.
+                if column.id in asked_model:
+                    model_fallbacks += 1
+                continue
+            if model_result is not None:
+                drafted_text = model_result.text
+                overall = model_result.confidence
+                payload = model_evidence_payload(
+                    column_evidence_payload(evidence),
+                    result=model_result,
+                    evidence_score=scores.overall,
+                )
+            else:
+                if column.id in asked_model:
+                    model_fallbacks += 1
+                drafted_text = compose_column_draft_text(evidence)
+                overall = scores.overall
+                payload = column_evidence_payload(evidence)
             fingerprint = text_fingerprint(drafted_text)
             if (column.id, fingerprint) in rejected:
                 # Negative knowledge: a reviewer already turned down exactly
                 # this text for this column.
                 skipped_duplicate += 1
                 continue
-            scores = score_column_evidence(evidence)
-            if scores.overall < MINIMUM_EVIDENCE_FOR_REVIEW:
+            planned_drafts.append(
+                _PlannedDraft(
+                    column=column,
+                    drafted_text=drafted_text,
+                    fingerprint=fingerprint,
+                    scores=scores,
+                    overall=overall,
+                    evidence=payload,
+                    base_version=evidence.current_description_version,
+                    by_model=model_result is not None,
+                )
+            )
+
+        # Close the thin drafts being replaced before opening their successors:
+        # one open draft per column is a database constraint, not a convention.
+        superseding = [
+            plan.replaceable[item.column.id]
+            for item in planned_drafts
+            if item.column.id in plan.replaceable
+        ]
+        for old in superseding:
+            old.status = "SUPERSEDED"
+            old.evidence = {
+                **(old.evidence or {}),
+                "superseded_reason": "replaced by a model-assisted draft",
+                "superseded_by": context.principal_id,
+            }
+        if superseding:
+            await session.flush()
+            replaced_thin += len(superseding)
+
+        for item in planned_drafts:
+            if item.overall < MINIMUM_EVIDENCE_FOR_REVIEW:
                 below_threshold += 1
+            if item.by_model:
+                model_drafted += 1
             draft = ColumnDescriptionDraft(
                 organization_id=organization_id,
                 table_id=table.id,
-                column_id=column.id,
-                drafted_text=drafted_text,
-                text_fingerprint=fingerprint,
-                accuracy_score=scores.accuracy,
-                clarity_score=scores.clarity,
-                style_score=scores.style,
-                completeness_score=scores.completeness,
-                overall_score=scores.overall,
-                evidence=column_evidence_payload(evidence),
+                column_id=item.column.id,
+                drafted_text=item.drafted_text,
+                text_fingerprint=item.fingerprint,
+                accuracy_score=item.scores.accuracy,
+                clarity_score=item.scores.clarity,
+                style_score=item.scores.style,
+                completeness_score=item.scores.completeness,
+                overall_score=item.overall,
+                evidence=item.evidence,
                 status="DRAFT",
-                base_description_version=evidence.current_description_version,
+                base_description_version=item.base_version,
                 created_by=context.principal_id,
             )
             session.add(draft)
-            created.append((draft, table.name, column.name))
+            created.append((draft, table.name, item.column.name))
     try:
         await session.flush()
     except IntegrityError as exc:
@@ -345,6 +537,13 @@ async def generate_column_description_drafts(
             "skipped_duplicate_rejected": skipped_duplicate,
             "below_review_threshold": below_threshold,
             "include_described": body.include_described,
+            "model_assist": body.model_assist,
+            "model_route": route.route_key if route is not None else None,
+            "model_drafted": model_drafted,
+            "model_fallbacks": model_fallbacks,
+            "model_withheld": model_withheld,
+            "replaced_thin_drafts": replaced_thin,
+            "model_note": model_note,
         },
     )
     await session.commit()
@@ -359,6 +558,11 @@ async def generate_column_description_drafts(
         skipped_duplicate_rejected=skipped_duplicate,
         below_review_threshold=below_threshold,
         tables_skipped=tables_skipped,
+        model_drafted=model_drafted,
+        model_fallbacks=model_fallbacks,
+        model_withheld=model_withheld,
+        replaced_thin_drafts=replaced_thin,
+        model_note=model_note,
     )
 
 
@@ -465,7 +669,7 @@ async def edit_column_description_draft(
     evidence = dict(draft.evidence or {})
     draft.evidence = {
         **evidence,
-        "origin": "METADATA_WITH_HUMAN_EDITS",
+        "origin": _edited_origin(evidence),
         "original_fingerprint": evidence.get("original_fingerprint", draft.text_fingerprint),
         "edited_by": context.principal_id,
         "editors": sorted(set(evidence.get("editors", [])) | {context.principal_id}),

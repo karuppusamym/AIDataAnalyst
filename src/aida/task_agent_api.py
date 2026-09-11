@@ -26,6 +26,7 @@ from aida.task_agent import (
     ACTION_PROPOSED,
     ACTION_SKIPPED,
     ACTION_WOULD_PROPOSE,
+    QUEUE_GOVERNANCE_REVIEW,
     CapabilityWork,
     TaskAgentOutcome,
     TaskAgentRefused,
@@ -59,8 +60,12 @@ class TaskAgentCapabilityRead(ApiModel):
     capability: str
     #: What its proposals are decided as.
     object_type: str
-    #: That object type's ADR-0027 tier.
-    risk_tier: str
+    #: Where they are decided: the shared `GOVERNANCE_REVIEW` queue, or a
+    #: dedicated human-only queue such as `PARSED_LINEAGE_REVIEW`.
+    review_queue: str
+    #: The object type's ADR-0027 tier. `None` for a dedicated queue, which the
+    #: tier table does not classify because no agent can decide from it.
+    risk_tier: str | None
     producer: str
 
 
@@ -168,7 +173,12 @@ def task_agent_state_read(
             TaskAgentCapabilityRead(
                 capability=capability.key,
                 object_type=capability.object_type,
-                risk_tier=risk_tier_for(capability.object_type),
+                review_queue=capability.queue,
+                risk_tier=(
+                    risk_tier_for(capability.object_type)
+                    if capability.queue == QUEUE_GOVERNANCE_REVIEW
+                    else None
+                ),
                 producer=capability.producer,
             )
             for capability in spec.capabilities

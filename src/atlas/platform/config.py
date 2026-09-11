@@ -373,6 +373,17 @@ class Settings(BaseSettings):
     #: lesson applied to the maker side. 0 disables the check.
     steward_agent_max_pending_proposals: int = Field(default=100, ge=0, le=100_000)
 
+    # --- ADR-0029: the lineage agent -------------------------------------
+    # The same registration rules as the steward agent's: nothing until an
+    # approved AGENT-kind version carries a contract for this principal.
+    lineage_agent_principal_id: str = "agent:lineage"
+    #: Views parsed per run, at most.
+    lineage_agent_max_proposals_per_run: int = Field(default=25, ge=1, le=200)
+    #: How many of its own proposed *edges* may wait for review before it stops.
+    #: One view yields a column edge per output column, so this is larger than
+    #: the steward agent's bound on whole proposals.
+    lineage_agent_max_pending_proposals: int = Field(default=500, ge=0, le=100_000)
+
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to
     #: embedding candidates live. A catalog change newer than the index also

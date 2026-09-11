@@ -325,7 +325,11 @@ export function TaskAgentConsole({
                 {state.capabilities.map((capability) => (
                   <li key={capability.capability} className="taskagent__row">
                     <span className="taskagent__rowhead">
-                      <Pill tone={tierTone(capability.risk_tier)}>{capability.risk_tier}</Pill>
+                      {capability.risk_tier ? (
+                        <Pill tone={tierTone(capability.risk_tier)}>{capability.risk_tier}</Pill>
+                      ) : (
+                        <Pill tone="info">human review</Pill>
+                      )}
                       <strong>{capabilityLabels[capability.capability] ?? capability.capability}</strong>
                       <span className="taskagent__muted">as {capability.object_type}</span>
                     </span>

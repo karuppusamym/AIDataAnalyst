@@ -90,9 +90,21 @@ REASON_VERSION_NOT_APPROVED: Final = "agent_version_not_approved"
 REASON_PRINCIPAL_RESERVED: Final = "agent_principal_reserved"
 REASON_AUTONOMY_WITHDRAWN: Final = "agent_autonomy_withdrawn"
 REASON_OBJECT_TYPE_ABOVE_CEILING: Final = "agent_object_type_above_ceiling"
+REASON_QUEUE_NOT_PERMITTED: Final = "agent_review_queue_not_permitted"
 # Stops: a budget ran out, and the run keeps what it already did. The contract's
 # wall-clock cap reports `agent_budget.REASON_WALL_CLOCK_CAP`.
 STOP_REVIEW_BACKLOG: Final = "agent_review_backlog_full"
+
+#: Where a capability's proposals are decided. Most go to the shared
+#: `GovernanceReview` queue, where the ADR-0027 tier table bounds what an agent
+#: may ask for. A few object kinds have a dedicated queue of their own, and an
+#: agent may write into one only if it is on `_HUMAN_ONLY_QUEUES` -- a queue no
+#: agent can decide from, so maker != checker holds there by construction.
+QUEUE_GOVERNANCE_REVIEW: Final = "GOVERNANCE_REVIEW"
+#: ADR-0026's per-edge review of parsed lineage. Only human reviewer roles decide
+#: it, and its maker-checker compares the edge's `created_by` with the reviewer.
+QUEUE_PARSED_LINEAGE: Final = "PARSED_LINEAGE_REVIEW"
+_HUMAN_ONLY_QUEUES: Final = frozenset({QUEUE_PARSED_LINEAGE})
 
 #: Contracts read when resolving authority. More than one APPROVED candidate is
 #: refused as ambiguous; this only bounds the read.
@@ -141,6 +153,15 @@ class TaskAgentCapability:
     #: Where the proposal's content comes from, reported verbatim by the state
     #: endpoint so "how does this agent write" is answerable without the code.
     producer: str
+    #: Where its proposals are decided (`QUEUE_*`).
+    queue: str = QUEUE_GOVERNANCE_REVIEW
+
+
+#: Proposals an agent has waiting in a dedicated queue: (session, organization
+#: id, agent principal) -> count.
+PendingCounter = Callable[[AsyncSession, UUID, str], Awaitable[int]]
+#: How an agent's proposals in a dedicated queue have been decided.
+OutcomeReader = Callable[[AsyncSession, UUID, str], Awaitable[list["TaskAgentOutcomeRow"]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +176,11 @@ class TaskAgentSpec:
     #: In the order a run performs them.
     capabilities: tuple[TaskAgentCapability, ...]
     method: str = METHOD_DETERMINISTIC
+    #: For an agent whose proposals are decided outside `GovernanceReview`: its
+    #: waiting proposals there, summed into the backlog bound ...
+    pending_counter: PendingCounter | None = None
+    #: ... and how they have been decided, merged into its outcome measure.
+    outcome_reader: OutcomeReader | None = None
 
     @property
     def principal_setting(self) -> str:
@@ -309,6 +335,19 @@ async def pending_proposal_count(
         )
     )
     return int(count or 0)
+
+
+async def agent_pending_count(
+    session: AsyncSession, organization_id: UUID, *, spec: TaskAgentSpec, agent_principal_id: str
+) -> int:
+    """Everything the agent has waiting for a person: its pending reviews, plus
+    its proposals in any dedicated queue it writes to."""
+    count = await pending_proposal_count(
+        session, organization_id, agent_principal_id=agent_principal_id
+    )
+    if spec.pending_counter is not None:
+        count += await spec.pending_counter(session, organization_id, agent_principal_id)
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +568,10 @@ class TaskAgentRun:
         ask for decisions an agent could in principle be trusted near
         (ADR-0027's T0/T1).
         """
-        object_type = self.spec.capability(capability).object_type
+        spec_capability = self.spec.capability(capability)
+        if spec_capability.queue != QUEUE_GOVERNANCE_REVIEW:
+            raise ValueError(f"{capability} is decided in {spec_capability.queue}, not here")
+        object_type = spec_capability.object_type
         tier = risk_tier_for(object_type)
         if not tier_at_or_below(tier, HARD_MAX_AGENT_TIER):
             raise TaskAgentRefused(REASON_OBJECT_TYPE_ABOVE_CEILING)
@@ -632,6 +674,126 @@ class TaskAgentRun:
             related_name=related_name,
         )
 
+    async def proposed_in_queue(
+        self,
+        capability: str,
+        *,
+        proposal_ref_type: str,
+        proposal_ref_id: UUID,
+        subject_id: UUID,
+        subject_name: str,
+        inputs: dict[str, Any],
+        pending_added: int,
+        evidence: dict[str, Any],
+        confidence: float | None = None,
+        rank: int | None = None,
+    ) -> TaskAgentItem:
+        """Ledger a proposal whose rows the agent wrote into a dedicated queue.
+
+        The second write path, and deliberately narrow: only a queue on
+        `_HUMAN_ONLY_QUEUES` is accepted, because the maker-checker guarantee
+        there is the queue's own. The agent module wrote the rows; this records
+        what it wrote -- ids and counts in `evidence`, never content -- audits it
+        as the agent, and counts `pending_added` against the backlog bound.
+        """
+        spec_capability = self.spec.capability(capability)
+        if spec_capability.queue not in _HUMAN_ONLY_QUEUES:
+            raise TaskAgentRefused(REASON_QUEUE_NOT_PERMITTED)
+        task = await record_agent_task(
+            self.session,
+            organization_id=self.organization_id,
+            agent_principal_id=self.principal_id,
+            intent=spec_capability.intent,
+            inputs=inputs,
+            ai_asset_version_id=self.authority.version.id,
+            proposal_ref_type=proposal_ref_type,
+            proposal_ref_id=proposal_ref_id,
+            sampling_rate=self.authority.contract.sampling_rate,
+        )
+        task_evidence: dict[str, Any] = {
+            "run_id": self.outcome.run_id,
+            "queue": spec_capability.queue,
+            "object_type": spec_capability.object_type,
+            **evidence,
+        }
+        if confidence is not None:
+            task_evidence["confidence"] = confidence
+        task.evidence = task_evidence
+        record_audit(
+            self.session,
+            self.agent_context,
+            action=f"{self.spec.key}_agent.propose",
+            resource_type=proposal_ref_type.lower(),
+            resource_id=str(proposal_ref_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "queue": spec_capability.queue,
+                "object_type": spec_capability.object_type,
+                "proposed_count": pending_added,
+                "run_id": self.outcome.run_id,
+            },
+        )
+        self.pending += pending_added
+        return self.item(
+            capability,
+            action=ACTION_PROPOSED,
+            subject_id=subject_id,
+            subject_name=subject_name,
+            object_id=proposal_ref_id,
+            task_id=task.id,
+            confidence=confidence,
+            rank=rank,
+        )
+
+    async def declined(
+        self,
+        capability: str,
+        *,
+        subject_id: UUID,
+        subject_name: str,
+        reason: str,
+        inputs: dict[str, Any],
+        proposal_ref_type: str | None = None,
+        proposal_ref_id: UUID | None = None,
+        rank: int | None = None,
+    ) -> TaskAgentItem:
+        """Something the agent examined and deliberately did not propose.
+
+        A proposing run ledgers it, so an agent can recognise work it has already
+        looked at -- by `inputs`, or by `proposal_ref_*` -- and not spend every
+        run re-examining the same dead end. The ledger's closed status set has no
+        "declined", so it is recorded as FAILED with the reason in `evidence`:
+        the unit of work could not produce a proposal. An observing run writes
+        nothing.
+        """
+        task_id: UUID | None = None
+        if self.proposing:
+            task = await record_agent_task(
+                self.session,
+                organization_id=self.organization_id,
+                agent_principal_id=self.principal_id,
+                intent=self.spec.capability(capability).intent,
+                inputs=inputs,
+                ai_asset_version_id=self.authority.version.id,
+                proposal_ref_type=proposal_ref_type,
+                proposal_ref_id=proposal_ref_id,
+                sampling_rate=self.authority.contract.sampling_rate,
+            )
+            finish_agent_task(
+                task, status="FAILED", evidence={"run_id": self.outcome.run_id, "declined": reason}
+            )
+            task_id = task.id
+        return self.item(
+            capability,
+            action=ACTION_SKIPPED,
+            subject_id=subject_id,
+            subject_name=subject_name,
+            reason=reason,
+            task_id=task_id,
+            rank=rank,
+        )
+
     async def failed(
         self,
         capability: str,
@@ -732,8 +894,8 @@ async def run_task_agent(
         settings=settings,
         outcome=outcome,
         datasource_id=request.datasource_id,
-        pending=await pending_proposal_count(
-            session, organization_id, agent_principal_id=authority.principal_id
+        pending=await agent_pending_count(
+            session, organization_id, spec=spec, agent_principal_id=authority.principal_id
         ),
     )
     for key in outcome.capabilities:
@@ -858,6 +1020,18 @@ async def task_agent_outcomes(
     return result
 
 
+async def agent_outcomes(
+    session: AsyncSession, organization_id: UUID, *, spec: TaskAgentSpec, agent_principal_id: str
+) -> list[TaskAgentOutcomeRow]:
+    """Its reviews' outcomes, plus those of any dedicated queue it writes to."""
+    rows = await task_agent_outcomes(
+        session, organization_id, agent_principal_id=agent_principal_id
+    )
+    if spec.outcome_reader is not None:
+        rows.extend(await spec.outcome_reader(session, organization_id, agent_principal_id))
+    return sorted(rows, key=lambda row: row.object_type)
+
+
 @dataclass(frozen=True, slots=True)
 class TaskAgentStatus:
     agent_principal_id: str
@@ -896,10 +1070,10 @@ async def task_agent_status(
         authority=authority,
         refusal_reason=refusal,
         blocking_reason=blocking,
-        pending_proposals=await pending_proposal_count(
-            session, organization_id, agent_principal_id=principal
+        pending_proposals=await agent_pending_count(
+            session, organization_id, spec=spec, agent_principal_id=principal
         ),
-        outcomes=await task_agent_outcomes(
-            session, organization_id, agent_principal_id=principal
+        outcomes=await agent_outcomes(
+            session, organization_id, spec=spec, agent_principal_id=principal
         ),
     )

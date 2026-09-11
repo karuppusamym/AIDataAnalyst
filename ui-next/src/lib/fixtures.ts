@@ -6451,24 +6451,60 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
  *  agent's `TaskAgentSpec` server-side. */
 const TASK_AGENT_FIXTURE_CAPABILITIES: Record<
   TaskAgentKind,
-  { capability: string; object_type: string; risk_tier: string; producer: string }[]
+  {
+    capability: string;
+    object_type: string;
+    review_queue: string;
+    risk_tier: string | null;
+    producer: string;
+  }[]
 > = {
   steward: [
     {
       capability: "TABLE_DESCRIPTION",
       object_type: "ASSET_DESCRIPTION_DRAFT",
+      review_queue: "GOVERNANCE_REVIEW",
       risk_tier: "T0",
       producer: "asset_description_service: GL-9 draft composed from catalog evidence",
     },
     {
       capability: "GLOSSARY_LINK",
       object_type: "GLOSSARY_LINK_PROPOSAL",
+      review_queue: "GOVERNANCE_REVIEW",
       risk_tier: "T1",
       producer: "glossary_link_candidates: GL-8 approved-label exact match",
     },
   ],
-  lineage: [],
+  lineage: [
+    {
+      capability: "VIEW_LINEAGE",
+      object_type: "VIEW_LINEAGE_EDGE",
+      review_queue: "PARSED_LINEAGE_REVIEW",
+      // A dedicated human-only queue: the tier table does not classify it.
+      risk_tier: null,
+      producer: "sql_lineage_parser: view definitions captured at ingestion",
+    },
+  ],
   quality: [],
+};
+
+/** What each agent's fixture run looks at, and the reason it skips one. */
+const TASK_AGENT_FIXTURE_RUN: Record<
+  TaskAgentKind,
+  { skipReason: string; subjects: readonly [string, string, string] }
+> = {
+  steward: {
+    skipReason: "open_draft_exists",
+    subjects: ["fact_card_transactions", "dim_branch", "customer_master"],
+  },
+  lineage: {
+    skipReason: "unparseable_definition",
+    subjects: ["reporting.v_card_spend", "reporting.v_branch_totals", "reporting.v_customer_360"],
+  },
+  quality: {
+    skipReason: "rule_already_exists",
+    subjects: ["fact_card_transactions", "dim_branch", "customer_master"],
+  },
 };
 
 /** `GET .../{kind}-agent` fixture (ADR-0029) -- a registered T1 agent with
@@ -6524,9 +6560,13 @@ export function makeFixtureTaskAgentRun(
   const capabilities = body.capabilities;
   const action = dryRun ? "WOULD_PROPOSE" : "PROPOSED";
   const opened = (id: string) => (dryRun ? null : id);
-  const objectType = (capability: string) =>
-    TASK_AGENT_FIXTURE_CAPABILITIES[kind].find((item) => item.capability === capability)
-      ?.object_type ?? null;
+  const { skipReason, subjects } = TASK_AGENT_FIXTURE_RUN[kind];
+  const capabilityOf = (capability: string) =>
+    TASK_AGENT_FIXTURE_CAPABILITIES[kind].find((item) => item.capability === capability);
+  const objectType = (capability: string) => capabilityOf(capability)?.object_type ?? null;
+  // A proposal in a dedicated queue opens no governance review to link to.
+  const reviewed = (capability: string, id: string) =>
+    capabilityOf(capability)?.review_queue === "GOVERNANCE_REVIEW" ? opened(id) : null;
   const items: TaskAgentRunItemRead[] = [];
   const [first, second] = TASK_AGENT_FIXTURE_CAPABILITIES[kind].map((item) => item.capability);
   if (first && capabilities.includes(first)) {
@@ -6534,12 +6574,12 @@ export function makeFixtureTaskAgentRun(
       {
         capability: first,
         subject_id: "bbbbbbbb-5555-5555-5555-000000000001",
-        subject_name: "fact_card_transactions",
+        subject_name: subjects[0],
         action,
         reason: null,
         object_type: objectType(first),
         object_id: opened("cccccccc-5555-5555-5555-000000000001"),
-        review_id: opened("dddddddd-5555-5555-5555-000000000001"),
+        review_id: reviewed(first, "dddddddd-5555-5555-5555-000000000001"),
         task_id: opened("eeeeeeee-5555-5555-5555-000000000001"),
         confidence: 0.61,
         rank: 1,
@@ -6549,9 +6589,9 @@ export function makeFixtureTaskAgentRun(
       {
         capability: first,
         subject_id: "bbbbbbbb-5555-5555-5555-000000000002",
-        subject_name: "dim_branch",
+        subject_name: subjects[1],
         action: "SKIPPED",
-        reason: "open_draft_exists",
+        reason: skipReason,
         object_type: null,
         object_id: null,
         review_id: null,
@@ -6567,12 +6607,12 @@ export function makeFixtureTaskAgentRun(
     items.push({
       capability: second,
       subject_id: "bbbbbbbb-5555-5555-5555-000000000003",
-      subject_name: "customer_master",
+      subject_name: subjects[2],
       action,
       reason: null,
       object_type: objectType(second),
       object_id: opened("cccccccc-5555-5555-5555-000000000003"),
-      review_id: opened("dddddddd-5555-5555-5555-000000000003"),
+      review_id: reviewed(second, "dddddddd-5555-5555-5555-000000000003"),
       task_id: opened("eeeeeeee-5555-5555-5555-000000000003"),
       confidence: 1,
       rank: null,
@@ -6599,7 +6639,7 @@ export function makeFixtureTaskAgentRun(
     would_propose: count("WOULD_PROPOSE"),
     skipped: count("SKIPPED"),
     failed: count("FAILED"),
-    skipped_by_reason: count("SKIPPED") ? { open_draft_exists: count("SKIPPED") } : {},
+    skipped_by_reason: count("SKIPPED") ? { [skipReason]: count("SKIPPED") } : {},
     stopped_reason: null,
     items,
   };

@@ -75,6 +75,7 @@ const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalytics
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
 const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
 const StewardAgentScreen = lazy(() => import("./screens/StewardAgentScreen").then((module) => ({ default: module.StewardAgentScreen })));
+const LineageAgentScreen = lazy(() => import("./screens/LineageAgentScreen").then((module) => ({ default: module.LineageAgentScreen })));
 
 /* UX-20: navigation is organised by *work area*, not by feature area. Thirty
    flat items grouped by what the code does is a feature map; a person opening
@@ -125,6 +126,7 @@ const NAV: NavItem[] = [
   { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
   { id: "worklist", label: "Documentation worklist", group: "Steward", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
   { id: "steward-agent", label: "Steward agent", group: "Steward", icon: "✧", keywords: "steward agent adr-0029 draft propose descriptions glossary links worklist autonomy tier kill switch acceptance" },
+  { id: "lineage-agent", label: "Lineage agent", group: "Steward", icon: "⤳", keywords: "lineage agent adr-0029 view definitions parse propose edges parsed lineage review kill switch" },
   { id: "playbooks", label: "Playbooks", group: "Steward", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
   { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
@@ -212,6 +214,7 @@ function Screen({
     case "stewardship": return <StewardshipScreen />;
     case "worklist": return <DocumentationWorklistScreen />;
     case "steward-agent": return <StewardAgentScreen />;
+    case "lineage-agent": return <LineageAgentScreen />;
     case "playbooks": return <PlaybooksScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
     case "access-policies": return <AccessPolicyScreen />;

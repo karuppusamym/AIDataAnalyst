@@ -34,20 +34,39 @@ const FIXTURE_NOTICE =
  *  a table wider than one page must not come back looking narrower than it is. */
 const LIST_PAGE_SIZE = 500;
 
+/** A generation result, with the model-assisted pass's counts optional: a
+ *  server that predates `model_assist` simply omits them, and every one reads
+ *  as zero rather than as a failure. */
+export type ColumnDraftGenerateResult = ColumnDescriptionDraftGenerateResult & {
+  model_drafted?: number;
+  model_fallbacks?: number;
+  model_withheld?: number;
+  replaced_thin_drafts?: number;
+  model_note?: string | null;
+};
+
 const orgPath = (organizationId: string) =>
   `/v1/organizations/${encodeURIComponent(organizationId)}/column-description-drafts`;
 
-/** Draft descriptions for a table's undescribed columns. */
+/** Draft descriptions for a table's undescribed columns.
+ *
+ *  `modelAssist` asks the governed model to draft the columns whose catalog
+ *  evidence is too thin, and to replace thin drafts nobody has touched. The
+ *  server refuses with 409 and the reason when no route is approved for it. */
 export async function generateColumnDescriptionDrafts(
   organizationId: string,
   tableIds: string[],
-  options: { includeDescribed?: boolean } = {},
+  options: { includeDescribed?: boolean; modelAssist?: boolean } = {},
   signal?: AbortSignal,
-): Promise<ColumnDescriptionDraftGenerateResult> {
+): Promise<ColumnDraftGenerateResult> {
   if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
-  return postJson<ColumnDescriptionDraftGenerateResult>(
+  return postJson<ColumnDraftGenerateResult>(
     `${orgPath(organizationId)}/generate`,
-    { table_ids: tableIds, include_described: options.includeDescribed ?? false },
+    {
+      table_ids: tableIds,
+      include_described: options.includeDescribed ?? false,
+      model_assist: options.modelAssist ?? false,
+    },
     signal,
   );
 }

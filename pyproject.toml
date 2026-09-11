@@ -558,6 +558,8 @@ type = "forbidden"
 source_modules = [
   "aida.documentation_worklist_signals",
   "aida.glossary_link_candidates",
+  "aida.lineage_agent",
+  "aida.lineage_table_resolution",
   "aida.steward_agent",
   "aida.task_agent",
 ]
@@ -565,8 +567,11 @@ forbidden_modules = [
   "aida.agent_contract_api",
   "aida.api",
   "aida.asset_description_api",
+  "aida.lineage_agent_api",
+  "aida.parsed_lineage_review_api",
   "aida.semantic_api",
   "aida.steward_agent_api",
   "aida.stewardship_api",
   "aida.task_agent_api",
+  "aida.view_lineage_api",
 ]
