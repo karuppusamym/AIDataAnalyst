@@ -4399,7 +4399,7 @@ export interface SqlValidationResponse {
 }
 
 export interface StewardAgentRunRequest {
-  capabilities?: ("TABLE_DESCRIPTION" | "GLOSSARY_LINK")[];
+  capabilities?: ("TABLE_DESCRIPTION" | "COLUMN_DESCRIPTION" | "GLOSSARY_LINK")[];
   limit?: number;
   datasource_id?: string | null;
   dry_run?: boolean;

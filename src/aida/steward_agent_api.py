@@ -39,16 +39,16 @@ router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 #: is the same drafting, attributed to the agent and bounded by its contract.
 STEWARD_AGENT_OPERATORS = ("PlatformAdmin", "MetadataAdmin", "SemanticAdmin", "DataSteward")
 
-StewardCapability = Literal["TABLE_DESCRIPTION", "GLOSSARY_LINK"]
+StewardCapability = Literal["TABLE_DESCRIPTION", "COLUMN_DESCRIPTION", "GLOSSARY_LINK"]
 
 
 def _every_capability() -> list[StewardCapability]:
-    return ["TABLE_DESCRIPTION", "GLOSSARY_LINK"]
+    return ["TABLE_DESCRIPTION", "COLUMN_DESCRIPTION", "GLOSSARY_LINK"]
 
 
 class StewardAgentRunRequest(ApiModel):
     capabilities: list[StewardCapability] = Field(
-        default_factory=_every_capability, min_length=1, max_length=2
+        default_factory=_every_capability, min_length=1, max_length=3
     )
     #: Proposals per capability, clamped server-side to
     #: `steward_agent_max_proposals_per_run`.

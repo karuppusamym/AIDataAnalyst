@@ -26209,11 +26209,12 @@
             "items": {
               "enum": [
                 "TABLE_DESCRIPTION",
+                "COLUMN_DESCRIPTION",
                 "GLOSSARY_LINK"
               ],
               "type": "string"
             },
-            "maxItems": 2,
+            "maxItems": 3,
             "minItems": 1,
             "title": "Capabilities",
             "type": "array"

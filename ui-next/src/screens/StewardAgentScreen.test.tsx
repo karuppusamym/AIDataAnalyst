@@ -91,7 +91,7 @@ describe("StewardAgentScreen (ADR-0029)", () => {
 
     await waitFor(() =>
       expect(runTaskAgent).toHaveBeenCalledWith(ORG, "steward", {
-        capabilities: ["TABLE_DESCRIPTION", "GLOSSARY_LINK"],
+        capabilities: ["TABLE_DESCRIPTION", "COLUMN_DESCRIPTION", "GLOSSARY_LINK"],
         limit: 10,
         datasource_id: null,
         dry_run: false,
@@ -134,11 +134,12 @@ describe("StewardAgentScreen (ADR-0029)", () => {
       expect(runTaskAgent).toHaveBeenCalledWith(
         ORG,
         "steward",
-        expect.objectContaining({ capabilities: ["TABLE_DESCRIPTION"] }),
+        expect.objectContaining({ capabilities: ["TABLE_DESCRIPTION", "COLUMN_DESCRIPTION"] }),
       ),
     );
 
     fireEvent.click(screen.getByLabelText("Table descriptions"));
+    fireEvent.click(screen.getByLabelText("Column descriptions"));
     expect(screen.getByRole("button", { name: "Run steward agent" })).toBeDisabled();
   });
 
@@ -161,6 +162,7 @@ describe("StewardAgentScreen (ADR-0029)", () => {
 
     await waitFor(() => expect(screen.getByText("GLOSSARY_LINK_PROPOSAL")).toBeInTheDocument());
     expect(screen.getByText("75%")).toBeInTheDocument();
-    expect(screen.getByText("—")).toBeInTheDocument();
+    // Glossary links and column descriptions: nothing decided on either yet.
+    expect(screen.getAllByText("—")).toHaveLength(2);
   });
 });

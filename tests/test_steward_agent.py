@@ -1000,6 +1000,8 @@ def test_the_agent_cannot_reach_a_decision_or_publish_path(module: str) -> None:
         "claim_review",
         "apply_asset_description_draft",
         "publish_asset_documentation_version",
+        "apply_column_description_draft",
+        "publish_column_description",
         "apply_link_proposal",
         "auto_decide",
     ):
@@ -1094,6 +1096,7 @@ async def test_the_state_endpoint_reports_an_unregistered_agent_honestly(
     assert (state.method, state.uses_model) == ("DETERMINISTIC", False)
     assert {(c.capability, c.object_type, c.risk_tier) for c in state.capabilities} == {
         ("TABLE_DESCRIPTION", "ASSET_DESCRIPTION_DRAFT", "T0"),
+        ("COLUMN_DESCRIPTION", "COLUMN_DESCRIPTION_DRAFT", "T0"),
         ("GLOSSARY_LINK", "GLOSSARY_LINK_PROPOSAL", "T1"),
     }
     assert state.outcomes == []

@@ -6474,6 +6474,13 @@ const TASK_AGENT_FIXTURE_CAPABILITIES: Record<
       risk_tier: "T1",
       producer: "glossary_link_candidates: GL-8 approved-label exact match",
     },
+    {
+      capability: "COLUMN_DESCRIPTION",
+      object_type: "COLUMN_DESCRIPTION_DRAFT",
+      review_queue: "GOVERNANCE_REVIEW",
+      risk_tier: "T0",
+      producer: "column_description_service: evidence-scored column draft, no model",
+    },
   ],
   lineage: [
     {
