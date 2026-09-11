@@ -4,17 +4,17 @@ import "@testing-library/jest-dom/vitest";
 
 import { StewardAgentScreen } from "./StewardAgentScreen";
 import { ApiError } from "../lib/api";
-import { makeFixtureStewardAgentRun, makeFixtureStewardAgentState } from "../lib/fixtures";
+import { makeFixtureTaskAgentRun, makeFixtureTaskAgentState } from "../lib/fixtures";
 
-const fetchStewardAgentState = vi.fn();
-const runStewardAgent = vi.fn();
+const fetchTaskAgentState = vi.fn();
+const runTaskAgent = vi.fn();
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
   return {
     ...actual,
-    fetchStewardAgentState: (...args: unknown[]) => fetchStewardAgentState(...args),
-    runStewardAgent: (...args: unknown[]) => runStewardAgent(...args),
+    fetchTaskAgentState: (...args: unknown[]) => fetchTaskAgentState(...args),
+    runTaskAgent: (...args: unknown[]) => runTaskAgent(...args),
   };
 });
 
@@ -24,7 +24,17 @@ describe("StewardAgentScreen (ADR-0029)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     history.replaceState(null, "", "/");
-    fetchStewardAgentState.mockResolvedValue(makeFixtureStewardAgentState(ORG));
+    fetchTaskAgentState.mockResolvedValue(makeFixtureTaskAgentState(ORG, "steward"));
+    runTaskAgent.mockImplementation(async (org: string, kind: string, body: unknown) =>
+      makeFixtureTaskAgentRun(org, kind as never, body as never),
+    );
+  });
+
+  it("asks for the steward agent's own state", async () => {
+    render(<StewardAgentScreen />);
+
+    await waitFor(() => expect(fetchTaskAgentState).toHaveBeenCalled());
+    expect(fetchTaskAgentState.mock.calls[0]!.slice(0, 2)).toEqual([ORG, "steward"]);
   });
 
   it("shows a registered agent's tier, mode, identity and that it calls no model", async () => {
@@ -39,8 +49,8 @@ describe("StewardAgentScreen (ADR-0029)", () => {
   });
 
   it("explains an unregistered agent and does not offer to run it", async () => {
-    fetchStewardAgentState.mockResolvedValue({
-      ...makeFixtureStewardAgentState(ORG),
+    fetchTaskAgentState.mockResolvedValue({
+      ...makeFixtureTaskAgentState(ORG, "steward"),
       registered: false,
       refusal_reason: "agent_contract_missing",
       ai_asset_version_id: null,
@@ -54,13 +64,14 @@ describe("StewardAgentScreen (ADR-0029)", () => {
     expect(
       screen.getByText(/not registered in this organization\. \(agent_contract_missing\)/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/supervisor persona is STEWARD/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run steward agent" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Preview" })).toBeDisabled();
   });
 
   it("does not offer to run an agent a kill switch is stopping", async () => {
-    fetchStewardAgentState.mockResolvedValue({
-      ...makeFixtureStewardAgentState(ORG),
+    fetchTaskAgentState.mockResolvedValue({
+      ...makeFixtureTaskAgentState(ORG, "steward"),
       kill_engaged: true,
       blocking_reason: "agent_kill_switch_engaged",
     });
@@ -71,9 +82,6 @@ describe("StewardAgentScreen (ADR-0029)", () => {
   });
 
   it("runs, then lists what it proposed with a link into the review queue", async () => {
-    runStewardAgent.mockImplementation(async (org: string, body: unknown) =>
-      makeFixtureStewardAgentRun(org, body as never),
-    );
     render(<StewardAgentScreen />);
 
     await waitFor(() =>
@@ -82,7 +90,7 @@ describe("StewardAgentScreen (ADR-0029)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run steward agent" }));
 
     await waitFor(() =>
-      expect(runStewardAgent).toHaveBeenCalledWith(ORG, {
+      expect(runTaskAgent).toHaveBeenCalledWith(ORG, "steward", {
         capabilities: ["TABLE_DESCRIPTION", "GLOSSARY_LINK"],
         limit: 10,
         datasource_id: null,
@@ -94,21 +102,19 @@ describe("StewardAgentScreen (ADR-0029)", () => {
     expect(within(list).getAllByRole("link", { name: "Open in review queue" }).length).toBe(2);
     expect(within(list).getByText("a draft is already open")).toBeInTheDocument();
     // The state is re-read after a run: its pending count just moved.
-    expect(fetchStewardAgentState).toHaveBeenCalledTimes(2);
+    expect(fetchTaskAgentState).toHaveBeenCalledTimes(2);
   });
 
   it("previews with dry_run and says that nothing was opened", async () => {
-    runStewardAgent.mockImplementation(async (org: string, body: unknown) =>
-      makeFixtureStewardAgentRun(org, body as never),
-    );
     render(<StewardAgentScreen />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
 
     await waitFor(() =>
-      expect(runStewardAgent).toHaveBeenCalledWith(
+      expect(runTaskAgent).toHaveBeenCalledWith(
         ORG,
+        "steward",
         expect.objectContaining({ dry_run: true }),
       ),
     );
@@ -117,9 +123,6 @@ describe("StewardAgentScreen (ADR-0029)", () => {
   });
 
   it("sends only the capabilities left ticked, and refuses to start with none", async () => {
-    runStewardAgent.mockImplementation(async (org: string, body: unknown) =>
-      makeFixtureStewardAgentRun(org, body as never),
-    );
     render(<StewardAgentScreen />);
 
     await waitFor(() =>
@@ -128,8 +131,9 @@ describe("StewardAgentScreen (ADR-0029)", () => {
     fireEvent.click(screen.getByLabelText("Glossary links"));
     fireEvent.click(screen.getByRole("button", { name: "Run steward agent" }));
     await waitFor(() =>
-      expect(runStewardAgent).toHaveBeenCalledWith(
+      expect(runTaskAgent).toHaveBeenCalledWith(
         ORG,
+        "steward",
         expect.objectContaining({ capabilities: ["TABLE_DESCRIPTION"] }),
       ),
     );
@@ -139,7 +143,7 @@ describe("StewardAgentScreen (ADR-0029)", () => {
   });
 
   it("shows the refusal in words and its code when the run is refused", async () => {
-    runStewardAgent.mockRejectedValue(new ApiError(409, "agent_kill_switch_engaged"));
+    runTaskAgent.mockRejectedValue(new ApiError(409, "agent_kill_switch_engaged"));
     render(<StewardAgentScreen />);
 
     await waitFor(() =>

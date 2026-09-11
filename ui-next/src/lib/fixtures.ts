@@ -64,10 +64,9 @@ import type {
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
-  StewardAgentRunItemRead,
-  StewardAgentRunRead,
-  StewardAgentRunRequest,
-  StewardAgentStateRead,
+  TaskAgentRunItemRead,
+  TaskAgentRunRead,
+  TaskAgentStateRead,
 } from "./types";
 import type {
   AuditEventRead,
@@ -98,6 +97,8 @@ import type {
   ReviewQueueQuery,
   SemanticPageQuery,
   StudioChangeSetQuery,
+  TaskAgentKind,
+  TaskAgentRunBody,
 } from "./api";
 
 /* UX-16: Relationships — a separate import block (not folded into the one
@@ -6446,98 +6447,109 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
   };
 }
 
-/** `GET .../steward-agent` fixture (ADR-0029) -- a registered T1 agent with
+/** A task agent's capabilities as its state endpoint reports them. Mirrors each
+ *  agent's `TaskAgentSpec` server-side. */
+const TASK_AGENT_FIXTURE_CAPABILITIES: Record<
+  TaskAgentKind,
+  { capability: string; object_type: string; risk_tier: string; producer: string }[]
+> = {
+  steward: [
+    {
+      capability: "TABLE_DESCRIPTION",
+      object_type: "ASSET_DESCRIPTION_DRAFT",
+      risk_tier: "T0",
+      producer: "asset_description_service: GL-9 draft composed from catalog evidence",
+    },
+    {
+      capability: "GLOSSARY_LINK",
+      object_type: "GLOSSARY_LINK_PROPOSAL",
+      risk_tier: "T1",
+      producer: "glossary_link_candidates: GL-8 approved-label exact match",
+    },
+  ],
+  lineage: [],
+  quality: [],
+};
+
+/** `GET .../{kind}-agent` fixture (ADR-0029) -- a registered T1 agent with
  *  proposals in flight, one kind already decided and one not, so both an
  *  acceptance rate and its "—" have something to render. Mirrors
- *  `steward_agent_api.StewardAgentStateRead` field for field. */
-export function makeFixtureStewardAgentState(organizationId: string): StewardAgentStateRead {
+ *  `task_agent_api.TaskAgentStateRead` field for field. */
+export function makeFixtureTaskAgentState(
+  organizationId: string,
+  kind: TaskAgentKind,
+): TaskAgentStateRead {
+  const capabilities = TASK_AGENT_FIXTURE_CAPABILITIES[kind];
   return {
+    agent_key: kind,
     organization_id: organizationId,
-    agent_principal_id: "agent:steward",
+    agent_principal_id: `agent:${kind}`,
     registered: true,
     refusal_reason: null,
     ai_asset_version_id: "aaaaaaaa-5555-5555-5555-555555555555",
-    agent_name: "Steward agent",
+    agent_name: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} agent`,
     autonomy_tier: "T1",
     mode: "PROPOSE",
-    supervisor_persona: "STEWARD",
+    supervisor_persona: kind === "steward" ? "STEWARD" : "OPERATOR",
     kill_engaged: false,
     blocking_reason: null,
     method: "DETERMINISTIC",
     uses_model: false,
-    capabilities: [
-      {
-        capability: "TABLE_DESCRIPTION",
-        object_type: "ASSET_DESCRIPTION_DRAFT",
-        risk_tier: "T0",
-        producer: "asset_description_service: GL-9 draft composed from catalog evidence",
-      },
-      {
-        capability: "GLOSSARY_LINK",
-        object_type: "GLOSSARY_LINK_PROPOSAL",
-        risk_tier: "T1",
-        producer: "glossary_link_candidates: GL-8 approved-label exact match",
-      },
-    ],
+    capabilities,
     max_proposals_per_run: 25,
     max_pending_proposals: 100,
     pending_proposals: 7,
     wall_clock_seconds_cap: 300,
-    outcomes: [
-      {
-        object_type: "ASSET_DESCRIPTION_DRAFT",
-        pending: 5,
-        approved: 12,
-        rejected: 4,
-        other: 0,
-        acceptance_rate: 0.75,
-      },
-      {
-        object_type: "GLOSSARY_LINK_PROPOSAL",
-        pending: 2,
-        approved: 0,
-        rejected: 0,
-        other: 0,
-        acceptance_rate: null,
-      },
-    ],
+    outcomes: capabilities.map((capability, index) => ({
+      object_type: capability.object_type,
+      pending: index === 0 ? 5 : 2,
+      approved: index === 0 ? 12 : 0,
+      rejected: index === 0 ? 4 : 0,
+      other: 0,
+      acceptance_rate: index === 0 ? 0.75 : null,
+    })),
   };
 }
 
-/** `POST .../steward-agent/run` fixture. Honours `dry_run` and the requested
+/** `POST .../{kind}-agent/run` fixture. Honours `dry_run` and the requested
  *  capabilities, so the preview and the capability toggles behave in fixture
- *  mode the way they do against the API: a preview opens nothing and links
- *  to nothing. */
-export function makeFixtureStewardAgentRun(
+ *  mode the way they do against the API: a preview opens nothing and links to
+ *  nothing. */
+export function makeFixtureTaskAgentRun(
   organizationId: string,
-  body: StewardAgentRunRequest,
-): StewardAgentRunRead {
-  const dryRun = body.dry_run ?? false;
-  const capabilities = body.capabilities ?? ["TABLE_DESCRIPTION", "GLOSSARY_LINK"];
+  kind: TaskAgentKind,
+  body: TaskAgentRunBody,
+): TaskAgentRunRead {
+  const dryRun = body.dry_run;
+  const capabilities = body.capabilities;
   const action = dryRun ? "WOULD_PROPOSE" : "PROPOSED";
   const opened = (id: string) => (dryRun ? null : id);
-  const items: StewardAgentRunItemRead[] = [];
-  if (capabilities.includes("TABLE_DESCRIPTION")) {
+  const objectType = (capability: string) =>
+    TASK_AGENT_FIXTURE_CAPABILITIES[kind].find((item) => item.capability === capability)
+      ?.object_type ?? null;
+  const items: TaskAgentRunItemRead[] = [];
+  const [first, second] = TASK_AGENT_FIXTURE_CAPABILITIES[kind].map((item) => item.capability);
+  if (first && capabilities.includes(first)) {
     items.push(
       {
-        capability: "TABLE_DESCRIPTION",
-        table_id: "bbbbbbbb-5555-5555-5555-000000000001",
-        table_name: "fact_card_transactions",
+        capability: first,
+        subject_id: "bbbbbbbb-5555-5555-5555-000000000001",
+        subject_name: "fact_card_transactions",
         action,
         reason: null,
-        object_type: "ASSET_DESCRIPTION_DRAFT",
+        object_type: objectType(first),
         object_id: opened("cccccccc-5555-5555-5555-000000000001"),
         review_id: opened("dddddddd-5555-5555-5555-000000000001"),
         task_id: opened("eeeeeeee-5555-5555-5555-000000000001"),
         confidence: 0.61,
-        worklist_rank: 1,
-        term_id: null,
-        term_name: null,
+        rank: 1,
+        related_id: null,
+        related_name: null,
       },
       {
-        capability: "TABLE_DESCRIPTION",
-        table_id: "bbbbbbbb-5555-5555-5555-000000000002",
-        table_name: "dim_branch",
+        capability: first,
+        subject_id: "bbbbbbbb-5555-5555-5555-000000000002",
+        subject_name: "dim_branch",
         action: "SKIPPED",
         reason: "open_draft_exists",
         object_type: null,
@@ -6545,40 +6557,41 @@ export function makeFixtureStewardAgentRun(
         review_id: null,
         task_id: null,
         confidence: null,
-        worklist_rank: 2,
-        term_id: null,
-        term_name: null,
+        rank: 2,
+        related_id: null,
+        related_name: null,
       },
     );
   }
-  if (capabilities.includes("GLOSSARY_LINK")) {
+  if (second && capabilities.includes(second)) {
     items.push({
-      capability: "GLOSSARY_LINK",
-      table_id: "bbbbbbbb-5555-5555-5555-000000000003",
-      table_name: "customer_master",
+      capability: second,
+      subject_id: "bbbbbbbb-5555-5555-5555-000000000003",
+      subject_name: "customer_master",
       action,
       reason: null,
-      object_type: "GLOSSARY_LINK_PROPOSAL",
+      object_type: objectType(second),
       object_id: opened("cccccccc-5555-5555-5555-000000000003"),
       review_id: opened("dddddddd-5555-5555-5555-000000000003"),
       task_id: opened("eeeeeeee-5555-5555-5555-000000000003"),
       confidence: 1,
-      worklist_rank: null,
-      term_id: "ffffffff-5555-5555-5555-000000000003",
-      term_name: "Customer",
+      rank: null,
+      related_id: "ffffffff-5555-5555-5555-000000000003",
+      related_name: "Customer",
     });
   }
   const count = (value: string) => items.filter((item) => item.action === value).length;
   const now = new Date().toISOString();
   return {
     run_id: "99999999-5555-5555-5555-000000000000",
+    agent_key: kind,
     organization_id: organizationId,
-    agent_principal_id: "agent:steward",
+    agent_principal_id: `agent:${kind}`,
     ai_asset_version_id: "aaaaaaaa-5555-5555-5555-555555555555",
     autonomy_tier: "T1",
     mode: dryRun ? "OBSERVE" : "PROPOSE",
     dry_run: dryRun,
-    limit: body.limit ?? 10,
+    limit: body.limit,
     capabilities,
     started_at: now,
     finished_at: now,

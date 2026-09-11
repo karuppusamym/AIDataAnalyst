@@ -1,11 +1,13 @@
-"""ADR-0029: the steward agent.
+"""ADR-0029: the steward agent, and the task-agent runtime it runs on.
 
-The ADR rests on a handful of properties. Each gets a test that exercises the
-mechanism against a real in-memory database rather than a double:
+The ADR rests on a handful of properties. Most belong to the shared runtime
+(`aida.task_agent`) and are exercised here through the first agent built on it;
+each gets a test against a real in-memory database rather than a double:
 
 * **Authority is fail-closed.** No contract, no approved version, an
   ambiguous pair of contracts, another organization's contract, or a principal
-  equal to the reviewer agent's is a refusal, and a refused run writes nothing.
+  another agent is configured with is a refusal, and a refused run writes
+  nothing.
 * **The kill switch stops it** -- every scope, before the run, and at the next
   item when engaged mid-run; a run whose licence was withdrawn keeps nothing.
 * **The autonomy tier is a ceiling.** T0 observes; T1, T2 and T3 propose
@@ -36,7 +38,7 @@ from sqlalchemy.pool import StaticPool
 
 import aida.models  # noqa: F401 -- registers every table on the metadata
 import aida.semantic_api  # noqa: F401 -- registers the decision target adapters
-from aida import steward_agent
+from aida import steward_agent, task_agent
 from aida.agent_budget import REASON_WALL_CLOCK_CAP
 from aida.agent_contracts import REASON_CONTRACT_MISSING, REASON_KILL_ENGAGED
 from aida.asset_description_service import compose_draft_text, gather_evidence, text_fingerprint
@@ -74,29 +76,32 @@ from aida.models import (
 from aida.review_risk_tiers import HARD_MAX_AGENT_TIER, risk_tier_for, tier_at_or_below
 from aida.security import SecurityContext
 from aida.steward_agent import (
-    ACTION_PROPOSED,
-    ACTION_SKIPPED,
-    ACTION_WOULD_PROPOSE,
-    PROPOSAL_OBJECT_TYPES,
-    REASON_AUTONOMY_WITHDRAWN,
-    REASON_CONTRACT_AMBIGUOUS,
-    REASON_PRINCIPAL_IS_REVIEWER,
-    REASON_VERSION_NOT_APPROVED,
     SKIP_BELOW_EVIDENCE_BAR,
     SKIP_OPEN_DRAFT,
     SKIP_REJECTED_BEFORE,
-    STOP_REVIEW_BACKLOG,
-    StewardAgentRefused,
-    StewardRunOutcome,
-    StewardRunRequest,
-    mode_for,
+    STEWARD_AGENT,
     run_steward_agent,
-    steward_agent_outcomes,
 )
 from aida.steward_agent_api import (
     StewardAgentRunRequest,
     get_steward_agent_state,
     start_steward_agent_run,
+)
+from aida.task_agent import (
+    ACTION_PROPOSED,
+    ACTION_SKIPPED,
+    ACTION_WOULD_PROPOSE,
+    REASON_AUTONOMY_WITHDRAWN,
+    REASON_CONTRACT_AMBIGUOUS,
+    REASON_PRINCIPAL_RESERVED,
+    REASON_VERSION_NOT_APPROVED,
+    STOP_REVIEW_BACKLOG,
+    TaskAgentOutcome,
+    TaskAgentRefused,
+    TaskAgentRunRequest,
+    mode_for,
+    reserved_principals,
+    task_agent_outcomes,
 )
 from atlas.platform.config import Settings
 from tests.support.doubles import security_context
@@ -410,11 +415,11 @@ async def _run(
     *,
     settings: Settings | None = None,
     **request: Any,
-) -> StewardRunOutcome:
+) -> TaskAgentOutcome:
     return await run_steward_agent(
         session,
         org.id,
-        request=StewardRunRequest(**request),
+        request=TaskAgentRunRequest(**request),
         settings=settings or _settings(),
         triggered_by=_human(org),
     )
@@ -458,7 +463,7 @@ async def test_an_unregistered_agent_is_refused_and_writes_nothing(session: Asyn
     org, datasource, schema = await _seed_estate(session)
     await _seed_table(session, org, datasource, schema, name="customers")
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org)
 
     assert excinfo.value.reason_code == REASON_CONTRACT_MISSING
@@ -470,7 +475,7 @@ async def test_a_contract_on_an_unapproved_version_is_refused(session: AsyncSess
     org, _datasource, _schema = await _seed_estate(session)
     await _register(session, org, status="REVIEW_REQUIRED")
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org)
 
     assert excinfo.value.reason_code == REASON_VERSION_NOT_APPROVED
@@ -485,7 +490,7 @@ async def test_two_approved_contracts_for_the_principal_are_ambiguous(
     await _register(session, org)
     await _register(session, org)
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org)
 
     assert excinfo.value.reason_code == REASON_CONTRACT_AMBIGUOUS
@@ -498,7 +503,7 @@ async def test_another_organizations_contract_confers_nothing(session: AsyncSess
     await _register(session, other)
     await _seed_table(session, org, datasource, schema, name="customers")
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org)
 
     assert excinfo.value.reason_code == REASON_CONTRACT_MISSING
@@ -514,10 +519,19 @@ async def test_a_principal_equal_to_the_reviewer_agents_is_refused(
         steward_agent_principal_id="agent:reviewer", reviewer_agent_principal_id="agent:reviewer"
     )
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org, settings=settings)
 
-    assert excinfo.value.reason_code == REASON_PRINCIPAL_IS_REVIEWER
+    assert excinfo.value.reason_code == REASON_PRINCIPAL_RESERVED
+
+
+def test_every_other_agent_principal_setting_is_reserved() -> None:
+    """Reserved identities are read from the settings model, so an agent added
+    later is reserved against this one the moment its setting exists."""
+    reserved = reserved_principals(_settings(), STEWARD_AGENT)
+
+    assert "agent:reviewer" in reserved
+    assert AGENT not in reserved
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +572,7 @@ async def test_every_kill_scope_refuses_the_run_before_any_work(
                 kill_engaged=True,
             )
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org)
 
     assert excinfo.value.reason_code == REASON_KILL_ENGAGED
@@ -574,7 +588,7 @@ async def test_a_kill_switch_engaged_mid_run_stops_it_at_the_next_item(
     contract = await _register(session, org)
     calls = _engage_after_first_item(monkeypatch, contract.id, kill_engaged=True)
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org, capabilities=("TABLE_DESCRIPTION",))
 
     assert excinfo.value.reason_code == REASON_KILL_ENGAGED
@@ -590,7 +604,7 @@ async def test_lowering_the_tier_mid_run_withdraws_the_licence_to_write(
     contract = await _register(session, org)
     _engage_after_first_item(monkeypatch, contract.id, autonomy_tier="T0")
 
-    with pytest.raises(StewardAgentRefused) as excinfo:
+    with pytest.raises(TaskAgentRefused) as excinfo:
         await _run(session, org, capabilities=("TABLE_DESCRIPTION",))
 
     assert excinfo.value.reason_code == REASON_AUTONOMY_WITHDRAWN
@@ -768,7 +782,7 @@ async def test_it_leaves_open_drafts_rejected_text_and_thin_evidence_alone(
 
     outcome = await _run(session, org, capabilities=("TABLE_DESCRIPTION",))
 
-    assert {item.table_name: (item.action, item.reason) for item in outcome.items} == {
+    assert {item.subject_name: (item.action, item.reason) for item in outcome.items} == {
         "a_in_progress": (ACTION_SKIPPED, SKIP_OPEN_DRAFT),
         "b_rejected": (ACTION_SKIPPED, SKIP_REJECTED_BEFORE),
         "c_thin": (ACTION_SKIPPED, SKIP_BELOW_EVIDENCE_BAR),
@@ -829,7 +843,7 @@ async def test_the_contracts_wall_clock_cap_ends_the_run(
         caps_checked.append(contract.wall_clock_seconds_cap)
         return REASON_WALL_CLOCK_CAP
 
-    monkeypatch.setattr(steward_agent, "wall_clock_violation", expired)
+    monkeypatch.setattr(task_agent, "wall_clock_violation", expired)
 
     outcome = await _run(session, org)
 
@@ -847,7 +861,7 @@ async def test_a_datasource_scope_keeps_the_run_inside_it(session: AsyncSession)
 
     outcome = await _run(session, org, datasource_id=in_scope.id)
 
-    assert [item.table_name for item in outcome.items] == ["a_inside"]
+    assert [item.subject_name for item in outcome.items] == ["a_inside"]
 
 
 # ---------------------------------------------------------------------------
@@ -867,7 +881,7 @@ async def test_an_exact_label_match_becomes_a_link_proposal_in_review(
     # The annotated table is documented, so only the link capability acts.
     [item] = outcome.items
     assert (item.capability, item.action) == ("GLOSSARY_LINK", ACTION_PROPOSED)
-    assert (item.term_id, item.confidence) == (term.id, 1.0)
+    assert (item.related_id, item.confidence) == (term.id, 1.0)
     proposal = await session.get(GlossaryLinkProposal, item.object_id)
     review = await session.get(GovernanceReview, item.review_id)
     assert proposal is not None and review is not None
@@ -933,7 +947,7 @@ async def test_the_ledger_carries_ids_and_hashes_never_the_drafted_text(
         "object_type",
         "object_id",
         "confidence",
-        "worklist_rank",
+        "rank",
     }
     ledger = json.dumps({"evidence": task.evidence, "inputs": task.inputs_fingerprint})
     assert draft.drafted_text not in ledger
@@ -947,7 +961,7 @@ async def test_outcomes_report_no_rate_until_something_is_decided(session: Async
     await _register(session, org)
     await _run(session, org, capabilities=("TABLE_DESCRIPTION",))
 
-    [before] = await steward_agent_outcomes(session, org.id, agent_principal_id=AGENT)
+    [before] = await task_agent_outcomes(session, org.id, agent_principal_id=AGENT)
     assert (before.pending, before.approved, before.rejected) == (2, 0, 0)
     assert before.acceptance_rate is None
 
@@ -958,7 +972,7 @@ async def test_outcomes_report_no_rate_until_something_is_decided(session: Async
         session, second, decision="REJECT", reason="wrong grain", context=reviewer, now=NOW
     )
 
-    [after] = await steward_agent_outcomes(session, org.id, agent_principal_id=AGENT)
+    [after] = await task_agent_outcomes(session, org.id, agent_principal_id=AGENT)
     assert (after.pending, after.approved, after.rejected) == (0, 1, 1)
     assert after.acceptance_rate == 0.5
 
@@ -969,14 +983,17 @@ async def test_outcomes_report_no_rate_until_something_is_decided(session: Async
 
 
 def test_every_proposal_the_agent_can_open_is_inside_the_agent_tier_ceiling() -> None:
-    for object_type in PROPOSAL_OBJECT_TYPES.values():
-        assert tier_at_or_below(risk_tier_for(object_type), HARD_MAX_AGENT_TIER), object_type
+    for capability in STEWARD_AGENT.capabilities:
+        assert tier_at_or_below(
+            risk_tier_for(capability.object_type), HARD_MAX_AGENT_TIER
+        ), capability.object_type
 
 
-def test_the_agent_cannot_reach_a_decision_or_publish_path() -> None:
+@pytest.mark.parametrize("module", ["steward_agent.py", "task_agent.py"])
+def test_the_agent_cannot_reach_a_decision_or_publish_path(module: str) -> None:
     """The ADR's 'it may decide none' as a property of the source, the same
     static check `test_reviewer_agent` makes of the reviewer agent."""
-    source = (REPO_ROOT / "src" / "aida" / "steward_agent.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "src" / "aida" / module).read_text(encoding="utf-8")
     for forbidden in (
         "decide_review",
         "_apply_governance_review_decision",
@@ -1072,6 +1089,7 @@ async def test_the_state_endpoint_reports_an_unregistered_agent_honestly(
         org.id, context=_human(org), session=session, settings=_settings()
     )
 
+    assert state.agent_key == "steward"
     assert (state.registered, state.refusal_reason) == (False, REASON_CONTRACT_MISSING)
     assert (state.method, state.uses_model) == ("DETERMINISTIC", False)
     assert {(c.capability, c.object_type, c.risk_tier) for c in state.capabilities} == {

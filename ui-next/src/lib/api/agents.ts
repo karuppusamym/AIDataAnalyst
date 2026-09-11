@@ -36,8 +36,8 @@ import {
   makeFixtureReviewerAgentSamples,
   makeFixtureReviewerAgentState,
   makeFixtureRunAgentEvaluation,
-  makeFixtureStewardAgentRun,
-  makeFixtureStewardAgentState,
+  makeFixtureTaskAgentRun,
+  makeFixtureTaskAgentState,
   makeFixtureSubmitAgentContractRequest,
   makeFixtureSubmitModelRoute,
   makeFixtureUpdateAiRemediation,
@@ -66,9 +66,8 @@ import type {
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
-  StewardAgentRunRead,
-  StewardAgentRunRequest,
-  StewardAgentStateRead,
+  TaskAgentRunRead,
+  TaskAgentStateRead,
 } from "../types";
 import type { PageOf } from "../ui-types";
 
@@ -768,41 +767,56 @@ export function fetchReviewerAgentSamples(
 }
 
 /* ---------------------------------------------------------------------------
-   ADR-0029: the steward agent console. Two real routes in
-   `steward_agent_api.py`. A run only ever *opens* review items — the agent
-   decides nothing — so fixture mode returns a representative result rather
-   than refusing, the same standing as the reviewer agent's run fixture.
+   ADR-0029: task agents — the steward, lineage and quality agents. Each has
+   two real routes, `/v1/organizations/{org}/{kind}-agent` and `…/run`, with
+   the same response shapes (`task_agent_api.py`). A run only ever *opens*
+   review items — no task agent decides anything — so fixture mode returns a
+   representative result rather than refusing, the same standing as the
+   reviewer agent's run fixture.
 --------------------------------------------------------------------------- */
 
-/** `GET /v1/organizations/{org}/steward-agent` — whether the agent could run
+export type TaskAgentKind = "steward" | "lineage" | "quality";
+
+/** What a run is asked to do. Each agent's own request model narrows
+ *  `capabilities` to the keys it has; the shape is otherwise shared. */
+export interface TaskAgentRunBody {
+  capabilities: string[];
+  limit: number;
+  datasource_id: string | null;
+  dry_run: boolean;
+}
+
+/** `GET /v1/organizations/{org}/{kind}-agent` — whether the agent could run
  *  here (and the refusal it would get if not), its tier and what that tier
  *  lets it do, any kill switch stopping it, and how its proposals have fared
  *  with reviewers. */
-export function fetchStewardAgentState(
+export function fetchTaskAgentState(
   organizationId: string,
+  kind: TaskAgentKind,
   signal?: AbortSignal,
-): Promise<StewardAgentStateRead> {
+): Promise<TaskAgentStateRead> {
   return demoOr(
-    async () => makeFixtureStewardAgentState(organizationId),
+    async () => makeFixtureTaskAgentState(organizationId, kind),
     async () => {
-      return get<StewardAgentStateRead>(`/v1/organizations/${organizationId}/steward-agent`, signal);
+      return get<TaskAgentStateRead>(`/v1/organizations/${organizationId}/${kind}-agent`, signal);
     },
   );
 }
 
-/** `POST .../steward-agent/run` — one bounded run. 409s (via `ApiError`) with
- *  a stable reason code in `detail` when the agent may not act; in that case
+/** `POST .../{kind}-agent/run` — one bounded run. 409s (via `ApiError`) with a
+ *  stable reason code in `detail` when the agent may not act; in that case
  *  nothing the run produced is kept. `dry_run` previews and opens nothing. */
-export function runStewardAgent(
+export function runTaskAgent(
   organizationId: string,
-  body: StewardAgentRunRequest,
+  kind: TaskAgentKind,
+  body: TaskAgentRunBody,
   signal?: AbortSignal,
-): Promise<StewardAgentRunRead> {
+): Promise<TaskAgentRunRead> {
   return demoOr(
-    async () => makeFixtureStewardAgentRun(organizationId, body),
+    async () => makeFixtureTaskAgentRun(organizationId, kind, body),
     async () => {
-      return postJson<StewardAgentRunRead>(
-        `/v1/organizations/${organizationId}/steward-agent/run`,
+      return postJson<TaskAgentRunRead>(
+        `/v1/organizations/${organizationId}/${kind}-agent/run`,
         body,
         signal,
       );
