@@ -12067,3 +12067,74 @@ AR-09 (enterprise-scale capacity, unmeasured) and the measurement halves of AR-0
 AR-10, AR-11 and AR-12. Every figure in the budget path remains an *estimate*; no provider adapter
 reports billable usage, and `reconcile_run_budget` is still the single place a real one would
 enter.
+
+## 2026-09-10 — Column description drafting, and Excel save-back through an add-in
+
+Commits `1b66c9f` (the backend, committed by a parallel session under its own message while this
+one was still writing it; its contents are this work and nothing else), `15ea6f1` (UI, tests and a
+review-queue fix) and `65d5719` (the Excel add-in), plus `72d1edb`, regenerating the surface control matrix
+those five routes had left stale. The full suite caught that; the targeted runs, which
+regenerated the OpenAPI baseline and UI types, did not. It was regenerated from a clean
+worktree at HEAD, because another session's uncommitted router was on disk.
+
+### Column descriptions are drafted, on the table-draft contract
+
+`aida.column_description_service` drafts a description for each undescribed column from catalog
+evidence alone: dbt column docs, the source system's comment, key and foreign-key membership, and
+approved same-source relationships. No model call. It scores on the four dimensions table drafts
+use and shares their 0.4 submission bar, and it publishes only through an independent decision on a
+`COLUMN_DESCRIPTION_DRAFT` review (risk tier T0, reviewer-agent resolver on `overall_score`).
+Nothing is read into a column's name. A draft records the description version it was composed
+against, and approval refuses if that has moved, retirement included. A partial unique index allows
+one open draft per column, and a workbook batch that describes a column closes its DRAFT-status
+draft as SUPERSEDED. Stewards use it from the column panel; the workbook export carries the open
+draft beside `business_description`.
+
+### A reviewer could approve table-draft text they had never seen
+
+Description drafts have no field diff, and the review queue's evidence for them listed the signals
+a draft was built from, never the draft. The proposed text now leads the evidence for column and
+table drafts, and the queue row quotes it.
+
+### On the dev catalog, deterministic drafting produces nothing submittable
+
+Measured read-only: 27 active tables, 196 columns, **0 reviewable drafts**. The catalog has no dbt
+column docs, no source comments and no approved relationships, so every draft is structure-only and
+scores 0.15 to 0.31. The rule is working. The expectation that column descriptions get generated is
+not met on this estate until the catalog carries authored evidence, or until model-assisted drafting
+covers the thin columns. That choice is open.
+
+### Excel save-back is the existing import, reached from inside Excel
+
+An Office add-in (`ui-next/excel-addin/`) opens a datasource's model from Atlas as a new workbook
+and sends the open workbook back to `POST /v1/datasources/{id}/model/import`, the endpoint the
+browser upload uses. Stale-edit skipping and the batch review are unchanged. Identity binding
+tightened: the server now refuses a workbook whose README names another datasource, and the export
+records the organization so the add-in can address the right tenant. Under OIDC the add-in signs in
+through an Office dialog that runs the existing PKCE flow. Vite builds the two add-in pages; dev
+HTTPS is opt-in. The frontend reachability walker now seeds every top-level page.
+
+### Verified
+
+- The full backend suite on a clean checkout of `72d1edb`: 9143 passed, 23 skipped, 0 failed (exit 0).
+- 19 backend tests for column drafts. The export, import, manifest and reachability suites.
+- The migration/ORM drift gate on real PostgreSQL. No breaking OpenAPI change: five paths added.
+- 591 ui-next tests, including the add-in pane against a fake Office runtime, and the production
+  build emitting both add-in pages and their icons.
+- The new migration was **not** applied to the dev database. A semantic-inference run in the
+  worker container had held one transaction for over an hour, with row-exclusive locks on
+  `governance_review`, so the `CREATE TABLE` queued behind it and would have queued writers
+  behind itself. It was cancelled; alembic's DDL is transactional, so nothing was left
+  half-applied and `alembic_version` is still `a7c41e93d2b0`. Run `alembic upgrade head`
+  once that run has finished.
+
+### Not verified
+
+The add-in has not been loaded in a real Excel, and no sign-in has gone through a real identity
+provider from its dialog. Loading it needs a trusted localhost certificate and a sideload, which are
+machine and tenant changes for the owner; the steps are in `ui-next/excel-addin/README.md`.
+
+### Still open
+
+- The drafting gap on thin catalogs: feed evidence, or model-assisted drafting for thin columns.
+- Document ingestion, the fourth write path for column descriptions, still has no UI.
