@@ -40,7 +40,10 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     OpenLineageTableEdge,
+    ProcedureLineageEdge,
+    ViewLineageEdge,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 
 # Below this overall score a draft carries too little evidence to be worth an
 # independent reviewer's time. A draft below this line stays in DRAFT and can
@@ -75,10 +78,21 @@ class AssetEvidence:
     grain_statement: str | None
     bound_term_names: tuple[str, ...]
     bound_term_ids: tuple[UUID, ...]
+    #: ADR-0026's parsed lineage -- a view's definition, pasted procedure SQL, a
+    #: captured routine -- as (edge type, edge id), the identifiers the per-edge
+    #: review queue uses. One edge per neighbouring table; the table's name is
+    #: in `upstream_table_names`/`downstream_table_names` beside OpenLineage's.
+    upstream_parsed_edges: tuple[tuple[str, UUID], ...] = ()
+    downstream_parsed_edges: tuple[tuple[str, UUID], ...] = ()
 
     @property
     def lineage_edge_count(self) -> int:
-        return len(self.upstream_edge_ids) + len(self.downstream_edge_ids)
+        return (
+            len(self.upstream_edge_ids)
+            + len(self.downstream_edge_ids)
+            + len(self.upstream_parsed_edges)
+            + len(self.downstream_parsed_edges)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +235,14 @@ def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
         "foreign_key_count": evidence.foreign_key_count,
         "upstream_edge_ids": [str(value) for value in evidence.upstream_edge_ids],
         "downstream_edge_ids": [str(value) for value in evidence.downstream_edge_ids],
+        "upstream_parsed_edges": [
+            {"edge_type": edge_type, "edge_id": str(edge_id)}
+            for edge_type, edge_id in evidence.upstream_parsed_edges
+        ],
+        "downstream_parsed_edges": [
+            {"edge_type": edge_type, "edge_id": str(edge_id)}
+            for edge_type, edge_id in evidence.downstream_parsed_edges
+        ],
         "lineage_edge_count": evidence.lineage_edge_count,
         "dbt_description_present": bool(evidence.dbt_description),
         "dbt_documented_column_count": evidence.dbt_documented_column_count,
@@ -229,6 +251,79 @@ def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
         ),
         "bound_term_ids": [str(value) for value in evidence.bound_term_ids],
     }
+
+
+#: ADR-0026's parsed-edge tables whose rows name two catalog tables.
+_PARSED_EDGE_MODELS: tuple[tuple[str, Any], ...] = (
+    ("VIEW", ViewLineageEdge),
+    ("PROCEDURE", ProcedureLineageEdge),
+    ("ROUTINE", DeepProcedureLineageEdge),
+)
+
+#: A neighbouring table's name, the edge type, and one edge that names it.
+_ParsedNeighbour = tuple[str, str, UUID]
+
+
+async def _parsed_lineage_neighbours(
+    session: AsyncSession, table: MetadataTable
+) -> tuple[list[_ParsedNeighbour], list[_ParsedNeighbour]]:
+    """The tables `table` is parsed as populated from, and those it feeds.
+
+    Only ACTIVE edges -- approved by a person, or activated by a person's own
+    parse -- between two catalog tables of this datasource. A PROPOSED edge,
+    such as every edge the lineage agent writes until someone approves it, is
+    not evidence yet, and a REJECTED one is evidence of nothing. A parser writes
+    one row per column pair, so one edge per neighbouring table is kept.
+    """
+    upstream: dict[str, tuple[str, UUID]] = {}
+    downstream: dict[str, tuple[str, UUID]] = {}
+    for edge_type, model in _PARSED_EDGE_MODELS:
+        filters: list[Any] = [
+            model.review_status == "ACTIVE",
+            MetadataTable.datasource_id == table.datasource_id,
+        ]
+        if model is DeepProcedureLineageEdge:
+            # A hop into a temp table is the procedure's own plumbing.
+            filters.append(model.is_intermediate.is_(False))
+        for this_side, other_side, found in (
+            (model.target_table_id, model.source_table_id, upstream),
+            (model.source_table_id, model.target_table_id, downstream),
+        ):
+            ranked = (
+                select(
+                    model.id.label("edge_id"),
+                    MetadataTable.name.label("name"),
+                    func.row_number()
+                    .over(partition_by=other_side, order_by=model.id)
+                    .label("neighbour_rank"),
+                )
+                .join(MetadataTable, MetadataTable.id == other_side)
+                .where(this_side == table.id, other_side != table.id, *filters)
+                .subquery()
+            )
+            rows = (
+                await session.execute(
+                    select(ranked.c.edge_id, ranked.c.name)
+                    .where(ranked.c.neighbour_rank == 1)
+                    .order_by(ranked.c.name)
+                    .limit(_LINEAGE_QUERY_LIMIT)
+                )
+            ).all()
+            for edge_id, name in rows:
+                found.setdefault(name, (edge_type, edge_id))
+    return (
+        [(name, edge_type, edge_id) for name, (edge_type, edge_id) in upstream.items()],
+        [(name, edge_type, edge_id) for name, (edge_type, edge_id) in downstream.items()],
+    )
+
+
+def _with_parsed_names(names: list[str], parsed: list[_ParsedNeighbour]) -> tuple[str, ...]:
+    """OpenLineage's names first, then each parsed neighbour not already named."""
+    merged = list(names)
+    for name, _edge_type, _edge_id in parsed:
+        if name not in merged:
+            merged.append(name)
+    return tuple(merged)
 
 
 async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetEvidence:
@@ -285,6 +380,8 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
             .limit(_LINEAGE_QUERY_LIMIT)
         )
     ).all()
+    # ADR-0026's parsed lineage, on the same terms -- see the helper.
+    upstream_parsed, downstream_parsed = await _parsed_lineage_neighbours(session, table)
 
     # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
     # not on `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
@@ -319,9 +416,13 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         column_count=column_count,
         primary_key_columns=primary_key_columns,
         foreign_key_count=foreign_key_count,
-        upstream_table_names=tuple(name for _, name in upstream_rows),
+        upstream_table_names=_with_parsed_names(
+            [name for _, name in upstream_rows], upstream_parsed
+        ),
         upstream_edge_ids=tuple(edge_id for edge_id, _ in upstream_rows),
-        downstream_table_names=tuple(name for _, name in downstream_rows),
+        downstream_table_names=_with_parsed_names(
+            [name for _, name in downstream_rows], downstream_parsed
+        ),
         downstream_edge_ids=tuple(edge_id for edge_id, _ in downstream_rows),
         dbt_description=dbt_description,
         dbt_documented_column_count=dbt_documented_column_count,
@@ -331,6 +432,12 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         grain_statement=annotation.grain_statement if annotation else None,
         bound_term_names=tuple(name for name, _ in term_rows),
         bound_term_ids=tuple(term_id for _, term_id in term_rows),
+        upstream_parsed_edges=tuple(
+            (edge_type, edge_id) for _, edge_type, edge_id in upstream_parsed
+        ),
+        downstream_parsed_edges=tuple(
+            (edge_type, edge_id) for _, edge_type, edge_id in downstream_parsed
+        ),
     )
 
 

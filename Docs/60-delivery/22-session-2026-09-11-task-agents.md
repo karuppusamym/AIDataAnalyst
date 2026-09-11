@@ -146,9 +146,14 @@
   routine's redacted body when it is literal-redacted and screened clean.
   An edge two routines establish names both and references neither.
 - The console labels the capability, and the review screen filters on
-  `ROUTINE`.
-- Tests: `tests/test_lineage_agent.py`, `tests/test_parsed_lineage_review.py`
-  and `tests/test_unified_lineage.py`.
+  `ROUTINE`. A proposal's "Open in review queue" link opens the queue already
+  filtered to the edge type it wrote; the filter lives in the URL.
+- Table description drafts (GL-9) now cite approved view, procedure and
+  routine lineage from the table's own datasource, beside OpenLineage's. A
+  proposed edge, such as every edge the agent writes, is not evidence until a
+  person approves it.
+- Tests: `tests/test_lineage_agent.py`, `tests/test_parsed_lineage_review.py`,
+  `tests/test_unified_lineage.py` and `tests/test_gl9_lineage_same_source.py`.
 
 ### Fixed on the way
 
