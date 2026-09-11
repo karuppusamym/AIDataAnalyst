@@ -74,6 +74,7 @@ const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then(
 const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
 const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
+const StewardAgentScreen = lazy(() => import("./screens/StewardAgentScreen").then((module) => ({ default: module.StewardAgentScreen })));
 
 /* UX-20: navigation is organised by *work area*, not by feature area. Thirty
    flat items grouped by what the code does is a feature map; a person opening
@@ -123,6 +124,7 @@ const NAV: NavItem[] = [
   // --- Steward: make the estate mean something ----------------------------
   { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
   { id: "worklist", label: "Documentation worklist", group: "Steward", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
+  { id: "steward-agent", label: "Steward agent", group: "Steward", icon: "✧", keywords: "steward agent adr-0029 draft propose descriptions glossary links worklist autonomy tier kill switch acceptance" },
   { id: "playbooks", label: "Playbooks", group: "Steward", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
   { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
@@ -209,6 +211,7 @@ function Screen({
     case "administration": return <AdministrationScreen />;
     case "stewardship": return <StewardshipScreen />;
     case "worklist": return <DocumentationWorklistScreen />;
+    case "steward-agent": return <StewardAgentScreen />;
     case "playbooks": return <PlaybooksScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
     case "access-policies": return <AccessPolicyScreen />;

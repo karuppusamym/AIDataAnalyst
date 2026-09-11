@@ -37,6 +37,9 @@ import {
 import "../components/ProposalRow.css";
 import "../components/EvidencePane.css";
 import "./ReviewQueueScreen.css";
+import { ReviewChangePreview } from "../components/ReviewChangePreview";
+
+const FULL_PREVIEW_TYPES = new Set(["MODEL_IMPORT_BATCH", "CONTEXT_PRODUCT_VERSION"]);
 
 /* ---------------------------------------------------------------------------
    Review queue — UX-15, migrated onto UX-17's real read model.
@@ -224,6 +227,7 @@ function ProposalRow({
   deciding,
   ownProposal,
   decisionError,
+  previewBlocked,
 }: {
   proposal: ReviewQueueProposalRead;
   focused: boolean;
@@ -232,6 +236,7 @@ function ProposalRow({
   deciding: boolean;
   ownProposal: boolean;
   decisionError?: string;
+  previewBlocked?: boolean;
 }) {
   const decided = proposal.status !== "PENDING";
   const extras = renderRowExtras(proposal);
@@ -304,6 +309,8 @@ function ProposalRow({
           <span className="prop__own-review">
             You proposed this change. Another reviewer must approve or reject it.
           </span>
+        ) : previewBlocked ? (
+          <span>Open this proposal and load its full change preview before deciding.</span>
         ) : (
           <>
             <Button variant="primary" disabled={deciding} onClick={() => onDecide("APPROVE")}>
@@ -349,6 +356,7 @@ export function ReviewQueueScreen() {
   const [rejecting, setRejecting] = useState<string | null>(null);
   const [decideError, setDecideError] = useState<string | null>(null);
   const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
+  const [detailReady, setDetailReady] = useState<string | null>(null);
   /* A 409 is not an error message. The decision service answers a lost claim
      with the review's refreshed state (F05), so the reviewer who lost is shown
      WHICH decision won rather than "409 Conflict" -- which is what the old
@@ -398,6 +406,8 @@ export function ReviewQueueScreen() {
       // The detail pane can remain visible during a refresh. Never act on its
       // old snapshot while the current queue is loading or unavailable.
       if (loading || error !== null) return;
+      const proposal = proposals.find(item => item.review_id === reviewId);
+      if (proposal && FULL_PREVIEW_TYPES.has(proposal.object_type) && (detailReady !== reviewId || focusedId !== reviewId)) return;
       setDeciding(reviewId);
       setDecideError(null);
       setDecisionErrors((current) => {
@@ -439,7 +449,7 @@ export function ReviewQueueScreen() {
         setDeciding(null);
       }
     },
-    [load, setParams, loading, error],
+    [load, setParams, loading, error, proposals, detailReady, focusedId],
   );
 
   /* A failed load must not leave three tiles asserting counts.
@@ -542,6 +552,7 @@ export function ReviewQueueScreen() {
                 deciding={deciding === p.review_id}
                 ownProposal={principalId !== null && p.requested_by === principalId}
                 decisionError={decisionErrors[p.review_id]}
+                previewBlocked={FULL_PREVIEW_TYPES.has(p.object_type) && (detailReady !== p.review_id || focusedId !== p.review_id)}
                 onDecide={(decision) =>
                   decision === "REJECT"
                     ? setRejecting(p.review_id)
@@ -576,9 +587,13 @@ export function ReviewQueueScreen() {
                 ? `This review is already ${focused.status.toLowerCase()}.`
                 : principalId !== null && focused.requested_by === principalId
                   ? "You proposed this change. Another reviewer must approve or reject it."
-                  : null,
+                  : FULL_PREVIEW_TYPES.has(focused.object_type) && detailReady !== focused.review_id
+                    ? "Load the full change preview before deciding."
+                    : null,
           }}
-          diff={<DiffEntries proposal={focused} />}
+          diff={FULL_PREVIEW_TYPES.has(focused.object_type)
+            ? <ReviewChangePreview key={focused.review_id} reviewId={focused.review_id} onReady={setDetailReady} />
+            : <DiffEntries proposal={focused} />}
           /* Impact: this queue composes no consumer/impact set today. Saying so
              is the honest state -- an empty "affects nothing" would be a claim
              the read model never made. */

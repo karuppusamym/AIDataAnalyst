@@ -455,6 +455,26 @@ async def parse_and_diff_workbook(
     if columns_sheet is not None:
         pending.extend(await _diff_columns(session, columns_sheet, datasource_id=datasource.id))
 
+    return await record_model_import(
+        session,
+        datasource=datasource,
+        pending=pending,
+        content=content,
+        filename=filename,
+        uploaded_by=uploaded_by,
+    )
+
+
+async def record_model_import(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    pending: list[_PendingChange],
+    content: bytes,
+    filename: str,
+    uploaded_by: str,
+) -> ModelImportBatch:
+    """Persist a proposed edit batch, shared by Excel and the browser worksheet."""
     real_changes = [change for change in pending if change.status == "PENDING"]
     if len(real_changes) > MAX_CHANGES_PER_BATCH:
         raise HTTPException(
@@ -588,8 +608,7 @@ async def submit_batch_for_review(
         raise HTTPException(
             status_code=409,
             detail=(
-                "this workbook changes nothing that is still included; there is nothing "
-                "to review"
+                "this workbook changes nothing that is still included; there is nothing to review"
             ),
         )
     review = GovernanceReview(

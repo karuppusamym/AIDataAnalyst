@@ -1,0 +1,55 @@
+/* Steward agent console (ADR-0029). Same panel/list vocabulary as the
+   reviewer agent console — built entirely on tokens.css so it themes
+   correctly in dark mode. */
+
+.stewagent { display: flex; flex-direction: column; gap: 16px; max-width: 1180px; margin: 0 auto; padding-bottom: 32px; }
+
+.stewagent__head h1 { margin: 0; font-size: 21px; letter-spacing: -0.015em; }
+.stewagent__sub { margin: 4px 0 0; color: var(--ink-3); font-size: 12.5px; max-width: 70ch; }
+
+.stewagent__notice {
+  margin: 0; padding: 9px 13px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--sunk); color: var(--ink-2); font-size: 12.5px;
+}
+
+.stewagent__panel {
+  border: 1px solid var(--line); border-radius: 11px; background: var(--surface);
+  box-shadow: var(--shadow-1); overflow: hidden;
+}
+.stewagent__panelhead {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 13px 16px; border-bottom: 1px solid var(--line-soft);
+}
+.stewagent__panelhead h2 { margin: 0; font-size: 13.5px; font-weight: 600; letter-spacing: -0.005em; }
+.stewagent__panelbody { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+.stewagent__loading { margin: 0; padding: 18px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+.stewagent__statepills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.stewagent__facts { display: flex; gap: 24px; margin: 0; flex-wrap: wrap; }
+.stewagent__facts > div { display: flex; flex-direction: column; gap: 2px; }
+.stewagent__facts dt { margin: 0; font-size: 11px; color: var(--ink-3); }
+.stewagent__facts dd { margin: 0; font-size: 13px; font-weight: 600; }
+.stewagent__mono { font-family: var(--mono); font-weight: 400 !important; font-size: 12px !important; }
+
+.stewagent__controls { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.stewagent__checks { display: flex; gap: 14px; flex-wrap: wrap; border: 0; margin: 0; padding: 0; }
+.stewagent__checks legend { font-size: 11px; color: var(--ink-3); padding: 0; margin-bottom: 4px; }
+.stewagent__checks label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.stewagent__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.stewagent__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.stewagent__row {
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 11px 13px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.stewagent__rowhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.stewagent__rowhead strong { font-size: 13.5px; }
+.stewagent__meta {
+  display: flex; gap: 12px; flex-wrap: wrap; color: var(--ink-3); font-size: 11.5px; align-items: center;
+}
+.stewagent__muted { margin: 0; color: var(--ink-3); font-size: 12.5px; }
+
+@media (max-width: 460px) {
+  .stewagent__panelhead { flex-direction: column; align-items: flex-start; }
+}

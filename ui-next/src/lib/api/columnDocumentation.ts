@@ -69,6 +69,11 @@ export interface ColumnDocumentationRead {
   withdrawn_description: string | null;
 }
 
+export function saveColumnWorksheet(tableId: string, changes: {column_id: string; description: string; expected_version: number | null}[]): Promise<ModelImportBatchRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error("Worksheet saving requires a connected backend."));
+  return postJson<ModelImportBatchRead>(`/v1/tables/${encodeURIComponent(tableId)}/column-worksheet`, { changes });
+}
+
 const readJson = get;
 
 /** Fixture columns for a table, so the pane renders something recognisable

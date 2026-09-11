@@ -43,18 +43,17 @@ from aida.model_import import (
     set_change_exclusion,
     submit_batch_for_review,
 )
-from aida.models import DataSource, ModelImportBatch, ModelImportChange
+from aida.models import (
+    DataSource,
+    MetadataColumn,
+    MetadataTable,
+    ModelImportBatch,
+    ModelImportChange,
+)
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["model-import"])
-
-# Same population that may upload a data dictionary
-# (`document_ingestion_api.DOCUMENT_WRITE_ROLES`): both propose metadata
-# changes that a reviewer then decides, and neither publishes anything on its
-# own, so they take the same population rather than inventing a second one.
-_IMPORT_WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
-_IMPORT_READ_ROLES = (*_IMPORT_WRITE_ROLES, "Reviewer", "Analyst", "Viewer", "Auditor")
 
 
 class ModelImportBatchRead(ApiModel):
@@ -72,6 +71,105 @@ class ModelImportBatchRead(ApiModel):
     uploaded_by: str
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None
+
+
+class WorksheetColumnEdit(ApiModel):
+    column_id: UUID
+    description: str = Field(min_length=1, max_length=16000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class WorksheetSave(ApiModel):
+    changes: list[WorksheetColumnEdit] = Field(min_length=1, max_length=1000)
+
+
+@router.post("/tables/{table_id}/column-worksheet", response_model=ModelImportBatchRead)
+async def save_column_worksheet(
+    table_id: UUID,
+    body: WorksheetSave,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> ModelImportBatchRead:
+    """Save browser edits as an import DRAFT; never submit or publish implicitly."""
+    from aida.authorization_gate import gate_read
+    from aida.model_import import _diff_columns, record_model_import
+    from aida.xlsx_reader import ParsedSheet
+
+    table = await session.get(MetadataTable, table_id)
+    if table is None or table.status != "ACTIVE":
+        raise HTTPException(status_code=404, detail="active table not found")
+    enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
+    datasource = await _authorized_datasource(table.datasource_id, context, session, settings)
+    ids = [edit.column_id for edit in body.changes]
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=422, detail="duplicate worksheet column")
+    found = set(
+        await session.scalars(
+            select(MetadataColumn.id).where(
+                MetadataColumn.id.in_(ids),
+                MetadataColumn.table_id == table.id,
+                MetadataColumn.status == "ACTIVE",
+            )
+        )
+    )
+    if found != set(ids):
+        raise HTTPException(
+            status_code=422, detail="worksheet columns must belong to this active table"
+        )
+    rows = [
+        {
+            "column_id": str(edit.column_id),
+            "business_description": edit.description.strip(),
+            "description_version": str(edit.expected_version) if edit.expected_version else "",
+        }
+        for edit in body.changes
+    ]
+    if any(not row["business_description"] for row in rows):
+        raise HTTPException(
+            status_code=422, detail="use the withdrawal workflow to clear a description"
+        )
+    sheet = ParsedSheet(name="Columns", headers=list(rows[0]), rows=rows, truncated=False)
+    pending = await _diff_columns(session, sheet, datasource_id=datasource.id)
+    batch = await record_model_import(
+        session,
+        datasource=datasource,
+        pending=pending,
+        content=body.model_dump_json().encode(),
+        filename="browser-column-worksheet.json",
+        uploaded_by=context.principal_id,
+    )
+    record_audit(
+        session,
+        context,
+        action="SAVE_COLUMN_WORKSHEET",
+        resource_type="model_import_batch",
+        resource_id=str(batch.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"table_id": str(table.id), "change_count": batch.change_count},
+    )
+    await session.commit()
+    return ModelImportBatchRead.model_validate(batch)
+
+
+# Same population that may upload a data dictionary
+# (`document_ingestion_api.DOCUMENT_WRITE_ROLES`): both propose metadata
+# changes that a reviewer then decides, and neither publishes anything on its
+# own, so they take the same population rather than inventing a second one.
+_IMPORT_WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
+_IMPORT_READ_ROLES = (*_IMPORT_WRITE_ROLES, "Reviewer", "Analyst", "Viewer", "Auditor")
 
 
 class ModelImportChangeRead(ApiModel):

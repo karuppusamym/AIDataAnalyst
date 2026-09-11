@@ -4378,6 +4378,88 @@ export interface SqlValidationResponse {
   applied_row_limit: number | null;
 }
 
+export interface StewardAgentCapabilityRead {
+  capability: string;
+  object_type: string;
+  risk_tier: string;
+  producer: string;
+}
+
+export interface StewardAgentOutcomeRead {
+  object_type: string;
+  pending: number;
+  approved: number;
+  rejected: number;
+  other: number;
+  acceptance_rate: number | null;
+}
+
+export interface StewardAgentRunItemRead {
+  capability: string;
+  table_id: string;
+  table_name: string;
+  action: "PROPOSED" | "WOULD_PROPOSE" | "SKIPPED" | "FAILED";
+  reason: string | null;
+  object_type: string | null;
+  object_id: string | null;
+  review_id: string | null;
+  task_id: string | null;
+  confidence: number | null;
+  worklist_rank: number | null;
+  term_id: string | null;
+  term_name: string | null;
+}
+
+export interface StewardAgentRunRead {
+  run_id: string;
+  organization_id: string;
+  agent_principal_id: string;
+  ai_asset_version_id: string;
+  autonomy_tier: string;
+  mode: "OBSERVE" | "PROPOSE";
+  dry_run: boolean;
+  limit: number;
+  capabilities: string[];
+  started_at: string;
+  finished_at: string;
+  proposed: number;
+  would_propose: number;
+  skipped: number;
+  failed: number;
+  skipped_by_reason: Record<string, number>;
+  stopped_reason: string | null;
+  items: StewardAgentRunItemRead[];
+}
+
+export interface StewardAgentRunRequest {
+  capabilities?: ("TABLE_DESCRIPTION" | "GLOSSARY_LINK")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
+}
+
+export interface StewardAgentStateRead {
+  organization_id: string;
+  agent_principal_id: string;
+  registered: boolean;
+  refusal_reason: string | null;
+  ai_asset_version_id: string | null;
+  agent_name: string | null;
+  autonomy_tier: string | null;
+  mode: "OBSERVE" | "PROPOSE" | null;
+  supervisor_persona: string | null;
+  kill_engaged: boolean | null;
+  blocking_reason: string | null;
+  method: string;
+  uses_model: boolean;
+  capabilities: StewardAgentCapabilityRead[];
+  max_proposals_per_run: number;
+  max_pending_proposals: number;
+  pending_proposals: number;
+  wall_clock_seconds_cap: number | null;
+  outcomes: StewardAgentOutcomeRead[];
+}
+
 export interface StewardshipCoverageRead {
   organization_id: string;
   datasource_id: string | null;
@@ -5035,6 +5117,16 @@ export interface ViewToolBlueprintRequest {
   semantic_model_version_id?: string | null;
   table_id: string;
   allowed_roles: string[];
+}
+
+export interface WorksheetColumnEdit {
+  column_id: string;
+  description: string;
+  expected_version?: number | null;
+}
+
+export interface WorksheetSave {
+  changes: WorksheetColumnEdit[];
 }
 
 export interface WorkspaceCreate {

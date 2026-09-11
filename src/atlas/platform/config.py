@@ -355,6 +355,24 @@ class Settings(BaseSettings):
     #: recommendation may have come from.
     reviewer_agent_evidence_max_age_minutes: int = Field(default=60, ge=1, le=10_080)
 
+    # --- ADR-0029: the steward agent -------------------------------------
+    # No on/off flag of its own: the agent does nothing in an organization
+    # until someone registers it -- an APPROVED `AGENT`-kind AI asset version
+    # carrying an `AgentContract` for the principal below. Its kill switch is
+    # that contract's.
+    #: The steward agent's own workload identity. Must differ from
+    #: `reviewer_agent_principal_id`, or the agent that drafts would be the
+    #: agent that checks; `steward_agent` refuses to run rather than trust it.
+    steward_agent_principal_id: str = "agent:steward"
+    #: Hard ceiling on proposals of each kind one run may open, whatever the
+    #: request asks for (ADR-0023's bounded-scope rule).
+    steward_agent_max_proposals_per_run: int = Field(default=25, ge=1, le=200)
+    #: How many of the agent's own proposals may wait for a decision before it
+    #: stops proposing. A drafter that outruns its reviewers saves nobody any
+    #: time -- it moves the backlog into the review queue, which is AR-11's
+    #: lesson applied to the maker side. 0 disables the check.
+    steward_agent_max_pending_proposals: int = Field(default=100, ge=0, le=100_000)
+
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to
     #: embedding candidates live. A catalog change newer than the index also

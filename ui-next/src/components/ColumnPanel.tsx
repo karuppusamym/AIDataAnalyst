@@ -11,6 +11,7 @@ import {
   type DescriptionActionSubject,
 } from "./DescriptionActionDialog";
 import { ColumnDescriptionDrafts } from "./ColumnDescriptionDrafts";
+import { ColumnWorksheet } from "./ColumnWorksheet";
 import { CrossLinks } from "./CrossLinks";
 import { Button, Field, Pill } from "./primitives";
 import "./ColumnPanel.css";
@@ -169,6 +170,7 @@ export function ColumnPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [table, setTable] = useState<TableDescriptionRead | null>(null);
   const [query, setQuery] = useState("");
+  const [worksheet, setWorksheet] = useState(false);
   const request = useRef<AbortController | null>(null);
   const [pending, setPending] = useState<
     { action: "WITHDRAW" | "REINSTATE"; subject: DescriptionActionSubject } | null
@@ -218,6 +220,7 @@ export function ColumnPanel({
     setNotice(null);
     setPending(null);
     setQuery("");
+    setWorksheet(false);
   }, [tableId]);
 
   if (error) {
@@ -365,7 +368,11 @@ export function ColumnPanel({
       {/* Generation and review of machine drafts, next to the columns they
           describe. Mounted here rather than folded into ColumnRow so a column
           and its draft stay separately labelled claims (rule 1 above). */}
-      {columns.length > 0 ? <ColumnDescriptionDrafts tableId={tableId} /> : null}
+      {columns.length > 0 ? <>
+        <Button onClick={() => setWorksheet(true)}>Open column worksheet</Button>
+        {worksheet ? <ColumnWorksheet key={tableId} tableId={tableId} columns={columns} onClose={() => setWorksheet(false)} /> : null}
+        <ColumnDescriptionDrafts tableId={tableId} />
+      </> : null}
       {columns.length > 0 ? (
         <Field label="Find columns">
           <input value={query} onChange={event => { setQuery(event.target.value); setExpanded(false); }} placeholder="Column name or data type" />

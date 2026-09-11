@@ -23,7 +23,7 @@ Real query-volume sources
     is already the real `MetadataTable.id`, recorded with `consumed_at`.
 
 Both retain per-table identity and recency, which is what makes ranking
-meaningful; see `stewardship_api._documentation_worklist_signals` for how
+meaningful; see `documentation_worklist_signals.gather_documentation_worklist_signals` for how
 they are gathered (DB-touching, bounded like RT-6's own scan) and fed into
 the pure function below.
 

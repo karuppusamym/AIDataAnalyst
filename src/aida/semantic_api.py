@@ -1390,7 +1390,11 @@ async def compose_governance_review_diff(
     after: dict[str, Any] | None = None
     message: str | None = None
 
-    if review.object_type == "SEMANTIC_MODEL_VERSION":
+    if review.object_type in {"CONTEXT_PRODUCT_VERSION", "MODEL_IMPORT_BATCH"}:
+        from aida.review_detail_snapshots import detail_snapshots
+
+        before, after, message = await detail_snapshots(session, review)
+    elif review.object_type == "SEMANTIC_MODEL_VERSION":
         model = await session.get(SemanticModelVersion, UUID(review.object_id))
         if model is None:
             raise HTTPException(status_code=409, detail="review target is unavailable")

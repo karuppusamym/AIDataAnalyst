@@ -26081,6 +26081,575 @@
         "title": "SqlValidationResponse",
         "type": "object"
       },
+      "StewardAgentCapabilityRead": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "title": "Capability",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "producer": {
+            "title": "Producer",
+            "type": "string"
+          },
+          "risk_tier": {
+            "title": "Risk Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability",
+          "object_type",
+          "risk_tier",
+          "producer"
+        ],
+        "title": "StewardAgentCapabilityRead",
+        "type": "object"
+      },
+      "StewardAgentOutcomeRead": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acceptance Rate"
+          },
+          "approved": {
+            "title": "Approved",
+            "type": "integer"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "other": {
+            "title": "Other",
+            "type": "integer"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object_type",
+          "pending",
+          "approved",
+          "rejected",
+          "other",
+          "acceptance_rate"
+        ],
+        "title": "StewardAgentOutcomeRead",
+        "type": "object"
+      },
+      "StewardAgentRunItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "PROPOSED",
+              "WOULD_PROPOSE",
+              "SKIPPED",
+              "FAILED"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "capability": {
+            "title": "Capability",
+            "type": "string"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "object_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Id"
+          },
+          "object_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "review_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Id"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "table_name": {
+            "title": "Table Name",
+            "type": "string"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          },
+          "term_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Term Id"
+          },
+          "term_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Term Name"
+          },
+          "worklist_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worklist Rank"
+          }
+        },
+        "required": [
+          "capability",
+          "table_id",
+          "table_name",
+          "action",
+          "reason",
+          "object_type",
+          "object_id",
+          "review_id",
+          "task_id",
+          "confidence",
+          "worklist_rank",
+          "term_id",
+          "term_name"
+        ],
+        "title": "StewardAgentRunItemRead",
+        "type": "object"
+      },
+      "StewardAgentRunRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_principal_id": {
+            "title": "Agent Principal Id",
+            "type": "string"
+          },
+          "ai_asset_version_id": {
+            "format": "uuid",
+            "title": "Ai Asset Version Id",
+            "type": "string"
+          },
+          "autonomy_tier": {
+            "title": "Autonomy Tier",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "title": "Finished At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StewardAgentRunItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "OBSERVE",
+              "PROPOSE"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "proposed": {
+            "title": "Proposed",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "skipped_by_reason": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Skipped By Reason",
+            "type": "object"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "stopped_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stopped Reason"
+          },
+          "would_propose": {
+            "title": "Would Propose",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "organization_id",
+          "agent_principal_id",
+          "ai_asset_version_id",
+          "autonomy_tier",
+          "mode",
+          "dry_run",
+          "limit",
+          "capabilities",
+          "started_at",
+          "finished_at",
+          "proposed",
+          "would_propose",
+          "skipped",
+          "failed",
+          "skipped_by_reason",
+          "stopped_reason",
+          "items"
+        ],
+        "title": "StewardAgentRunRead",
+        "type": "object"
+      },
+      "StewardAgentRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "items": {
+              "enum": [
+                "TABLE_DESCRIPTION",
+                "GLOSSARY_LINK"
+              ],
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "StewardAgentRunRequest",
+        "type": "object"
+      },
+      "StewardAgentStateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Name"
+          },
+          "agent_principal_id": {
+            "title": "Agent Principal Id",
+            "type": "string"
+          },
+          "ai_asset_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Asset Version Id"
+          },
+          "autonomy_tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Autonomy Tier"
+          },
+          "blocking_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocking Reason"
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/StewardAgentCapabilityRead"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "kill_engaged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kill Engaged"
+          },
+          "max_pending_proposals": {
+            "title": "Max Pending Proposals",
+            "type": "integer"
+          },
+          "max_proposals_per_run": {
+            "title": "Max Proposals Per Run",
+            "type": "integer"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "OBSERVE",
+                  "PROPOSE"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "outcomes": {
+            "items": {
+              "$ref": "#/components/schemas/StewardAgentOutcomeRead"
+            },
+            "title": "Outcomes",
+            "type": "array"
+          },
+          "pending_proposals": {
+            "title": "Pending Proposals",
+            "type": "integer"
+          },
+          "refusal_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal Reason"
+          },
+          "registered": {
+            "title": "Registered",
+            "type": "boolean"
+          },
+          "supervisor_persona": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supervisor Persona"
+          },
+          "uses_model": {
+            "title": "Uses Model",
+            "type": "boolean"
+          },
+          "wall_clock_seconds_cap": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wall Clock Seconds Cap"
+          }
+        },
+        "required": [
+          "organization_id",
+          "agent_principal_id",
+          "registered",
+          "refusal_reason",
+          "ai_asset_version_id",
+          "agent_name",
+          "autonomy_tier",
+          "mode",
+          "supervisor_persona",
+          "kill_engaged",
+          "blocking_reason",
+          "method",
+          "uses_model",
+          "capabilities",
+          "max_proposals_per_run",
+          "max_pending_proposals",
+          "pending_proposals",
+          "wall_clock_seconds_cap",
+          "outcomes"
+        ],
+        "title": "StewardAgentStateRead",
+        "type": "object"
+      },
       "StewardshipCoverageRead": {
         "additionalProperties": false,
         "properties": {
@@ -77537,6 +78106,273 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/steward-agent": {
+      "get": {
+        "operationId": "get_steward_agent_state_v1_organizations__organization_id__steward_agent_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StewardAgentStateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Steward Agent State",
+        "tags": [
+          "agent-workforce"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/steward-agent/run": {
+      "post": {
+        "description": "Run the agent once, synchronously and bounded.\n\n409 with a stable reason code when the agent may not act -- no contract, no\napproved version, a kill switch, or authority withdrawn mid-run -- and in\nthat case nothing the run produced is kept.",
+        "operationId": "start_steward_agent_run_v1_organizations__organization_id__steward_agent_run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StewardAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StewardAgentRunRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Steward Agent Run",
+        "tags": [
+          "agent-workforce"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/stewardship/bulk-operations": {
       "get": {
         "operationId": "list_bulk_stewardship_operations_v1_organizations__organization_id__stewardship_bulk_operations_get",
@@ -78401,7 +79237,7 @@
     },
     "/v1/organizations/{organization_id}/stewardship/documentation-worklist": {
       "get": {
-        "description": "AT-5: undocumented/under-described tables ranked by real query volume.\n\nDistinct from RT-6's `usage_popularity` retrieval signal\n(`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate\ntables for an agent's next SQL statement*; this ranks *tables a human\nsteward should document next*, and excludes any table that already has a\nreal (non-proposed) description rather than merely weighting it down.\n\nPaginated with the same bounded offset/limit `Page` contract GL-6's own\nbacklog endpoint above uses, not CT-2's keyset convention: keyset\npagination continues a page via a `WHERE` predicate over an indexed,\nstored ordering column, and there is no such column here -- `query_volume`\nis a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`\nscan (`_documentation_worklist_signals`), recomputed and re-sorted by the\npure `rank_documentation_worklist` on every request. `Page.total` still\nreports the full ranked-candidate count, independent of `limit`.",
+        "description": "AT-5: undocumented/under-described tables ranked by real query volume.\n\nDistinct from RT-6's `usage_popularity` retrieval signal\n(`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate\ntables for an agent's next SQL statement*; this ranks *tables a human\nsteward should document next*, and excludes any table that already has a\nreal (non-proposed) description rather than merely weighting it down.\n\nPaginated with the same bounded offset/limit `Page` contract GL-6's own\nbacklog endpoint above uses, not CT-2's keyset convention: keyset\npagination continues a page via a `WHERE` predicate over an indexed,\nstored ordering column, and there is no such column here -- `query_volume`\nis a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`\nscan (`gather_documentation_worklist_signals`), recomputed and re-sorted by the\npure `rank_documentation_worklist` on every request. `Page.total` still\nreports the full ranked-candidate count, independent of `limit`.",
         "operationId": "list_documentation_worklist_v1_organizations__organization_id__stewardship_documentation_worklist_get",
         "parameters": [
           {

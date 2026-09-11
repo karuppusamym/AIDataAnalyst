@@ -49,6 +49,10 @@ import type {
 } from "../types";
 import type { AuditEventRead, PageOf } from "../ui-types";
 
+export function fetchGovernanceReviewDiff(reviewId: string, signal?: AbortSignal): Promise<import("../types").GovernanceReviewDiffRead> {
+  return get(`/v1/governance/reviews/${encodeURIComponent(reviewId)}/diff`, signal);
+}
+
 /* ---------------------------------------------------------------------------
    UX-15: review queue, marketplace, lineage refusals and Studio change sets.
    UX-20: narrated lineage traversal (the impact endpoint's per-hop evidence).

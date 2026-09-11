@@ -5495,3 +5495,7 @@ class ReviewerAgentState(Base, TimestampMixin):
     suspended_by: Mapped[str | None] = mapped_column(String(255))
     suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suspension_reason: Mapped[str | None] = mapped_column(Text)
+
+
+# Register ontology metadata for migrations and independent schema/test creation.
+from aida.ontology_models import OntologyHead, OntologyVersion  # noqa: E402,F401

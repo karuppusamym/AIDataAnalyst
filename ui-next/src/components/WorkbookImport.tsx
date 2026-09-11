@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   fetchModelImportChanges,
@@ -123,14 +123,14 @@ function ChangeRow({
   );
 }
 
-export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
+export function WorkbookImport({ datasourceId, initialBatch }: { datasourceId: string; initialBatch?: ModelImportBatchRead }) {
   // Switching sources must never retain a draft belonging to the previous source.
-  return <WorkbookImportSession key={datasourceId} datasourceId={datasourceId} />;
+  return <WorkbookImportSession key={`${datasourceId}:${initialBatch?.id ?? "upload"}`} datasourceId={datasourceId} initialBatch={initialBatch} />;
 }
 
-function WorkbookImportSession({ datasourceId }: { datasourceId: string }) {
+function WorkbookImportSession({ datasourceId, initialBatch }: { datasourceId: string; initialBatch?: ModelImportBatchRead }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
-  const [batch, setBatch] = useState<ModelImportBatchRead | null>(null);
+  const [batch, setBatch] = useState<ModelImportBatchRead | null>(initialBatch ?? null);
   const [changes, setChanges] = useState<ModelImportChangeRead[]>([]);
   const [busy, setBusy] = useState<"upload" | "preview" | "submit" | "exclude" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -147,6 +147,16 @@ function WorkbookImportSession({ datasourceId }: { datasourceId: string }) {
       : current);
     setPreviewReady(true);
   }, []);
+
+  useEffect(() => {
+    if (!initialBatch) return;
+    let active = true;
+    setBusy("preview");
+    loadPreview(initialBatch.id).catch(e => {
+      if (active) setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    }).finally(() => { if (active) setBusy(null); });
+    return () => { active = false; };
+  }, [initialBatch, loadPreview]);
 
   const retryPreview = async () => {
     if (!batch || busy !== null) return;
@@ -245,7 +255,7 @@ function WorkbookImportSession({ datasourceId }: { datasourceId: string }) {
   return (
     <div className="wbi">
       <div className="wbi__sub">
-        Upload edited workbook
+        {initialBatch ? "Saved worksheet changes" : "Upload edited workbook"}
         {batch ? (
           <button className="wbi__reset" disabled={busy !== null} onClick={reset}>
             Start over

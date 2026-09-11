@@ -36,6 +36,8 @@ import {
   makeFixtureReviewerAgentSamples,
   makeFixtureReviewerAgentState,
   makeFixtureRunAgentEvaluation,
+  makeFixtureStewardAgentRun,
+  makeFixtureStewardAgentState,
   makeFixtureSubmitAgentContractRequest,
   makeFixtureSubmitModelRoute,
   makeFixtureUpdateAiRemediation,
@@ -64,6 +66,9 @@ import type {
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
+  StewardAgentRunRead,
+  StewardAgentRunRequest,
+  StewardAgentStateRead,
 } from "../types";
 import type { PageOf } from "../ui-types";
 
@@ -756,6 +761,49 @@ export function fetchReviewerAgentSamples(
       params.set("offset", String(query.offset ?? 0));
       return get<PageOf<ReviewAuditSampleRead>>(
         `/v1/organizations/${organizationId}/reviewer-agent/samples?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   ADR-0029: the steward agent console. Two real routes in
+   `steward_agent_api.py`. A run only ever *opens* review items — the agent
+   decides nothing — so fixture mode returns a representative result rather
+   than refusing, the same standing as the reviewer agent's run fixture.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{org}/steward-agent` — whether the agent could run
+ *  here (and the refusal it would get if not), its tier and what that tier
+ *  lets it do, any kill switch stopping it, and how its proposals have fared
+ *  with reviewers. */
+export function fetchStewardAgentState(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<StewardAgentStateRead> {
+  return demoOr(
+    async () => makeFixtureStewardAgentState(organizationId),
+    async () => {
+      return get<StewardAgentStateRead>(`/v1/organizations/${organizationId}/steward-agent`, signal);
+    },
+  );
+}
+
+/** `POST .../steward-agent/run` — one bounded run. 409s (via `ApiError`) with
+ *  a stable reason code in `detail` when the agent may not act; in that case
+ *  nothing the run produced is kept. `dry_run` previews and opens nothing. */
+export function runStewardAgent(
+  organizationId: string,
+  body: StewardAgentRunRequest,
+  signal?: AbortSignal,
+): Promise<StewardAgentRunRead> {
+  return demoOr(
+    async () => makeFixtureStewardAgentRun(organizationId, body),
+    async () => {
+      return postJson<StewardAgentRunRead>(
+        `/v1/organizations/${organizationId}/steward-agent/run`,
+        body,
         signal,
       );
     },

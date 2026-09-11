@@ -1,7 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -9,30 +8,25 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.business_annotation_versions import current_version_alias
-from aida.catalog_read_model import (
-    _business_annotations,
-    _description,
-    _latest_approved_documentation,
-    _latest_pending_drafts,
-)
 from aida.config import Settings, get_settings
-from aida.consumption_lineage import get_consumption_by_resource_counts
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.documentation_worklist import (
     DocumentationWorklistEntry,
-    TableQuerySignal,
     WorklistRanking,
     rank_documentation_worklist,
 )
+from aida.documentation_worklist_signals import gather_documentation_worklist_signals
 from aida.events import record_audit, record_outbox
+from aida.glossary_link_candidates import (
+    build_glossary_link_proposal,
+    find_glossary_link_candidates,
+)
 from aida.glossary_owner_routing import TableFacts, sync_unowned_asset_backlog
 from aida.models import (
     AssetCertification,
     AssetDocumentation,
     AssetDocumentationVersion,
-    AssetTermLink,
     BulkStewardshipOperation,
     BusinessDomain,
     CoverageSnapshot,
@@ -53,10 +47,8 @@ from aida.models import (
     OwnershipAssignment,
     OwnershipRule,
     Project,
-    QueryExecution,
     UnownedAssetEscalation,
 )
-from aida.quality_coupling import resolve_table_ids
 from aida.schemas import (
     BulkStewardshipOperationCreate,
     BulkStewardshipOperationRead,
@@ -85,7 +77,6 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
-from aida.stewardship_worklist import enrich_tables
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -1243,123 +1234,22 @@ async def generate_glossary_link_proposals(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     enforce_organization(context, organization_id)
-    term_rows = (
-        await session.execute(
-            select(GlossaryTerm, GlossaryTermVersion)
-            .join(GlossaryTermVersion, GlossaryTermVersion.term_id == GlossaryTerm.id)
-            .where(
-                GlossaryTerm.organization_id == organization_id,
-                GlossaryTerm.lifecycle_status == "ACTIVE",
-                GlossaryTermVersion.status == "APPROVED",
-            )
-            .limit(5000)
-        )
-    ).all()
-    label_index: dict[str, list[tuple[GlossaryTerm, GlossaryTermVersion, str]]] = {}
-    for term, version in term_rows:
-        labels = [(version.display_name, "DISPLAY_NAME"), (term.term_key, "TERM_KEY")]
-        labels.extend((synonym, "SYNONYM") for synonym in version.synonyms)
-        for label, kind in labels:
-            label_index.setdefault(label.strip().casefold(), []).append((term, version, kind))
-    # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
-    # not on `MetadataBusinessAnnotation` -- see `business_annotation_versions.py`.
-    annotation_version_alias, annotation_version_ranked = current_version_alias()
-    annotation_rows = (
-        await session.execute(
-            select(MetadataBusinessAnnotation, annotation_version_alias)
-            .join(
-                annotation_version_alias,
-                annotation_version_alias.annotation_id == MetadataBusinessAnnotation.id,
-            )
-            .where(
-                MetadataBusinessAnnotation.organization_id == organization_id,
-                annotation_version_ranked.c.rn == 1,
-            )
-            .order_by(MetadataBusinessAnnotation.id)
-            .limit(10_000)
-        )
-    ).all()
-    link_rows = (
-        await session.execute(
-            select(AssetTermLink.table_id, AssetTermLink.term_id).where(
-                AssetTermLink.organization_id == organization_id
-            )
-        )
-    ).all()
-    existing_links = {(row[0], row[1]) for row in link_rows}
-    proposal_rows = (
-        await session.execute(
-            select(
-                GlossaryLinkProposal.table_id,
-                GlossaryLinkProposal.term_id,
-                GlossaryLinkProposal.source_annotation_id,
-            ).where(GlossaryLinkProposal.organization_id == organization_id)
-        )
-    ).all()
-    existing_proposals = {(row[0], row[1], row[2]) for row in proposal_rows}
+    # GL-8's matching rule lives in `aida.glossary_link_candidates`, shared with
+    # the steward agent (ADR-0029). This endpoint attributes the proposals to the
+    # steward who asked and leaves them in DRAFT for that steward to submit.
+    scan = await find_glossary_link_candidates(
+        session,
+        organization_id=organization_id,
+        minimum_confidence=body.minimum_confidence,
+        limit=body.limit,
+    )
     created: list[tuple[GlossaryLinkProposal, GlossaryTermVersion, MetadataTable]] = []
-    tables = {
-        row.id: row
-        for row in (
-            await session.scalars(
-                select(MetadataTable).where(MetadataTable.organization_id == organization_id)
-            )
-        ).all()
-    }
-    for annotation, content_version in annotation_rows:
-        annotation_labels = [(content_version.business_name, "BUSINESS_NAME")]
-        annotation_labels.extend(
-            (value, "ANNOTATION_SYNONYM") for value in content_version.synonyms
+    for candidate in scan.candidates:
+        proposal = build_glossary_link_proposal(
+            candidate, organization_id=organization_id, created_by=context.principal_id
         )
-        candidates: dict[UUID, tuple[GlossaryTerm, GlossaryTermVersion, float, str, str]] = {}
-        for annotation_label, annotation_kind in annotation_labels:
-            normalized = annotation_label.strip().casefold()
-            for term, version, term_kind in label_index.get(normalized, []):
-                is_primary_match = (
-                    annotation_kind == "BUSINESS_NAME" and term_kind == "DISPLAY_NAME"
-                )
-                confidence = 1.0 if is_primary_match else 0.92
-                current = candidates.get(term.id)
-                if current is None or confidence > current[2]:
-                    candidates[term.id] = (
-                        term,
-                        version,
-                        confidence,
-                        annotation_label,
-                        term_kind,
-                    )
-        for term, version, confidence, matched_label, term_kind in candidates.values():
-            key = (annotation.table_id, term.id, annotation.id)
-            if (
-                confidence < body.minimum_confidence
-                or (annotation.table_id, term.id) in existing_links
-                or key in existing_proposals
-            ):
-                continue
-            table = tables.get(annotation.table_id)
-            if table is None:
-                continue
-            proposal = GlossaryLinkProposal(
-                organization_id=organization_id,
-                table_id=annotation.table_id,
-                term_id=term.id,
-                source_annotation_id=annotation.id,
-                confidence=confidence,
-                evidence={
-                    "strategy": "APPROVED_LABEL_EXACT_MATCH",
-                    "matched_label": matched_label,
-                    "term_label_kind": term_kind,
-                    "annotation_version": content_version.version,
-                },
-                created_by=context.principal_id,
-            )
-            session.add(proposal)
-            created.append((proposal, version, table))
-            existing_proposals.add(key)
-            if len(created) == body.limit:
-                break
-        if len(created) == body.limit:
-            break
+        session.add(proposal)
+        created.append((proposal, candidate.term_version, candidate.table))
     await session.flush()
     record_audit(
         session,
@@ -1370,8 +1260,8 @@ async def generate_glossary_link_proposals(
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
         details={
-            "annotations_scanned": len(annotation_rows),
-            "approved_terms_scanned": len(term_rows),
+            "annotations_scanned": scan.annotations_scanned,
+            "approved_terms_scanned": scan.approved_terms_scanned,
             "proposals_created": len(created),
         },
     )
@@ -2109,249 +1999,6 @@ class DocumentationWorklistEntryRead(ApiModel):
     missing: list[str]
 
 
-# Mirrors GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT` bound: caps both (a) how
-# many tables the CX-4 consumption side contributes as ranking candidates,
-# and (b) how many additional zero-query-volume tables `include_zero_volume`
-# pulls in. The gateway-execution side is bounded separately, by
-# `Settings.agent_retrieval_scan_limit` (RT-6's own budget) on *rows scanned*
-# per datasource rather than tables returned -- a row-scan bound naturally
-# limits the number of distinct tables that can appear from it too.
-DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT = 500
-
-
-async def _query_execution_volume(
-    session: AsyncSession,
-    *,
-    datasources: list[DataSource],
-    scan_limit: int,
-) -> dict[UUID, tuple[int, datetime]]:
-    """How many recent `COMPLETED` `QueryExecution` rows referenced each
-    table, aggregated across every datasource in ``datasources``.
-
-    `QueryExecution.referenced_tables` stores SQL-qualified name strings, not
-    ids, and a name only resolves unambiguously within one datasource's own
-    catalog (two datasources can both have a table named ``customers``), so
-    the scan and resolution happen per datasource -- exactly RT-6's own
-    `aida.retrieval._table_execution_counts`, reused at the technique level
-    (same `aida.quality_coupling.resolve_table_ids` resolver, same
-    most-recent-first bounded scan) since AT-5 needs a different aggregate
-    (every touched table, not lookup counts for a caller-given set), not a
-    fork of RT-6's private, retrieval-scoped helper itself.
-    """
-    counts: dict[UUID, int] = {}
-    last_seen: dict[UUID, datetime] = {}
-    for datasource in datasources:
-        rows = (
-            await session.execute(
-                select(QueryExecution.referenced_tables, QueryExecution.created_at)
-                .where(
-                    QueryExecution.datasource_id == datasource.id,
-                    QueryExecution.organization_id == datasource.organization_id,
-                    QueryExecution.status == "COMPLETED",
-                )
-                .order_by(QueryExecution.created_at.desc())
-                .limit(scan_limit)
-            )
-        ).all()
-        if not rows:
-            continue
-        all_names: set[str] = set()
-        for referenced_tables, _created_at in rows:
-            all_names.update(referenced_tables or [])
-        if not all_names:
-            continue
-        name_to_id = await resolve_table_ids(
-            session, datasource=datasource, table_names=sorted(all_names)
-        )
-        for referenced_tables, created_at in rows:
-            # A table referenced twice in one statement counts once for that
-            # execution -- this measures how many past *queries* touched the
-            # table, the same "queries, not raw name occurrences" rule RT-6
-            # applies for the identical reason.
-            touched = {
-                table_id
-                for name in (referenced_tables or [])
-                if (table_id := name_to_id.get(name)) is not None
-            }
-            for table_id in touched:
-                counts[table_id] = counts.get(table_id, 0) + 1
-                if table_id not in last_seen or created_at > last_seen[table_id]:
-                    last_seen[table_id] = created_at
-    return {table_id: (count, last_seen[table_id]) for table_id, count in counts.items()}
-
-
-async def _consumption_volume(
-    session: AsyncSession, *, organization_id: UUID, limit: int
-) -> dict[UUID, tuple[int, datetime]]:
-    """CX-4 consumption-read counts per table, top ``limit`` tables by count.
-
-    `ConsumptionRecord.resource_id` for `resource_type="metadata_table"` is
-    already the real `MetadataTable.id` (set by `mcp_server.py`'s
-    `record_consumption` call at the point a table is read via MCP), so --
-    unlike the gateway-execution side -- no name resolution is needed here.
-    """
-    rows = await get_consumption_by_resource_counts(
-        session,
-        organization_id=organization_id,
-        resource_type="metadata_table",
-        limit=limit,
-    )
-    result: dict[UUID, tuple[int, datetime]] = {}
-    for resource_id, count, last_consumed_at in rows:
-        try:
-            table_id = UUID(resource_id)
-        except ValueError:  # pragma: no cover - defensive, ids are always UUIDs
-            continue
-        result[table_id] = (count, last_consumed_at)
-    return result
-
-
-async def _documentation_state(
-    session: AsyncSession, tables: list[MetadataTable]
-) -> dict[UUID, tuple[bool, bool]]:
-    """table id -> (is_documented, description_is_proposed), reusing UX-12's
-    exact precedence chain (`catalog_read_model._description`) rather than a
-    second "is this documented" rule -- see `documentation_worklist.py`'s
-    module docstring for why a pending, unapproved draft does not count as
-    documented here even though `catalog_read_model` surfaces it as a
-    proposal.
-    """
-    if not tables:
-        return {}
-    table_ids = [table.id for table in tables]
-    documentation = await _latest_approved_documentation(session, table_ids)
-    pending_drafts = await _latest_pending_drafts(session, table_ids)
-    annotations = await _business_annotations(session, table_ids)
-    state: dict[UUID, tuple[bool, bool]] = {}
-    for table in tables:
-        description, description_is_proposed = _description(
-            table,
-            documentation=documentation.get(table.id),
-            pending_draft=pending_drafts.get(table.id),
-            annotation=annotations.get(table.id),
-        )
-        is_documented = bool(description) and not description_is_proposed
-        state[table.id] = (is_documented, description_is_proposed)
-    return state
-
-
-async def _documentation_worklist_signals(
-    session: AsyncSession,
-    *,
-    organization_id: UUID,
-    scan_limit: int,
-    include_zero_volume: bool,
-) -> list[TableQuerySignal]:
-    """Gather every DB-touching input `rank_documentation_worklist` needs,
-    then hand off to that pure function -- this is the only place in AT-5
-    that talks to the database.
-
-    The candidate table set is driven by real activity rather than a full
-    catalog scan: a table that appears in neither the bounded
-    `QueryExecution` scan nor the top-`DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT`
-    consumption reads has, by construction, no real query-volume signal to
-    rank it by, so it is simply never fetched -- consistent with
-    `rank_documentation_worklist`'s own default of excluding zero-volume
-    tables, and a lot cheaper than the alternative (composing documentation
-    state for an org's entire active-table catalog on every request, which
-    `list_catalog_rows`'s own 1M-table docstring notes is exactly the scale
-    this platform's catalog surfaces are built not to assume). Only when a
-    caller opts into ``include_zero_volume`` does this reach for an
-    additional bounded slice of zero-volume active tables.
-    """
-    datasources = (
-        await session.scalars(
-            select(DataSource).where(DataSource.organization_id == organization_id)
-        )
-    ).all()
-
-    execution_volume = await _query_execution_volume(
-        session, datasources=list(datasources), scan_limit=scan_limit
-    )
-    consumption_volume = await _consumption_volume(
-        session,
-        organization_id=organization_id,
-        limit=DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT,
-    )
-    candidate_ids = set(execution_volume) | set(consumption_volume)
-
-    if include_zero_volume:
-        zero_volume_filters: list[Any] = [
-            MetadataTable.organization_id == organization_id,
-            MetadataTable.status == "ACTIVE",
-        ]
-        if candidate_ids:
-            zero_volume_filters.append(MetadataTable.id.notin_(candidate_ids))
-        zero_volume_ids = (
-            await session.scalars(
-                select(MetadataTable.id)
-                .where(*zero_volume_filters)
-                .order_by(MetadataTable.id)
-                .limit(DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT)
-            )
-        ).all()
-        candidate_ids |= set(zero_volume_ids)
-
-    if not candidate_ids:
-        return []
-
-    rows = (
-        await session.execute(
-            select(MetadataTable, MetadataSchema, DataSource)
-            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
-            .join(DataSource, DataSource.id == MetadataTable.datasource_id)
-            .where(
-                MetadataTable.organization_id == organization_id,
-                MetadataTable.id.in_(candidate_ids),
-            )
-        )
-    ).all()
-    candidate_rows = [(table, schema, datasource) for table, schema, datasource in rows]
-    documentation_state = await _documentation_state(
-        session, [table for table, _, _ in candidate_rows]
-    )
-    # SW-1 adoption: downstream impact and the five-field deficit, from the
-    # same `enrich_tables` `compute_worklist` uses -- so "documented" has one
-    # definition on this platform rather than one per surface. AT-5's own
-    # UX-12 precedence chain still decides the description field; SW-1 is
-    # handed that answer rather than computing a weaker one of its own.
-    enrichment = await enrich_tables(
-        session,
-        organization_id,
-        [table.id for table, _, _ in candidate_rows],
-        descriptions={
-            table.id: documentation_state.get(table.id, (False, False))[0]
-            for table, _, _ in candidate_rows
-        },
-    )
-
-    signals: list[TableQuerySignal] = []
-    for table, schema, datasource in candidate_rows:
-        exec_count, last_queried_at = execution_volume.get(table.id, (0, None))
-        consumption_count, last_consumed_at = consumption_volume.get(table.id, (0, None))
-        is_documented, description_is_proposed = documentation_state.get(
-            table.id, (False, False)
-        )
-        deficit = enrichment.get(table.id)
-        signals.append(
-            TableQuerySignal(
-                table_id=table.id,
-                table_name=table.name,
-                schema_name=schema.name,
-                datasource_name=datasource.name,
-                query_execution_count=exec_count,
-                consumption_read_count=consumption_count,
-                last_queried_at=last_queried_at,
-                last_consumed_at=last_consumed_at,
-                is_documented=is_documented,
-                description_is_proposed=description_is_proposed,
-                downstream_count=deficit.downstream_count if deficit else 0,
-                missing=deficit.missing if deficit else (),
-            )
-        )
-    return signals
-
-
 @router.get(
     "/organizations/{organization_id}/stewardship/documentation-worklist",
     response_model=Page,
@@ -2396,12 +2043,12 @@ async def list_documentation_worklist(
     pagination continues a page via a `WHERE` predicate over an indexed,
     stored ordering column, and there is no such column here -- `query_volume`
     is a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`
-    scan (`_documentation_worklist_signals`), recomputed and re-sorted by the
+    scan (`gather_documentation_worklist_signals`), recomputed and re-sorted by the
     pure `rank_documentation_worklist` on every request. `Page.total` still
     reports the full ranked-candidate count, independent of `limit`.
     """
     enforce_organization(context, organization_id)
-    signals = await _documentation_worklist_signals(
+    signals = await gather_documentation_worklist_signals(
         session,
         organization_id=organization_id,
         scan_limit=settings.agent_retrieval_scan_limit,

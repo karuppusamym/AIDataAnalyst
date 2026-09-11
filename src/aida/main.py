@@ -89,6 +89,7 @@ from aida.search_api import router as search_router
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
 from aida.sql_validation_api import router as sql_validation_router
+from aida.steward_agent_api import router as steward_agent_router
 from aida.stewardship_api import router as stewardship_router
 from aida.studio_api import router as studio_router
 from aida.table_family_api import router as table_family_router
@@ -456,6 +457,8 @@ app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
 app.include_router(review_queue_router)
+# ADR-0029: the steward agent.
+app.include_router(steward_agent_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

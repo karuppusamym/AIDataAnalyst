@@ -542,3 +542,29 @@ forbidden_modules = [
   "aida.semantic_api",
   "aida.unified_lineage_api",
 ]
+
+[[tool.importlinter.contracts]]
+# ADR-0029. The steward agent is automation, not a router, and it drafts through
+# the same rules a steward's own buttons use. Those rules were two private
+# functions inside `stewardship_api` (the AT-5 worklist gatherer and the GL-8 label
+# matcher); they moved to `aida.documentation_worklist_signals` and
+# `aida.glossary_link_candidates` so the agent could reach them without importing
+# a router. This pins that: the cheapest way to add a third shared rule would
+# otherwise be another import back into the router it lives beside -- R03's
+# "services should not obtain business models from routers", and the same edge the
+# F05 contract above forbids the reviewer agent.
+name = "ADR-0029 the steward agent and the rules it shares never import a router"
+type = "forbidden"
+source_modules = [
+  "aida.documentation_worklist_signals",
+  "aida.glossary_link_candidates",
+  "aida.steward_agent",
+]
+forbidden_modules = [
+  "aida.agent_contract_api",
+  "aida.api",
+  "aida.asset_description_api",
+  "aida.semantic_api",
+  "aida.steward_agent_api",
+  "aida.stewardship_api",
+]

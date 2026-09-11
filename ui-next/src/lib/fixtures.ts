@@ -64,6 +64,10 @@ import type {
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
+  StewardAgentRunItemRead,
+  StewardAgentRunRead,
+  StewardAgentRunRequest,
+  StewardAgentStateRead,
 } from "./types";
 import type {
   AuditEventRead,
@@ -6439,6 +6443,152 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
     sampling_rate: 0.1,
     agent_principal_id: "agent:reviewer",
     evidence_max_age_minutes: 60,
+  };
+}
+
+/** `GET .../steward-agent` fixture (ADR-0029) -- a registered T1 agent with
+ *  proposals in flight, one kind already decided and one not, so both an
+ *  acceptance rate and its "—" have something to render. Mirrors
+ *  `steward_agent_api.StewardAgentStateRead` field for field. */
+export function makeFixtureStewardAgentState(organizationId: string): StewardAgentStateRead {
+  return {
+    organization_id: organizationId,
+    agent_principal_id: "agent:steward",
+    registered: true,
+    refusal_reason: null,
+    ai_asset_version_id: "aaaaaaaa-5555-5555-5555-555555555555",
+    agent_name: "Steward agent",
+    autonomy_tier: "T1",
+    mode: "PROPOSE",
+    supervisor_persona: "STEWARD",
+    kill_engaged: false,
+    blocking_reason: null,
+    method: "DETERMINISTIC",
+    uses_model: false,
+    capabilities: [
+      {
+        capability: "TABLE_DESCRIPTION",
+        object_type: "ASSET_DESCRIPTION_DRAFT",
+        risk_tier: "T0",
+        producer: "asset_description_service: GL-9 draft composed from catalog evidence",
+      },
+      {
+        capability: "GLOSSARY_LINK",
+        object_type: "GLOSSARY_LINK_PROPOSAL",
+        risk_tier: "T1",
+        producer: "glossary_link_candidates: GL-8 approved-label exact match",
+      },
+    ],
+    max_proposals_per_run: 25,
+    max_pending_proposals: 100,
+    pending_proposals: 7,
+    wall_clock_seconds_cap: 300,
+    outcomes: [
+      {
+        object_type: "ASSET_DESCRIPTION_DRAFT",
+        pending: 5,
+        approved: 12,
+        rejected: 4,
+        other: 0,
+        acceptance_rate: 0.75,
+      },
+      {
+        object_type: "GLOSSARY_LINK_PROPOSAL",
+        pending: 2,
+        approved: 0,
+        rejected: 0,
+        other: 0,
+        acceptance_rate: null,
+      },
+    ],
+  };
+}
+
+/** `POST .../steward-agent/run` fixture. Honours `dry_run` and the requested
+ *  capabilities, so the preview and the capability toggles behave in fixture
+ *  mode the way they do against the API: a preview opens nothing and links
+ *  to nothing. */
+export function makeFixtureStewardAgentRun(
+  organizationId: string,
+  body: StewardAgentRunRequest,
+): StewardAgentRunRead {
+  const dryRun = body.dry_run ?? false;
+  const capabilities = body.capabilities ?? ["TABLE_DESCRIPTION", "GLOSSARY_LINK"];
+  const action = dryRun ? "WOULD_PROPOSE" : "PROPOSED";
+  const opened = (id: string) => (dryRun ? null : id);
+  const items: StewardAgentRunItemRead[] = [];
+  if (capabilities.includes("TABLE_DESCRIPTION")) {
+    items.push(
+      {
+        capability: "TABLE_DESCRIPTION",
+        table_id: "bbbbbbbb-5555-5555-5555-000000000001",
+        table_name: "fact_card_transactions",
+        action,
+        reason: null,
+        object_type: "ASSET_DESCRIPTION_DRAFT",
+        object_id: opened("cccccccc-5555-5555-5555-000000000001"),
+        review_id: opened("dddddddd-5555-5555-5555-000000000001"),
+        task_id: opened("eeeeeeee-5555-5555-5555-000000000001"),
+        confidence: 0.61,
+        worklist_rank: 1,
+        term_id: null,
+        term_name: null,
+      },
+      {
+        capability: "TABLE_DESCRIPTION",
+        table_id: "bbbbbbbb-5555-5555-5555-000000000002",
+        table_name: "dim_branch",
+        action: "SKIPPED",
+        reason: "open_draft_exists",
+        object_type: null,
+        object_id: null,
+        review_id: null,
+        task_id: null,
+        confidence: null,
+        worklist_rank: 2,
+        term_id: null,
+        term_name: null,
+      },
+    );
+  }
+  if (capabilities.includes("GLOSSARY_LINK")) {
+    items.push({
+      capability: "GLOSSARY_LINK",
+      table_id: "bbbbbbbb-5555-5555-5555-000000000003",
+      table_name: "customer_master",
+      action,
+      reason: null,
+      object_type: "GLOSSARY_LINK_PROPOSAL",
+      object_id: opened("cccccccc-5555-5555-5555-000000000003"),
+      review_id: opened("dddddddd-5555-5555-5555-000000000003"),
+      task_id: opened("eeeeeeee-5555-5555-5555-000000000003"),
+      confidence: 1,
+      worklist_rank: null,
+      term_id: "ffffffff-5555-5555-5555-000000000003",
+      term_name: "Customer",
+    });
+  }
+  const count = (value: string) => items.filter((item) => item.action === value).length;
+  const now = new Date().toISOString();
+  return {
+    run_id: "99999999-5555-5555-5555-000000000000",
+    organization_id: organizationId,
+    agent_principal_id: "agent:steward",
+    ai_asset_version_id: "aaaaaaaa-5555-5555-5555-555555555555",
+    autonomy_tier: "T1",
+    mode: dryRun ? "OBSERVE" : "PROPOSE",
+    dry_run: dryRun,
+    limit: body.limit ?? 10,
+    capabilities,
+    started_at: now,
+    finished_at: now,
+    proposed: count("PROPOSED"),
+    would_propose: count("WOULD_PROPOSE"),
+    skipped: count("SKIPPED"),
+    failed: count("FAILED"),
+    skipped_by_reason: count("SKIPPED") ? { open_draft_exists: count("SKIPPED") } : {},
+    stopped_reason: null,
+    items,
   };
 }
 

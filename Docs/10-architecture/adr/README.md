@@ -63,6 +63,7 @@ The observable condition under which this should be reconsidered.
 | [0023](ADR-0023-deterministic-jobs-vs-generative-producers.md) | Deterministic jobs vs. confidence-gated generative producers for catalog enrichment | Proposed | A capability exists where the deterministic/generative line is genuinely ambiguous at design time |
 | [0027](ADR-0027-risk-tiered-agent-checking.md) | An independent reviewer agent may check risk-tier T0/T1 items only, under three hard conditions | Proposed | The sampled disagreement rate exceeds 5% for any object type over a month, a T0/T1 misclassification causes an incident, or an auditor rejects sampled automated checking as a control |
 | [0028](ADR-0028-developer-workbench-not-separate-applications.md) | One application with a Developer workbench, not several applications behind a landing page | Proposed | A developer surface must be reachable from a network zone the governed portal must not be, or served to an audience without an Atlas seat |
+| [0029](ADR-0029-steward-agent.md) | A steward agent proposes descriptions and glossary links under its own contracted identity, and decides nothing | Proposed | Either object type's acceptance rate falls below 50% over at least 50 decided proposals in 30 days, a model route is approved for drafting, or the ingest side-car is proposed for inclusion |
 
 ## Superseded decision history
 
