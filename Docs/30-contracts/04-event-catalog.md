@@ -297,6 +297,7 @@ and carry no actions: a notification here is never a control surface.
 | `agent.kill_switch_engaged.v1` | AG-10: an agent's kill switch was engaged. Takes effect on the agent's very next run -- the orchestrator queries the switch live rather than caching it | ai_asset_version_id, kill_scope, agent_principal_id |
 | `agent.kill_switch_released.v1` | AG-10: an agent's kill switch was released and its runs may resume | ai_asset_version_id, kill_scope, agent_principal_id |
 | `reviewer_agent.sample_resolved.v1` | ADR-0027 condition (b): a human resolved one sampled agent decision. The DISAGREED rate per object type is the metric ADR-0027's revisit trigger watches | sample_id, human_outcome, object_type, risk_tier |
+| `reviewer_agent.audit_backlog_exceeded.v1` | AR-11: the reviewer agent refused a run because its unread audit sample had reached `reviewer_agent_max_unresolved_samples`. Recorded after the refused run's rollback, beside a DENIED `reviewer_agent.run` audit row and a `REVIEWER_AGENT_AUDIT_BACKLOG` notification. The agent resumes by itself once humans bring the backlog under the bound | unresolved_samples, max_unresolved_samples |
 
 ### AI registry — topic `atlas.governance.v1`
 
