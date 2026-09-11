@@ -577,24 +577,39 @@ async def handle_newly_created_table(session: Any, payload: dict[str, Any]) -> N
     await enqueue_semantics_for_source(session, datasource_id, [table_id])
 
 
-async def enqueue_semantics_for_source(
+#: Tables per semantic-inference batch. On the consumer's path each batch is
+#: its own transaction (`enqueue_semantics_in_batches`).
+SEMANTICS_BATCH_SIZE = 100
+
+
+async def enqueue_semantics_batch(
     session: Any,
     datasource_id: UUID,
+    *,
     table_ids: list[UUID] | None = None,
-) -> None:
-    """Generate actual proposals, once per table and completed scan, in bounded batches."""
+    after: UUID | None = None,
+) -> UUID | None:
+    """Propose semantics for the next batch of a source's unproposed tables.
+
+    Returns the last table id the batch covered, which is the cursor for the
+    next one, or None when nothing is left or the source is not ready (no
+    completed scan, or auto-enqueue switched off). It takes the source's row
+    lock, so two batches for one source never run side by side.
+
+    The cursor is what makes the pass end. A table inference writes no proposal
+    for stays unproposed, so selecting "whatever is still unproposed" picked it
+    again on every pass, forever. In the dev stack that loop held one
+    transaction for the worker's whole uptime; every migration queued behind
+    it, and every write behind the migration.
+    """
     datasource = await session.scalar(
-        select(DataSource)
-        .where(
-            DataSource.id == datasource_id,
-        )
-        .with_for_update()
+        select(DataSource).where(DataSource.id == datasource_id).with_for_update()
     )
     if datasource is None or not get_settings().auto_enqueue_on_ingest:
-        return
+        return None
     run_id = await _completed_analysis_run_id(session, datasource_id)
     if run_id is None:
-        return
+        return None
     proposed = (
         select(MetadataEnrichmentProposal.table_id)
         .join(
@@ -603,44 +618,71 @@ async def enqueue_semantics_for_source(
         )
         .where(SemanticInferenceRun.analysis_run_id == run_id)
     )
-    # A keyset cursor, not "whatever is still unproposed". A table inference
-    # writes no proposal for stayed unproposed, so it was selected again on every
-    # pass, forever, inside this one transaction. In the dev stack that
-    # transaction outlived the worker's uptime; every migration queued behind it,
-    # and every write behind the migration. The cursor tries each table once.
+    filters = [
+        MetadataTable.datasource_id == datasource_id,
+        MetadataTable.status == "ACTIVE",
+        MetadataTable.id.not_in(proposed),
+    ]
+    if table_ids is not None:
+        filters.append(MetadataTable.id.in_(table_ids))
+    if after is not None:
+        filters.append(MetadataTable.id > after)
+    pending: list[UUID] = list(
+        await session.scalars(
+            select(MetadataTable.id)
+            .where(*filters)
+            .order_by(MetadataTable.id)
+            .limit(SEMANTICS_BATCH_SIZE)
+        )
+    )
+    if not pending:
+        return None
+    await generate_semantic_inference(
+        datasource_id,
+        SemanticInferenceRequest(use_model=False, max_tables=SEMANTICS_BATCH_SIZE),
+        _worker_context(datasource.organization_id),
+        session,
+        get_settings(),
+        table_ids=pending,
+    )
+    await session.flush()
+    return pending[-1]
+
+
+async def enqueue_semantics_for_source(
+    session: Any,
+    datasource_id: UUID,
+    table_ids: list[UUID] | None = None,
+) -> None:
+    """Every batch, inside the caller's transaction: the single-table path from
+    `handle_newly_created_table`, and any caller that owns the transaction."""
     after: UUID | None = None
     while True:
-        filters = [
-            MetadataTable.datasource_id == datasource_id,
-            MetadataTable.status == "ACTIVE",
-            MetadataTable.id.not_in(proposed),
-        ]
-        if table_ids is not None:
-            filters.append(MetadataTable.id.in_(table_ids))
-        if after is not None:
-            filters.append(MetadataTable.id > after)
-        pending = list(
-            await session.scalars(
-                select(MetadataTable.id)
-                .where(*filters)
-                .order_by(
-                    MetadataTable.id,
-                )
-                .limit(100)
-            )
+        after = await enqueue_semantics_batch(
+            session, datasource_id, table_ids=table_ids, after=after
         )
-        if not pending:
+        if after is None:
             return
-        await generate_semantic_inference(
-            datasource_id,
-            SemanticInferenceRequest(use_model=False, max_tables=100),
-            _worker_context(datasource.organization_id),
-            session,
-            get_settings(),
-            table_ids=pending,
-        )
-        await session.flush()
-        after = pending[-1]
+
+
+async def enqueue_semantics_in_batches(datasource_id: UUID) -> int:
+    """The consumer's path for a completed scan: one transaction per batch.
+
+    A whole source in one transaction held its row lock and its snapshot for
+    the entire pass, so on a large source any migration touching those tables
+    waited for all of it. Committed batch by batch, nothing outlives a batch.
+    A failure keeps the batches before it, and since the message is not
+    acknowledged, a replay resumes there: tables already proposed are skipped.
+    Returns how many batches ran.
+    """
+    after: UUID | None = None
+    batches = 0
+    while True:
+        async with session_factory() as session, session.begin():
+            after = await enqueue_semantics_batch(session, datasource_id, after=after)
+        if after is None:
+            return batches
+        batches += 1
 
 
 def _decode_event(raw: bytes) -> dict[str, Any]:
@@ -692,13 +734,11 @@ async def run_newly_created_table_drafter_consumer() -> None:
                 if state.stopping:
                     break
                 continue
-            async with session_factory() as session, session.begin():
-                if envelope["event_type"] == NEWLY_CREATED_TABLE_EVENT_TYPE:
+            if envelope["event_type"] == NEWLY_CREATED_TABLE_EVENT_TYPE:
+                async with session_factory() as session, session.begin():
                     await handle_newly_created_table(session, envelope["payload"])
-                else:
-                    await enqueue_semantics_for_source(
-                        session, UUID(envelope["payload"]["datasource_id"])
-                    )
+            else:
+                await enqueue_semantics_in_batches(UUID(envelope["payload"]["datasource_id"]))
             await consumer.commit()
             logger.info(
                 "newly_created_table_drafter_processed",

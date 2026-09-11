@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from aida.asset_description_api import DescriptionDraftEdit, edit_asset_description_draft
 from aida.db import Base
@@ -23,6 +24,7 @@ from aida.models import (
 from aida.newly_created_table_drafter import (
     enqueue_description_draft_for_table,
     enqueue_semantics_for_source,
+    enqueue_semantics_in_batches,
 )
 from aida.query_gateway import GatewayResult, QueryExecutionGateway
 from aida.security import SecurityContext
@@ -147,6 +149,47 @@ async def test_a_table_inference_leaves_unproposed_is_tried_once_not_forever(
 
     assert len(attempted) == 1
     assert len(attempted[0]) == 2
+
+
+async def test_the_consumer_commits_each_batch_in_its_own_transaction(monkeypatch):
+    """A completed scan ran every batch inside the one transaction the consumer
+    opened per message, holding the source's row lock and snapshot for the
+    whole pass. Each batch now gets its own session and its own commit."""
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as seed:
+        datasource, analysis = await _seed_datasource(seed)
+        await persist_discovery_snapshot(
+            seed,
+            analysis,
+            datasource,
+            _catalog(["accounts", "ledger"]),
+            deprecate_missing=False,
+            connector_capabilities={},
+        )
+        analysis.status = "COMPLETED"
+        await seed.commit()
+    batches: list[tuple[list[object], object]] = []
+
+    async def records_its_session(
+        _datasource_id, _request, _context, session, _settings, *, table_ids
+    ):
+        batches.append((list(table_ids), session))
+
+    monkeypatch.setattr("aida.newly_created_table_drafter.session_factory", sessions)
+    monkeypatch.setattr("aida.newly_created_table_drafter.SEMANTICS_BATCH_SIZE", 1)
+    monkeypatch.setattr(
+        "aida.newly_created_table_drafter.generate_semantic_inference", records_its_session
+    )
+
+    ran = await enqueue_semantics_in_batches(datasource.id)
+    await engine.dispose()
+
+    assert ran == 2
+    assert [len(table_ids) for table_ids, _session in batches] == [1, 1]
+    assert batches[0][1] is not batches[1][1]
 
 
 async def test_description_edit_preserves_evidence_and_rejects_stale_edits(session):
