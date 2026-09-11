@@ -88,12 +88,17 @@ review:
 |---|---|---|
 | `column_description_service.apply_column_description_draft` | A column draft is approved (evidence or model) | Yes: Catalog → column panel |
 | `model_import.py` (`_apply_column_changes`) | An uploaded or saved-back workbook batch is approved | Yes: Sources → Model workbook, or Excel → Save to Atlas |
-| `document_ingestion.py` | A `DocumentClaim` with `subject_type == "COLUMN"` is approved | **No** |
+| `document_ingestion.py` | A `DocumentClaim` with `subject_type == "COLUMN"` is approved | Yes: Steward → Data dictionaries, then the review queue |
 | `description_withdrawal.py` | A withdrawn description is reinstated | Yes: Catalog → column panel |
 
-Document ingestion is still unreachable. `document_ingestion_api.py` exposes
-seven routes and ui-next calls none of them. It is the same shape as AR-5/LN-3:
-a module with passing tests and no caller.
+Document ingestion was the one unreachable path until 2026-09-11, when Steward →
+Data dictionaries gave it a caller. A steward uploads a CSV data dictionary,
+matches its rows to the project's catalog by exact name (a row that matches
+nothing, or more than one table, stays unmatched), and proposes the matched
+rows, each as its own review. Proposing a document a second time is refused
+with 409 under a row lock on the document, so a double click or a second
+steward cannot raise every review again. `tests/test_document_claims_postgres_concurrency.py`
+shows the lock holding on a real PostgreSQL.
 
 Two rules keep the paths from overwriting one another:
 

@@ -116,6 +116,14 @@ const CLAIMS: DocumentClaimRead[] = [
   },
 ];
 
+/** jsdom's File has no `text()`; every browser the app supports does. */
+function withText(file: File, content: string): File {
+  if (typeof file.text !== "function") {
+    Object.defineProperty(file, "text", { value: () => Promise.resolve(content) });
+  }
+  return file;
+}
+
 function chooseFile(file: File) {
   fireEvent.change(screen.getByLabelText("Data dictionary (CSV)"), { target: { files: [file] } });
   fireEvent.click(screen.getByRole("button", { name: "Upload" }));
@@ -149,7 +157,7 @@ describe("DataDictionariesScreen (N8 document ingestion)", () => {
     render(<DataDictionariesScreen />);
     await screen.findByText("None yet");
 
-    chooseFile(new File([content], "dictionary.csv", { type: "text/csv" }));
+    chooseFile(withText(new File([content], "dictionary.csv", { type: "text/csv" }), content));
 
     await waitFor(() =>
       expect(api.uploadDataDictionary).toHaveBeenCalledWith("project-1", {
