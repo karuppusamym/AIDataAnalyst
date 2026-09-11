@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
@@ -40,6 +40,7 @@ from aida.models import (
     GovernanceReview,
     LineOfBusiness,
     MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
@@ -96,6 +97,15 @@ WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "SemanticAdmin", "DataSteward")
 # GL-6: matches the 500-row bound coverage scoring already applies to the
 # unowned-table backlog it returns.
 UNOWNED_BACKLOG_ROUTE_LIMIT = 500
+
+# AT-6 moved annotation content, tags included, onto the append-only version
+# rows, and the annotation row keeps only identity. The APPROVED version is
+# the current one: `write_annotation_version` supersedes the previous one in
+# the same transaction. Both readers of a table's tags join through this.
+_APPROVED_ANNOTATION_VERSION = and_(
+    MetadataBusinessAnnotationVersion.annotation_id == MetadataBusinessAnnotation.id,
+    MetadataBusinessAnnotationVersion.status == "APPROVED",
+)
 
 
 def _audit_context(context: SecurityContext, organization_id: UUID) -> SecurityContext:
@@ -671,12 +681,18 @@ async def apply_ownership_rule(
     enforce_organization(context, rule.organization_id)
     rows = (
         await session.execute(
-            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
+            select(
+                MetadataTable,
+                MetadataSchema,
+                MetadataBusinessAnnotationVersion.tags,
+                BusinessDomain,
+            )
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
             .outerjoin(
                 MetadataBusinessAnnotation,
                 MetadataBusinessAnnotation.table_id == MetadataTable.id,
             )
+            .outerjoin(MetadataBusinessAnnotationVersion, _APPROVED_ANNOTATION_VERSION)
             .outerjoin(
                 BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id
             )
@@ -690,10 +706,9 @@ async def apply_ownership_rule(
     ).all()
     pattern = rule.match_pattern.casefold()
     matched: list[UUID] = []
-    for table, schema, annotation, domain in rows:
+    for table, schema, tags, domain in rows:
         if rule.match_field == "TAG":
-            tags = annotation.tags if annotation is not None else []
-            is_match = any(fnmatchcase(tag.casefold(), pattern) for tag in tags)
+            is_match = any(fnmatchcase(tag.casefold(), pattern) for tag in tags or ())
         else:
             candidates = {
                 "TABLE_NAME": table.name,
@@ -1691,12 +1706,18 @@ async def _unowned_asset_table_facts(
         return {}
     rows = (
         await session.execute(
-            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
+            select(
+                MetadataTable,
+                MetadataSchema,
+                MetadataBusinessAnnotationVersion.tags,
+                BusinessDomain,
+            )
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
             .outerjoin(
                 MetadataBusinessAnnotation,
                 MetadataBusinessAnnotation.table_id == MetadataTable.id,
             )
+            .outerjoin(MetadataBusinessAnnotationVersion, _APPROVED_ANNOTATION_VERSION)
             .outerjoin(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
             .where(
                 MetadataTable.organization_id == organization_id,
@@ -1705,14 +1726,14 @@ async def _unowned_asset_table_facts(
         )
     ).all()
     facts: dict[UUID, TableFacts] = {}
-    for table, schema, annotation, domain in rows:
+    for table, schema, tags, domain in rows:
         facts[table.id] = TableFacts(
             table_id=table.id,
             datasource_id=table.datasource_id,
             table_name=table.name,
             schema_name=schema.name,
             domain_key=domain.domain_key if domain is not None else None,
-            tags=tuple(annotation.tags) if annotation is not None else (),
+            tags=tuple(tags or ()),
         )
     return facts
 
