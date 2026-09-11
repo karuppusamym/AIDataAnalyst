@@ -115,6 +115,40 @@ async def test_completed_scan_creates_reviewable_semantics_once(session):
     assert review.status == "PENDING"
 
 
+async def test_a_table_inference_leaves_unproposed_is_tried_once_not_forever(
+    session, monkeypatch
+):
+    """A table `generate_semantic_inference` wrote no proposal for stayed
+    pending, so the batch loop selected it again, forever, in one open
+    transaction -- in the dev stack, for the worker's whole uptime."""
+    datasource, analysis = await _seed_datasource(session)
+    await persist_discovery_snapshot(
+        session,
+        analysis,
+        datasource,
+        _catalog(["accounts", "ledger"]),
+        deprecate_missing=False,
+        connector_capabilities={},
+    )
+    analysis.status = "COMPLETED"
+    await session.flush()
+    attempted: list[list[object]] = []
+
+    async def writes_no_proposal(*_args, table_ids, **_kwargs):
+        attempted.append(list(table_ids))
+        if len(attempted) > 3:
+            raise AssertionError("the batch loop is not making progress")
+
+    monkeypatch.setattr(
+        "aida.newly_created_table_drafter.generate_semantic_inference", writes_no_proposal
+    )
+
+    await enqueue_semantics_for_source(session, datasource.id)
+
+    assert len(attempted) == 1
+    assert len(attempted[0]) == 2
+
+
 async def test_description_edit_preserves_evidence_and_rejects_stale_edits(session):
     datasource, analysis = await _seed_datasource(session)
     await persist_discovery_snapshot(

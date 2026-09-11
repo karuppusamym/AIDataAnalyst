@@ -603,6 +603,12 @@ async def enqueue_semantics_for_source(
         )
         .where(SemanticInferenceRun.analysis_run_id == run_id)
     )
+    # A keyset cursor, not "whatever is still unproposed". A table inference
+    # writes no proposal for stayed unproposed, so it was selected again on every
+    # pass, forever, inside this one transaction. In the dev stack that
+    # transaction outlived the worker's uptime; every migration queued behind it,
+    # and every write behind the migration. The cursor tries each table once.
+    after: UUID | None = None
     while True:
         filters = [
             MetadataTable.datasource_id == datasource_id,
@@ -611,6 +617,8 @@ async def enqueue_semantics_for_source(
         ]
         if table_ids is not None:
             filters.append(MetadataTable.id.in_(table_ids))
+        if after is not None:
+            filters.append(MetadataTable.id > after)
         pending = list(
             await session.scalars(
                 select(MetadataTable.id)
@@ -632,6 +640,7 @@ async def enqueue_semantics_for_source(
             table_ids=pending,
         )
         await session.flush()
+        after = pending[-1]
 
 
 def _decode_event(raw: bytes) -> dict[str, Any]:
