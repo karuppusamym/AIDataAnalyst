@@ -156,7 +156,9 @@
   and downstream tables from other datasources, past the per-read grant check
   (ADR-0017), and cited edges a reviewer had rejected. Both are gone. Tests:
   `tests/test_gl9_lineage_same_source.py`.
-- **The roster** lists each task agent's completed runs from its audit rows.
+- **The roster** lists each task agent's runs from its audit rows. A refused
+  run is listed too, with the reason it was stopped and no run id, since it
+  never started.
 - **Re-parse after a rejection (defect).** Under `require_review`, re-parsing
   a view or pasted procedure SQL failed on the natural-key constraint when a
   reviewer had rejected one of its edges, so the person got a 500. A decided
@@ -195,14 +197,12 @@
 
 1. **Scheduled runs are off.** Every `<key>_agent_interval_minutes` is 0 by
    default, so a person starts every run until an operator sets one.
-2. **The roster lists completed task-agent runs, not refused ones.** The inbox
-   counts those.
-3. **The lineage agent parses views and captured routine bodies.** dbt models
+2. **The lineage agent parses views and captured routine bodies.** dbt models
    keep their own manifest path, and a procedure's hops through its own temp
    tables are left to a person's parse.
-4. **The quality agent proposes two rule types.** Profiles store no values,
+3. **The quality agent proposes two rule types.** Profiles store no values,
    so there is nothing to derive a range or distribution rule from.
-5. **Nothing measured on a real estate.** Every acceptance rate is `None`.
+4. **Nothing measured on a real estate.** Every acceptance rate is `None`.
 
 ## Verification
 

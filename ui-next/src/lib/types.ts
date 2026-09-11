@@ -267,7 +267,7 @@ export interface AgentRunGroundingReceiptsRead {
 
 /** One recent `AgentRun`'s outcome -- the "live results" half of this */
 export interface AgentRunOutcomeRead {
-  run_id: string;
+  run_id: string | null;
   status: string;
   strategy: string | null;
   confidence: number | null;

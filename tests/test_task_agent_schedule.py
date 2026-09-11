@@ -5,9 +5,9 @@
   -- started by the scheduler's worker identity, once per interval, only in an
   organization that registered the agent. A refusal is recorded and the pass
   goes on.
-* Task agents write no `AgentRun`. The inbox now counts their runs from the
-  audit rows every run leaves, completed and refused, and the roster says where
-  their runs are instead of implying there were none.
+* Task agents write no `AgentRun`. The inbox counts their runs from the audit
+  rows every run leaves, completed and refused, and the roster lists them -- a
+  refusal with the reason it was stopped -- instead of implying there were none.
 * Every agent principal setting belongs to a registered task agent or to the
   reviewer agent, so a new agent cannot be left off the scheduler and the
   inbox.
@@ -189,15 +189,22 @@ async def test_the_inbox_counts_task_agent_runs_and_refusals(
     assert (agent.runs_recent, agent.success_rate) == (2, 0.5)
 
 
-async def test_the_roster_lists_a_task_agents_completed_runs(
+async def test_the_roster_lists_a_task_agents_runs_and_its_refusals(
     maker: async_sessionmaker[Any],
 ) -> None:
-    org_id, _contract = await _registered_org(maker)
+    """A refused run never started, so it has no run id. The roster lists it
+    with the reason it was stopped -- which is why the agent is not working."""
+    org_id, contract = await _registered_org(maker)
+    settings = agent_settings(steward_agent_interval_minutes=60)
+    tracker: dict[Any, datetime] = {}
+    await run_task_agent_schedule_pass(settings, now=T0, session_maker=maker, last_run_at=tracker)
+    async with maker() as session:
+        await session.execute(
+            update(AgentContract).where(AgentContract.id == contract.id).values(kill_engaged=True)
+        )
+        await session.commit()
     await run_task_agent_schedule_pass(
-        agent_settings(steward_agent_interval_minutes=60),
-        now=T0,
-        session_maker=maker,
-        last_run_at={},
+        settings, now=T0 + timedelta(hours=2), session_maker=maker, last_run_at=tracker
     )
 
     async with maker() as session:
@@ -208,6 +215,12 @@ async def test_the_roster_lists_a_task_agents_completed_runs(
     [entry] = roster.agents
     assert "steward_agent.run" in entry.method.note
     assert entry.method.sampled_runs == 0, "planned-run figures do not apply"
-    assert entry.recent_results_total == 1
-    [result] = entry.recent_results
-    assert (result.status, result.generation_source) == ("COMPLETED", "DETERMINISTIC")
+    assert entry.recent_results_total == 2
+    refused, completed = entry.recent_results
+    assert (refused.status, refused.run_id, refused.failure_reason) == (
+        "REFUSED",
+        None,
+        "agent_kill_switch_engaged",
+    )
+    assert (completed.status, completed.generation_source) == ("COMPLETED", "DETERMINISTIC")
+    assert completed.run_id is not None

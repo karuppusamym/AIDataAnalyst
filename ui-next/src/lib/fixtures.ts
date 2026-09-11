@@ -6386,8 +6386,21 @@ export function makeFixtureAgentRoster(organizationId: string, windowDays = 30):
           documentation_url: null,
         },
         method,
-        recent_results: recentResults,
-        recent_results_total: 214,
+        // ADR-0029: a run the agent's contract refused never started, so it has
+        // no run id; the row carries the reason instead.
+        recent_results: [
+          {
+            run_id: null,
+            status: "REFUSED",
+            strategy: null,
+            confidence: null,
+            generation_source: "DETERMINISTIC",
+            created_at: iso(0),
+            failure_reason: "agent_kill_switch_engaged",
+          },
+          ...recentResults,
+        ],
+        recent_results_total: 215,
         auto_apply: autoApply,
       },
       {

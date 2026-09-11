@@ -1454,9 +1454,16 @@
             "type": "string"
           },
           "run_id": {
-            "format": "uuid",
-            "title": "Run Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
           },
           "status": {
             "title": "Status",

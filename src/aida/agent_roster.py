@@ -238,7 +238,9 @@ class AgentRunOutcomeRead(ApiModel):
     row's exit condition.
     """
 
-    run_id: UUID
+    #: `None` for a refused task-agent run (ADR-0029): it never started, so it
+    #: has no run of its own, and the row carries why it was stopped instead.
+    run_id: UUID | None
     status: str
     strategy: str | None
     confidence: float | None
@@ -484,15 +486,17 @@ async def _contract_principals(
 
 def _task_agent_note(run_action: str) -> str:
     """ADR-0029: a task agent runs, but writes no `AgentRun`. Its recent results
-    come from the audit row each completed run leaves, and the method figures,
-    which describe planned runs, stay empty by construction -- not because it
-    did nothing. Saying so is the AR-07 rule applied the other way: a number
-    that looks like evidence of inactivity must not be left to read as one."""
+    come from the audit row each run leaves, completed or refused, and the
+    method figures, which describe planned runs, stay empty by construction --
+    not because it did nothing. Saying so is the AR-07 rule applied the other
+    way: a number that looks like evidence of inactivity must not be left to
+    read as one."""
     return (
-        "A task agent (ADR-0029). It writes no AgentRun rows: each completed run "
-        f"is a {run_action} audit event, listed here as a recent result, and each "
-        "proposal a ledger task. Its method is deterministic, so the strategy and "
-        "tool-first figures do not apply. The agent inbox also counts its refused runs."
+        "A task agent (ADR-0029). It writes no AgentRun rows: each run is a "
+        f"{run_action} audit event, listed here as a recent result -- a refused "
+        "one with the reason it was stopped -- and each proposal a ledger task. "
+        "Its method is deterministic, so the strategy and tool-first figures do "
+        "not apply."
     )
 
 
@@ -507,11 +511,18 @@ async def _task_agent_recent_results(
     now: datetime,
     limit: int,
 ) -> tuple[list[AgentRunOutcomeRead], int]:
-    """A task agent's completed runs, from the audit row each one leaves.
+    """A task agent's runs, completed and refused, from the audit row each one
+    leaves.
 
     Scoped the AR-07 way: the row's resource is this version, and nothing is
-    inferred from a name. A refused run is not listed -- it has no run to show,
-    and the agent inbox counts it instead.
+    inferred from a name. A refused run never started, so it has no run id. It
+    is listed with the reason its refusal recorded -- the kill switch, an
+    autonomy tier withdrawn, a version no longer approved -- which is what a
+    supervisor looking at an agent that is not working needs to see. (A full
+    review backlog is not a refusal: it stops a run, which still completes.)
+    Only a
+    refusal after authority resolved names a version, so one refused before
+    that, with no approved contract at all, belongs to no roster entry.
     """
     since = now - timedelta(days=window_days)
     filters = (
@@ -519,7 +530,7 @@ async def _task_agent_recent_results(
         AuditEvent.action == run_action,
         AuditEvent.resource_type == "agent_contract",
         AuditEvent.resource_id == str(ai_asset_version_id),
-        AuditEvent.outcome == "SUCCESS",
+        AuditEvent.outcome.in_(("SUCCESS", "DENIED")),
         AuditEvent.occurred_at >= since,
     )
     total = await session.scalar(select(func.count()).select_from(AuditEvent).where(*filters))
@@ -533,8 +544,22 @@ async def _task_agent_recent_results(
     ).all()
     results: list[AgentRunOutcomeRead] = []
     for event in events:
+        details = event.details or {}
+        if event.outcome == "DENIED":
+            results.append(
+                AgentRunOutcomeRead(
+                    run_id=None,
+                    status="REFUSED",
+                    strategy=None,
+                    confidence=None,
+                    generation_source=method,
+                    created_at=event.occurred_at,
+                    failure_reason=str(details.get("reason") or "unspecified"),
+                )
+            )
+            continue
         try:
-            run_id = UUID(str((event.details or {}).get("run_id")))
+            run_id = UUID(str(details.get("run_id")))
         except ValueError:
             continue
         results.append(
