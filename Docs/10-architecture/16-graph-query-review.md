@@ -74,15 +74,17 @@ identity binding, concurrency/conflict handling and the existing approval gate.
 The agent review's production-scale, independent semantic evaluation and
 human-audit recovery evidence remain separate work.
 
-Two items this section listed as open have since been settled, and the note is
-corrected rather than left standing. **Provider-timeout accounting** was
-reconciled on 2026-09-10: a failed generation is settled to the input it
-demonstrably sent, releasing the output allowance it never produced
-(`agent_budget.settle_unresolved_run_budget`). The reservation itself is still
-the worst case — admission holds every planned route's input estimate plus its
-output allowance — so this is not a loosening; and the figure remains an
-estimate, because no provider adapter reports billable usage. That limit is
-AR-05's, not a new one. **Multi-worker revocation** was measured the same day:
+**Provider-timeout accounting** uses an input-only estimate on generation
+failure (`agent_budget.settle_unresolved_run_budget`) and releases the output
+allowance. Admission reserves planned input plus output, but settlement is not
+provider-reported usage. A timeout or unparseable response does not prove the
+provider generated no billable output, and planned attempts do not prove every
+attempt was sent. Treat this as an estimated accounting policy, not a verified
+hard provider-spend ceiling. Usage reconciliation remains necessary for that
+stronger claim. This follow-up corrects the earlier wording without changing
+the implemented settlement policy.
+
+**Multi-worker revocation** was reported measured the same day:
 `tests/test_reviewer_agent_postgres_suspension.py` puts four agents on four
 PostgreSQL connections and suspends them from a fifth, giving a maximum stop
 delay of 0 items at READ COMMITTED and 6 — the whole remaining batch — at
@@ -98,3 +100,6 @@ browser layout or Neo4j interoperability.
 
 Executed this pass: 15 graph/parser UI tests and 26 Sources/Review Queue UI tests
 passed; the production UI build passed. Targeted backend lint also passed.
+
+See the [follow-up validation ledger](../60-delivery/17-follow-up-validation.md)
+for the later workbook, column-panel and review-queue fixes and remaining gaps.

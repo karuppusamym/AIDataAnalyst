@@ -296,11 +296,38 @@ export async function fetchModelImportChanges(
   signal?: AbortSignal,
 ): Promise<ModelImportChangeRead[]> {
   if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
-  const page = await readJson<PageOf<ModelImportChangeRead>>(
-    `/v1/model-imports/${encodeURIComponent(batchId)}/changes?limit=1000`,
-    signal,
-  );
-  return page.items ?? [];
+  const rows: ModelImportChangeRead[] = [];
+  let expectedTotal: number | null = null;
+  const seen = new Set<string>();
+  // Never present the first page as the complete diff for a larger batch.
+  // Bound the in-browser preview; an oversized workbook must be split rather
+  // than silently approving rows that were not available to inspect.
+  const previewLimit = 50_000;
+  while (true) {
+    const page = await readJson<PageOf<ModelImportChangeRead>>(
+      `/v1/model-imports/${encodeURIComponent(batchId)}/changes?limit=1000&offset=${rows.length}`,
+      signal,
+    );
+    if (!Number.isInteger(page.total) || page.total < 0 || page.total > previewLimit) {
+      throw new Error("The workbook preview exceeds the supported 50,000 changes or has an invalid count. Split large workbooks into smaller imports.");
+    }
+    if (expectedTotal !== null && page.total !== expectedTotal) {
+      throw new Error("The import changed while its preview was loading. Retry the preview.");
+    }
+    expectedTotal = page.total;
+    const items = page.items ?? [];
+    if ((items.length === 0 && rows.length < expectedTotal) || rows.length + items.length > expectedTotal) {
+      throw new Error("The workbook preview is incomplete. Retry the preview before submitting.");
+    }
+    for (const row of items) {
+      if (row.batch_id !== batchId || seen.has(row.id)) {
+        throw new Error("The workbook preview contains inconsistent rows. Retry the preview.");
+      }
+      seen.add(row.id);
+      rows.push(row);
+    }
+    if (rows.length === expectedTotal) return rows;
+  }
 }
 
 /** Submit a parsed batch into the shared review queue. Still publishes

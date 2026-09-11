@@ -91,6 +91,7 @@ const OBJECT_TYPES = [
   "TERM_SEMANTIC_BINDING",
   "COLUMN_CLASSIFICATION_PROMOTION",
   "CONTEXT_PRODUCT_VERSION",
+  "MODEL_IMPORT_BATCH",
 ] as const;
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
@@ -371,6 +372,9 @@ export function ReviewQueueScreen() {
 
   const decide = useCallback(
     async (reviewId: string, decision: "APPROVE" | "REJECT", reason: string | null) => {
+      // The detail pane can remain visible during a refresh. Never act on its
+      // old snapshot while the current queue is loading or unavailable.
+      if (loading || error !== null) return;
       setDeciding(reviewId);
       setDecideError(null);
       setDecisionErrors((current) => {
@@ -412,7 +416,7 @@ export function ReviewQueueScreen() {
         setDeciding(null);
       }
     },
-    [load, setParams],
+    [load, setParams, loading, error],
   );
 
   /* A failed load must not leave three tiles asserting counts.
@@ -543,7 +547,9 @@ export function ReviewQueueScreen() {
             decidedAt: focused.decided_at,
             decisionReason: focused.decision_reason,
             blockedReason:
-              focused.status !== "PENDING"
+              loading || error !== null
+                ? "Refresh the review queue successfully before deciding this proposal."
+                : focused.status !== "PENDING"
                 ? `This review is already ${focused.status.toLowerCase()}.`
                 : principalId !== null && focused.requested_by === principalId
                   ? "You proposed this change. Another reviewer must approve or reject it."

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { GovernanceReviewRead, MeRead, ReviewQueueRead } from "../lib/types";
 
 /* ---------------------------------------------------------------------------
@@ -431,6 +431,23 @@ const TERM_VERSION: ReviewQueueRead["proposals"][number] = {
 };
 
 describe("ReviewQueueScreen when the queue cannot be loaded", () => {
+  it("keeps a stale detail readable but blocks decisions after a refresh fails", async () => {
+    history.replaceState(null, "", "/?review=rq_1");
+    fetchReviewQueue.mockResolvedValueOnce(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+    await screen.findByLabelText("Proposal detail");
+    fetchReviewQueue.mockRejectedValue(new Error("refresh unavailable"));
+    act(() => {
+      history.pushState(null, "", "/?review=rq_1&status=ALL");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await screen.findByText("The review queue could not be loaded");
+    expect(screen.getByText("Refresh the review queue successfully before deciding this proposal.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(decideGovernanceReview).not.toHaveBeenCalled();
+  });
+
   /* The load-failure journey had no test at all, and it shipped a defect the
      decision-path tests could not see: the three tiles read
      `data?.byStatus[...] ?? 0`, so a first failure rendered "0 pending review"

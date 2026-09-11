@@ -124,15 +124,46 @@ function ChangeRow({
 }
 
 export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
+  // Switching sources must never retain a draft belonging to the previous source.
+  return <WorkbookImportSession key={datasourceId} datasourceId={datasourceId} />;
+}
+
+function WorkbookImportSession({ datasourceId }: { datasourceId: string }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [batch, setBatch] = useState<ModelImportBatchRead | null>(null);
   const [changes, setChanges] = useState<ModelImportChangeRead[]>([]);
-  const [busy, setBusy] = useState<"upload" | "submit" | "exclude" | null>(null);
+  const [busy, setBusy] = useState<"upload" | "preview" | "submit" | "exclude" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [previewReady, setPreviewReady] = useState(false);
+  const [previewPage, setPreviewPage] = useState(0);
+
+  const loadPreview = useCallback(async (batchId: string) => {
+    setPreviewReady(false);
+    const rows = await fetchModelImportChanges(batchId);
+    setChanges(rows);
+    setPreviewPage(0);
+    setBatch(current => current?.id === batchId && current.status === "DRAFT"
+      ? { ...current, change_count: rows.filter(row => row.status === "PENDING").length }
+      : current);
+    setPreviewReady(true);
+  }, []);
+
+  const retryPreview = async () => {
+    if (!batch || busy !== null) return;
+    setBusy("preview");
+    setError(null);
+    try {
+      await loadPreview(batch.id);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const toggleInclusion = useCallback(
     async (change: ModelImportChangeRead) => {
-      if (!batch || batch.status !== "DRAFT") return;
+      if (!batch || batch.status !== "DRAFT" || !previewReady || busy !== null) return;
       const excluded = change.status !== "EXCLUDED";
       setBusy("exclude");
       setError(null);
@@ -149,7 +180,7 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
       } catch (e) {
         setError(e instanceof ApiError ? e.detail : (e as Error).message);
         try {
-          setChanges(await fetchModelImportChanges(batch.id));
+          await loadPreview(batch.id);
         } catch {
           /* the error above is the one worth showing */
         }
@@ -157,13 +188,14 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
         setBusy(null);
       }
     },
-    [batch],
+    [batch, previewReady, busy, loadPreview],
   );
 
   const reset = useCallback(() => {
     setBatch(null);
     setChanges([]);
     setError(null);
+    setPreviewReady(false);
     if (fileInput.current) fileInput.current.value = "";
   }, []);
 
@@ -173,21 +205,22 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
       setError(null);
       setBatch(null);
       setChanges([]);
+      setPreviewReady(false);
       try {
         const uploaded = await uploadModelWorkbook(datasourceId, file);
         setBatch(uploaded);
-        setChanges(await fetchModelImportChanges(uploaded.id));
+        await loadPreview(uploaded.id);
       } catch (e) {
         setError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
         setBusy(null);
       }
     },
-    [datasourceId],
+    [datasourceId, loadPreview],
   );
 
   const onSubmit = useCallback(async () => {
-    if (!batch) return;
+    if (!batch || batch.status !== "DRAFT" || !previewReady || busy !== null) return;
     setBusy("submit");
     setError(null);
     try {
@@ -197,7 +230,7 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
     } finally {
       setBusy(null);
     }
-  }, [batch]);
+  }, [batch, previewReady, busy]);
 
   // Failures first: see rule 1 in the header comment.
   const ordered = [...changes].sort((a, b) => {
@@ -206,13 +239,15 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
     if (aBad !== bBad) return aBad - bBad;
     return a.row_number - b.row_number;
   });
+  const pageSize = 100;
+  const visibleChanges = ordered.slice(previewPage * pageSize, (previewPage + 1) * pageSize);
 
   return (
     <div className="wbi">
       <div className="wbi__sub">
         Upload edited workbook
         {batch ? (
-          <button className="wbi__reset" onClick={reset}>
+          <button className="wbi__reset" disabled={busy !== null} onClick={reset}>
             Start over
           </button>
         ) : null}
@@ -267,23 +302,40 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
             ) : null}
           </div>
 
-          {batch.status === "DRAFT" && batch.change_count === 0 ? (
+          {!previewReady ? (
+            <div className="wbi__load" role="status">
+              The change preview must load before this batch can be submitted.
+              <Button disabled={busy !== null} onClick={() => void retryPreview()}>Retry change preview</Button>
+            </div>
+          ) : null}
+
+          {previewReady && batch.status === "DRAFT" && batch.change_count === 0 ? (
             <div className="wbi__none">
-              This workbook matches the current model — there is nothing to submit.
+              {batch.rejected_row_count > 0 || changes.some(change => change.status === "EXCLUDED")
+                ? "No included changes are ready for review. Check rejected or excluded rows below."
+                : "This workbook matches the current model — there is nothing to submit."}
             </div>
           ) : null}
 
           {ordered.length > 0 ? (
             <ol className="wbi__list">
-              {ordered.map((change) => (
+              {visibleChanges.map((change) => (
                 <ChangeRow
                   key={change.id}
                   change={change}
-                  editable={batch.status === "DRAFT" && busy === null}
+                  editable={previewReady && batch.status === "DRAFT" && busy === null}
                   onToggle={(c) => void toggleInclusion(c)}
                 />
               ))}
             </ol>
+          ) : null}
+
+          {previewReady && ordered.length > pageSize ? (
+            <nav className="wbi__pages" aria-label="Workbook preview pages">
+              <Button disabled={busy !== null || previewPage === 0} onClick={() => setPreviewPage(page => page - 1)}>Previous changes</Button>
+              <span> Rows {previewPage * pageSize + 1}–{Math.min((previewPage + 1) * pageSize, ordered.length)} of {ordered.length} </span>
+              <Button disabled={busy !== null || (previewPage + 1) * pageSize >= ordered.length} onClick={() => setPreviewPage(page => page + 1)}>Next changes</Button>
+            </nav>
           ) : null}
 
           {batch.status === "PENDING_REVIEW" ? (
@@ -294,7 +346,7 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
           ) : null}
 
           {batch.status === "DRAFT" && batch.change_count > 0 ? (
-            <Button variant="primary" disabled={busy !== null} onClick={() => void onSubmit()}>
+            <Button variant="primary" disabled={busy !== null || !previewReady} onClick={() => void onSubmit()}>
               {busy === "submit"
                 ? "Submitting…"
                 : `Submit ${batch.change_count} ${

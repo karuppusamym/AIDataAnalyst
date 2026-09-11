@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   fetchColumnDocumentation,
@@ -11,7 +11,7 @@ import {
   type DescriptionActionSubject,
 } from "./DescriptionActionDialog";
 import { CrossLinks } from "./CrossLinks";
-import { Pill } from "./primitives";
+import { Button, Field, Pill } from "./primitives";
 import "./ColumnPanel.css";
 
 /* ---------------------------------------------------------------------------
@@ -167,6 +167,8 @@ export function ColumnPanel({
   const [expanded, setExpanded] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [table, setTable] = useState<TableDescriptionRead | null>(null);
+  const [query, setQuery] = useState("");
+  const request = useRef<AbortController | null>(null);
   const [pending, setPending] = useState<
     { action: "WITHDRAW" | "REINSTATE"; subject: DescriptionActionSubject } | null
   >(null);
@@ -180,29 +182,32 @@ export function ColumnPanel({
   );
 
   const load = useCallback(
-    (signal?: AbortSignal) => {
+    () => {
+      request.current?.abort();
+      const controller = new AbortController();
+      request.current = controller;
+      const { signal } = controller;
       setError(null);
+      setColumns(null);
+      setTable(null);
       fetchColumnDocumentation(tableId, signal)
-        .then(setColumns)
+        .then(rows => { if (!signal.aborted) setColumns(rows); })
         .catch((e: unknown) => {
-          if ((e as Error)?.name === "AbortError") return;
+          if (signal.aborted || (e as Error)?.name === "AbortError") return;
           setError(e as Error);
         });
       // The table's own documentation failing must not blank the column list:
       // they are separate claims about the same asset.
       fetchTableDescription(tableId, signal)
-        .then(setTable)
-        .catch(() => setTable(null));
+        .then(row => { if (!signal.aborted) setTable(row); })
+        .catch(() => { if (!signal.aborted) setTable(null); });
     },
     [tableId],
   );
 
   useEffect(() => {
-    const ac = new AbortController();
-    setColumns(null);
-    setTable(null);
-    load(ac.signal);
-    return () => ac.abort();
+    load();
+    return () => request.current?.abort();
   }, [load]);
 
   // Collapsed by default: a wide table would otherwise push the evidence items
@@ -211,6 +216,7 @@ export function ColumnPanel({
     setExpanded(false);
     setNotice(null);
     setPending(null);
+    setQuery("");
   }, [tableId]);
 
   if (error) {
@@ -223,6 +229,7 @@ export function ColumnPanel({
                 error instanceof ApiError ? error.detail : error.message
               }`}
         </div>
+        <Button onClick={() => load()}>Retry columns</Button>
       </div>
     );
   }
@@ -238,7 +245,10 @@ export function ColumnPanel({
   }
 
   const documentedCount = columns.filter((c) => c.business_description !== null).length;
-  const shown = expanded ? columns : columns.slice(0, 8);
+  const normalizedQuery = query.trim().toLowerCase();
+  const matching = columns.filter(column => !normalizedQuery ||
+    `${column.name} ${column.physical_type}`.toLowerCase().includes(normalizedQuery));
+  const shown = expanded ? matching : matching.slice(0, 8);
 
   return (
     <div className="colp">
@@ -351,8 +361,15 @@ export function ColumnPanel({
           {notice}
         </div>
       ) : null}
+      {columns.length > 0 ? (
+        <Field label="Find columns">
+          <input value={query} onChange={event => { setQuery(event.target.value); setExpanded(false); }} placeholder="Column name or data type" />
+        </Field>
+      ) : null}
       {columns.length === 0 ? (
         <div className="colp__none">This table has no active columns.</div>
+      ) : matching.length === 0 ? (
+        <div className="colp__none">No columns match your search.</div>
       ) : (
         <>
           <ol className="colp__list">
@@ -365,10 +382,10 @@ export function ColumnPanel({
               />
             ))}
           </ol>
-          {columns.length > shown.length ? (
+          {matching.length > shown.length ? (
             <button className="colp__more" onClick={() => setExpanded(true)}>
-              {`Show ${columns.length - shown.length} more column${
-                columns.length - shown.length === 1 ? "" : "s"
+              {`Show ${matching.length - shown.length} more column${
+                matching.length - shown.length === 1 ? "" : "s"
               }`}
             </button>
           ) : null}

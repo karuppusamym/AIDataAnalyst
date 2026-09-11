@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ColumnDocumentationRead } from "../lib/_column_documentation_api";
 
@@ -61,6 +61,40 @@ beforeEach(() => {
   // and the column tests are not competing with a second Withdraw control.
   fetchTable.mockReset().mockResolvedValue(tableDescription());
   requestWithdrawal.mockReset();
+});
+
+it("ignores a late column response after navigating to another table", async () => {
+  let resolveOld!: (rows: ColumnDocumentationRead[]) => void;
+  fetchColumns.mockReturnValueOnce(new Promise<ColumnDocumentationRead[]>(resolve => { resolveOld = resolve; }));
+  fetchColumns.mockResolvedValueOnce([column({ column_id: "new", table_id: "t2", name: "new_asset_column" })]);
+  const view = render(<ColumnPanel tableId="t1" />);
+  view.rerender(<ColumnPanel tableId="t2" />);
+  await screen.findByText("new_asset_column");
+  await act(async () => resolveOld([column({ name: "old_asset_column" })]));
+  expect(screen.getByText("new_asset_column")).toBeInTheDocument();
+  expect(screen.queryByText("old_asset_column")).not.toBeInTheDocument();
+});
+
+it("retries a failed column load", async () => {
+  fetchColumns.mockRejectedValueOnce(new Error("temporary outage"));
+  fetchColumns.mockResolvedValueOnce([column({})]);
+  render(<ColumnPanel tableId="t1" />);
+  await screen.findByText(/temporary outage/);
+  fireEvent.click(screen.getByRole("button", { name: "Retry columns" }));
+  await screen.findByText("customer_id");
+  expect(screen.queryByText(/temporary outage/)).not.toBeInTheDocument();
+});
+
+it("finds columns by name or physical type and distinguishes no matches from no columns", async () => {
+  fetchColumns.mockResolvedValue([column({}), column({ column_id: "c2", name: "joined_at", physical_type: "timestamp" })]);
+  render(<ColumnPanel tableId="t1" />);
+  await screen.findByText("customer_id");
+  fireEvent.change(screen.getByLabelText("Find columns"), { target: { value: "timestamp" } });
+  expect(screen.getByText("joined_at")).toBeInTheDocument();
+  expect(screen.queryByText("customer_id")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Find columns"), { target: { value: "not-a-column" } });
+  expect(screen.getByText("No columns match your search.")).toBeInTheDocument();
+  expect(screen.queryByText("This table has no active columns.")).not.toBeInTheDocument();
 });
 
 /** Wait for the dialog and fill in its reason, the way a steward would. */
