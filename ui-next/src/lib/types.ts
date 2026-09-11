@@ -3795,6 +3795,13 @@ export interface ProjectRead {
   updated_at: string;
 }
 
+export interface QualityAgentRunRequest {
+  capabilities?: ("ROW_COUNT_FLOOR" | "NULL_RATE_CEILING")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
+}
+
 export interface QualityRulePackRead {
   name: string;
   enabled?: boolean;

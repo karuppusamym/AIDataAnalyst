@@ -129,6 +129,13 @@ _TIERS: Final[Mapping[str, str]] = {
     "CONTEXT_PRODUCT_VERSION": TIER_T2,
     "DATA_PRODUCT_VERSION": TIER_T2,
     "DATA_CONTRACT_VERSION": TIER_T2,
+    # A quality rule is an executable control: its incidents gate governed
+    # tools, demote retrieval and attach trust warnings to answers
+    # (`custom_quality_rules`). A wrong threshold switches a capability off or
+    # hides a regression -- the harm a data contract's quality clause can do,
+    # so the same tier. The quality agent proposes these (ADR-0029); no agent
+    # decides them.
+    "QUALITY_RULE_PROPOSAL": TIER_T2,
     # --- T3: the trust boundary itself ------------------------------------
     "MODEL_ROUTE_CONFIGURATION": TIER_T3,
     "AI_ASSET": TIER_T3,

@@ -552,7 +552,8 @@ forbidden_modules = [
 # a router. This pins that: the cheapest way to add a third shared rule would
 # otherwise be another import back into the router it lives beside -- R03's
 # "services should not obtain business models from routers", and the same edge the
-# F05 contract above forbids the reviewer agent.
+# F05 contract above forbids the reviewer agent. The lineage and quality agents,
+# and the rules they share, are held to the same line.
 name = "ADR-0029 the steward agent and the rules it shares never import a router"
 type = "forbidden"
 source_modules = [
@@ -560,6 +561,9 @@ source_modules = [
   "aida.glossary_link_candidates",
   "aida.lineage_agent",
   "aida.lineage_table_resolution",
+  "aida.quality_agent",
+  "aida.quality_rule_proposal_model",
+  "aida.quality_rule_proposals",
   "aida.steward_agent",
   "aida.task_agent",
 ]
@@ -569,6 +573,8 @@ forbidden_modules = [
   "aida.asset_description_api",
   "aida.lineage_agent_api",
   "aida.parsed_lineage_review_api",
+  "aida.quality_agent_api",
+  "aida.quality_api",
   "aida.semantic_api",
   "aida.steward_agent_api",
   "aida.stewardship_api",

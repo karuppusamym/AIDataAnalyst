@@ -6485,7 +6485,23 @@ const TASK_AGENT_FIXTURE_CAPABILITIES: Record<
       producer: "sql_lineage_parser: view definitions captured at ingestion",
     },
   ],
-  quality: [],
+  quality: [
+    {
+      capability: "ROW_COUNT_FLOOR",
+      object_type: "QUALITY_RULE_PROPOSAL",
+      review_queue: "GOVERNANCE_REVIEW",
+      risk_tier: "T2",
+      producer: "quality_rule_proposals: half the smallest row count in recent profiles",
+    },
+    {
+      capability: "NULL_RATE_CEILING",
+      object_type: "QUALITY_RULE_PROPOSAL",
+      review_queue: "GOVERNANCE_REVIEW",
+      risk_tier: "T2",
+      producer:
+        "quality_rule_proposals: worst recent null rate of a normally complete column, plus headroom",
+    },
+  ],
 };
 
 /** What each agent's fixture run looks at, and the reason it skips one. */
@@ -6502,8 +6518,8 @@ const TASK_AGENT_FIXTURE_RUN: Record<
     subjects: ["reporting.v_card_spend", "reporting.v_branch_totals", "reporting.v_customer_360"],
   },
   quality: {
-    skipReason: "rule_already_exists",
-    subjects: ["fact_card_transactions", "dim_branch", "customer_master"],
+    skipReason: "rule_or_proposal_exists",
+    subjects: ["public.fact_card_transactions", "public.dim_branch", "public.customer_master.email"],
   },
 };
 
@@ -6536,14 +6552,18 @@ export function makeFixtureTaskAgentState(
     max_pending_proposals: 100,
     pending_proposals: 7,
     wall_clock_seconds_cap: 300,
-    outcomes: capabilities.map((capability, index) => ({
-      object_type: capability.object_type,
-      pending: index === 0 ? 5 : 2,
-      approved: index === 0 ? 12 : 0,
-      rejected: index === 0 ? 4 : 0,
-      other: 0,
-      acceptance_rate: index === 0 ? 0.75 : null,
-    })),
+    // One row per object type, as the server groups them -- the quality
+    // agent's two capabilities share one.
+    outcomes: [...new Set(capabilities.map((capability) => capability.object_type))].map(
+      (objectType, index) => ({
+        object_type: objectType,
+        pending: index === 0 ? 5 : 2,
+        approved: index === 0 ? 12 : 0,
+        rejected: index === 0 ? 4 : 0,
+        other: 0,
+        acceptance_rate: index === 0 ? 0.75 : null,
+      }),
+    ),
   };
 }
 
@@ -6616,8 +6636,9 @@ export function makeFixtureTaskAgentRun(
       task_id: opened("eeeeeeee-5555-5555-5555-000000000003"),
       confidence: 1,
       rank: null,
-      related_id: "ffffffff-5555-5555-5555-000000000003",
-      related_name: "Customer",
+      // Only the steward's glossary links relate a subject to something else.
+      related_id: kind === "steward" ? "ffffffff-5555-5555-5555-000000000003" : null,
+      related_name: kind === "steward" ? "Customer" : null,
     });
   }
   const count = (value: string) => items.filter((item) => item.action === value).length;

@@ -119,7 +119,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 
 | Aspect | Now | Target |
 |---|---|---|
-| Baselines | Implemented — volume, null-rate, schema fingerprint; source/table policies; immutable observations; custom threshold rule packs (row-count min/max, column null-rate max) on their own schedule, independent of the profiling scan (DQ-4) | Seasonality |
+| Baselines | Implemented — volume, null-rate, schema fingerprint; source/table policies; immutable observations; custom threshold rule packs (row-count min/max, column null-rate max) on their own schedule, independent of the profiling scan (DQ-4). Since 2026-09-11 the quality agent ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) proposes row-count floors and null-rate ceilings from profile history, each a T2 review a person decides | Seasonality |
 | Incidents | Implemented — fingerprinted lifecycle, audited transitions, auto-recovery | Notification routing, ownership escalation |
 | Freshness | Fails closed as `NOT_CONFIGURED` | Approved connector watermark contracts |
 | Scan-age posture | Implemented and explicitly labelled | Unchanged |
@@ -139,4 +139,5 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 | DQ-5 | Data SLA/SLO definitions | P1 |
 | DQ-6 | Seasonality-aware thresholds | P2 |
 | DQ-7 | Bank-scale incident-volume certification | P1 |
+| AG-14 | Quality agent: rule proposals from profile history under a contracted identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | Delivered 2026-09-11 — on-demand runs; no scheduler |
 | DQ-8 | Open quality framework for third-party detector integration | P2 |

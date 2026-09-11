@@ -69,6 +69,11 @@ Confidence and evidence per proposal type
 ``TERM_SEMANTIC_BINDING``
     No confidence field -- a steward's own request, not a scored proposal
     (`confidence=None`); evidence is the binding's own term/object identity.
+``QUALITY_RULE_PROPOSAL``
+    `.confidence` -- how much profile history the rule rests on. The proposed
+    rule itself comes first, name, type and threshold, because the queue has
+    no diff for it; then one item per key in `.evidence`
+    (`quality_rule_proposals`).
 ``SEMANTIC_MODEL_VERSION`` / ``GLOSSARY_TERM_VERSION``
     No confidence field either (human-authored content submitted for review,
     not an inference); `confidence=None`, `evidence=[]` -- the *diff* carries
@@ -105,6 +110,7 @@ from aida.models import (
     SemanticModelVersion,
     TermSemanticBinding,
 )
+from aida.quality_rule_proposal_model import QualityRuleProposal
 from aida.review_queue_schemas import ReviewQueueProposalRead
 from aida.schemas import EvidenceItemRead
 from aida.semantic_api import GovernanceReviewDiffRead, SemanticFieldDeltaRead
@@ -169,6 +175,17 @@ async def _column_description_drafts_by_id(
         return {}
     rows = await session.scalars(
         select(ColumnDescriptionDraft).where(ColumnDescriptionDraft.id.in_(ids))
+    )
+    return {row.id: row for row in rows.all()}
+
+
+async def _quality_rule_proposals_by_id(
+    session: AsyncSession, ids: Sequence[UUID]
+) -> dict[UUID, QualityRuleProposal]:
+    if not ids:
+        return {}
+    rows = await session.scalars(
+        select(QualityRuleProposal).where(QualityRuleProposal.id.in_(ids))
     )
     return {row.id: row for row in rows.all()}
 
@@ -651,6 +668,9 @@ async def compose_review_queue(
     term_bindings = await _term_semantic_bindings_by_id(
         session, ids_by_type.get("TERM_SEMANTIC_BINDING", [])
     )
+    quality_rules = await _quality_rule_proposals_by_id(
+        session, ids_by_type.get("QUALITY_RULE_PROPOSAL", [])
+    )
     diffs = await compose_review_queue_diffs(session, reviews)
 
     composed: list[ReviewQueueProposalRead] = []
@@ -716,6 +736,25 @@ async def compose_review_queue(
             binding = term_bindings.get(object_id)
             if binding is not None:
                 evidence = _term_binding_evidence(binding)
+        elif review.object_type == "QUALITY_RULE_PROPOSAL" and object_id is not None:
+            rule_proposal = quality_rules.get(object_id)
+            if rule_proposal is not None:
+                confidence = rule_proposal.confidence
+                evidence = [
+                    EvidenceItemRead(
+                        category="QUALITY_RULE_PROPOSAL",
+                        claim=(
+                            f"proposed rule: {rule_proposal.name} "
+                            f"({rule_proposal.rule_type} {rule_proposal.threshold:g})"
+                        ),
+                        source=f"quality_rule_proposal:{rule_proposal.id}",
+                    ),
+                    *_dict_evidence_items(
+                        rule_proposal.evidence,
+                        category="QUALITY_RULE_PROPOSAL",
+                        source=f"quality_rule_proposal:{rule_proposal.id}.evidence",
+                    ),
+                ]
 
         diff: GovernanceReviewDiffRead = diffs[review.id]
         composed.append(
@@ -750,4 +789,5 @@ def confidence_bearing_object_types() -> Iterable[str]:
         "SEMANTIC_METRIC_PROPOSAL",
         "ASSET_DESCRIPTION_DRAFT",
         "COLUMN_DESCRIPTION_DRAFT",
+        "QUALITY_RULE_PROPOSAL",
     )

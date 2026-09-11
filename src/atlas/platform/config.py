@@ -384,6 +384,16 @@ class Settings(BaseSettings):
     #: the steward agent's bound on whole proposals.
     lineage_agent_max_pending_proposals: int = Field(default=500, ge=0, le=100_000)
 
+    # --- ADR-0029: the quality agent -------------------------------------
+    # Registered like the others: nothing until an approved AGENT-kind version
+    # carries a contract for this principal.
+    quality_agent_principal_id: str = "agent:quality"
+    #: Rules proposed per capability per run, at most.
+    quality_agent_max_proposals_per_run: int = Field(default=25, ge=1, le=200)
+    #: How many of its own proposals may wait for review before it stops. Lower
+    #: than the steward agent's bound: every one is T2 and needs a person.
+    quality_agent_max_pending_proposals: int = Field(default=50, ge=0, le=10_000)
+
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to
     #: embedding candidates live. A catalog change newer than the index also

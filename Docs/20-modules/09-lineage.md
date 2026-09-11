@@ -136,7 +136,7 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 |---|---|---|
 | QUERY | Implemented — value-free output-to-source, direct/derived, transformation names, tool dependencies | Historical lineage search |
 | DBT | Implemented — manifest v12-compatible, model/source/test inventory, catalog matching, SQL hash + redacted SQL, dependency DAG, impact; `run_results.json` test-outcome ingestion now reconciles into `DataQualityIncident` rows (`dbt_quality_bridge.py`) | CI/dbt Cloud auth, column-level manifest lineage, retention, large-DAG virtualization |
-| VIEW / PROCEDURE | **Not implemented** | Entry-ticket gap |
+| VIEW / PROCEDURE | Partial — view and procedure SQL is parsed into lineage on request (LN-2) and folded into impact (LN-7). Since 2026-09-11 the lineage agent ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) also parses the view definitions ingestion captured and proposes their edges for per-edge review ([ADR-0026](../10-architecture/adr/ADR-0026-per-edge-type-lineage-review.md)); a person decides every one | Scheduled agent runs; procedures under the agent |
 | ETL / OpenLineage | Partial — `POST /v1/lineage/openlineage` ingests RunEvents, extracts column-lineage edges from the `columnLineage` facet, matches against the catalog, and persists idempotently (`openlineage.py`, `openlineage_api.py`); **zero test coverage**, and no Airflow-sourced event has ever been verified producing real edges | Test coverage; live Airflow e2e evidence |
 | BI | **Not implemented** | Entry-ticket gap |
 | AI_DECISION | Partial — traces exist; not modelled as lineage edges | **Differentiator — model as first-class edges** |
@@ -158,6 +158,7 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | LN-10 | Authoritative column-to-column mapping (replace dbt's identical-name matching) | P1 |
 | LN-11 | BI report/metric node kinds folded into the unified graph (view/procedure table-pair edges already folded in as part of LN-7) | P1, depends on LN-4 |
 | LN-12 | Unified graph export: SVG, PNG, PDF, CSV | P2 |
+| AG-13 | Lineage agent: parse captured view definitions under a contracted identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | **Delivered 2026-09-11** — on-demand runs; no scheduler |
 
 ### 13.1 Runtime scaling controls
 

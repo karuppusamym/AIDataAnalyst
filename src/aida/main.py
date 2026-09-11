@@ -74,6 +74,7 @@ from aida.policy_native_sync_api import router as policy_native_sync_router
 from aida.procedure_lineage_api import router as procedure_lineage_router
 from aida.procedure_tool_api import router as procedure_tool_router
 from aida.product_marketplace_api import router as product_marketplace_router
+from aida.quality_agent_api import router as quality_agent_router
 from aida.quality_api import router as quality_router
 from aida.readiness import (
     AUDIT_ARCHIVE_TASK,
@@ -461,6 +462,7 @@ app.include_router(review_queue_router)
 # ADR-0029: task agents.
 app.include_router(steward_agent_router)
 app.include_router(lineage_agent_router)
+app.include_router(quality_agent_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

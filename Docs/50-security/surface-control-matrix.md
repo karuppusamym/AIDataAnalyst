@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **478**
-- By family: BULK 11, EXPORT 5, JOB 24, MCP 9, REST 428, SDK 1
+- Surfaces covered: **480**
+- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 429, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -93,6 +93,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/analysis-runs` | JOB | `aida.api.create_analysis_run` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/semantic-inference-runs` | JOB | `aida.semantic_intelligence_api.create_semantic_inference_run` | DataAdmin, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/lineage-agent/run` | JOB | `aida.lineage_agent_api.start_lineage_agent_run` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/organizations/{organization_id}/quality-agent/run` | JOB | `aida.quality_agent_api.start_quality_agent_run` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/reviewer-agent/run` | JOB | `aida.agent_contract_api.run_reviewer_agent` | MetadataReviewer, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/steward-agent/run` | JOB | `aida.steward_agent_api.start_steward_agent_run` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/playbooks/{playbook_id}/run` | JOB | `aida.playbooks_api.run_playbook_now` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -276,6 +277,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/portfolio-analytics/summary` | REST | `aida.product_marketplace_api.portfolio_analytics_summary` | Analyst, Auditor, DataProductOwner, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/portfolio-analytics/trends` | REST | `aida.product_marketplace_api.portfolio_analytics_trends` | Analyst, Auditor, DataProductOwner, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/projects` | REST | `aida.operational_api.list_organization_projects` | DataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/quality-agent` | REST | `aida.quality_agent_api.get_quality_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/retrieval/vector-index` | REST | `aida.retrieval_ops_api.get_vector_index_status` | Analyst, Auditor, DataSteward, MetadataAdmin, Operations, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent/disagreement-rates` | REST | `aida.agent_contract_api.get_disagreement_rates` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent/samples` | REST | `aida.agent_contract_api.list_audit_samples` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |

@@ -97,6 +97,7 @@ from aida.models import (
     TermSemanticBinding,
 )
 from aida.product_marketplace_api import approve_access_request
+from aida.quality_rule_proposals import decide_quality_rule_proposal
 from aida.query_history_miner import apply_query_history_metric_candidate_decision
 from aida.retrieval import hybrid_retrieve_cross_source
 from aida.schemas import (
@@ -2859,6 +2860,9 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "SEMANTIC_METRIC_PROPOSAL": _decide_semantic_metric_proposal,
     "COLUMN_CLASSIFICATION_PROMOTION": _decide_column_classification_promotion,
     "QUERY_HISTORY_METRIC_CANDIDATE": _decide_query_history_metric_candidate,
+    # ADR-0029: the quality agent's proposals. The adapter lives beside the
+    # rules they are derived by rather than here.
+    "QUALITY_RULE_PROPOSAL": decide_quality_rule_proposal,
 }
 
 register_target_adapters(_TARGET_EFFECT_ADAPTERS)

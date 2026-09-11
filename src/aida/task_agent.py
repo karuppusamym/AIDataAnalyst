@@ -28,10 +28,12 @@ them, so it lives here and an agent module cannot implement it differently:
 4. **Budgets.** A per-run proposal limit clamped by configuration, a bound on
    the agent's own undecided proposals, and the contract's wall-clock cap.
 5. **One way to write.** `TaskAgentRun.open_review` is the only path by which an
-   agent's work reaches anyone, and it refuses any object type above
-   `review_risk_tiers.HARD_MAX_AGENT_TIER` -- so an agent that tried to propose
-   published meaning or a trust-boundary change would fail at its first
-   proposal rather than ship.
+   agent's work reaches anyone, and it refuses any object type above the
+   agent's proposal ceiling: `review_risk_tiers.HARD_MAX_AGENT_TIER` (T1) unless
+   its spec declares more, and never above `HARD_MAX_PROPOSAL_TIER` (T2). An
+   agent that tried to ask for a trust-boundary change would fail at its first
+   proposal rather than ship. Proposing and deciding are different ceilings: no
+   agent *decides* above T1, so a T2 proposal is always decided by a person.
 6. **A ledger and an outcome measure.** One `AgentTask` per proposal, linked to
    its review and carrying ids, hashes and scores only (INV-6); and an
    acceptance rate per object type that is `None`, never 0, until a reviewer has
@@ -69,7 +71,12 @@ from aida.agent_tasks import finish_agent_task, record_agent_task
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
 from aida.models import AgentContract, AiAsset, AiAssetVersion, GovernanceReview
-from aida.review_risk_tiers import HARD_MAX_AGENT_TIER, risk_tier_for, tier_at_or_below
+from aida.review_risk_tiers import (
+    HARD_MAX_AGENT_TIER,
+    TIER_T2,
+    risk_tier_for,
+    tier_at_or_below,
+)
 from aida.security import SecurityContext
 from atlas.platform.config import Settings
 
@@ -105,6 +112,13 @@ QUEUE_GOVERNANCE_REVIEW: Final = "GOVERNANCE_REVIEW"
 #: it, and its maker-checker compares the edge's `created_by` with the reviewer.
 QUEUE_PARSED_LINEAGE: Final = "PARSED_LINEAGE_REVIEW"
 _HUMAN_ONLY_QUEUES: Final = frozenset({QUEUE_PARSED_LINEAGE})
+
+#: The highest ADR-0027 tier any task agent may *propose*. A spec defaults to
+#: `HARD_MAX_AGENT_TIER` (T1, the most any agent may also decide) and may declare
+#: up to this. Raising a T2 proposal is safe only because deciding stays capped at
+#: T1 for every agent, so a person decides each one. T3 -- policy, access, model
+#: routes, agent registrations -- is never an agent's to ask for.
+HARD_MAX_PROPOSAL_TIER: Final = TIER_T2
 
 #: Contracts read when resolving authority. More than one APPROVED candidate is
 #: refused as ambiguous; this only bounds the read.
@@ -181,6 +195,16 @@ class TaskAgentSpec:
     pending_counter: PendingCounter | None = None
     #: ... and how they have been decided, merged into its outcome measure.
     outcome_reader: OutcomeReader | None = None
+    #: The highest tier its proposals' object types may be. A spec above
+    #: `HARD_MAX_PROPOSAL_TIER` cannot be constructed.
+    max_proposal_tier: str = HARD_MAX_AGENT_TIER
+
+    def __post_init__(self) -> None:
+        if not tier_at_or_below(self.max_proposal_tier, HARD_MAX_PROPOSAL_TIER):
+            raise ValueError(
+                f"a task agent may propose at most {HARD_MAX_PROPOSAL_TIER}, "
+                f"not {self.max_proposal_tier}"
+            )
 
     @property
     def principal_setting(self) -> str:
@@ -564,16 +588,20 @@ class TaskAgentRun:
     ) -> GovernanceReview:
         """Put one proposal in the review queue as the agent's own request.
 
-        The tier check is structural, not configuration: an agent may only ever
-        ask for decisions an agent could in principle be trusted near
-        (ADR-0027's T0/T1).
+        The tier check is structural, not configuration: an agent may ask only
+        for decisions at or below its spec's proposal ceiling, which is itself
+        capped at `HARD_MAX_PROPOSAL_TIER`. Both are checked, so a spec altered
+        after construction still cannot ask for a trust-boundary change.
         """
         spec_capability = self.spec.capability(capability)
         if spec_capability.queue != QUEUE_GOVERNANCE_REVIEW:
             raise ValueError(f"{capability} is decided in {spec_capability.queue}, not here")
         object_type = spec_capability.object_type
         tier = risk_tier_for(object_type)
-        if not tier_at_or_below(tier, HARD_MAX_AGENT_TIER):
+        if not (
+            tier_at_or_below(tier, self.spec.max_proposal_tier)
+            and tier_at_or_below(tier, HARD_MAX_PROPOSAL_TIER)
+        ):
             raise TaskAgentRefused(REASON_OBJECT_TYPE_ABOVE_CEILING)
         review = GovernanceReview(
             organization_id=self.organization_id,

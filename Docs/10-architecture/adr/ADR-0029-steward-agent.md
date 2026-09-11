@@ -85,3 +85,65 @@ Revisit when any one of these happens:
 * Nothing has been measured on a real estate.
 * The mid-run stop has been exercised on SQLite in one process, not across PostgreSQL workers.
 * GL-9's evidence gathering names upstream and downstream tables from lineage without filtering them to the draft's own datasource. The column drafter does filter them (ADR-0017). That gap predates this agent, but the agent now reaches it without a human in the loop.
+
+## Amendment (2026-09-11): one runtime, two more agents
+
+The six properties in the Decision were first written inside `steward_agent.py`. They are also what would make a lineage agent or a quality agent governable, and a second copy of them is how two agents end up governed differently. They now live in one runtime, `src/aida/task_agent.py`. Each agent contributes only a spec — its key, its capabilities and the object types they propose — and one coroutine per capability that finds work.
+
+* Refusal and stop codes are agent-neutral: `agent_version_not_approved`, `agent_principal_reserved`, `agent_autonomy_withdrawn`, `agent_review_backlog_full`.
+* Every setting ending in `_agent_principal_id` is reserved against every other agent. The runtime reads that list from the settings model itself, so an agent added later is kept off every existing identity, the reviewer agent's included, as soon as its setting exists.
+
+Two agents were added on this runtime. Each passes the test the Decision sets: its identity enforces something.
+
+**The lineage agent (`agent:lineage`).** Ingestion captures every view's definition, and nothing parsed it. View lineage existed only where a person pasted SQL into the parse endpoint. The agent parses eligible definitions — active, available, literal-redacted and screened clean — for views that have no parsed lineage in any review state. It writes the edges whose sources resolve, as PROPOSED. Two things differ from the steward agent:
+
+1. **A second write path, deliberately narrow.** Parsed edges are decided in [ADR-0026](ADR-0026-per-edge-type-lineage-review.md)'s per-edge queue, not in `GovernanceReview`. The runtime lets an agent write into a dedicated queue only if that queue is on its human-only list: a queue no agent can decide from, whose own maker-checker compares an edge's author with its reviewer. `PARSED_LINEAGE_REVIEW` is the only entry.
+2. **Auto-activation does not apply.** `lineage_parsed_edges_review_mode` and the high-confidence threshold govern what a person's parse may activate. An agent's edge is PROPOSED whatever they say.
+
+The agent does not re-parse a view that has any edge, including one a reviewer rejected. A definition it cannot turn into lineage is recorded once and not examined again until it changes. Its backlog bound and its outcome measure count edges.
+
+**The quality agent (`agent:quality`).** DQ-4 gave stewards threshold rules; nothing suggested one. The agent derives two value-free rule types from each table's most recent completed profiles:
+
+* a row-count floor at half the smallest recent count;
+* a null-rate ceiling just above the worst recent null rate of a column that is normally complete.
+
+It needs at least three profiles. It never proposes a rule key — table, column and rule type — that already has a rule, enabled or not, or a proposal in any state. A rule a person disabled and a proposal a person rejected are answers already given.
+
+A proposal is a new governed object, `QUALITY_RULE_PROPOSAL`, classified **T2**. A failing rule gates governed tools, demotes retrieval and attaches warnings to answers, which is the harm a data contract's quality clause can do. On approval, the decision adapter creates an enabled rule in the datasource's "Agent-proposed rules" pack, with the approver as the rule's creator.
+
+**Proposing and deciding are now separate ceilings.** This is the one change to the runtime's rules, and the quality agent needed it:
+
+* **Deciding** stays capped at `HARD_MAX_AGENT_TIER` (T1) for every agent, and nothing about the reviewer agent changes.
+* **Proposing** also defaults to T1. A spec may declare a higher proposal ceiling, up to `HARD_MAX_PROPOSAL_TIER` (T2), and the quality agent is the only spec that does. A spec above T2 cannot be constructed, and the tier is checked again each time a review is opened.
+
+So a person decides every T2 proposal, and no agent ever asks to move the trust boundary (T3).
+
+### Consequences of the amendment
+
+* The same code refuses, stops, bounds, ledgers and measures every task agent. An agent that wanted to behave differently would have to change the runtime, where the change is visible, rather than its own module.
+* People get more to review: edges from every eligible view, and rule proposals no automation may approve. The default backlog bounds — 500 edges, 50 rule proposals — are what keep that from becoming a queue nobody reads.
+* If the reviewer agent is enabled, it may still decide the steward agent's T0/T1 proposals. It can decide neither lineage edges (a different queue) nor quality rules (T2).
+
+### Revisit trigger (added)
+
+* Any spec other than the quality agent's is proposed with a proposal ceiling above T1.
+* A second dedicated queue is proposed for the runtime's human-only list.
+
+## Implementation status (2026-09-11)
+
+**Implemented:**
+
+* **The shared runtime:** `task_agent.py` and `task_agent_api.py`, with its response shapes.
+* **The lineage agent:** `lineage_agent.py`, `lineage_agent_api.py` and `lineage_table_resolution.py`.
+* **The quality agent:** `quality_agent.py`, `quality_agent_api.py`, `quality_rule_proposals.py`, `quality_rule_proposal_model.py` and migration `e3b8f14c6a92`.
+* **For every agent:** three settings, and a console built on one shared screen component.
+
+Tests: `tests/test_lineage_agent.py` and `tests/test_quality_agent.py`, alongside the steward agent's.
+
+**Not done, stated plainly:**
+
+* There is no scheduler for any task agent. A person starts every run.
+* The inbox and the roster count `AgentRun` rows, and no task agent writes any, so both report zero runs for all three agents. Each agent's work shows on its own console and in the inbox's task lists.
+* The lineage agent parses views only. Stored procedures and dbt models keep their own parse paths.
+* The quality agent proposes floors and null-rate ceilings only. Profiles store no values, so it has nothing to derive a range or distribution rule from without breaking INV-6.
+* Nothing has been measured on a real estate.
