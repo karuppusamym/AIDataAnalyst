@@ -10,6 +10,7 @@ import {
   DescriptionActionDialog,
   type DescriptionActionSubject,
 } from "./DescriptionActionDialog";
+import { ColumnDescriptionDrafts } from "./ColumnDescriptionDrafts";
 import { CrossLinks } from "./CrossLinks";
 import { Button, Field, Pill } from "./primitives";
 import "./ColumnPanel.css";
@@ -337,9 +338,9 @@ export function ColumnPanel({
           is how a documented feature stays undiscovered, so the cross-link
           carries the source id the way every other catalog cross-link does. */}
       <p className="colp__guidance">
-        Definitions and source comments come from discovery scans. Automatic description
-        drafts currently apply to tables; use the source model workbook for bulk column
-        business descriptions.
+        Definitions and source comments come from discovery scans. Drafts below are composed
+        from catalog evidence and published only after review; to write descriptions yourself,
+        or in bulk, use the source model workbook.
       </p>
       {datasourceId ? (
         <CrossLinks
@@ -361,6 +362,10 @@ export function ColumnPanel({
           {notice}
         </div>
       ) : null}
+      {/* Generation and review of machine drafts, next to the columns they
+          describe. Mounted here rather than folded into ColumnRow so a column
+          and its draft stay separately labelled claims (rule 1 above). */}
+      {columns.length > 0 ? <ColumnDescriptionDrafts tableId={tableId} /> : null}
       {columns.length > 0 ? (
         <Field label="Find columns">
           <input value={query} onChange={event => { setQuery(event.target.value); setExpanded(false); }} placeholder="Column name or data type" />

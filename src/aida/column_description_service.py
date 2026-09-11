@@ -164,12 +164,20 @@ async def gather_table_column_evidence(
     ]
     target_names = await _table_names(
         session,
-        {constraint.referenced_table_id for constraint in foreign_keys if constraint.referenced_table_id},
+        {
+            constraint.referenced_table_id
+            for constraint in foreign_keys
+            if constraint.referenced_table_id
+        },
         datasource_id=table.datasource_id,
     )
     references: dict[str, list[str]] = defaultdict(list)
     for constraint in foreign_keys:
-        target = target_names.get(constraint.referenced_table_id) if constraint.referenced_table_id else None
+        target = (
+            target_names.get(constraint.referenced_table_id)
+            if constraint.referenced_table_id
+            else None
+        )
         if target is None:
             continue
         referenced_columns = constraint.referenced_columns or []

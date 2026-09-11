@@ -1,0 +1,23 @@
+/* Column description drafts, inside the column panel. Colours come from the
+   shared tokens only: small text uses `--ink-3`, which is the token the WCAG AA
+   audit (App.css header) measured as passing on every surface these render on. */
+.cdd{margin:10px 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.cdd__head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.cdd__head .colp__sub{margin:0}
+.cdd__actions{display:flex;gap:8px;flex-wrap:wrap}
+.cdd__lede{margin:6px 0 8px;font-size:12px;line-height:1.45;color:var(--ink-3)}
+.cdd__notice{margin:6px 0;padding:7px 9px;border-radius:6px;background:var(--sunk);font-size:12.5px;line-height:1.45}
+.cdd__error{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0;font-size:12.5px;color:var(--bad, #b42318)}
+.cdd__load,.cdd__none{font-size:12.5px;color:var(--ink-3);padding:4px 0}
+.cdd__list{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:8px}
+.cdd__item{padding:8px 10px;border:1px solid var(--line-soft, var(--line));border-radius:7px}
+.cdd__row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cdd__col{font-family:var(--mono);font-size:12.5px;font-weight:600}
+.cdd__score{margin-left:auto;font-size:11.5px;color:var(--ink-3)}
+.cdd__text{margin:6px 0;font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.cdd__edit{display:grid;gap:6px;margin:6px 0}
+.cdd__edit textarea{width:100%;font:inherit;font-size:13px;line-height:1.5;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:inherit;resize:vertical}
+.cdd__label{font-size:11.5px;color:var(--ink-3)}
+.cdd__itemactions{display:flex;gap:8px;flex-wrap:wrap}
+.cdd__warn{margin:6px 0 0;font-size:12px;line-height:1.45;color:var(--ink-3)}
+.cdd__meta{margin:6px 0 0;font-size:12px;color:var(--ink-3)}

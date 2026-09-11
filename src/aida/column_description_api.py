@@ -349,7 +349,10 @@ async def generate_column_description_drafts(
     )
     await session.commit()
     return ColumnDescriptionDraftGenerateResult(
-        drafts=[_draft_read(draft, table_name, column_name) for draft, table_name, column_name in created],
+        drafts=[
+            _draft_read(draft, table_name, column_name)
+            for draft, table_name, column_name in created
+        ],
         created=len(created),
         skipped_open=skipped_open,
         skipped_described=skipped_described,
@@ -418,7 +421,9 @@ async def list_column_description_drafts(
     )
     rows = (await session.execute(base.order_by(*ordering).limit(limit).offset(offset))).all()
     return Page(
-        items=[_draft_read(draft, table_name, column_name) for draft, table_name, column_name in rows],
+        items=[
+            _draft_read(draft, table_name, column_name) for draft, table_name, column_name in rows
+        ],
         limit=limit,
         offset=offset,
         total=total or 0,
@@ -444,7 +449,9 @@ async def edit_column_description_draft(
     on, and rewording the prose does not change that evidence.
     """
     draft = await session.scalar(
-        select(ColumnDescriptionDraft).where(ColumnDescriptionDraft.id == draft_id).with_for_update()
+        select(ColumnDescriptionDraft)
+        .where(ColumnDescriptionDraft.id == draft_id)
+        .with_for_update()
     )
     if draft is None:
         raise HTTPException(status_code=404, detail="column description draft not found")

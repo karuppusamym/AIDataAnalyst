@@ -88,6 +88,7 @@ const OBJECT_TYPES = [
   "GLOSSARY_LINK_PROPOSAL",
   "SEMANTIC_METRIC_PROPOSAL",
   "ASSET_DESCRIPTION_DRAFT",
+  "COLUMN_DESCRIPTION_DRAFT",
   "TERM_SEMANTIC_BINDING",
   "COLUMN_CLASSIFICATION_PROMOTION",
   "CONTEXT_PRODUCT_VERSION",
@@ -164,6 +165,28 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
     return {
       subject: `Term "${term}"`,
       subtitle: reason ? `Reason: ${reason}` : undefined,
+    };
+  }
+  if (
+    proposal.object_type === "COLUMN_DESCRIPTION_DRAFT" ||
+    proposal.object_type === "ASSET_DESCRIPTION_DRAFT"
+  ) {
+    // The proposed text arrives as the first evidence item: description
+    // drafts have no field diff, so without it the row would ask a reviewer
+    // to approve text it never showed them.
+    const proposed = extractEvidenceValue(proposal, "proposed_description");
+    const column = extractEvidenceValue(proposal, "column");
+    const parts: string[] = [];
+    if (proposed) parts.push(`“${proposed.length > 180 ? `${proposed.slice(0, 180)}…` : proposed}”`);
+    if (proposal.confidence !== null && proposal.confidence !== undefined) {
+      parts.push(`evidence ${pct(proposal.confidence)}`);
+    }
+    return {
+      subject:
+        proposal.object_type === "COLUMN_DESCRIPTION_DRAFT"
+          ? `Describe column ${column ?? proposal.object_id}`
+          : "Table description draft",
+      subtitle: parts.join(" — ") || undefined,
     };
   }
   return { subject: proposal.object_id };

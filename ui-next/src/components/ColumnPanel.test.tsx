@@ -450,7 +450,7 @@ it("keeps the guidance but offers no trip when the source is not known", async (
 
   await waitFor(() => expect(screen.getByText("No description.")).toBeInTheDocument());
   expect(
-    screen.getByText(/use the source model workbook for bulk column business descriptions/),
+    screen.getByText(/use the source model workbook/),
   ).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Source model workbook/ })).not.toBeInTheDocument();
 });
