@@ -1,0 +1,330 @@
+{
+  "provenance": {
+    "purpose": "AR-03 / R11-C3. Ground truth for the false-approval benchmark's twin corpus, held outside the benchmark so the verdict a pair is scored against is stated, sourced and reviewable rather than implied by a boolean argument.",
+    "authored_by": "R11-C3 session, 2026-09-12. NOT reviewed by a human data steward. The labels are checkable rather than authoritative: each one states the fact it rests on, so a steward can confirm or overturn it without re-deriving anything.",
+    "authored_on": "2026-09-12",
+    "method": "One label per twin. The verdict is decided from the label's own stated `basis` about the subject the case builds, and never from any score, tier or verdict the platform itself produced. `basis_kind` records what kind of fact the basis is, so a weak label cannot hide among strong ones.",
+    "independence": "This file is data. It executes nothing, imports nothing, and names no Atlas scoring field; `test_the_truth_labels_name_no_platform_score` enforces the last of those. Nothing in the pipeline under measurement writes, derives or validates a verdict here.",
+    "why_this_exists": "Until 2026-09-12 the twin verdicts were the `truthful: bool` argument passed to each seed function inside the benchmark itself. That boolean was never read by the decision under test, carried no basis, no author and no date, and bound nothing: a seed's content could drift from the judgement it was supposed to carry and no test would notice. Three cases were worse than unprovenanced -- the two enrichment cases and the document-claim case took the claim they judged from the pipeline's own output through an `assert`, so a change to the rules engine's keyword table or to the name matcher would have redefined the case, and the natural repair would have been to edit the expectation.",
+    "basis_kinds": {
+      "schema": "A fact readable from the physical catalog the case builds: a column's type, its nullability, a primary key, a foreign key. The strongest basis available here, and independent of every Atlas score.",
+      "naming_convention": "A fact about what a name means in this estate rather than about the data itself. Weaker: a steward who does not share the convention may reasonably overturn the label.",
+      "operational_fact": "A premise about the estate outside the catalog -- who is an active principal, what a table is used for. Weakest: the fixture states it rather than establishing it, and it is the kind of fact that goes stale."
+    },
+    "limits": [
+      "The corpus is adversarial by construction. These labels support statements about which routes to a wrong approval exist, never about how often one occurs in the field.",
+      "Three labels rest on a naming convention and four on an operational premise the fixture does not itself create. Both kinds are marked.",
+      "No human data steward has signed these off. Until one has, `basis` is the thing to review, not the verdict."
+    ]
+  },
+  "labels": [
+    {
+      "case_id": "asset-misleading-dbt",
+      "twin": "true",
+      "subject": "retail.customers",
+      "asserted": "One row per customer, keyed by customer_id.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "retail.customers has a single primary key column, customer_id, so one row per customer keyed by customer_id is exactly its grain.",
+      "basis_source": "primary key constraint on retail.customers, as the case builds it",
+      "falsifier": "A second primary key column, or a primary key other than customer_id, would make the grain statement wrong."
+    },
+    {
+      "case_id": "asset-misleading-dbt",
+      "twin": "false",
+      "subject": "retail.customers",
+      "asserted": "One row per order line, keyed by order_line_id.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "retail.customers is keyed by customer_id and has no order_line_id column at all, so it cannot be one row per order line. The claim names a key the table does not have.",
+      "basis_source": "column list and primary key constraint on retail.customers",
+      "falsifier": "An order_line_id column on retail.customers holding that table's primary key."
+    },
+    {
+      "case_id": "asset-wrong-annotation",
+      "twin": "true",
+      "subject": "retail.customers",
+      "asserted": "Retail customer master.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "The table is named customers, is keyed by customer_id, and its columns describe customers. A customer master is what it is.",
+      "basis_source": "table name, primary key and column list",
+      "falsifier": "Columns showing the table is a transaction or event log about customers rather than the master list of them."
+    },
+    {
+      "case_id": "asset-wrong-annotation",
+      "twin": "false",
+      "subject": "retail.customers",
+      "asserted": "Represents party supply information in the Customer domain.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "Nothing in retail.customers concerns supplies: there is no supply column, no supply key and no supplier reference. The phrase is the wrong subject for this table, and it is the text approving this corpus's party_supplies enrichment twin would have published -- the errors chain.",
+      "basis_source": "column list on retail.customers",
+      "falsifier": "Supply or supplier columns on retail.customers."
+    },
+    {
+      "case_id": "column-misleading-sources",
+      "twin": "true",
+      "subject": "retail.orders.customer_id",
+      "asserted": "Customer who placed the order. || Foreign key to the customer who placed the order.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "retail.orders.customer_id is a non-null integer that references customers.customer_id. A description calling it the customer who placed the order agrees with both its type and its foreign key.",
+      "basis_source": "column type, nullability and foreign key reference on retail.orders.customer_id",
+      "falsifier": "The reference pointing at a table other than customers."
+    },
+    {
+      "case_id": "column-misleading-sources",
+      "twin": "false",
+      "subject": "retail.orders.customer_id",
+      "asserted": "Date the order shipped. || Carrier code for the shipment.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "retail.orders.customer_id is a non-null integer referencing customers.customer_id. It is neither a date nor a carrier code: both claims contradict its physical type, and both contradict its foreign key.",
+      "basis_source": "column type and foreign key reference on retail.orders.customer_id",
+      "falsifier": "A date or character type on the column, or the reference pointing at a shipment table."
+    },
+    {
+      "case_id": "column-model-drafted",
+      "twin": "true",
+      "subject": "retail.orders.customer_id",
+      "asserted": "Customer who placed the order.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "Same column, same reasoning as column-misleading-sources: an integer foreign key to customers.customer_id is the customer who placed the order.",
+      "basis_source": "column type and foreign key reference on retail.orders.customer_id",
+      "falsifier": "The reference pointing at a table other than customers."
+    },
+    {
+      "case_id": "column-model-drafted",
+      "twin": "false",
+      "subject": "retail.orders.customer_id",
+      "asserted": "Date the order shipped.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "An integer foreign key to customers.customer_id is not a shipping date. The claim contradicts the column's physical type.",
+      "basis_source": "column type on retail.orders.customer_id",
+      "falsifier": "A date type on the column."
+    },
+    {
+      "case_id": "enrichment-keyword-inside-a-word",
+      "twin": "true",
+      "subject": "retail.customer",
+      "asserted": "retail.customer belongs to the CUSTOMER domain.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "The table is named customer and is keyed by customer_id. Its subject is customers.",
+      "basis_source": "table name and primary key on retail.customer",
+      "falsifier": "A primary key or column list showing the table is about something other than customers."
+    },
+    {
+      "case_id": "enrichment-keyword-inside-a-word",
+      "twin": "false",
+      "subject": "retail.discard_log",
+      "asserted": "retail.discard_log belongs to the PAYMENTS domain.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "retail.discard_log is keyed by discard_id and holds discard_id and created_at. It has no payment, card, amount or currency column. The only reason anything connects it to payments is that the letters 'card' occur inside the word 'discard'.",
+      "basis_source": "column list and primary key on retail.discard_log",
+      "falsifier": "A payment, card, amount or currency column on retail.discard_log."
+    },
+    {
+      "case_id": "enrichment-keyword-another-meaning",
+      "twin": "true",
+      "subject": "retail.counterparty",
+      "asserted": "retail.counterparty belongs to the CUSTOMER domain.",
+      "verdict": "TRUE",
+      "basis_kind": "naming_convention",
+      "basis": "A counterparty is the legal entity on the other side of a transaction, which is a party in the customer sense. Filing it under CUSTOMER is right for this estate, where counterparties and customers are one domain.",
+      "basis_source": "the estate's domain vocabulary; retail.counterparty is keyed by counterparty_id",
+      "falsifier": "A separate COUNTERPARTY domain in the estate, which would make CUSTOMER the wrong one of two available answers."
+    },
+    {
+      "case_id": "enrichment-keyword-another-meaning",
+      "twin": "false",
+      "subject": "retail.party_supplies",
+      "asserted": "retail.party_supplies belongs to the CUSTOMER domain.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "retail.party_supplies is keyed by supply_id and holds supply_id and created_at. It records supplies, not parties: 'party' here is the celebration sense, not the legal-entity sense, and no column refers to a person or organisation.",
+      "basis_source": "column list and primary key on retail.party_supplies",
+      "falsifier": "A party, customer, counterparty or legal-entity column on retail.party_supplies."
+    },
+    {
+      "case_id": "enrichment-model-self-graded",
+      "twin": "true",
+      "subject": "retail.customer",
+      "asserted": "retail.customer belongs to the CUSTOMER domain.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "The table is named customer and keyed by customer_id; its subject is customers.",
+      "basis_source": "table name and primary key on retail.customer",
+      "falsifier": "A column list showing the table is about something other than customers."
+    },
+    {
+      "case_id": "enrichment-model-self-graded",
+      "twin": "false",
+      "subject": "retail.customer",
+      "asserted": "retail.customer belongs to the PAYMENTS domain.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "retail.customer is keyed by customer_id and holds customer_id and created_at. It has no payment, card, amount or currency column, so it is not a payments table.",
+      "basis_source": "column list and primary key on retail.customer",
+      "falsifier": "A payment, card, amount or currency column on retail.customer."
+    },
+    {
+      "case_id": "glossary-name-stem",
+      "twin": "true",
+      "subject": "fct_revenue",
+      "asserted": "The table fct_revenue is the glossary term 'Revenue'.",
+      "verdict": "TRUE",
+      "basis_kind": "naming_convention",
+      "basis": "The fct_ prefix marks a published fact table in this estate. A published revenue fact table is the asset the Revenue term denotes.",
+      "basis_source": "the estate's dbt-style layer naming convention (stg_ staging, fct_ published fact)",
+      "falsifier": "An estate that does not use the fct_ prefix for published facts, or a second published revenue fact table that is the real referent."
+    },
+    {
+      "case_id": "glossary-name-stem",
+      "twin": "false",
+      "subject": "stg_revenue",
+      "asserted": "The table stg_revenue is the glossary term 'Revenue'.",
+      "verdict": "FALSE",
+      "basis_kind": "naming_convention",
+      "basis": "The stg_ prefix marks a staging table: pre-transformation rows, including rows the downstream load rejects. Its contents are not the bank's published Revenue measure even though its name stem is 'revenue'.",
+      "basis_source": "the estate's dbt-style layer naming convention (stg_ staging, fct_ published fact)",
+      "falsifier": "An estate where stg_ tables are the published layer, or evidence that stg_revenue is what the Revenue term was defined against."
+    },
+    {
+      "case_id": "glossary-synonym",
+      "twin": "true",
+      "subject": "account_balance",
+      "asserted": "The table account_balance is the glossary term 'Balance'.",
+      "verdict": "TRUE",
+      "basis_kind": "naming_convention",
+      "basis": "account_balance holds the balance of an account, which is the quantity the Balance term names.",
+      "basis_source": "the table's name, read in the account sense that matches the term's definition",
+      "falsifier": "A Balance term defined as something other than an account balance."
+    },
+    {
+      "case_id": "glossary-synonym",
+      "twin": "false",
+      "subject": "balance_sheet_template",
+      "asserted": "The table balance_sheet_template is the glossary term 'Balance'.",
+      "verdict": "FALSE",
+      "basis_kind": "naming_convention",
+      "basis": "'Balance' in balance_sheet_template belongs to the compound 'balance sheet', a financial statement, and the table is a template for one. It holds no account balance, so it is not the Balance term's referent; the two share a word, not a meaning.",
+      "basis_source": "the table's name, read as the compound it is part of",
+      "falsifier": "The table holding account balances rather than statement layout."
+    },
+    {
+      "case_id": "document-claim-wrong-row",
+      "twin": "true",
+      "subject": "public.customers.customer_id",
+      "asserted": "unique customer identifier",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "customer_id is the identifying column of the customers table, so 'unique customer identifier' describes it.",
+      "basis_source": "column name and role on public.customers",
+      "falsifier": "customer_id not being unique on that table."
+    },
+    {
+      "case_id": "document-claim-wrong-row",
+      "twin": "false",
+      "subject": "public.customers.customer_id",
+      "asserted": "date the customer closed their account",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "customer_id identifies a customer. It is not a date, and an account-closure date is a different fact about a customer that this column does not hold.",
+      "basis_source": "column name and role on public.customers",
+      "falsifier": "customer_id being a date column recording account closure."
+    },
+    {
+      "case_id": "bulk-three-tables-wrong-owner",
+      "twin": "true",
+      "subject": "3 TABLE subjects",
+      "asserted": "Ownership of 3 tables is assigned to the principal 'retail-data-steward'.",
+      "verdict": "TRUE",
+      "basis_kind": "operational_fact",
+      "basis": "retail-data-steward is the estate's active stewardship principal for retail tables, so the assignment leaves the tables owned by someone who can act on them.",
+      "basis_source": "stated premise of the case: the principal is active and in the right team",
+      "falsifier": "The principal not existing, or not being responsible for retail tables."
+    },
+    {
+      "case_id": "bulk-three-tables-wrong-owner",
+      "twin": "false",
+      "subject": "3 TABLE subjects",
+      "asserted": "Ownership of 3 tables is assigned to the principal 'departed-contractor'.",
+      "verdict": "FALSE",
+      "basis_kind": "operational_fact",
+      "basis": "departed-contractor is not an active principal, so the assignment leaves three tables owned by nobody who can act on them -- worse than unowned, because the catalog then reports an owner and no escalation fires.",
+      "basis_source": "stated premise of the case: the principal has left and holds no active account",
+      "falsifier": "The principal still being active."
+    },
+    {
+      "case_id": "workbook-three-wrong-descriptions",
+      "twin": "true",
+      "subject": "retail.orders.customer_id, total_amount, ordered_at",
+      "asserted": "Customer who placed the order. || Order total. || When the order was placed.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "Each description matches the column it is filed against: customer_id is the integer foreign key to customers, total_amount the order's total, ordered_at the time it was placed.",
+      "basis_source": "column names and types on retail.orders",
+      "falsifier": "Any of the three columns holding something other than what its name says."
+    },
+    {
+      "case_id": "workbook-three-wrong-descriptions",
+      "twin": "false",
+      "subject": "retail.orders.customer_id, total_amount, ordered_at",
+      "asserted": "Date the order shipped. || Items returned. || Warehouse it left from.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "Every one of the three is filed against the wrong column: a shipping date against an integer customer foreign key, a returned-item count against an order total, a warehouse against a timestamp. All three contradict their column's type or name.",
+      "basis_source": "column names and types on retail.orders",
+      "falsifier": "The columns holding shipment, return and warehouse facts rather than what their names say."
+    },
+    {
+      "case_id": "bulk-one-table-wrong-owner",
+      "twin": "true",
+      "subject": "1 TABLE subject",
+      "asserted": "Ownership of 1 table is assigned to the principal 'retail-data-steward'.",
+      "verdict": "TRUE",
+      "basis_kind": "operational_fact",
+      "basis": "As bulk-three-tables-wrong-owner's true twin, at the smallest size the platform will still route through review.",
+      "basis_source": "stated premise of the case: the principal is active and in the right team",
+      "falsifier": "The principal not existing, or not being responsible for retail tables."
+    },
+    {
+      "case_id": "bulk-one-table-wrong-owner",
+      "twin": "false",
+      "subject": "1 TABLE subject",
+      "asserted": "Ownership of 1 table is assigned to the principal 'departed-contractor'.",
+      "verdict": "FALSE",
+      "basis_kind": "operational_fact",
+      "basis": "Wrong for the same reason as the three-table twin, and the size is the point: one subject is the smallest a bulk operation can carry, so an agent that approves it is not approving because the change is small. Size is the only property the control checks, and it is satisfied maximally here.",
+      "basis_source": "stated premise of the case: the principal has left and holds no active account",
+      "falsifier": "The principal still being active."
+    },
+    {
+      "case_id": "workbook-one-row-unattributed-text",
+      "twin": "true",
+      "subject": "retail.orders.customer_id",
+      "asserted": "Foreign key to the customer who placed the order.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "The description matches the column: a non-null integer referencing customers.customer_id.",
+      "basis_source": "column type and foreign key reference on retail.orders.customer_id",
+      "falsifier": "The reference pointing at a table other than customers."
+    },
+    {
+      "case_id": "workbook-one-row-unattributed-text",
+      "twin": "false",
+      "subject": "retail.orders.customer_id",
+      "asserted": "Carrier code for the shipment, as inferred by the description model.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "An integer foreign key to customers.customer_id is not a carrier code. This is the same text the control refuses when it arrives as a MODEL_INFERRED column draft; a workbook change records no origin, so arriving this way strips the one attribute the abstention reads.",
+      "basis_source": "column type and foreign key reference on retail.orders.customer_id",
+      "falsifier": "A model-origin attribute on ModelImportChange that the evidence resolver reads."
+    }
+  ]
+}
