@@ -116,6 +116,15 @@ ALLOWLIST: dict[str, str] = {
         "tsconfig and imported by no module -- being unimported is what an ambient "
         ".d.ts is for, so this is a permanent exception, not a backlog item."
     ),
+    "lib/demoDataMode.ts": (
+        "R11-X1: imported by `ui-next/vite.config.ts`, which decides demo-vs-live "
+        "at build time and hands the client a literal. This gate walks the browser "
+        "entry points, and a build-config module is reachable from none of them by "
+        "construction -- putting the policy where the browser could import it is "
+        "what made the fixture estate unshakeable from the bundle in the first "
+        "place. A permanent exception while the build owns the decision, not a "
+        "backlog item; it goes away only if the policy moves back into the app."
+    ),
     "components/OrgPicker.tsx": (
         "Docs/review-2026-09-05/POINTS-TRACKER.md D01: named by the review "
         "(REVIEW.md line 301) alongside ProposalCard as unreached from main. Unlike "
