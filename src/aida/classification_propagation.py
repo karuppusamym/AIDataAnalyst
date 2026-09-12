@@ -68,6 +68,9 @@ from aida.models import (
     ColumnDerivedClassification,
     GovernanceReview,
     MetadataColumn,
+    OpenLineageColumnEdge,
+    ProcedureLineageEdge,
+    ViewLineageEdge,
 )
 from aida.security_types import SecurityContext
 
@@ -564,3 +567,201 @@ async def get_current_derived_classification(
         )
     )
     return row
+
+
+# --------------------------------------------------------------------------- #
+# 6. Building the graph from real lineage (AT-11's missing producer)
+# --------------------------------------------------------------------------- #
+#
+# Everything above computes and stores derived classifications; until now
+# nothing built the edges to run it over, so a deployment had the review and
+# apply half of AT-11 and never a single derived row. These two functions are
+# that producer.
+#
+# Three rules the collector holds, none of them optional:
+#
+# * **Only reviewed edges propagate.** ADR-0026 gave the parser-produced edge
+#   tables a review lifecycle, and a PROPOSED edge is a machine's guess nobody
+#   has confirmed. Raising an ABAC enforcement input off an unconfirmed edge is
+#   the same mistake as propagating along an INFLUENCES edge, which rule 2
+#   above already forbids -- so only ACTIVE rows are collected.
+# * **Column identity is resolved, never matched by name across tables.** A
+#   column name is unique only *within* a table, so each edge end is resolved
+#   as (table_id, column_name) against `metadata_column`, and an end whose
+#   table did not resolve is dropped. This is the same false-merge refusal
+#   `unified_lineage_builder` makes for unmatched table names.
+# * **The pass is bounded.** `max_edges` caps what one sweep collects, so a
+#   large estate degrades into "propagated over the first N edges" rather than
+#   an unbounded scan. The cap is reported, never silently applied.
+
+
+@dataclass(frozen=True, slots=True)
+class PropagationInputs:
+    """What one datasource contributes to a propagation run."""
+
+    edges: list[PropagationEdge]
+    asserted: dict[str, str]
+    truncated: bool
+
+
+async def collect_propagation_inputs(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    datasource_id: UUID,
+    max_edges: int = 5_000,
+) -> PropagationInputs:
+    """Build column-level propagation edges for one datasource.
+
+    Reads the three parser-produced column-level edge tables that carry a
+    resolved table id on both ends -- view definitions, procedure definitions
+    and OpenLineage column edges -- and resolves each end to a real
+    `MetadataColumn`. The unified graph's own `edge_source` literals are used
+    so `propagation_kind_for_edge_source` decides what may propagate, rather
+    than this collector hard-coding trust.
+    """
+    edge_specs: list[tuple[Any, str]] = [
+        (ViewLineageEdge, "VIEW_DEFINITION"),
+        (ProcedureLineageEdge, "PROCEDURE_DEFINITION"),
+    ]
+
+    raw: list[tuple[UUID, str, UUID, str, str, str]] = []
+    truncated = False
+    for model, edge_source in edge_specs:
+        remaining = max_edges - len(raw)
+        if remaining <= 0:
+            truncated = True
+            break
+        rows = (
+            await session.execute(
+                select(
+                    model.source_table_id,
+                    model.source_column,
+                    model.target_table_id,
+                    model.target_column,
+                    model.id,
+                )
+                .where(
+                    model.organization_id == organization_id,
+                    model.datasource_id == datasource_id,
+                    model.review_status == "ACTIVE",
+                    model.source_table_id.is_not(None),
+                    model.target_table_id.is_not(None),
+                )
+                .limit(remaining + 1)
+            )
+        ).all()
+        if len(rows) > remaining:
+            truncated = True
+            rows = rows[:remaining]
+        for source_table_id, source_column, target_table_id, target_column, edge_id in rows:
+            raw.append(
+                (source_table_id, source_column, target_table_id, target_column,
+                 edge_source, str(edge_id))
+            )
+
+    # OpenLineage column edges are organization-scoped rather than
+    # datasource-scoped (their dataset names are namespaced, not FK'd to a
+    # datasource), so they are framed by the resolved table ids instead.
+    remaining = max_edges - len(raw)
+    if remaining > 0:
+        ol_rows = (
+            await session.execute(
+                select(
+                    OpenLineageColumnEdge.input_table_id,
+                    OpenLineageColumnEdge.input_column_name,
+                    OpenLineageColumnEdge.output_table_id,
+                    OpenLineageColumnEdge.output_column_name,
+                    OpenLineageColumnEdge.id,
+                )
+                .where(
+                    OpenLineageColumnEdge.organization_id == organization_id,
+                    OpenLineageColumnEdge.review_status == "ACTIVE",
+                    OpenLineageColumnEdge.input_table_id.is_not(None),
+                    OpenLineageColumnEdge.output_table_id.is_not(None),
+                )
+                .limit(remaining + 1)
+            )
+        ).all()
+        if len(ol_rows) > remaining:
+            truncated = True
+            ol_rows = ol_rows[:remaining]
+        for input_table_id, input_column, output_table_id, output_column, edge_id in ol_rows:
+            raw.append(
+                (input_table_id, input_column, output_table_id, output_column,
+                 "OPENLINEAGE_ETL", str(edge_id))
+            )
+    else:
+        truncated = True
+
+    table_ids = {row[0] for row in raw} | {row[2] for row in raw}
+    if not table_ids:
+        return PropagationInputs(edges=[], asserted={}, truncated=truncated)
+
+    columns = (
+        await session.execute(
+            select(
+                MetadataColumn.id,
+                MetadataColumn.table_id,
+                MetadataColumn.name,
+                MetadataColumn.classification,
+            ).where(MetadataColumn.table_id.in_(table_ids))
+        )
+    ).all()
+    # A column name is unique within a table, never across tables -- which is
+    # why the key is the pair and an unresolved table end is dropped above.
+    by_key: dict[tuple[UUID, str], UUID] = {
+        (table_id, name): column_id for column_id, table_id, name, _cls in columns
+    }
+    asserted: dict[str, str] = {
+        str(column_id): classification
+        for column_id, _table_id, _name, classification in columns
+        if classification
+    }
+
+    edges: list[PropagationEdge] = []
+    for source_table_id, source_column, target_table_id, target_column, edge_source, ref in raw:
+        upstream = by_key.get((source_table_id, source_column))
+        downstream = by_key.get((target_table_id, target_column))
+        if upstream is None or downstream is None or upstream == downstream:
+            continue
+        edges.append(
+            PropagationEdge(
+                upstream_id=str(upstream),
+                downstream_id=str(downstream),
+                kind=propagation_kind_for_edge_source(edge_source),
+                edge_ref=ref,
+            )
+        )
+    return PropagationInputs(edges=edges, asserted=asserted, truncated=truncated)
+
+
+async def propagate_for_datasource(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    datasource_id: UUID,
+    created_by: str,
+    max_edges: int = 5_000,
+) -> list[ColumnDerivedClassification]:
+    """Collect one datasource's lineage and store what it derives.
+
+    Returns the rows written. Writes nothing when the datasource has no
+    reviewed column lineage, which is the common case on an estate whose
+    parsers have not run -- a no-op, not an error.
+    """
+    inputs = await collect_propagation_inputs(
+        session,
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        max_edges=max_edges,
+    )
+    if not inputs.edges or not inputs.asserted:
+        return []
+    return await store_derived_classifications(
+        session,
+        organization_id=organization_id,
+        asserted=inputs.asserted,
+        edges=inputs.edges,
+        created_by=created_by,
+    )

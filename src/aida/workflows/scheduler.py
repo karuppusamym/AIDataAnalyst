@@ -10,6 +10,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from aida.certification_expiry_warning import run_certification_expiry_warning_pass
+from aida.classification_propagation import propagate_for_datasource
 from aida.config import Settings, get_settings
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
@@ -22,6 +23,7 @@ from aida.graph_reconciliation import run_graph_reconciliation_pass
 from aida.logging import configure_logging
 from aida.models import (
     AnalysisRun,
+    DataSource,
     MetadataTable,
     NotificationRuleRecord,
     OwnershipRule,
@@ -45,6 +47,10 @@ from aida.task_agent_schedule import run_task_agent_schedule_pass
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
 logger = structlog.get_logger(__name__)
+
+#: Written into every derived classification the propagation pass stores, so
+#: the evidence says a scheduled sweep produced it and not a person.
+CLASSIFICATION_PROPAGATION_PRINCIPAL = "scheduler:classification-propagation"
 
 
 def maintenance_window_allows(policy: ScanPolicy, now: datetime) -> bool:
@@ -497,6 +503,63 @@ async def run_graph_reconciliation_scheduler_pass(
     )
 
 
+#: R11-B17: last propagation sweep per datasource, in process memory -- the
+#: same tradeoff every pass above accepts (a restart costs one redundant
+#: sweep; propagation is idempotent, since a re-derived value supersedes its
+#: own previous row rather than accumulating).
+_classification_propagation_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_classification_propagation_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Propagate classifications along reviewed column lineage, per datasource.
+
+    AT-11 could review and apply a derived classification but nothing produced
+    one, so an estate never had any. This is the producer.
+
+    Off unless an operator sets an interval, like the task agents: the pass
+    writes derived rows a person may later be asked to promote, so it is opted
+    into rather than discovered. Nothing it writes is enforced -- a derived
+    classification only becomes the asserted, policy-enforced value through the
+    review queue (`apply_classification_promotion`).
+
+    Returns how many datasources were swept. One datasource's failure is logged
+    and skipped, never aborting the rest, matching every pass above.
+    """
+    interval = settings.classification_propagation_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(select(DataSource.id, DataSource.organization_id))
+        ).all()
+    swept = 0
+    for datasource_id, organization_id in rows:
+        previous = _classification_propagation_last_run_at.get(datasource_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await propagate_for_datasource(
+                    session,
+                    organization_id=organization_id,
+                    datasource_id=datasource_id,
+                    created_by=CLASSIFICATION_PROPAGATION_PRINCIPAL,
+                    max_edges=settings.classification_propagation_max_edges,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one datasource must not stop the sweep
+            logger.exception(
+                "classification_propagation_failed", datasource_id=str(datasource_id)
+            )
+            continue
+        _classification_propagation_last_run_at[datasource_id] = effective_now
+        swept += 1
+    return swept
+
+
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
     try:
         await client.start_workflow(
@@ -617,6 +680,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await run_owner_routing_pass(settings, now=now)
     await run_custom_rule_pack_pass(now=now)
     await run_graph_reconciliation_scheduler_pass(settings, now=now)
+    await run_classification_propagation_pass(settings, now=now)
     await run_due_playbooks_pass(now=now)
     # ADR-0029: scheduled task-agent runs. Off by default -- every
     # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening

@@ -370,6 +370,19 @@ class Settings(BaseSettings):
     #: never: a person starts every run. The same for every task agent below.
     steward_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
+    # --- AT-11 (R11-B17): classification propagation ---------------------
+    #: How often the scheduler propagates classifications along reviewed
+    #: column lineage, in minutes. 0, the default, means never -- the same
+    #: convention as the task agents above, and for the same reason: this
+    #: writes proposals a person has to read, so an estate opts in rather
+    #: than discovering a queue it did not ask for. Derived values never
+    #: become asserted without the review queue either way.
+    classification_propagation_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+    #: Edges one pass collects per datasource before it stops and says so.
+    #: A large estate degrades to "propagated over the first N edges", never
+    #: an unbounded scan.
+    classification_propagation_max_edges: int = Field(default=5_000, ge=1, le=100_000)
+
     # --- ADR-0029: the lineage agent -------------------------------------
     # The same registration rules as the steward agent's: nothing until an
     # approved AGENT-kind version carries a contract for this principal.
