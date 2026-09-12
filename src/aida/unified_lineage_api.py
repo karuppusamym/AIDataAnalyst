@@ -10,11 +10,19 @@ catalog on both ends only), plus transitive, cross-kind, bounded
 upstream/downstream impact traversal (`traverse` in `aida.unified_lineage`)
 in place of direct-reference counting.
 
+R11-B13 extended it past the warehouse edge: BI report nodes and their
+`BI_LINEAGE` edges (LN-4's Tableau/Power BI report -> metric -> column chain,
+folded to report -> table) now merge in through
+`unified_lineage_builder.collect_bi_lineage`, so a REFERENCED_BY traversal from
+a table reaches the dashboards it feeds. Consumption edges are deliberately
+*not* merged -- they record who read an asset rather than what derives from it;
+that provider's docstring gives the four reasons.
+
 This intentionally does not yet cover: authoritative column-level mappings
 (dbt UI still matches columns by name -- see `transformation-workbench.js`),
-unmatched (free-text) view/procedure table names, BI/report nodes, AI
-decision edges, or export. Those remain tracked as LN-3, LN-4, LN-10, LN-12
-in `Docs/20-modules/09-lineage.md` and EA.9, EC.6+ in
+unmatched (free-text) view/procedure table names, AI decision edges, or
+export. Those remain tracked as LN-3, LN-10, LN-12 in
+`Docs/20-modules/09-lineage.md` and EA.9, EC.6+ in
 `Docs/60-delivery/02-epic-backlog.md`.
 
 AT-19: a `VIEW_DEFINITION` edge's `evidence` also carries a bounded, resolvable

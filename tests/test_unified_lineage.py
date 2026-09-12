@@ -21,6 +21,7 @@ from aida.models import (
     BiMetricNode,
     BiReportMetricEdge,
     BiReportNode,
+    ConsumptionRecord,
     ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductVersion,
@@ -1210,11 +1211,18 @@ async def test_view_definition_transformation_detail_withholds_quarantined_text(
 # named as invisible to the unified graph. View/procedure edges (LN-2) were
 # already folded in by LN-7 (2026-08-31), before this row was claimed -- see
 # `test_unified_lineage_impact_chains_view_definition_into_foreign_key` above.
-# The remaining four -- BI report/metric edges (LN-4/LN-11), AI decision
-# edges (LN-3/AU-5), context-product consumption edges (CX-4), and gateway
-# executed-query column lineage (`query_gateway.extract_column_lineage`) --
-# were investigated and found genuinely blocked from joining
-# `_build_unified_graph` in this pass, not merely deferred for convenience:
+#
+# BI report/metric edges (LN-4/LN-11) were the first of the remaining four to
+# be unblocked: R11-B13 extended both Literals and joined them, so the test
+# that pinned that gap has been replaced by the positive tests in the
+# R11-B13 section at the end of this file. The header below is kept for the
+# three that are still out -- AI decision edges (LN-3/AU-5), context-product
+# consumption edges (CX-4), and gateway executed-query column lineage
+# (`query_gateway.extract_column_lineage`). The first two were blocked when
+# this was written; consumption has since been re-examined by R11-B13 and is
+# now excluded on its merits rather than on the Literal constraint -- the
+# test keeps its name (the claim it pins is unchanged) and its docstring
+# carries the new reasoning.
 #
 #   * `UnifiedLineageEdgeSource` and `UnifiedLineageNodeKind` (both in
 #     `schemas.py`) are closed `Literal`s -- pydantic rejects any value
@@ -1253,100 +1261,6 @@ async def test_view_definition_transformation_detail_withholds_quarantined_text(
 # the Literals has a concrete regression test to flip green, and so a silent
 # accidental "fix" that only half-works cannot go unnoticed.
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_at10_bi_metric_column_edges_do_not_appear_in_the_unified_graph(
-    db_session,
-) -> None:
-    """A `BiMetricColumnEdge` resolved all the way to a real `MetadataTable`
-    (`matched_table_id` populated, exactly like the FK/view/procedure edges
-    the graph already folds in) still does not surface as a unified-graph
-    edge or add to `counts_by_source` -- `BiReportNode`/`BiMetricNode` have
-    no `UnifiedLineageNodeKind` to render as, so there is no node for a BI
-    edge to connect the table to. Blocked on LN-11 (new node kinds), out of
-    this row's `schemas.py`-free scope."""
-    datasource, schema = await _seed_org_and_datasource(db_session)
-    orders = await _seed_table(db_session, datasource, schema, "orders")
-
-    connection = BiConnection(
-        id=uuid4(),
-        organization_id=datasource.organization_id,
-        project_id=datasource.project_id,
-        datasource_id=datasource.id,
-        bi_tool="TABLEAU",
-        connection_key="site-1",
-        display_name="Tableau Site",
-        created_by="test-harness",
-    )
-    db_session.add(connection)
-    await db_session.flush()
-    artifact_import = BiArtifactImport(
-        id=uuid4(),
-        organization_id=datasource.organization_id,
-        connection_id=connection.id,
-        artifact_fingerprint="fp-1",
-        bi_tool="TABLEAU",
-        status="IMPORTED",
-        report_count=1,
-        metric_count=1,
-        report_metric_edge_count=1,
-        metric_column_edge_count=1,
-        matched_column_count=1,
-        unmatched_column_count=0,
-        imported_by="test-harness",
-    )
-    db_session.add(artifact_import)
-    await db_session.flush()
-    report = BiReportNode(
-        id=uuid4(),
-        organization_id=datasource.organization_id,
-        artifact_import_id=artifact_import.id,
-        external_id="wb-1",
-        name="Revenue Dashboard",
-        report_type="DASHBOARD",
-    )
-    metric = BiMetricNode(
-        id=uuid4(),
-        organization_id=datasource.organization_id,
-        artifact_import_id=artifact_import.id,
-        external_id="fld-1",
-        name="Net Revenue",
-        field_type="CALCULATED",
-    )
-    db_session.add_all([report, metric])
-    await db_session.flush()
-    db_session.add(
-        BiReportMetricEdge(
-            id=uuid4(),
-            organization_id=datasource.organization_id,
-            artifact_import_id=artifact_import.id,
-            report_id=report.id,
-            metric_id=metric.id,
-        )
-    )
-    db_session.add(
-        BiMetricColumnEdge(
-            id=uuid4(),
-            organization_id=datasource.organization_id,
-            artifact_import_id=artifact_import.id,
-            metric_id=metric.id,
-            source_table_name="orders",
-            source_column_name="amount",
-            matched_table_id=orders.id,
-        )
-    )
-    await db_session.flush()
-
-    result = await build_unified_lineage_graph_payload(
-        db_session, datasource, node_limit=50, edge_limit=50, settings=None
-    )
-
-    assert result.counts_by_source.get("BI_LINEAGE", 0) == 0
-    assert not any("BI" in edge.edge_source for edge in result.edges)
-    assert not any(
-        edge.evidence.get("source") in {"BI", "BI_LINEAGE", "TABLEAU"} for edge in result.edges
-    )
 
 
 @pytest.mark.asyncio
@@ -1397,13 +1311,21 @@ async def test_at10_ai_decision_edges_do_not_appear_in_the_unified_graph_or_impa
 @pytest.mark.asyncio
 async def test_at10_consumption_edges_do_not_appear_in_the_unified_graph(db_session) -> None:
     """A real `ContextProductConsumptionEdge` (the immutable per-read record
-    CX-4 emits) still contributes nothing to the unified graph: the version
-    it points at is `ContextProductVersion`, `project_id`-scoped with no
-    `datasource_id`/`MetadataTable` link at all even though it names real
-    tables in its own `table_ids` JSON column, and its other side,
-    `principal_id`, is a bare consumer-identity string, not an asset. Both
-    sides need a `UnifiedLineageNodeKind` that does not exist. Blocked, out
-    of this row's `schemas.py`-free scope."""
+    CX-4 emits) contributes nothing to the unified graph -- and as of R11-B13
+    that is a decision, not a blocker. AT-10 recorded it as blocked on the
+    closed `UnifiedLineageNodeKind` Literal; R11-B13 was authorized to extend
+    that Literal, extended it for BI, and still declined consumption, because
+    a consumption row records *who read* an asset rather than what derives
+    from what. `collect_bi_lineage`'s docstring carries the four reasons; the
+    two visible in this fixture are that `principal_id` is a consumer identity
+    rather than an asset, and that `ContextProductVersion` is `project_id`-
+    scoped with no `datasource_id` or `MetadataTable` link at all even though
+    its `table_ids` JSON column names real tables -- so there is no join that
+    could tenant-frame it the way every other provider here is framed.
+
+    This is pinned rather than merely documented so the exclusion stays a
+    decision: folding consumption in later would have to flip this test
+    deliberately."""
     datasource, schema = await _seed_org_and_datasource(db_session)
     orders = await _seed_table(db_session, datasource, schema, "orders")
 
@@ -1446,6 +1368,23 @@ async def test_at10_consumption_edges_do_not_appear_in_the_unified_graph(db_sess
             policy_decision="ALLOWED",
         )
     )
+    # The other consumption table, and the harder one: `ConsumptionRecord`
+    # names the table directly -- but as free text in `resource_id`, with no
+    # FK, so resolving it would be a name match across datasources of exactly
+    # the kind `_register_definition_edges` refuses to make.
+    db_session.add(
+        ConsumptionRecord(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            consumer_id="analyst@example.com",
+            consumer_type="USER",
+            resource_type="metadata_table",
+            resource_id=str(orders.id),
+            channel="MCP",
+            correlation_id="corr-2",
+            policy_decision="ALLOWED",
+        )
+    )
     await db_session.flush()
 
     result = await build_unified_lineage_graph_payload(
@@ -1455,7 +1394,12 @@ async def test_at10_consumption_edges_do_not_appear_in_the_unified_graph(db_sess
     assert result.counts_by_source.get("CONSUMPTION", 0) == 0
     assert not any("CONSUMPTION" in edge.edge_source for edge in result.edges)
     assert not any(node.id == "agent-run-123" for node in result.nodes)
+    assert not any(node.id == "analyst@example.com" for node in result.nodes)
     assert not any(node.id == str(version.id) for node in result.nodes)
+    # `orders` is a real, resolved node -- the exclusion is of the consumption
+    # edges specifically, not an artefact of an empty fixture.
+    assert str(orders.id) in {node.id for node in result.nodes}
+    assert result.edges == []
 
 
 @pytest.mark.asyncio
@@ -1509,3 +1453,545 @@ async def test_at10_gateway_query_lineage_does_not_appear_in_the_unified_graph(
     node_ids = {node.id for node in result.nodes}
     assert str(orders.id) in node_ids
     assert str(revenue_agg.id) in node_ids
+
+
+# ---------------------------------------------------------------------------
+# R11-B13: the graph runs past the warehouse edge into BI, and stops there.
+#
+# "Which reports does this column feed?" is the question a bank asks before it
+# changes a column. `bi_lineage.py` has imported and stored the report ->
+# metric -> column chain since LN-4, but nothing joined it to the unified
+# graph, so the graph could not answer. `collect_bi_lineage` joins it, folded
+# to the table grain every other provider in that module already uses.
+#
+# These tests are written to fail if any of the three properties the row is
+# accepted on regresses: reports are reachable *with provenance*, the
+# traversal stays *bounded*, and it never crosses an organization. The two
+# bound tests and the two tenancy tests each assert on a concretely missing
+# node or edge, not merely on a truncation flag, so a bound that silently
+# stopped truncating could not pass them.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_bi_connection(
+    session: AsyncSession,
+    datasource: DataSource,
+    *,
+    connection_key: str = "site-1",
+    status: str = "ACTIVE",
+) -> BiConnection:
+    connection = BiConnection(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        project_id=datasource.project_id,
+        datasource_id=datasource.id,
+        bi_tool="TABLEAU",
+        connection_key=connection_key,
+        display_name="Tableau Site",
+        status=status,
+        created_by="test-harness",
+    )
+    session.add(connection)
+    await session.flush()
+    return connection
+
+
+async def _seed_bi_import(
+    session: AsyncSession,
+    connection: BiConnection,
+    *,
+    fingerprint: str = "fp-1",
+    status: str = "IMPORTED",
+    created_at: datetime | None = None,
+) -> BiArtifactImport:
+    artifact_import = BiArtifactImport(
+        id=uuid4(),
+        organization_id=connection.organization_id,
+        connection_id=connection.id,
+        artifact_fingerprint=fingerprint,
+        bi_tool=connection.bi_tool,
+        status=status,
+        report_count=0,
+        metric_count=0,
+        report_metric_edge_count=0,
+        metric_column_edge_count=0,
+        matched_column_count=0,
+        unmatched_column_count=0,
+        imported_by="test-harness",
+        **({"created_at": created_at} if created_at is not None else {}),
+    )
+    session.add(artifact_import)
+    await session.flush()
+    return artifact_import
+
+
+async def _seed_bi_report(
+    session: AsyncSession,
+    artifact_import: BiArtifactImport,
+    *,
+    name: str,
+    report_type: str,
+    parent: BiReportNode | None = None,
+    project_name: str | None = "Finance",
+) -> BiReportNode:
+    report = BiReportNode(
+        id=uuid4(),
+        organization_id=artifact_import.organization_id,
+        artifact_import_id=artifact_import.id,
+        parent_report_id=None if parent is None else parent.id,
+        external_id=f"ext-{uuid4().hex[:10]}",
+        name=name,
+        report_type=report_type,
+        project_name=project_name,
+    )
+    session.add(report)
+    await session.flush()
+    return report
+
+
+async def _seed_bi_metric(
+    session: AsyncSession,
+    artifact_import: BiArtifactImport,
+    *,
+    name: str,
+    reports: list[BiReportNode],
+    matched_table_id: UUID | None,
+    source_table_name: str,
+    source_column_name: str,
+) -> BiMetricNode:
+    """One field, used by `reports`, deriving from one source column."""
+    metric = BiMetricNode(
+        id=uuid4(),
+        organization_id=artifact_import.organization_id,
+        artifact_import_id=artifact_import.id,
+        external_id=f"fld-{uuid4().hex[:10]}",
+        name=name,
+        field_type="CalculatedField",
+    )
+    session.add(metric)
+    await session.flush()
+    for report in reports:
+        session.add(
+            BiReportMetricEdge(
+                id=uuid4(),
+                organization_id=artifact_import.organization_id,
+                artifact_import_id=artifact_import.id,
+                report_id=report.id,
+                metric_id=metric.id,
+            )
+        )
+    session.add(
+        BiMetricColumnEdge(
+            id=uuid4(),
+            organization_id=artifact_import.organization_id,
+            artifact_import_id=artifact_import.id,
+            metric_id=metric.id,
+            source_table_name=source_table_name,
+            source_column_name=source_column_name,
+            matched_table_id=matched_table_id,
+        )
+    )
+    await session.flush()
+    return metric
+
+
+def test_r11b13_the_builders_edge_sources_match_the_published_contract() -> None:
+    """`EDGE_SOURCES` seeds `counts_by_source`, and `UnifiedLineageEdgeSource`
+    is what pydantic validates every edge against. A member added to one and
+    not the other is either an edge the API rejects at serialization time or a
+    count key no caller can receive, so the two are pinned equal."""
+    from typing import get_args
+
+    from aida.schemas import UnifiedLineageEdgeSource, UnifiedLineageNodeKind
+    from aida.unified_lineage_builder import (
+        BI_NODE_KIND_BY_REPORT_TYPE,
+        DBT_NODE_KIND_BY_RESOURCE_TYPE,
+        EDGE_SOURCES,
+    )
+
+    assert set(EDGE_SOURCES) == set(get_args(UnifiedLineageEdgeSource))
+    assert "BI_LINEAGE" in EDGE_SOURCES
+    declared_kinds = set(get_args(UnifiedLineageNodeKind))
+    assert set(BI_NODE_KIND_BY_REPORT_TYPE.values()) <= declared_kinds
+    assert set(DBT_NODE_KIND_BY_RESOURCE_TYPE.values()) <= declared_kinds
+
+
+def test_r11b13_every_report_type_the_parsers_emit_has_a_node_kind() -> None:
+    """The mapping is only useful if it covers what `bi_lineage.py` actually
+    produces; a parser emitting a `report_type` with no node kind would have
+    its reports silently skipped."""
+    from aida.bi_lineage import _TABLEAU_REPORT_TYPES
+    from aida.unified_lineage_builder import BI_NODE_KIND_BY_REPORT_TYPE
+
+    # Tableau: the workbook itself plus each field container's own type.
+    assert {"WORKBOOK", *_TABLEAU_REPORT_TYPES.values()} <= set(BI_NODE_KIND_BY_REPORT_TYPE)
+    # Power BI: `_parse_power_bi` emits REPORT for a report and PAGE per page.
+    assert {"REPORT", "PAGE"} <= set(BI_NODE_KIND_BY_REPORT_TYPE)
+
+
+@pytest.mark.asyncio
+async def test_r11b13_a_bi_report_reaches_the_graph_with_its_provenance(db_session) -> None:
+    """The row's headline: a Tableau sheet that reads `orders.amount` becomes a
+    real graph node with a real edge to `orders`, carrying enough provenance to
+    say which tool, which connection, which import and which metric produced
+    it -- and its containing workbook comes with it."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = await _seed_bi_connection(db_session, datasource)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    workbook = await _seed_bi_report(
+        db_session, artifact_import, name="Revenue", report_type="WORKBOOK"
+    )
+    sheet = await _seed_bi_report(
+        db_session, artifact_import, name="Net Revenue", report_type="SHEET", parent=workbook
+    )
+    await _seed_bi_metric(
+        db_session,
+        artifact_import,
+        name="Net Revenue",
+        reports=[sheet],
+        matched_table_id=orders.id,
+        source_table_name="orders",
+        source_column_name="amount",
+    )
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+
+    nodes_by_id = {node.id: node for node in result.nodes}
+    sheet_node = nodes_by_id[f"bi:{sheet.id}"]
+    assert sheet_node.node_kind == "BI_SHEET"
+    assert sheet_node.label == "Net Revenue"
+    assert sheet_node.qualified_name == "TABLEAU.Finance.Net Revenue"
+    # A workbook is not a catalog table, so it resolves to nothing -- the same
+    # posture an unmatched dbt resource or OpenLineage dataset gets.
+    assert sheet_node.resolved is False
+    assert sheet_node.matched_table_id is None
+    assert nodes_by_id[f"bi:{workbook.id}"].node_kind == "BI_WORKBOOK"
+
+    edges_by_id = {edge.id: edge for edge in result.edges}
+    reads = edges_by_id[f"bi:{sheet.id}:{orders.id}"]
+    assert reads.edge_source == "BI_LINEAGE"
+    # source-depends-on-target: the report depends on the table, so a
+    # REFERENCED_BY walk from the table finds the report.
+    assert reads.source_node_id == f"bi:{sheet.id}"
+    assert reads.target_node_id == str(orders.id)
+    assert reads.confidence == 1.0
+    # The metric did not become a node; it rides on the edge beside the
+    # catalog column it derives from.
+    assert reads.source_columns == ["Net Revenue"]
+    assert reads.target_columns == ["amount"]
+    assert reads.evidence["source"] == "BI_LINEAGE"
+    assert reads.evidence["relation"] == "REPORT_READS_TABLE"
+    assert reads.evidence["bi_tool"] == "TABLEAU"
+    assert reads.evidence["report_type"] == "SHEET"
+    assert reads.evidence["bi_connection_id"] == str(connection.id)
+    assert reads.evidence["bi_artifact_import_id"] == str(artifact_import.id)
+    assert reads.evidence["bi_report_id"] == str(sheet.id)
+    assert reads.evidence["metric_count"] == 1
+
+    contains = edges_by_id[f"bi:{workbook.id}:{sheet.id}"]
+    assert contains.edge_source == "BI_LINEAGE"
+    assert contains.evidence["relation"] == "REPORT_CONTAINS_REPORT"
+    assert contains.source_node_id == f"bi:{workbook.id}"
+    assert contains.target_node_id == f"bi:{sheet.id}"
+
+    assert result.counts_by_source["BI_LINEAGE"] == 2
+    assert result.truncation_reasons == []
+
+
+@pytest.mark.asyncio
+async def test_r11b13_impact_from_a_column_reaches_the_reports_it_feeds(db_session) -> None:
+    """The acceptance criterion stated as the traversal that answers it: a
+    downstream impact walk from `orders` reaches the sheet at depth 1 and the
+    workbook containing it at depth 2, both attributing BI_LINEAGE."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = await _seed_bi_connection(db_session, datasource)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    workbook = await _seed_bi_report(
+        db_session, artifact_import, name="Revenue", report_type="WORKBOOK"
+    )
+    sheet = await _seed_bi_report(
+        db_session, artifact_import, name="Net Revenue", report_type="SHEET", parent=workbook
+    )
+    await _seed_bi_metric(
+        db_session,
+        artifact_import,
+        name="Net Revenue",
+        reports=[sheet],
+        matched_table_id=orders.id,
+        source_table_name="orders",
+        source_column_name="amount",
+    )
+
+    impact = await build_unified_lineage_impact_payload(
+        db_session, datasource, str(orders.id), depth=5, node_limit=50, settings=None
+    )
+
+    downstream = {node.node_id: node for node in impact.downstream}
+    assert downstream[f"bi:{sheet.id}"].depth == 1
+    assert downstream[f"bi:{sheet.id}"].node_kind == "BI_SHEET"
+    assert "BI_LINEAGE" in downstream[f"bi:{sheet.id}"].contributing_edge_sources
+    assert downstream[f"bi:{workbook.id}"].depth == 2
+    assert downstream[f"bi:{workbook.id}"].node_kind == "BI_WORKBOOK"
+    # A report is not upstream of the table it reads.
+    assert impact.upstream == []
+
+
+@pytest.mark.asyncio
+async def test_r11b13_a_bi_edge_matched_to_another_orgs_table_is_unreachable(db_session) -> None:
+    """Tenancy, the adversarial case. `BiMetricColumnEdge.matched_table_id` is a
+    bare FK to `metadata_table` with nothing tying it to the connection's own
+    datasource, so a row in *this* organization naming *another* one's table is
+    representable in the database. It must not be traversable: neither the
+    foreign table nor the report that names it may enter this graph."""
+    datasource_a, schema_a = await _seed_org_and_datasource(db_session, name="ds-a")
+    datasource_b, schema_b = await _seed_org_and_datasource(db_session, name="ds-b")
+    await _seed_table(db_session, datasource_a, schema_a, "orders")
+    secret_ledger = await _seed_table(db_session, datasource_b, schema_b, "secret_ledger")
+    assert datasource_a.organization_id != datasource_b.organization_id
+
+    connection = await _seed_bi_connection(db_session, datasource_a)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    leaky_sheet = await _seed_bi_report(
+        db_session, artifact_import, name="Leaky Sheet", report_type="SHEET"
+    )
+    await _seed_bi_metric(
+        db_session,
+        artifact_import,
+        name="Foreign Balance",
+        reports=[leaky_sheet],
+        matched_table_id=secret_ledger.id,
+        source_table_name="secret_ledger",
+        source_column_name="balance",
+    )
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource_a, node_limit=50, edge_limit=50, settings=None
+    )
+
+    node_ids = {node.id for node in result.nodes}
+    assert str(secret_ledger.id) not in node_ids
+    assert f"bi:{leaky_sheet.id}" not in node_ids
+    assert not any(node.id.startswith("bi:") for node in result.nodes)
+    assert result.counts_by_source["BI_LINEAGE"] == 0
+    assert not any(edge.edge_source == "BI_LINEAGE" for edge in result.edges)
+    assert not any("secret_ledger" in node.qualified_name for node in result.nodes)
+
+
+@pytest.mark.asyncio
+async def test_r11b13_another_orgs_bi_connection_never_enters_this_graph(db_session) -> None:
+    """Tenancy, the ordinary case, with a positive control so the assertion
+    cannot pass vacuously: the very same BI fixture *is* reachable from the
+    datasource that owns it, and is absent from the other organization's."""
+    datasource_a, _schema_a = await _seed_org_and_datasource(db_session, name="ds-a")
+    datasource_b, schema_b = await _seed_org_and_datasource(db_session, name="ds-b")
+    ledger = await _seed_table(db_session, datasource_b, schema_b, "ledger")
+
+    connection = await _seed_bi_connection(db_session, datasource_b)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    sheet = await _seed_bi_report(
+        db_session, artifact_import, name="B Sheet", report_type="SHEET"
+    )
+    await _seed_bi_metric(
+        db_session,
+        artifact_import,
+        name="Balance",
+        reports=[sheet],
+        matched_table_id=ledger.id,
+        source_table_name="ledger",
+        source_column_name="balance",
+    )
+
+    owner_graph = await build_unified_lineage_graph_payload(
+        db_session, datasource_b, node_limit=50, edge_limit=50, settings=None
+    )
+    assert f"bi:{sheet.id}" in {node.id for node in owner_graph.nodes}
+    assert owner_graph.counts_by_source["BI_LINEAGE"] == 1
+
+    foreign_graph = await build_unified_lineage_graph_payload(
+        db_session, datasource_a, node_limit=50, edge_limit=50, settings=None
+    )
+    assert not any(node.id.startswith("bi:") for node in foreign_graph.nodes)
+    assert foreign_graph.counts_by_source["BI_LINEAGE"] == 0
+
+
+@pytest.mark.asyncio
+async def test_r11b13_the_node_bound_actually_drops_a_bi_report(db_session) -> None:
+    """The bound truncates rather than merely reporting: with one table and a
+    node budget of three, two of three sheets are admitted, the third is named
+    by neither a node nor a dangling edge, and which two survive is decided by
+    the same deterministic ordering `collect_tables` uses."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = await _seed_bi_connection(db_session, datasource)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    sheets = []
+    for suffix in ("a", "b", "c"):
+        sheet = await _seed_bi_report(
+            db_session, artifact_import, name=f"sheet_{suffix}", report_type="SHEET"
+        )
+        await _seed_bi_metric(
+            db_session,
+            artifact_import,
+            name=f"metric_{suffix}",
+            reports=[sheet],
+            matched_table_id=orders.id,
+            source_table_name="orders",
+            source_column_name="amount",
+        )
+        sheets.append(sheet)
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=3, edge_limit=50, settings=None
+    )
+
+    node_ids = {node.id for node in result.nodes}
+    assert len(result.nodes) == 3  # orders + two of the three sheets
+    assert node_ids == {str(orders.id), f"bi:{sheets[0].id}", f"bi:{sheets[1].id}"}
+    assert f"bi:{sheets[2].id}" not in node_ids
+    assert "NODE_LIMIT" in result.truncation_reasons
+    assert result.truncated is True
+    # The dropped node takes its edge with it rather than leaving a dangler.
+    assert result.counts_by_source["BI_LINEAGE"] == 2
+    assert f"bi:{sheets[2].id}:{orders.id}" not in {edge.id for edge in result.edges}
+
+
+@pytest.mark.asyncio
+async def test_r11b13_the_edge_bound_actually_drops_a_bi_edge(db_session) -> None:
+    """The edge budget truncates the same way: three sheets sharing one metric
+    want three edges, an `edge_limit` of two admits two, and the third edge is
+    genuinely absent from the response."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = await _seed_bi_connection(db_session, datasource)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    sheets = [
+        await _seed_bi_report(
+            db_session, artifact_import, name=f"sheet_{suffix}", report_type="SHEET"
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    await _seed_bi_metric(
+        db_session,
+        artifact_import,
+        name="Shared Metric",
+        reports=sheets,
+        matched_table_id=orders.id,
+        source_table_name="orders",
+        source_column_name="amount",
+    )
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=2, settings=None
+    )
+
+    edge_ids = {edge.id for edge in result.edges}
+    assert result.returned_edge_count == 2
+    assert edge_ids == {
+        f"bi:{sheets[0].id}:{orders.id}",
+        f"bi:{sheets[1].id}:{orders.id}",
+    }
+    assert f"bi:{sheets[2].id}:{orders.id}" not in edge_ids
+    assert result.counts_by_source["BI_LINEAGE"] == 2
+    assert "EDGE_LIMIT" in result.truncation_reasons
+    assert result.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_r11b13_only_the_latest_import_of_a_connection_is_folded_in(db_session) -> None:
+    """A BI site is re-scanned on a schedule. Folding every snapshot in would
+    multiply each report by its import count, so only the newest IMPORTED
+    artifact per connection contributes -- the rule `collect_dbt_dependencies`
+    already applies to dbt."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = await _seed_bi_connection(db_session, datasource)
+    older = await _seed_bi_import(
+        db_session,
+        connection,
+        fingerprint="fp-old",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    newer = await _seed_bi_import(
+        db_session,
+        connection,
+        fingerprint="fp-new",
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    stale_sheet = await _seed_bi_report(
+        db_session, older, name="Stale Sheet", report_type="SHEET"
+    )
+    await _seed_bi_metric(
+        db_session,
+        older,
+        name="Stale Metric",
+        reports=[stale_sheet],
+        matched_table_id=orders.id,
+        source_table_name="orders",
+        source_column_name="amount",
+    )
+    current_sheet = await _seed_bi_report(
+        db_session, newer, name="Current Sheet", report_type="SHEET"
+    )
+    await _seed_bi_metric(
+        db_session,
+        newer,
+        name="Current Metric",
+        reports=[current_sheet],
+        matched_table_id=orders.id,
+        source_table_name="orders",
+        source_column_name="amount",
+    )
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+
+    node_ids = {node.id for node in result.nodes}
+    assert f"bi:{current_sheet.id}" in node_ids
+    assert f"bi:{stale_sheet.id}" not in node_ids
+    assert result.counts_by_source["BI_LINEAGE"] == 1
+
+
+@pytest.mark.asyncio
+async def test_r11b13_a_report_type_with_no_node_kind_is_skipped_not_guessed(db_session) -> None:
+    """An unrecognised `report_type` -- a Looker parser landing later, a Tableau
+    object type not parsed today -- gets no node rather than an invented kind
+    the API's closed `UnifiedLineageNodeKind` would reject at serialization."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = await _seed_bi_connection(db_session, datasource)
+    artifact_import = await _seed_bi_import(db_session, connection)
+    known = await _seed_bi_report(
+        db_session, artifact_import, name="Known Sheet", report_type="SHEET"
+    )
+    unknown = await _seed_bi_report(
+        db_session, artifact_import, name="Some Story", report_type="STORY"
+    )
+    await _seed_bi_metric(
+        db_session,
+        artifact_import,
+        name="Shared Metric",
+        reports=[known, unknown],
+        matched_table_id=orders.id,
+        source_table_name="orders",
+        source_column_name="amount",
+    )
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+
+    node_ids = {node.id for node in result.nodes}
+    assert f"bi:{known.id}" in node_ids
+    assert f"bi:{unknown.id}" not in node_ids
+    assert result.counts_by_source["BI_LINEAGE"] == 1

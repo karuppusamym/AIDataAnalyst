@@ -56,6 +56,10 @@ ALL_EDGE_SOURCES = {
     "OPENLINEAGE_ETL",
     "VIEW_DEFINITION",
     "PROCEDURE_DEFINITION",
+    # R11-B13. `counts_by_source` reporting a zero is how a caller tells
+    # "no BI edges" from "BI not merged", so a new source has to appear here
+    # even on a datasource with no BI connection at all.
+    "BI_LINEAGE",
 }
 
 

@@ -29416,7 +29416,8 @@
               "DBT_DEPENDENCY",
               "OPENLINEAGE_ETL",
               "VIEW_DEFINITION",
-              "PROCEDURE_DEFINITION"
+              "PROCEDURE_DEFINITION",
+              "BI_LINEAGE"
             ],
             "title": "Edge Source",
             "type": "string"
@@ -29560,7 +29561,8 @@
                 "DBT_DEPENDENCY",
                 "OPENLINEAGE_ETL",
                 "VIEW_DEFINITION",
-                "PROCEDURE_DEFINITION"
+                "PROCEDURE_DEFINITION",
+                "BI_LINEAGE"
               ],
               "type": "string"
             },
@@ -29586,7 +29588,12 @@
               "DBT_SOURCE",
               "DBT_SEED",
               "DBT_SNAPSHOT",
-              "UNRESOLVED_DATASET"
+              "UNRESOLVED_DATASET",
+              "BI_WORKBOOK",
+              "BI_DASHBOARD",
+              "BI_SHEET",
+              "BI_REPORT",
+              "BI_PAGE"
             ],
             "title": "Node Kind",
             "type": "string"
@@ -29647,7 +29654,12 @@
               "DBT_SOURCE",
               "DBT_SEED",
               "DBT_SNAPSHOT",
-              "UNRESOLVED_DATASET"
+              "UNRESOLVED_DATASET",
+              "BI_WORKBOOK",
+              "BI_DASHBOARD",
+              "BI_SHEET",
+              "BI_REPORT",
+              "BI_PAGE"
             ],
             "title": "Focus Node Kind",
             "type": "string"
@@ -29728,7 +29740,12 @@
               "DBT_SOURCE",
               "DBT_SEED",
               "DBT_SNAPSHOT",
-              "UNRESOLVED_DATASET"
+              "UNRESOLVED_DATASET",
+              "BI_WORKBOOK",
+              "BI_DASHBOARD",
+              "BI_SHEET",
+              "BI_REPORT",
+              "BI_PAGE"
             ],
             "title": "Node Kind",
             "type": "string"

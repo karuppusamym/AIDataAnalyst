@@ -9319,8 +9319,11 @@ table alongside a real 2-table FK graph, proving the producer's data does not su
 unified-graph edge, a `counts_by_source` entry, or (where relevant) a node — concrete evidence of
 the gap, not just a claim about it:
 
-- `test_at10_bi_metric_column_edges_do_not_appear_in_the_unified_graph` — a `BiMetricColumnEdge`
-  resolved to a real table via `matched_table_id` still contributes nothing.
+- (BI gap test, 2026-09-01) — a `BiMetricColumnEdge` resolved to a real table via
+  `matched_table_id` still contributed nothing. **Superseded 2026-09-11 by R11-B13**, which
+  joined BI lineage to the graph: the gap test was replaced by
+  `test_r11b13_a_bi_report_reaches_the_graph_with_its_provenance`, which asserts the
+  opposite. The entry above is left as the record of what was true on 2026-09-01.
 - `test_at10_ai_decision_edges_do_not_appear_in_the_unified_graph_or_impact` — a real
   `RETRIEVAL_SELECTED` `AiDecisionRecord` naming a real table as `target_node` contributes nothing
   to the graph *or* to that table's own impact traversal (`upstream`/`downstream` both empty).

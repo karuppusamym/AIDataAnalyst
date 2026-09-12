@@ -1035,7 +1035,23 @@ class GraphSearchRead(ApiModel):
 
 
 UnifiedLineageNodeKind = Literal[
-    "TABLE", "DBT_MODEL", "DBT_SOURCE", "DBT_SEED", "DBT_SNAPSHOT", "UNRESOLVED_DATASET"
+    "TABLE",
+    "DBT_MODEL",
+    "DBT_SOURCE",
+    "DBT_SEED",
+    "DBT_SNAPSHOT",
+    "UNRESOLVED_DATASET",
+    # R11-B13: the consumption end of the warehouse. One member per
+    # `BiReportNode.report_type` the LN-4 parsers actually emit -- Tableau's
+    # WORKBOOK/DASHBOARD/SHEET and Power BI's REPORT/PAGE -- mirroring how the
+    # dbt resource types each got their own member rather than collapsing into
+    # one "DBT" kind. A caller that renders a dashboard differently from a
+    # worksheet can; one that does not can match on the `BI_` prefix.
+    "BI_WORKBOOK",
+    "BI_DASHBOARD",
+    "BI_SHEET",
+    "BI_REPORT",
+    "BI_PAGE",
 ]
 UnifiedLineageEdgeSource = Literal[
     "FOREIGN_KEY",
@@ -1044,6 +1060,10 @@ UnifiedLineageEdgeSource = Literal[
     "OPENLINEAGE_ETL",
     "VIEW_DEFINITION",
     "PROCEDURE_DEFINITION",
+    # R11-B13. Adding a member to a response enum is a widening, not a break
+    # (`scripts/openapi_diff.py` classifies it as informational), and it is the
+    # precedent LN-7 set when VIEW_DEFINITION/PROCEDURE_DEFINITION landed.
+    "BI_LINEAGE",
 ]
 
 
