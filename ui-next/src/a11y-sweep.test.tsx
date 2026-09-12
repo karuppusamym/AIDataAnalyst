@@ -106,6 +106,14 @@ beforeEach(() => {
   vi.resetModules();
 });
 
+/** How long either wait below may take before the case is called a failure.
+ *
+ * One constant for both, because they wait on the two halves of the same
+ * race -- the lazy chunk arriving, then its first data render finishing --
+ * and letting them drift apart is what produced the intermittent failure
+ * this value was measured against. See the note at the `waitFor`. */
+const WAIT = 15000;
+
 describe("every navigable screen is accessible", () => {
   it.each(SCREENS.map((row) => [`${row[0]}${row[2] ?? ""}`, ...row] as const))(
     "%s has no detectable WCAG A/AA violation and names every focusable control",
@@ -119,10 +127,34 @@ describe("every navigable screen is accessible", () => {
       // chunk, so on the tick `render` returns, the region is a Suspense
       // fallback. This is the race the brief for this row warns about, and
       // asserting here without awaiting is how it becomes intermittent.
-      const region = await screen.findByRole("region", { name: label }, { timeout: 5000 });
-      await waitFor(() => {
-        expect(within(region).queryByText(/^Loading /)).toBeNull();
-      });
+      const region = await screen.findByRole("region", { name: label }, { timeout: WAIT });
+      // Waiting out the lazy chunk, and the reason the budget is `WAIT` and
+      // not `@testing-library`'s 1s default (R11-D13, 2026-09-12).
+      //
+      // This `waitFor` was the one place in the file that took the default,
+      // while the `findByRole` above it had always asked for 5s against the
+      // very same race. The vitest 2 -> 5 upgrade turned that inconsistency
+      // into a failing gate: vitest 5 overlaps test files more aggressively
+      // than vitest 2 did (this suite reports ~151s of environment time
+      // inside a ~65s run), and this file is the heaviest in the suite -- it
+      // mounts the whole application 44 times and runs axe-core over each.
+      // Measured, not guessed: on vitest 2 three consecutive full-suite runs
+      // were green; on vitest 5, 1s failed twice in three runs and 5s still
+      // failed once, each time on a *different* screen (`catalog`,
+      // `reliability`, then `relationships`) and never when this file ran
+      // alone, which is the signature of contention rather than a broken
+      // screen.
+      //
+      // So the assertions are untouched and the window is sized for the
+      // worst case instead of the quiet case. It is still a bounded wait: a
+      // screen that genuinely never loads fails here exactly as before, and
+      // the per-test timeout at the foot of this block caps the whole case.
+      await waitFor(
+        () => {
+          expect(within(region).queryByText(/^Loading /)).toBeNull();
+        },
+        { timeout: WAIT },
+      );
 
       const violations = await axeViolations(container);
       expect(
@@ -138,6 +170,9 @@ describe("every navigable screen is accessible", () => {
         ),
       ).toEqual([]);
     },
-    20000,
+    // Two `WAIT`s plus an axe-core pass, with headroom; raised from 20000
+    // when `WAIT` went to 15000 so that the case reports the assertion that
+    // actually failed rather than a bare per-test timeout.
+    45000,
   );
 });
