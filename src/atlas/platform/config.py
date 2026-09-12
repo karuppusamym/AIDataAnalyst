@@ -688,6 +688,18 @@ class Settings(BaseSettings):
     embedding_model_version: str = Field(default="unset", max_length=100)
     embedding_dimensions: int = Field(default=768, ge=8, le=8192)
     embedding_chunking_version: int = Field(default=1, ge=1)
+    # RT-1 built a persisted vector index and nothing ever scheduled its
+    # rebuild: it was reachable only from an operator endpoint whose UI does
+    # not exist, so an index went stale and the vector channel silently fell
+    # back to embedding every candidate on every query -- the cost the index
+    # exists to remove, with answers still correct and nothing complaining.
+    # Enabled by default because the pass is a no-op with no embedding
+    # provider configured, which is the shipped state; the interval is
+    # daily, and `..._batch_size` bounds how many organizations one sweep
+    # touches. Same shape as `business_rollup_rebuild_*` above.
+    vector_index_rebuild_enabled: bool = True
+    vector_index_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
+    vector_index_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
 
     # What to do with a request whose workspace cannot be resolved (ADR-0018 rollout).
     # SHADOW proceeds and logs; DENY refuses. It defaults to SHADOW because the API

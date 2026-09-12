@@ -50,6 +50,7 @@ from aida.stewardship_api import (
     _unowned_asset_table_facts,
 )
 from aida.task_agent_schedule import run_task_agent_schedule_pass
+from aida.vector_index_service import run_vector_index_rebuild_pass
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
 logger = structlog.get_logger(__name__)
@@ -760,6 +761,11 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # so calling it every iteration is a no-op between windows -- the same shape as
     # the reaper and the two expiry sweeps below.
     await run_rollup_rebuild_pass(settings, now=now)
+    # Same cadence shape, and here for the same reason: RT-1's persisted
+    # vector index had no scheduled writer, so it went stale and retrieval
+    # paid a provider call per candidate per query instead. A no-op when no
+    # embedding provider is configured, which is the default.
+    await run_vector_index_rebuild_pass(settings, now=now)
     await run_classification_propagation_pass(settings, now=now)
     # R11-B8: DQ-2's watermark contracts, evaluated on a cadence instead of
     # only when a screen asks. Off by default

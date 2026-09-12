@@ -91,8 +91,15 @@ missing its UI. So on a real estate:
 
 Nothing is wrong at that point, and nothing says anything either: retrieval
 still returns good answers, at a bill that grows with the estate and the
-traffic at the same time. A scheduled rebuild pass, on the pattern R11-D11 used
-for the classification roll-up, is the smallest high-value piece of work here.
+traffic at the same time.
+
+**Closed 2026-09-12.** `vector_index_service.run_vector_index_rebuild_pass`
+now runs from `run_scheduler_iteration`, on the same cadence shape R11-D11 used
+for the classification roll-up: daily by default, bounded per sweep, per-tenant
+fault isolation, and a no-op when no embedding provider is configured — which
+is the shipped state, so an unconfigured deployment must do nothing rather than
+log an exception every tick. The skip stamps the clock as well, so it asks once
+per interval instead of resolving a provider it does not have on every tick.
 
 ## 4. The four use cases that were asked about
 

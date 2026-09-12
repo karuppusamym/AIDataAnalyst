@@ -19,7 +19,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**246 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
+**249 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -267,6 +267,9 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `embedding_model_version` | `str` | `'unset'` | 2 |
 | `embedding_dimensions` | `int` | `768` | 4 |
 | `embedding_chunking_version` | `int` | `1` | 2 |
+| `vector_index_rebuild_enabled` | `bool` | `True` | 1 |
+| `vector_index_rebuild_interval_seconds` | `int` | `86400` | 1 |
+| `vector_index_rebuild_batch_size` | `int` | `25` | 1 |
 | `unresolved_workspace_posture` | `Literal['SHADOW', 'DENY']` | `'SHADOW'` | 2 |
 | `workspace_authorization_posture` | `Literal['OBSERVING', 'ENFORCING']` | `'OBSERVING'` | 2 |
 | `edition` | `Literal['FOUNDATION', 'ENTERPRISE', 'REGULATED']` | `'REGULATED'` | 4 |

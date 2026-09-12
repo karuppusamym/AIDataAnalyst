@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,11 +52,14 @@ from aida.models import (
     GlossaryTerm,
     MetadataColumn,
     MetadataTable,
+    Organization,
 )
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 from aida.vector_retrieval import build_embedding_text
 from aida.vector_store import EmbeddingRecord, EmbeddingRef, resolve_vector_index
+
+_log = structlog.get_logger(__name__)
 
 #: Owner types this builder indexes. Deliberately a closed list: an owner
 #: type that reaches the index without a matching read path in retrieval is
@@ -354,3 +358,108 @@ async def search_persisted_index(
     )
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Scheduler entry: keep the index fresh, or stop paying for it twice
+# --------------------------------------------------------------------------- #
+
+_index_rebuild_last_run_at: datetime | None = None
+
+
+async def run_vector_index_rebuild_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int | None:
+    """Rebuild the stalest organizations' vector indexes on a cadence.
+
+    `rebuild_vector_index` shipped with RT-1 and was reachable only from
+    `POST /v1/organizations/{id}/retrieval/vector-index/rebuild` -- an endpoint
+    whose UI does not exist (R11-X5 records the cluster as missing one). So the
+    index was built only if an operator knew to call it, and after the estate
+    next changed it went stale, `index_freshness` correctly stopped trusting
+    it, and the vector channel fell back to embedding **every candidate on
+    every query**.
+
+    That fallback is the expensive shape RT-1 exists to remove: a provider call
+    per candidate per query, so the bill grows with the estate and the traffic
+    at the same time. Nothing is wrong at that point and nothing says anything
+    either -- retrieval still returns good answers. A cost regression that
+    presents as correct behaviour is exactly the kind a schedule prevents and a
+    dashboard does not.
+
+    Returns `None` when the pass was skipped (disabled, not yet due, or no
+    provider configured) and the number of organizations rebuilt when it ran --
+    the same shape as `business_graph.run_rollup_rebuild_pass`, whose structure
+    this follows deliberately rather than inventing a second cadence idiom.
+
+    One organization's failure is logged and skipped rather than aborting the
+    sweep, and the cost of a skip is bounded and non-corrupting: that
+    organization's index stays exactly as stale as it already was, and the
+    vector channel goes on answering by the live path.
+
+    **A missing provider is a skip, not an error.** `embedding_provider`
+    defaults to `unset`, which is the shipped state, so an unconfigured
+    deployment must not log an exception every tick -- it must do nothing, once,
+    and say why at info level.
+    """
+    from aida.db import session_factory
+
+    global _index_rebuild_last_run_at
+    if not settings.vector_index_rebuild_enabled:
+        return None
+    effective_now = now or datetime.now(UTC)
+    interval = timedelta(seconds=settings.vector_index_rebuild_interval_seconds)
+    if (
+        _index_rebuild_last_run_at is not None
+        and (effective_now - _index_rebuild_last_run_at) < interval
+    ):
+        return None
+
+    try:
+        resolve_embedding_provider(settings, SecretResolver(settings))
+    except EmbeddingUnavailable as exc:
+        _log.info("vector_index_rebuild_skipped", reason=str(exc))
+        # Stamped so an unconfigured deployment asks once per interval rather
+        # than resolving a provider it does not have on every scheduler tick.
+        _index_rebuild_last_run_at = effective_now
+        return None
+
+    async with session_factory() as session:
+        organization_ids = list(
+            (
+                await session.scalars(
+                    select(Organization.id)
+                    .where(Organization.status == "ACTIVE")
+                    .order_by(Organization.created_at)
+                    .limit(settings.vector_index_rebuild_batch_size)
+                )
+            ).all()
+        )
+
+    rebuilt = 0
+    for organization_id in organization_ids:
+        async with session_factory() as session:
+            try:
+                result = await rebuild_vector_index(
+                    session, organization_id, settings=settings
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                _log.exception(
+                    "vector_index_rebuild_failed", organization_id=str(organization_id)
+                )
+                continue
+        rebuilt += 1
+        _log.info(
+            "vector_index_rebuilt",
+            organization_id=str(organization_id),
+            considered=result.considered,
+            embedded=result.embedded,
+            skipped_unchanged=result.skipped_unchanged,
+            backend=result.backend,
+        )
+    # Stamped after the sweep and even when nothing was rebuilt, so an estate
+    # with no indexable objects does not re-query every tick.
+    _index_rebuild_last_run_at = effective_now
+    return rebuilt
