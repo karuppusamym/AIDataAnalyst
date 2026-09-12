@@ -457,6 +457,37 @@ def _staleness_signals(names: tuple[str, ...], *, now: datetime) -> dict[str, st
     return signals
 
 
+async def _model_route_signals(settings: Settings) -> dict[str, str]:
+    """R11-B16: which approved model routes the provider no longer serves.
+
+    Reads the state the scheduled sweep recorded -- it makes **no** provider
+    call, because a readiness scrape whose latency and cost a third party
+    decides is not a readiness check. `never_checked` is reported separately
+    from `unreachable` so an operator can tell "all good" from "nothing has
+    looked yet", which is the distinction this signal exists to preserve.
+
+    Failure is swallowed to a reason string rather than propagated: a route
+    health summary must never be what takes readiness down, or the least
+    important probe here becomes the most dangerous.
+    """
+    from aida.model_route_health import unreachable_route_summary
+
+    try:
+        summary = await unreachable_route_summary(settings)
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        return {"model_routes.detail": f"unavailable: {type(exc).__name__}"}
+    unreachable = summary["unreachable"]
+    detail = (
+        f"approved={summary['approved']};unreachable={len(unreachable)};"
+        f"never_checked={summary['never_checked']};"
+        f"sweep={'enabled' if summary['enabled'] else 'disabled'}"
+    )
+    signals = {"model_routes.detail": detail}
+    if unreachable:
+        signals["model_routes.unreachable"] = ", ".join(unreachable)
+    return signals
+
+
 async def evaluate_readiness(
     settings: Settings,
     *,
@@ -506,6 +537,7 @@ async def evaluate_readiness(
             signals[f"{probe.name}.detail"] = probe.detail
         signals[f"{probe.name}.duration_ms"] = f"{probe.duration_ms:.1f}"
     signals.update(posture.as_signals())
+    signals.update(await _model_route_signals(settings))
 
     return ReadinessResponse(
         status=UP if ready else DOWN,

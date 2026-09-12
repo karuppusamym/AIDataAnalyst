@@ -27,6 +27,7 @@ from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_ass
 from aida.governance_review_relay import run_review_notification_pass
 from aida.graph_reconciliation import run_graph_reconciliation_pass
 from aida.logging import configure_logging
+from aida.model_route_health import run_model_route_reachability_pass
 from aida.models import (
     AnalysisRun,
     DataSource,
@@ -766,6 +767,10 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # paid a provider call per candidate per query instead. A no-op when no
     # embedding provider is configured, which is the default.
     await run_vector_index_rebuild_pass(settings, now=now)
+    # R11-B16: an approved model route whose model the provider has retired
+    # looks entirely healthy and fails every generated answer. Listing models
+    # is free; this never generates.
+    await run_model_route_reachability_pass(settings, now=now)
     await run_classification_propagation_pass(settings, now=now)
     # R11-B8: DQ-2's watermark contracts, evaluated on a cadence instead of
     # only when a screen asks. Off by default

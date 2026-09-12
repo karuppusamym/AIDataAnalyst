@@ -726,6 +726,13 @@ class Settings(BaseSettings):
     vector_index_rebuild_enabled: bool = True
     vector_index_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     vector_index_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
+    # R11-B16: an approved route can be silently retired by its provider, and
+    # the approval cannot expire when they do. The sweep lists models (free)
+    # and never generates (not free), so it is on by default; it is a no-op
+    # for a provider it cannot probe or a credential it does not have.
+    model_route_health_enabled: bool = True
+    model_route_health_interval_seconds: int = Field(default=21_600, ge=300, le=604_800)
+    model_route_health_batch_size: int = Field(default=50, ge=1, le=1_000)
 
     # What to do with a request whose workspace cannot be resolved (ADR-0018 rollout).
     # SHADOW proceeds and logs; DENY refuses. It defaults to SHADOW because the API
