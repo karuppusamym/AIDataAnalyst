@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-385 Python modules under `src/`, 1908 intra-`src` import edges.
+385 Python modules under `src/`, 1909 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -60,7 +60,7 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|532| domain
+  routers -->|533| domain
   app -->|62| routers
   domain -->|45| platform
   workflows -->|43| domain
@@ -510,10 +510,10 @@ a package's fan-in measures nothing but the size of the package.
 | `aida.authorization_gate` | aida domain modules | 13 |
 | `aida.connectors.base` | aida.connectors | 13 |
 | `aida.secrets` | aida domain modules | 11 |
+| `aida.agent_contracts` | aida domain modules | 10 |
 | `aida.business_annotation_versions` | aida domain modules | 10 |
 | `aida.classification` | aida domain modules | 10 |
 | `aida.task_agent` | aida domain modules | 10 |
-| `atlas.platform.db` | atlas.platform | 10 |
 
 ## What this map cannot tell you
 
