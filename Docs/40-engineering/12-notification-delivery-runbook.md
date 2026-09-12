@@ -38,8 +38,12 @@ state in `optional.delivery_backlog`, and its numbers in
 
 ```bash
 curl -s https://<host>/health/ready | jq -r '.signals["delivery_backlog.detail"]'
-# queued=3;queued_notification=2;queued_siem=1;failed=0;oldest_age_seconds=41.2;worker=enabled
+# failed=0;oldest_age_seconds=41.2;queued=3;queued_notification=2;queued_siem=1;worker=enabled
 ```
+
+Keys are emitted in alphabetical order, and the per-kind and `oldest_age_seconds`
+keys appear only when there is something to report — an empty queue has no
+oldest row and names no kinds.
 
 | Key | Meaning | Acts on it |
 |---|---|---|

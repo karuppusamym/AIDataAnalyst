@@ -360,10 +360,25 @@ async def test_the_two_kinds_sharing_the_ledger_are_counted_apart(sessions: Any)
             )
         await session.commit()
 
-    signals = await _backlog(sessions, settings)
+    result = await probe_delivery_backlog(settings, timeout_seconds=5.0, session_factory=sessions)
+    signals = _signals(result.detail)
     assert signals["queued"] == "3"
     assert signals["queued_notification"] == "1"
     assert signals["queued_siem"] == "2"
+
+    # The exact wire shape, pinned because the runbook documents it and an
+    # alert rule parses it: `key=value` pairs, `;`-separated, keys sorted.
+    assert result.detail is not None
+    keys = [part.split("=", 1)[0] for part in result.detail.split(";")]
+    assert keys == sorted(keys), f"keys are not in sorted order: {result.detail}"
+    assert keys == [
+        "failed",
+        "oldest_age_seconds",
+        "queued",
+        "queued_notification",
+        "queued_siem",
+        "worker",
+    ]
 
 
 # ---------------------------------------------------------------------------
