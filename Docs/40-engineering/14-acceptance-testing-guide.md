@@ -41,6 +41,13 @@ live Gemini model route. Reproduce all of it with one command (section 4.3).
 | Claim → role mapping, and the persona from the verified groups claim | `atlas-steward` → 4 roles, Steward |
 | **A token cannot name its way to a platform role** | see the warning below |
 
+Plus, on `548caf9` with a clean tree: the full Python suite (10,200 passed, 0
+failed), `ruff check .`, `mypy src` (385 files), `lint-imports` (12 contracts),
+all ten CI script gates, and the frontend (typecheck, 799 tests across 93
+files, production build). Two of those ten script gates were **red** when this
+pass began, while the test suite was green — see section 4.1 for why a green
+`pytest` is not the whole answer.
+
 ### Not verified, and what each needs
 
 | Not verified | Needs |
@@ -206,8 +213,10 @@ baseline and `ui-next/src/lib/types.ts` in place, so check `git status`
 afterwards — and if either moved, read the diff before committing it, because
 those two files are the usual collision between concurrent sessions.
 
-The full suite takes about 20 minutes. Expect roughly ten thousand passing
-tests and zero failures.
+The full suite takes about 20 minutes. The reference run for this guide, on
+`548caf9` with nothing else touching Postgres: **10,200 passed, 92 skipped, 1
+xfailed, 0 failed, 21m08s.** A number materially below that means collection
+stopped early, not that your tree is smaller.
 
 **Run one suite at a time on this machine.** Five test files need a real
 Postgres and reset a scratch database to do it, and two of those databases are
