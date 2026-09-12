@@ -12,14 +12,47 @@
 # Path allowlisting (not commit/fingerprint allowlisting) is deliberate: this
 # branch is rebased frequently by concurrent sessions, which rewrites commit
 # hashes and would silently invalidate a fingerprint-based allowlist.
+#
+# The second allowlist is a *value*, not a path (R11-D13, 2026-09-12). The
+# `secret-scan` job had been red on nearly every run since 2026-09-06 on a
+# single `curl-auth-header` finding, and a gate that is always red gates
+# nothing. Reproduced with gitleaks v8.21.2 -- the CI version exactly -- over
+# 587 commits of real history: one finding, `.github/workflows/ci.yml`, the
+# literal string `ci-smoke-token` in the `ui-proxy` job. It is a false
+# positive, and not by assertion: the string occurs exactly once in the whole
+# repository and in no other revision, it is sent to `http://localhost:8099`
+# -- a stub container started by that same job, four steps earlier, which
+# echoes `authorization=present` and validates nothing -- and its only purpose
+# is to prove nginx forwards the `Authorization` header across the proxy hop
+# rather than dropping it. It authenticates nothing and reaches no system.
+# Entropy 3.24, consistent with two English words and a hyphen.
+#
+# It is allowlisted by the token value and NOT by path. Allowlisting
+# `.github/workflows/ci.yml` would have been one line shorter and much worse:
+# the workflow file is precisely where a real credential would be pasted, so
+# excluding it would blind the scan to the risk it exists for. Scoped this
+# way, the placeholder is exempt and every other secret in that file -- and
+# any future one -- still fails the job.
+
+# Both exemptions live in the one `[allowlist]` table on purpose: gitleaks
+# v8.21.2 -- the version `ci.yml` pins and installs -- does not understand the
+# plural `[[allowlists]]` form. It does not reject it either; it parses the
+# file, ignores the table and reports the finding anyway. That was verified
+# here rather than assumed, by running the plural form against real history
+# and watching the leak count stay at 1. Keep these merged until the pinned
+# version moves.
 
 [extend]
 useDefault = true
 
 [allowlist]
-  description = "Synthetic connector-auth fixtures in unit tests, not real credentials"
+  description = "Synthetic connector-auth fixtures in unit tests, and the CI proxy-contract smoke placeholder -- not real credentials"
+  regexTarget = "match"
   paths = [
     '''tests/test_connectors_databricks\.py''',
     '''tests/test_connectors_bigquery\.py''',
     '''tests/test_inv6_value_freedom\.py''',
+  ]
+  regexes = [
+    '''ci-smoke-token''',
   ]

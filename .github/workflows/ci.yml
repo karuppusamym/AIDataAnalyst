@@ -628,21 +628,25 @@ jobs:
         with:
           python-version: "3.13"
 
-      # THE BASELINE, as measured on 2026-09-06 and recorded in full in
-      # `scripts/check_npm_audit.py`: 14 advisories across esbuild 0.21.5, vite
-      # 5.4.11 and vitest 2.1.9, every one of them reached only through
-      # devDependencies. The runtime scan (react, react-dom,
-      # @tanstack/react-virtual) returns zero, so nothing baselined here is in
-      # the bundle a browser loads. Thirteen are Vite dev-server defects
-      # (`server.fs.deny` bypasses, dev-server request forgery, a path
-      # traversal); this repository never runs Vite's dev server in a deployed
-      # configuration -- production serves the built SPA from nginx, which the
-      # `ui-proxy` job exercises. The fourteenth is the Vitest UI server, which
-      # is never started (`npm run test` is `vitest run`, headless, no --ui).
-      # They are baselined rather than fixed because the fixes are vite 5 -> 7
-      # and vitest 2 -> 3 major bumps -- a change with its own build and review,
-      # not a side effect of adding the gate that found them. Exactly the
-      # reasoning of the 2026-08-31 pip-audit baseline above.
+      # THERE IS NO LONGER A BASELINE. It was 14 advisories on 2026-09-06 and 6
+      # after vite was pinned to 5.4.21 on 2026-09-11; on 2026-09-12 (R11-D13)
+      # the vitest 2.1.9 -> 5.0.0 upgrade -- which forces vite -> 7.3.6 and
+      # @vitejs/plugin-react -> 5.2.0 -- fixed the remaining six outright, and
+      # `scripts/check_npm_audit.py` now ships an empty `BASELINE` with the
+      # advisory-by-advisory record of what cleared and in which version.
+      # The comment this replaces predicted the fix as "vite 5 -> 7 and
+      # vitest 2 -> 3"; it was vitest 2 -> 5, and the 795-test suite needed no
+      # change across all three majors.
+      #
+      # `ui-next` is therefore held to the same zero-exception rule the `e2e`
+      # lockfile always was: ANY advisory fails this job, in either scope, at
+      # any severity. Nothing is excepted, so there is nothing to keep current.
+      #
+      # One constraint the upgrade introduced, since nothing else in the repo
+      # records it: vitest 5 requires Node ^22.12 || ^24 || >=26. The
+      # `node-version: "22"` above satisfies it only because setup-node
+      # resolves the newest 22.x; pinning any 22.x below 22.12 would break the
+      # `frontend` and `ui-journey` jobs.
       #
       # A NEW advisory, a new vulnerable package, an advisory that reaches a
       # runtime dependency, or a baseline entry that no longer applies all fail
