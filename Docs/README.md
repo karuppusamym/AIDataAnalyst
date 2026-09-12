@@ -28,7 +28,7 @@ Two properties make it usable rather than decorative:
 
 ## Start here
 
-For the current agent inventory, automation limits, vendor comparison and open release blockers, read the [2026-09-09 critical architecture review](10-architecture/15-agent-architecture-critical-review.md). Its dated findings supersede conflicting agent-count, reviewer-safety and model-call economics claims in older documents. Its status table is the authority on what has since been fixed: four findings are closed in code, seven are fixed but awaiting the measurement or audit their closure criterion also demands, and enterprise-scale capacity (AR-09) is untouched.
+Start with the [September 11 reconciliation](60-delivery/23-review-reconciliation-2026-09-11.md). The [tracker current queue](60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns work status; the [capability register](60-delivery/20-capability-register.md) owns dated verification evidence. Earlier reviews retain rationale and measurements. The [agent architecture review](10-architecture/15-agent-architecture-critical-review.md) supplies safety evidence carried into the current queue.
 
 | If you are… | Read, in order |
 |---|---|

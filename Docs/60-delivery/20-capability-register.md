@@ -1,5 +1,18 @@
 # Capability register — current state
 
+> **Reconciliation 2026-09-11:** this register owns dated capability evidence, not work status. [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns execution. Rows dated September 6 have not all been reverified; R11-B14 tracks the refresh. Do not treat old Yes cells as current end-to-end certification.
+
+## September 11 source corrections
+
+| Capability / property | Implemented / reachable | Configured / verified | Current work |
+|---|---|---|---|
+| Contracted-agent Ask and governed MCP tools | Yes: `api.py` and `mcp_server.py` pass resolved caller contract into orchestrator | Production configuration not inspected; boundary tests exist in `test_ar06_contract_on_live_paths.py`, not rerun in this documentation pass | X7 removal cancelled; R11-C6 retains other contract-boundary gaps |
+| Safe unattended reviewer approvals | Guards and benchmark exist; truth discrimination remains insufficient | Recorded AR-03 result: 7 false twins approved in 12 pairs; no safe unattended approval claim | R11-C3 PARTIAL; keep unattended review off |
+| Single source-SQL execution boundary | Gateway exists, but native-policy sync opens source drivers outside it | Direct source connections rechecked in `policy_native_sync.py`; no live execution performed | R11-D1 open |
+| Ontology publication in running deployment | Code/lifecycle tests reported in five-feature implementation report | Last report has unapplied migration/lock checkpoint; database not rechecked in this pass | R11-C1 BLOCKED on fresh deployment verification |
+| Legacy UI retirement | Removed; `ui/` absent in current tree | Source/filesystem confirmation 2026-09-11; no live deployment inspected | UX-16 closed; navigation consolidation is R11-S10 |
+
+
 > Status: **Current state, not history.** Owner: Engineering lead.
 > Created 2026-09-06 for finding D06 of [`../review-2026-09-05/REVIEW.md`](../review-2026-09-05/REVIEW.md).
 > Every row carries a date, an owner and evidence a reader can go and check.

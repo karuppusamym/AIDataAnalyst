@@ -1,5 +1,7 @@
 # Graph exploration and query review
 
+> **Scope reconciled 2026-09-11.** [Tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](../60-delivery/23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
 Update 2026-09-11: see the [five-feature implementation report](../60-delivery/18-five-feature-implementation.md)
 for expanded language support, ontology governance, worksheet and review details,
 including the unresolved database deployment checkpoint. The original assessment

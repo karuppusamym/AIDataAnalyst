@@ -1,5 +1,7 @@
 # Bank Data Intelligence Platform
 
+> **Delivery planning, 2026-09-11:** [review reconciliation](Docs/60-delivery/23-review-reconciliation-2026-09-11.md) explains the dispositions from all prior reviews. [Tracker section P](Docs/60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) is the current work queue; older plans and completion counts are dated evidence.
+
 Production-oriented foundation for a governed, agentic data analyst platform designed for a large banking organization.
 
 The platform uses deterministic controls for discovery, profiling, authorization, pre-retrieval prompt-risk screening, SQL validation, execution, and audit. Model providers are optional, replaceable reasoning components and are never trusted execution boundaries.

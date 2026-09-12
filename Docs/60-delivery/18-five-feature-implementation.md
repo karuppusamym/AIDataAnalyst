@@ -1,5 +1,7 @@
 # Five-feature implementation and validation
 
+> **Scope reconciled 2026-09-11.** [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
 Updated 2026-09-11. This supersedes the feature-gap entries in the earlier
 [follow-up ledger](17-follow-up-validation.md). Code implementation, automated
 verification, database deployment and live visual acceptance are distinct.

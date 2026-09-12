@@ -1,5 +1,7 @@
 # Atlas — prioritized implementation plan
 
+> **Scope reconciled 2026-09-11.** [Tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](../60-delivery/23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
 Proposed backlog from [REVIEW.md](REVIEW.md) and [UX-AND-JOURNEYS.md](UX-AND-JOURNEYS.md). Restored on 6 September 2026. Consult [POINTS-TRACKER.md](POINTS-TRACKER.md) before implementing: later remediation activity may already address an item. This document preserves the review's stable IDs; it does not reset tracker status.
 
 Sizes are relative: S = localized; M = several components/services; L = cross-cutting workflow/integration. They are not calendar commitments. P0 blocks a release promising the affected safety capability; P1 precedes broader rollout; P2 is maintainability/workflow improvement.

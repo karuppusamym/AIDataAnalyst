@@ -1,9 +1,32 @@
 # Delivery Status
 
+## Current delivery decision ? 2026-09-11
+
+The [tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) is the
+only authority for current work status. The [reconciliation](23-review-reconciliation-2026-09-11.md)
+records what continues, what is deferred and why prior tickets closed. The
+[capability register](20-capability-register.md) records dated implementation/configuration/verification evidence.
+
+All 79 previously open/partial tracker items now have dispositions: 78 merged into explicit
+successors, legacy UI retirement closed. The new queue also covers September 11 findings and
+missing safety/deployment evidence. X7's proposed agent-budget deletion is cancelled because
+REST/MCP callers now exist. Unattended reviewer approvals stay off: the recorded adversarial
+benchmark remains unsafe. Prioritize execution/signing/archive defects, contract and workspace
+controls, then the governed Ask/access/source journey. Live-provider, accessibility and recovery
+proof remain pending. Details and prerequisites are in the queue, not implied by historical DONEs.
+
+## Historical status snapshots
+
+Everything below is dated evidence from earlier passes, not a current verification or execution
+plan. In particular, test counts, invariant limits, open decisions and capability tables have
+not all been rerun against the September 11 tree. Current review findings override them:
+INV-2 has the native-policy execution bypass R11-D1; agent safety remainders are R11-C3/C4/C6/C7/C8.
+
+
 > Status: **Living document — the single answer to "where are we".** Owner: Engineering lead.
 > Consolidated 2026-08-30 from `04-status-matrix.md` and `05-gap-register.md`, both now in
-> `Docs/_superseded/`. If a status claim appears in two places, this one wins; every other
-> document should carry a pointer here rather than its own summary.
+> `Docs/_superseded/`. Historical consolidation rule (superseded): if a status claim appeared in two places, this one won; every other
+> document previously carried a pointer here. The September 11 authority convention above supersedes this historical rule.
 
 **Verified:** 2026-09-02, against the working tree at commit `fd70428`. (This branch has been under
 continuous concurrent push across many parallel sessions since 2026-08-30 — every number below is
@@ -42,7 +65,7 @@ checks, and `03-tracker.md`'s §K for the current item-level DONE/TODO/IN-PROGRE
 >
 > For the four-column implemented / reachable / configured / verified view that D06 asked for, see
 > [`20-capability-register.md`](20-capability-register.md). That register is the current-state
-> document; this page remains the narrative summary.
+> evidence document; current work status is tracker section P.
 
 ## 1. At a glance
 
@@ -99,7 +122,7 @@ named rather than rounded up to a tick.
 | # | Invariant | Test | Limit that remains |
 |:--:|---|---|---|
 | INV-1 | Single authoritative store | `test_inv1_single_authoritative_store.py` (8) | Does **not** prove Neo4j ingests correctly — no Neo4j runs in the suite. The projection-rebuild drill has never been run (E5) |
-| INV-2 | One execution choke point | Type system + import contract + AST scan | None. The statement was narrowed so it is literally true: discovery and profiling touch sources but cannot carry caller SQL |
+| INV-2 | One execution choke point | Type system + import contract + AST scan | **Open, 2026-09-11: R11-D1** ? native-policy sync executes source DDL outside the gateway; the earlier no-limit statement was incorrect. |
 | INV-3 | Model output is never authority | `test_tier0_invariants.py` | None |
 | INV-4 | Fail closed | `test_tier0_invariants.py` + `test_inv4_authorization_wiring.py` (26) | The decision is now *reached* on the execution path and 5 read surfaces, but every workspace is in `SHADOW` and the unresolved-workspace posture defaults to `SHADOW` — **so nothing is denied**. See §6 decision 3 |
 | INV-5 | Tenant isolation is total | `test_inv5_tenant_isolation.py` (8) + route-table scan | The intended structural mechanism — a repository base class with no unscoped query helper — **does not exist**. Scoping is per-query by convention; the test substitutes for the guarantee (ST-05/06/07) |

@@ -1,5 +1,7 @@
 # Agent architecture: implementation audit and adversarial review
 
+> **Scope reconciled 2026-09-11.** [Tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](../60-delivery/23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
 > Reviewed: 2026-09-09. Baseline: `15f29cd`, clean working tree before this documentation pass.
 > Status: code-backed review and proposed remediation, not production certification or approval to enable automation.
 > Scope: agent inventory, authority boundaries, economics, recovery, observability, and selected vendor documentation. Live registrations, enabled routes and production capacity were not measured.

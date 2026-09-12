@@ -1,5 +1,7 @@
 # Atlas / AIDataAnalyst — comprehensive project review
 
+> **Scope reconciled 2026-09-11.** [Tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current execution status; [reconciliation decisions](../60-delivery/23-review-reconciliation-2026-09-11.md) map the remaining work. This document retains design and dated evidence. Older priorities, partials and recommendations do not form a separate queue.
+
 Review date: 5 September 2026. Initial source baseline: `3799457`. Workspace revision on resumption: `e4a3cfb`. This report restores the review documents referenced by the existing [remediation tracker](POINTS-TRACKER.md).
 
 **Status convention:** findings below describe the inspected review baseline. The workspace advanced during the review, and the tracker records subsequent remediation plans/activity. A tracker entry is not independent proof that a fix is complete. The restored report does not overwrite that tracker or claim to have re-certified all subsequent changes. Source line numbers refer to the initial snapshot and can shift.
