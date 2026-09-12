@@ -404,3 +404,91 @@ async def test_vector_channel_ranks_nothing_when_nothing_is_authorized(
 
     assert recorded["candidates"] == ()
     assert result.contributions == []
+
+
+async def test_a_candidate_the_index_does_not_cover_still_gets_a_vector_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-B2: the persisted index covers TABLE, COLUMN and GLOSSARY_TERM only.
+
+    A `GOVERNED_TOOL` candidate has no index entry, so the persisted search
+    cannot score it -- and it used to leave this stage with no vector signal at
+    all while the live path scored it, reported as `PERSISTED_INDEX / USABLE`
+    with nothing saying a whole candidate class had been dropped. Measured on
+    the AG-8 corpus that cost 6 points of recall-within-bound.
+
+    The assertion is about the *tool*, not the table: an index that covers the
+    table is working as designed, and this test exists only because the
+    candidate it does not cover was silently losing its score.
+    """
+    from aida import retrieval_stages as stages
+    from aida import vector_index_service
+    from aida.vector_index_service import IndexFreshness
+
+    table_id = str(uuid4())
+    tool_id = str(uuid4())
+    authorized = [
+        HybridRetrievalHit(
+            object_type="TABLE",
+            object_id=table_id,
+            display_name="fact_account_balances",
+            score=0.9,
+            reason_codes=("lexical",),
+            metadata={},
+        ),
+        HybridRetrievalHit(
+            object_type="GOVERNED_TOOL",
+            object_id=tool_id,
+            display_name="customer-account-summary",
+            score=0.8,
+            reason_codes=("lexical",),
+            metadata={},
+        ),
+    ]
+
+    class _Batch:
+        def __init__(self, count: int) -> None:
+            self.vectors = tuple([0.1, 0.2] for _ in range(count))
+
+    embedded: list[list[str]] = []
+
+    class _Provider:
+        async def embed(self, texts: list[str]) -> _Batch:
+            embedded.append(list(texts))
+            return _Batch(len(texts))
+
+    async def _fresh(session: object, organization_id: object, **kwargs: object) -> IndexFreshness:
+        return IndexFreshness(
+            usable=True,
+            reason="USABLE",
+            entries=10,
+            signature="sig",
+            built_at=None,
+            age_minutes=1.0,
+        )
+
+    async def _search(session: object, organization_id: object, query: object, **kwargs: object):
+        # The index knows the table and has never heard of the tool.
+        return (("TABLE", table_id, 0.77),)
+
+    monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
+    monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
+    monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
+
+    result = await stages.run_vector_channel(
+        None,  # type: ignore[arg-type]
+        _request(),
+        CandidatePool(authorized=authorized, candidates={}),
+    )
+
+    scored_ids = {contribution.object_id for contribution in result.contributions}
+    assert tool_id in scored_ids, (
+        "the governed tool left the vector stage with no score; the persisted index "
+        "does not cover GOVERNED_TOOL and the stage must embed what it cannot look up"
+    )
+    assert table_id in scored_ids
+    # Two calls, not one batch of everything: the question is embedded for the
+    # index search, then only the uncovered candidates. Embedding every
+    # candidate again would throw away the saving the index exists for.
+    assert len(embedded) == 2
+    assert embedded[1] == ["GOVERNED_TOOL customer-account-summary"]

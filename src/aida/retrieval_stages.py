@@ -40,7 +40,7 @@ remaining channel to completion for an answer nobody is waiting for.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
@@ -356,6 +356,55 @@ async def select_authorized_candidates(
 # ---------------------------------------------------------------------------
 
 
+async def _live_vector_scores(
+    embedding_provider: AsyncEmbeddingProvider,
+    request: RetrievalRequest,
+    candidates: Sequence[Any],
+    *,
+    query_emb: tuple[float, ...] | None = None,
+) -> list[tuple[str, str, float]]:
+    """Embed these candidates now and score them against the question.
+
+    One batched call for the question and every candidate text, rather than a
+    call per candidate: the provider bills and rate-limits per request, and N+1
+    network round trips inside a retrieval path is a latency budget spent on
+    nothing. `query_emb` is passed when the caller has already embedded the
+    question -- the persisted path has -- so closing the index's coverage gap
+    costs one request rather than two.
+    """
+    from aida.vector_retrieval import build_embedding_text, vector_search
+
+    if not candidates:
+        return []
+    candidate_texts = [
+        build_embedding_text(name=hit.display_name, object_type=hit.object_type)
+        for hit in candidates
+    ]
+    if query_emb is None:
+        batch = await embedding_provider.embed([request.question, *candidate_texts])
+        query_vector = list(batch.vectors[0])
+        candidate_embeddings = [list(v) for v in batch.vectors[1:]]
+    else:
+        batch = await embedding_provider.embed(candidate_texts)
+        query_vector = list(query_emb)
+        candidate_embeddings = [list(v) for v in batch.vectors]
+    vector_candidates: list[dict[str, Any]] = [
+        {
+            "object_type": hit.object_type,
+            "object_id": hit.object_id,
+            "display_name": hit.display_name,
+            "embedding": emb,
+            "datasource_id": hit.metadata.get("datasource_id"),
+            "metadata": hit.metadata,
+        }
+        for hit, emb in zip(candidates, candidate_embeddings, strict=True)
+    ]
+    return [
+        (vhit.object_type, str(vhit.object_id), vhit.similarity)
+        for vhit in vector_search(query_vector, vector_candidates, top_k=request.result_limit)
+    ]
+
+
 async def run_vector_channel(
     session: AsyncSession, request: RetrievalRequest, pool: CandidatePool
 ) -> ChannelResult:
@@ -372,18 +421,34 @@ async def run_vector_channel(
     RT-1: the *persisted* index is preferred when it is fresh. The live path
     embeds every candidate on every query, which is correct but pays a model
     call per candidate per query -- cost that grows with the estate and with
-    traffic at the same time. The fallback is not a degradation: it is the same
-    computation, and it is what runs whenever the index is empty, stale, built
-    under a different embedding model, or the estate has changed since the last
-    build. Which path ran is recorded per hit (`vector_path`) so "why was this
-    ranked here" stays answerable.
+    traffic at the same time. It is what runs whenever the index is empty,
+    stale, built under a different embedding model, or the estate has changed
+    since the last build. Which path ran is recorded per hit (`vector_path`) so
+    "why was this ranked here" stays answerable.
+
+    **The two paths are not interchangeable, and this said they were until
+    2026-09-12.** The index covers `INDEXED_OWNER_TYPES` only -- TABLE, COLUMN
+    and GLOSSARY_TERM -- so a TOOL candidate, which this platform does retrieve,
+    has no index entry and the persisted search cannot score it. It used to
+    leave the stage with no vector signal at all while the live path scored it,
+    reported as `PERSISTED_INDEX / USABLE` with nothing saying a candidate class
+    had been dropped. Measured on the AG-8 corpus, that cost 6 points of
+    recall-within-bound purely from the tool candidates losing their score
+    (R11-B2). Candidates the index does not cover are now embedded live and
+    scored alongside, and `retrieval_vector_index_gap` reports how many needed
+    it -- so the computation is complete on both paths, the index still carries
+    the bulk of the estate, and the gap stays visible if the covered set
+    changes again.
 
     Policy still filters before ranking: the candidate set handed to the index
     is exactly the authorized set, so the index can only reorder what the
     caller was already entitled to.
     """
-    from aida.vector_index_service import index_freshness, search_persisted_index
-    from aida.vector_retrieval import build_embedding_text, vector_search
+    from aida.vector_index_service import (
+        INDEXED_OWNER_TYPES,
+        index_freshness,
+        search_persisted_index,
+    )
     from aida.vector_store import EmbeddingRef, VectorIndexUnavailable
 
     started = time.perf_counter()
@@ -462,34 +527,43 @@ async def run_vector_channel(
             logger.info("retrieval_vector_index_unavailable", reason=str(exc))
             vector_path = "LIVE_EMBED"
             freshness = replace(freshness, usable=False)
+        else:
+            # The index covers `vector_index_service.INDEXED_OWNER_TYPES` only
+            # -- TABLE, COLUMN and GLOSSARY_TERM. A candidate of any other
+            # type, and a TOOL is the one this platform actually retrieves,
+            # has no index entry, so the persisted search cannot score it and
+            # it silently left the stage with no vector signal at all. The
+            # live path embeds every candidate and scores all of them, which
+            # is why this module's own docstring claiming the fallback "is the
+            # same computation" was wrong: measured on the AG-8 corpus, using
+            # the index cost 6 points of recall-within-bound purely by
+            # dropping the tool candidates' vector score (R11-B2, 2026-09-12).
+            #
+            # So the uncovered candidates are embedded live and scored here.
+            # The index still carries the bulk -- tables and columns are the
+            # estate -- so the cost saving RT-1 exists for is kept, and the
+            # computation is complete either way. `vector_index_gap` reports
+            # how many needed it, because a stage that quietly scores a subset
+            # is the failure this fixes and it must stay visible if the
+            # covered set changes again.
+            uncovered = [
+                hit for hit in authorized if hit.object_type not in INDEXED_OWNER_TYPES
+            ]
+            if uncovered:
+                logger.info(
+                    "retrieval_vector_index_gap",
+                    uncovered=len(uncovered),
+                    object_types=sorted({hit.object_type for hit in uncovered}),
+                    datasource_id=str(request.datasource.id),
+                )
+                scored.extend(
+                    await _live_vector_scores(
+                        embedding_provider, request, uncovered, query_emb=query_emb
+                    )
+                )
 
     if not freshness.usable:
-        # One batched call for the question and every candidate text, rather
-        # than a call per candidate: the provider bills and rate-limits per
-        # request, and N+1 network round trips inside a retrieval path is a
-        # latency budget spent on nothing.
-        candidate_texts = [
-            build_embedding_text(name=hit.display_name, object_type=hit.object_type)
-            for hit in authorized
-        ]
-        batch = await embedding_provider.embed([request.question, *candidate_texts])
-        query_emb_list = list(batch.vectors[0])
-        candidate_embeddings = [list(v) for v in batch.vectors[1:]]
-        vector_candidates: list[dict[str, Any]] = [
-            {
-                "object_type": hit.object_type,
-                "object_id": hit.object_id,
-                "display_name": hit.display_name,
-                "embedding": emb,
-                "datasource_id": hit.metadata.get("datasource_id"),
-                "metadata": hit.metadata,
-            }
-            for hit, emb in zip(authorized, candidate_embeddings, strict=True)
-        ]
-        scored = [
-            (vhit.object_type, str(vhit.object_id), vhit.similarity)
-            for vhit in vector_search(query_emb_list, vector_candidates, top_k=request.result_limit)
-        ]
+        scored = await _live_vector_scores(embedding_provider, request, authorized)
 
     contributions = [
         SignalContribution(

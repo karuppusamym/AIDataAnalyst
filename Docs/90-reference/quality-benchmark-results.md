@@ -1,18 +1,18 @@
 # Quality benchmark results (AG-8)
 
-Generated 2026-09-06T09:25:58.124524+00:00 by `scripts/quality_benchmark.py`. Reproduce with `uv run python scripts/quality_benchmark.py` (requires `AIDA_ENVIRONMENT` set, e.g. `development`). Every number below comes from a real run of the live retrieval/planning code against the deterministic seeded catalog in that script's `seed_catalog` -- not hand-typed.
+Generated 2026-09-12T13:29:52.052398+00:00 by `scripts/quality_benchmark.py`. Reproduce with `uv run python scripts/quality_benchmark.py` (requires `AIDA_ENVIRONMENT` set, e.g. `development`). Every number below comes from a real run of the live retrieval/planning code against the deterministic seeded catalog in that script's `seed_catalog` -- not hand-typed.
 
 Scope: this is the quality/accuracy counterpart to PF-3's latency ratchet (`Docs/90-reference/perf-baseline.json`), not the bank-scale 1M-object benchmark tracked separately as RT-8/PF-1, which this sandbox has no infrastructure for.
 
 ## Retrieval quality
 
-`GovernedRetriever.retrieve` (-> `hybrid_retrieve_enhanced`) over `tests/fixtures/quality_benchmark_corpus/retrieval_quality_corpus.json` (12 cases).
+`GovernedRetriever.retrieve` (-> `hybrid_retrieve_enhanced`) over `tests/fixtures/quality_benchmark_corpus/retrieval_quality_corpus.json` (17 cases).
 
 | Metric | Value | Baseline | Change |
 |---|---|---|---|
-| `retrieval_hit_at_1_rate` | 0.8333 | 0.8333 | +0.00 pts |
-| `retrieval_recall_within_bound_rate` | 1.0000 | 1.0000 | +0.00 pts |
-| `retrieval_mrr` | 0.9028 | 0.9028 | -0.00 pts |
+| `retrieval_hit_at_1_rate` | 0.5882 | 0.5882 | +0.00 pts |
+| `retrieval_recall_within_bound_rate` | 0.7059 | 0.7059 | +0.00 pts |
+| `retrieval_mrr` | 0.6373 | 0.6373 | +0.00 pts |
 
 | Case | Question | Expected | Rank | Hit@1 | Within bound |
 |---|---|---|---|---|---|
@@ -28,8 +28,13 @@ Scope: this is the quality/accuracy counterpart to PF-3's latency ratchet (`Docs
 | fraud-alerts-top1 | fraud alert events | TABLE:fact_fraud_alerts | 1 | yes | yes |
 | orders-related-customer-recall | orders and their related customer information | TABLE:dim_customer | 3 | no | yes |
 | governed-tool-top1 | customer account summary | GOVERNED_TOOL:customer-account-summary | 1 | yes | yes |
+| semantic-deposits-not-balances | what funds does each depositor have at close of business | TABLE:fact_account_balances | not found | no | no |
+| semantic-suspicious-not-fraud | suspicious activity flagged for investigation | TABLE:fact_fraud_alerts | not found | no | no |
+| semantic-highstreet-not-branch | where are our high street offices | TABLE:dim_branch | not found | no | no |
+| semantic-borrow-not-loan | who has asked to borrow money from us | TABLE:fact_loan_applications | not found | no | no |
+| semantic-vendors-not-merchant | vendors we process purchases for | TABLE:dim_merchant | not found | no | no |
 
-Vector-similarity signal: skipped this run — `EMBEDDING_PROVIDER_NOT_CONFIGURED`. The numbers above are the real fused result of lexical + graph + fusion with the vector signal absent, not a partial run presented as complete.
+Vector-similarity signal: available and exercised.
 
 ## Tool / generation-path selection quality
 
@@ -51,11 +56,11 @@ Vector-similarity signal: skipped this run — `EMBEDDING_PROVIDER_NOT_CONFIGURE
 
 | Activation prerequisite | Status |
 |---|---|
-| `model_generation_enabled` | False |
-| `model_route` configured | False |
-| OpenAI credential present | False |
-| Gemini credential present | False |
-| **Activatable in this environment** | **False** |
+| `model_generation_enabled` | True |
+| `model_route` configured | True |
+| OpenAI credential present | True |
+| Gemini credential present | True |
+| **Activatable in this environment** | **True** |
 
-No usable model route in this sandbox: `model_generation_enabled` is False and neither `OPENAI_API_KEY` nor `GEMINI_API_KEY` is configured. This section is honestly framework-only — the harness above (posture check + the real, model-free tool/generation-path selection benchmark) is real and running; actual generated-text quality numbers require a configured, approved model route and are not fabricated here.
+This environment has the `Settings`-level prerequisites for a live model route (module 15's five-condition posture also needs an approved+selected `ApprovedModelRoute` row, which this script does not provision). This script does not itself place a live network call to a model provider — running actual generated-SQL/answer scenarios through `model_gateway.ProviderNeutralModelGateway.structured_completion` against a real approved route is the deliberate next step once one is provisioned in this environment, kept out of a routine benchmark run to avoid an unbounded-cost, unbounded-network side effect.
 

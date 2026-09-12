@@ -394,7 +394,7 @@ async def run_retrieval_benchmark(
     session: AsyncSession, catalog: SeededCatalog, cases: list[RetrievalCase]
 ) -> RetrievalQualityReport:
     from aida.agent_intelligence import GovernedRetriever
-    from aida.config import Settings
+    from aida.config import get_settings
     from aida.models import DataSource
 
     datasource = await session.get(DataSource, catalog.datasource_id)
@@ -408,7 +408,7 @@ async def run_retrieval_benchmark(
             return str(catalog.tool_version_ids[case.expected_object_key])
         raise ValueError(f"unsupported expected_object_type: {case.expected_object_type!r}")
 
-    retriever = GovernedRetriever(Settings())
+    retriever = GovernedRetriever(get_settings())
     results: list[RetrievalCaseResult] = []
     for case in cases:
         hits = await retriever.retrieve(session, datasource=datasource, question=case.question)
@@ -487,14 +487,14 @@ async def run_tool_selection_benchmark(
     session: AsyncSession, catalog: SeededCatalog, cases: list[ToolSelectionCase]
 ) -> ToolSelectionReport:
     from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
-    from aida.config import Settings
+    from aida.config import get_settings
     from aida.models import DataSource
 
     datasource = await session.get(DataSource, catalog.datasource_id)
     if datasource is None:
         raise RuntimeError("seeded datasource missing -- seed_catalog did not commit")
 
-    settings = Settings()
+    settings = get_settings()
     retriever = GovernedRetriever(settings)
     planner = GovernedPlanner(settings)
     tool_key_by_version_id = {str(v): k for k, v in catalog.tool_version_ids.items()}
@@ -550,11 +550,19 @@ class ModelGenerationPosture:
 
 
 def check_model_generation_posture() -> ModelGenerationPosture:
-    from aida.config import Settings
+    from aida.config import get_settings
     from aida.embedding_provider import EmbeddingUnavailable, resolve_embedding_provider
     from aida.secrets import SecretResolver
 
-    settings = Settings()
+    # `get_settings()` rather than `Settings()`, and the difference was a real
+    # defect for this script's whole purpose: a bare `Settings()` reads the
+    # process environment and never `.env`, which is how this repository
+    # actually configures a development deployment. So the posture check
+    # answered "no provider configured" from a *different* configuration source
+    # than the application reads, and reported a stub posture for a deployment
+    # that had a live route. A posture check must answer from where the app
+    # answers from, or it is checking something else.
+    settings = get_settings()
 
     def _has_secret(secret: object) -> bool:
         if secret is None:
@@ -798,12 +806,54 @@ def _metric_row(
 # ---------------------------------------------------------------------------
 
 
+async def _build_vector_index(session: AsyncSession, catalog: SeededCatalog) -> None:
+    """Build the persisted vector index over the seeded catalog, if we can.
+
+    RT-1 built a persisted, rebuildable index and the vector channel prefers it
+    when it is fresh -- but with no embedding provider ever configured, the
+    index was always empty, the channel always took the live-embed fallback,
+    and the persisted path had never run outside its own unit tests. Building
+    it here means the benchmark measures the path a deployment would actually
+    serve from.
+
+    Failure is reported and swallowed on purpose: with no provider configured
+    this is the ordinary state, the vector channel skips itself with a recorded
+    reason, and the rest of the benchmark is still worth running. What must not
+    happen is a silent skip, because "the index was not built" and "the index
+    was built and found nothing" are different results.
+    """
+    from aida.config import get_settings
+    from aida.embedding_provider import EmbeddingUnavailable
+    from aida.models import DataSource
+    from aida.vector_index_service import rebuild_vector_index
+
+    datasource = await session.get(DataSource, catalog.datasource_id)
+    if datasource is None:  # pragma: no cover - seed_catalog guarantees it
+        return
+    try:
+        result = await rebuild_vector_index(
+            session,
+            datasource.organization_id,
+            settings=get_settings(),
+            datasource_id=datasource.id,
+        )
+    except EmbeddingUnavailable as exc:
+        print(f"vector index not built: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - reported, never hidden
+        print(f"vector index build failed: {type(exc).__name__}: {exc}")
+        return
+    await session.commit()
+    print(f"vector index built: {result}")
+
+
 async def _run(
     *, retrieval_corpus_path: Path, tool_selection_corpus_path: Path
 ) -> tuple[RetrievalQualityReport, ToolSelectionReport, ModelGenerationPosture]:
     session, engine = await _make_session()
     try:
         catalog = await seed_catalog(session)
+        await _build_vector_index(session, catalog)
         retrieval_cases = load_retrieval_corpus(retrieval_corpus_path)
         tool_cases = load_tool_selection_corpus(tool_selection_corpus_path)
         retrieval_report = await run_retrieval_benchmark(session, catalog, retrieval_cases)
