@@ -5212,6 +5212,13 @@
             "title": "Applied Count",
             "type": "integer"
           },
+          "applied_subject_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applied Subject Ids",
+            "type": "array"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -5244,6 +5251,30 @@
           "requested_by": {
             "title": "Requested By",
             "type": "string"
+          },
+          "reverses_operation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reverses Operation Id"
+          },
+          "review_audit_sample_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Audit Sample Id"
           },
           "status": {
             "title": "Status",
@@ -5279,6 +5310,9 @@
           "applied_by",
           "applied_at",
           "applied_count",
+          "applied_subject_ids",
+          "reverses_operation_id",
+          "review_audit_sample_id",
           "created_at",
           "updated_at"
         ],
@@ -24150,6 +24184,11 @@
             "minLength": 1,
             "title": "Rationale",
             "type": "string"
+          },
+          "reverse_applied_changes": {
+            "default": false,
+            "title": "Reverse Applied Changes",
+            "type": "boolean"
           }
         },
         "required": [
@@ -24587,6 +24626,10 @@
             "title": "Evidence Max Age Minutes",
             "type": "integer"
           },
+          "max_sample_age_hours": {
+            "title": "Max Sample Age Hours",
+            "type": "integer"
+          },
           "max_tier": {
             "title": "Max Tier",
             "type": "string"
@@ -24599,10 +24642,25 @@
             "title": "Max Unresolved Samples",
             "type": "integer"
           },
+          "oldest_pending_sample_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Pending Sample Hours"
+          },
           "organization_id": {
             "format": "uuid",
             "title": "Organization Id",
             "type": "string"
+          },
+          "sample_age_exceeded": {
+            "title": "Sample Age Exceeded",
+            "type": "boolean"
           },
           "sampling_rate": {
             "title": "Sampling Rate",
@@ -24629,7 +24687,10 @@
           "evidence_max_age_minutes",
           "unresolved_samples",
           "max_unresolved_samples",
-          "audit_backlog_exceeded"
+          "audit_backlog_exceeded",
+          "oldest_pending_sample_hours",
+          "max_sample_age_hours",
+          "sample_age_exceeded"
         ],
         "title": "ReviewerAgentStateRead",
         "type": "object"

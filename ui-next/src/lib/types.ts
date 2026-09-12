@@ -875,6 +875,9 @@ export interface BulkStewardshipOperationRead {
   applied_by: string | null;
   applied_at: string | null;
   applied_count: number;
+  applied_subject_ids: string[];
+  reverses_operation_id: string | null;
+  review_audit_sample_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -4059,6 +4062,7 @@ export interface RenameCandidateRead {
 export interface ResolveSampleRequest {
   human_outcome: "AGREED" | "DISAGREED";
   rationale: string;
+  reverse_applied_changes?: boolean;
 }
 
 export interface ReviewAuditSampleRead {
@@ -4140,6 +4144,9 @@ export interface ReviewerAgentStateRead {
   unresolved_samples: number;
   max_unresolved_samples: number;
   audit_backlog_exceeded: boolean;
+  oldest_pending_sample_hours: number | null;
+  max_sample_age_hours: number;
+  sample_age_exceeded: boolean;
 }
 
 export interface RiskTierDisagreementRateRead {
