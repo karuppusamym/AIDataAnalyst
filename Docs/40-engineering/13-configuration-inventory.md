@@ -54,7 +54,7 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `lineage_cache_enabled` | `bool` | `False` | 5 |
 | `lineage_neo4j_read_enabled` | `bool` | `False` | 1 |
 | `reviewer_agent_enabled` | `bool` | `False` | 3 |
-| `reviewer_agent_suspended` | `bool` | `False` | 5 |
+| `reviewer_agent_suspended` | `bool` | `False` | 6 |
 | `steward_agent_interval_minutes` | `int` | `0` | dynamic |
 | `classification_propagation_interval_minutes` | `int` | `0` | 1 |
 | `freshness_evaluation_interval_minutes` | `int` | `0` | 1 |
@@ -195,12 +195,12 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `lineage_high_confidence_auto_active_threshold` | `float` | `0.9` | 3 |
 | `reviewer_agent_enabled` | `bool` | `False` | 3 |
 | `reviewer_agent_principal_id` | `str` | `'agent:reviewer'` | 5 |
-| `reviewer_agent_max_tier` | `Literal['T0', 'T1', 'T2', 'T3']` | `'T1'` | 7 |
-| `reviewer_agent_sampling_rate` | `float` | `0.05` | 2 |
-| `reviewer_agent_suspended` | `bool` | `False` | 5 |
+| `reviewer_agent_max_tier` | `Literal['T0', 'T1', 'T2', 'T3']` | `'T1'` | 8 |
+| `reviewer_agent_sampling_rate` | `float` | `0.05` | 3 |
+| `reviewer_agent_suspended` | `bool` | `False` | 6 |
 | `reviewer_agent_approve_confidence` | `float` | `0.8` | 3 |
-| `reviewer_agent_max_unresolved_samples` | `int` | `50` | 3 |
-| `reviewer_agent_max_sample_age_hours` | `int` | `168` | 3 |
+| `reviewer_agent_max_unresolved_samples` | `int` | `50` | 4 |
+| `reviewer_agent_max_sample_age_hours` | `int` | `168` | 4 |
 | `reviewer_agent_evidence_max_age_minutes` | `int` | `60` | 2 |
 | `steward_agent_principal_id` | `str` | `'agent:steward'` | dynamic |
 | `steward_agent_max_proposals_per_run` | `int` | `25` | dynamic |
