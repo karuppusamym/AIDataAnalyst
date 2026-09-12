@@ -419,6 +419,15 @@ _COLUMN_NAME_EXEMPTIONS: dict[str, str] = {
         "raw question or query text; the mined question row itself carries no source "
         "values either, only object_type/object_id and an evidence edge id"
     ),
+    "bulk_stewardship_operation.review_audit_sample_id": (
+        "foreign key to review_audit_sample.id (AR-11, R11-C8) -- the governance "
+        "record of which decision a human re-checked, not a sample of source data. "
+        "The `sample_` fragment is banned because a column like `sample_values` "
+        "would carry rows out of a warehouse; this one carries the id of a row in "
+        "this platform's own audit table, whose own columns are a governance review "
+        "id, an object type, a risk tier, a decision and an outcome -- no content "
+        "from the reviewed object at all"
+    ),
 }
 
 _VALUE_BEARING_COLUMN_FRAGMENTS = (
