@@ -15,14 +15,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get } from "./transport";
-import {
-  makeFixtureMe,
-  makeFixtureOrgDatasources,
-  makeFixtureOrgProjects,
-  makeFixtureOrgWorkspaces,
-  makeFixtureOrganizations,
-  makeFixtureWorkspaceSourceBindings,
-} from "../fixtures";
 import type {
   DataSourceRead,
   MeRead,
@@ -47,7 +39,7 @@ import type { PageOf } from "../ui-types";
  */
 export function fetchMe(signal?: AbortSignal): Promise<MeRead> {
   return demoOr(
-    async () => makeFixtureMe(),
+    async (fixtures) => fixtures.makeFixtureMe(),
     () => get<MeRead>("/v1/me", signal),
   );
 }
@@ -63,7 +55,7 @@ export function fetchMe(signal?: AbortSignal): Promise<MeRead> {
  */
 export function fetchOrganizations(signal?: AbortSignal): Promise<OrganizationRead[]> {
   return demoOr(
-    () => makeFixtureOrganizations(),
+    (fixtures) => fixtures.makeFixtureOrganizations(),
     async () => (await listOrganizations(signal)).items,
   );
 }
@@ -77,7 +69,7 @@ export function fetchOrgProjects(
   signal?: AbortSignal,
 ): Promise<PageOf<ProjectRead>> {
   return demoOr(
-    () => makeFixtureOrgProjects(),
+    (fixtures) => fixtures.makeFixtureOrgProjects(),
     () =>
       get<PageOf<ProjectRead>>(
         `/v1/organizations/${organizationId}/projects?limit=500`,
@@ -96,7 +88,7 @@ export function fetchOrgDatasources(
   signal?: AbortSignal,
 ): Promise<PageOf<DataSourceRead>> {
   return demoOr(
-    () => makeFixtureOrgDatasources(),
+    (fixtures) => fixtures.makeFixtureOrgDatasources(),
     () =>
       get<PageOf<DataSourceRead>>(
         `/v1/organizations/${organizationId}/datasources?limit=500`,
@@ -112,7 +104,7 @@ export function fetchOrgWorkspaces(
   signal?: AbortSignal,
 ): Promise<PageOf<WorkspaceRead>> {
   return demoOr(
-    () => makeFixtureOrgWorkspaces(organizationId),
+    (fixtures) => fixtures.makeFixtureOrgWorkspaces(organizationId),
     () =>
       get<PageOf<WorkspaceRead>>(
         `/v1/organizations/${organizationId}/workspaces?limit=200`,
@@ -127,7 +119,7 @@ export function fetchWorkspaceSourceBindings(
   signal?: AbortSignal,
 ): Promise<PageOf<SourceBindingRead>> {
   return demoOr(
-    () => makeFixtureWorkspaceSourceBindings(workspaceId),
+    (fixtures) => fixtures.makeFixtureWorkspaceSourceBindings(workspaceId),
     () =>
       get<PageOf<SourceBindingRead>>(
         `/v1/workspaces/${workspaceId}/source-bindings`,
@@ -257,7 +249,7 @@ export function fetchOrgWorkspacePage(
   signal?: AbortSignal,
 ): Promise<PageOf<WorkspaceRead>> {
   return demoOr(
-    () => makeFixtureOrgWorkspaces(organizationId),
+    (fixtures) => fixtures.makeFixtureOrgWorkspaces(organizationId),
     () =>
       get<PageOf<WorkspaceRead>>(
         `/v1/organizations/${organizationId}/workspaces?limit=${limit}&offset=${offset}`,
@@ -274,7 +266,7 @@ export function fetchOrgProjectPage(
   signal?: AbortSignal,
 ): Promise<PageOf<ProjectRead>> {
   return demoOr(
-    () => makeFixtureOrgProjects(),
+    (fixtures) => fixtures.makeFixtureOrgProjects(),
     () =>
       get<PageOf<ProjectRead>>(
         `/v1/organizations/${organizationId}/projects?limit=${limit}&offset=${offset}`,
@@ -291,7 +283,7 @@ export function fetchOrgDatasourcePage(
   signal?: AbortSignal,
 ): Promise<PageOf<DataSourceRead>> {
   return demoOr(
-    () => makeFixtureOrgDatasources(),
+    (fixtures) => fixtures.makeFixtureOrgDatasources(),
     () =>
       get<PageOf<DataSourceRead>>(
         `/v1/organizations/${organizationId}/datasources?limit=${limit}&offset=${offset}`,
@@ -307,8 +299,8 @@ export function fetchOrganizationPage(
   signal?: AbortSignal,
 ): Promise<PageOf<OrganizationRead>> {
   return demoOr(
-    async () => {
-      const items = await makeFixtureOrganizations();
+    async (fixtures) => {
+      const items = await fixtures.makeFixtureOrganizations();
       return { items, limit, offset: 0, total: items.length };
     },
     () =>

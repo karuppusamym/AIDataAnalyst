@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { resolveDemoData } from "./src/lib/demoDataMode";
 
 // `@types/node` is intentionally not part of this browser-only TypeScript
 // project. Vite's config does run in Node, so read its environment through a
@@ -32,8 +33,32 @@ async function devHttps(): Promise<{ cert: string; key: string } | undefined> {
 // The API runs as a modular monolith on :8000. In dev we proxy rather than turn
 // on CORS server-side, so the browser sees one origin and cookie/OIDC behaviour
 // matches production, where nginx serves the SPA and the API from one host.
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [react()],
+  /* Settle the demo/live question here, in Node, and hand the client a literal
+     (review 2026-09-11, R11-X1).
+
+     Vite substitutes only the `VITE_*` keys it was actually given, so an
+     *unset* `import.meta.env.VITE_USE_FIXTURES` survives into the bundle as a
+     property read on a runtime object -- which no amount of tree-shaking can
+     fold. Defining the key unconditionally makes it a string literal in every
+     module, and that is the entire mechanism by which `api/transport.ts` can
+     shed its `import("../fixtures")` and Rollup can drop `lib/fixtures.ts`
+     (~340 kB, a third of the shipped JavaScript) along with it.
+
+     The define deliberately overrides whatever the ambient environment holds:
+     `resolveDemoData` has already read that value and applied the mode default
+     to it, so there is one answer rather than two spellings of the question
+     that could disagree. */
+  define: {
+    "import.meta.env.VITE_USE_FIXTURES": JSON.stringify(
+      resolveDemoData(mode, {
+        VITE_USE_FIXTURES: runtimeEnvironment?.VITE_USE_FIXTURES,
+      })
+        ? "1"
+        : "0",
+    ),
+  },
   server: {
     https: await devHttps(),
     // `VITE_API_PROXY_TARGET` lets the same configuration work on the host

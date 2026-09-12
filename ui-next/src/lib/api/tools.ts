@@ -11,19 +11,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
-import {
-  makeFixtureCancelToolPlan,
-  makeFixtureCreateToolPlan,
-  makeFixtureCreateToolVersion,
-  makeFixtureExecuteToolPlan,
-  makeFixtureExecuteToolVersion,
-  makeFixtureRequestToolDeprecation,
-  makeFixtureSubmitToolForReview,
-  makeFixtureToolPlan,
-  makeFixtureToolPlanEvidence,
-  makeFixtureTools,
-  makeFixtureValidateToolPlan,
-} from "../fixtures";
 import type {
   ExecutionRead,
   GovernanceReviewRead,
@@ -66,7 +53,7 @@ export function fetchTools(
   signal?: AbortSignal,
 ): Promise<PageOf<GovernedToolVersionRead>> {
   return demoOr(
-    async () => makeFixtureTools(projectId, query),
+    async (fixtures) => fixtures.makeFixtureTools(projectId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -91,7 +78,7 @@ export function createToolVersion(
   signal?: AbortSignal,
 ): Promise<GovernedToolVersionRead> {
   return demoOr(
-    async () => makeFixtureCreateToolVersion(projectId, body),
+    async (fixtures) => fixtures.makeFixtureCreateToolVersion(projectId, body),
     async () => {
       return postJson<GovernedToolVersionRead>(`/v1/projects/${projectId}/tools`, body, signal);
     },
@@ -107,7 +94,7 @@ export function submitToolForReview(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureSubmitToolForReview(versionId),
+    async (fixtures) => fixtures.makeFixtureSubmitToolForReview(versionId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/tool-versions/${versionId}/submit`, {}, signal);
     },
@@ -124,7 +111,7 @@ export function requestToolDeprecation(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureRequestToolDeprecation(versionId),
+    async (fixtures) => fixtures.makeFixtureRequestToolDeprecation(versionId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/tool-versions/${versionId}/deprecation-submit`, {}, signal);
     },
@@ -145,7 +132,7 @@ export function executeToolVersion(
   signal?: AbortSignal,
 ): Promise<ToolExecutionResponse> {
   return demoOr(
-    async () => makeFixtureExecuteToolVersion(versionId, body),
+    async (fixtures) => fixtures.makeFixtureExecuteToolVersion(versionId, body),
     async () => {
       return postJson<ToolExecutionResponse>(`/v1/tool-versions/${versionId}/execute`, body, signal);
     },
@@ -192,7 +179,7 @@ export function createToolPlan(
   signal?: AbortSignal,
 ): Promise<ToolPlanRead> {
   return demoOr(
-    async () => makeFixtureCreateToolPlan(body),
+    async (fixtures) => fixtures.makeFixtureCreateToolPlan(body),
     async () => {
       return postJson<ToolPlanRead>(`/v1/tool-plans`, body, signal);
     },
@@ -205,7 +192,7 @@ export function fetchToolPlan(
   signal?: AbortSignal,
 ): Promise<ToolPlanDetailRead> {
   return demoOr(
-    async () => makeFixtureToolPlan(planId),
+    async (fixtures) => fixtures.makeFixtureToolPlan(planId),
     async () => {
       return get<ToolPlanDetailRead>(`/v1/tool-plans/${planId}`, signal);
     },
@@ -220,7 +207,7 @@ export function validateToolPlan(
   signal?: AbortSignal,
 ): Promise<ValidationResponse> {
   return demoOr(
-    async () => makeFixtureValidateToolPlan(planId),
+    async (fixtures) => fixtures.makeFixtureValidateToolPlan(planId),
     async () => {
       return postJson<ValidationResponse>(`/v1/tool-plans/${planId}/validate`, {}, signal);
     },
@@ -235,7 +222,7 @@ export function executeToolPlan(
   signal?: AbortSignal,
 ): Promise<ExecutionRead> {
   return demoOr(
-    async () => makeFixtureExecuteToolPlan(planId),
+    async (fixtures) => fixtures.makeFixtureExecuteToolPlan(planId),
     async () => {
       return postJson<ExecutionRead>(`/v1/tool-plans/${planId}/execute`, {}, signal);
     },
@@ -251,7 +238,7 @@ export function cancelToolPlan(
   signal?: AbortSignal,
 ): Promise<ToolPlanRead> {
   return demoOr(
-    async () => makeFixtureCancelToolPlan(planId),
+    async (fixtures) => fixtures.makeFixtureCancelToolPlan(planId),
     async () => {
       return postJson<ToolPlanRead>(`/v1/tool-plans/${planId}/cancel`, {}, signal);
     },
@@ -271,7 +258,7 @@ export function fetchToolPlanEvidence(
   signal?: AbortSignal,
 ): Promise<PageOf<ExecutionRead>> {
   return demoOr(
-    async () => makeFixtureToolPlanEvidence(planId, query),
+    async (fixtures) => fixtures.makeFixtureToolPlanEvidence(planId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));

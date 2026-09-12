@@ -9,13 +9,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
-import {
-  makeFixtureStudioChangeSetItems,
-  makeFixtureStudioChangeSets,
-  makeFixtureStudioDiff,
-  makeFixtureStudioImpact,
-  makeFixtureSubmitStudioChangeSet,
-} from "../fixtures";
 import type {
   StudioChangeItemRead,
   StudioChangeSetRead,
@@ -35,7 +28,7 @@ export function fetchStudioChangeSets(
   signal?: AbortSignal,
 ): Promise<StudioChangeSetRead[]> {
   return demoOr(
-    async () => makeFixtureStudioChangeSets(query),
+    async (fixtures) => fixtures.makeFixtureStudioChangeSets(query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -54,7 +47,7 @@ export function fetchStudioChangeSetItems(
   signal?: AbortSignal,
 ): Promise<StudioChangeItemRead[]> {
   return demoOr(
-    async () => makeFixtureStudioChangeSetItems(changeSetId),
+    async (fixtures) => fixtures.makeFixtureStudioChangeSetItems(changeSetId),
     async () => {
       return get<StudioChangeItemRead[]>(`/v1/studio/change-sets/${changeSetId}/items`, signal);
     },
@@ -68,7 +61,7 @@ export function fetchStudioDiff(
   signal?: AbortSignal,
 ): Promise<StudioDiffRead> {
   return demoOr(
-    async () => makeFixtureStudioDiff(changeSetId),
+    async (fixtures) => fixtures.makeFixtureStudioDiff(changeSetId),
     async () => {
       return get<StudioDiffRead>(`/v1/studio/change-sets/${changeSetId}/diff`, signal);
     },
@@ -83,7 +76,7 @@ export function fetchStudioImpact(
   signal?: AbortSignal,
 ): Promise<StudioImpactPreview> {
   return demoOr(
-    async () => makeFixtureStudioImpact(changeSetId),
+    async (fixtures) => fixtures.makeFixtureStudioImpact(changeSetId),
     async () => {
       return get<StudioImpactPreview>(`/v1/studio/change-sets/${changeSetId}/impact`, signal);
     },
@@ -99,7 +92,7 @@ export function submitStudioChangeSet(
   signal?: AbortSignal,
 ): Promise<StudioChangeSetRead> {
   return demoOr(
-    async () => makeFixtureSubmitStudioChangeSet(changeSetId),
+    async (fixtures) => fixtures.makeFixtureSubmitStudioChangeSet(changeSetId),
     async () => {
       return postJson<StudioChangeSetRead>(`/v1/studio/change-sets/${changeSetId}/submit`, {}, signal);
     },

@@ -4,7 +4,9 @@
    TWO INDEPENDENT AXES, previously conflated into one boolean:
 
      DATA MODE  -- where the screens' data comes from: bundled `fixtures.ts`
-                   demo data, or a live backend.
+                   demo data, or a live backend. Settled while the bundle is
+                   built, not while it runs (R11-X1, `demoDataMode.ts`): a
+                   production build has no fixtures in it to fall back to.
      AUTH MODE  -- how a request proves who is making it: development identity
                    headers, an OIDC bearer token, or an authenticating reverse
                    proxy in front of the app.
@@ -117,8 +119,18 @@ function readOidcConfig(env: RawEnv): OidcClientConfig | null {
   };
 }
 
-export function resolveAppConfig(env: RawEnv): AppConfig {
-  const dataMode: DataMode = env.VITE_USE_FIXTURES !== "0" ? "fixtures" : "live";
+/**
+ * @param demoData Whether this BUILD carries demo data at all. It defaults to
+ *   reading the flag out of `env`, which is what a caller passing a
+ *   hand-written environment wants; `APP_CONFIG` below instead passes the
+ *   build-time literal, because after R11-X1 the two are not the same fact --
+ *   see the note on `USE_FIXTURES`.
+ */
+export function resolveAppConfig(
+  env: RawEnv,
+  demoData: boolean = env.VITE_USE_FIXTURES !== "0",
+): AppConfig {
+  const dataMode: DataMode = demoData ? "fixtures" : "live";
   const declared = readAuthMode(env.VITE_AUTH_MODE);
   return {
     dataMode,
@@ -134,12 +146,27 @@ export function resolveAppConfig(env: RawEnv): AppConfig {
   };
 }
 
+/**
+ * Demo data. Screens must label themselves when this is true.
+ *
+ * R11-X1: this is a BUILD-time constant, not a runtime lookup. `vite.config.ts`
+ * defines `import.meta.env.VITE_USE_FIXTURES` to a literal `"1"` or `"0"` for
+ * every build, so the comparison below folds to `true` or `false` while the
+ * bundle is being made -- which is what allows a production build to shed
+ * `lib/fixtures.ts` entirely instead of shipping the demo estate to users who
+ * can never reach it. Flipping the flag now means rebuilding, and that is the
+ * point: a bundler cannot drop what a browser might still ask for.
+ *
+ * `api/transport.ts` repeats this comparison rather than importing this name.
+ * That is not a duplicate of the decision -- both read the same one literal --
+ * but a chunking constraint, and it is explained where it is written.
+ */
+export const USE_FIXTURES: boolean = import.meta.env.VITE_USE_FIXTURES !== "0";
+
 export const APP_CONFIG: AppConfig = resolveAppConfig(
   (typeof import.meta !== "undefined" ? import.meta.env : {}) as RawEnv,
+  USE_FIXTURES,
 );
-
-/** Demo data. Screens must label themselves when this is true. */
-export const USE_FIXTURES = APP_CONFIG.dataMode === "fixtures";
 
 /**
  * Headers that identify the caller.

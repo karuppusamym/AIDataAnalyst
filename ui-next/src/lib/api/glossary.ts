@@ -20,7 +20,7 @@
    "list terms" without misrepresenting what the API sends.
 --------------------------------------------------------------------------- */
 
-import { ApiError, USE_FIXTURES, requestWithInit } from "./transport";
+import { ApiError, demoOr, requestWithInit } from "./transport";
 
 import type {
   AssetTermLinkCreate,
@@ -30,14 +30,6 @@ import type {
   GovernanceReviewRead,
   Page,
 } from "../types";
-import {
-  makeFixtureAssetTermLinks,
-  makeFixtureCreateGlossaryTerm,
-  makeFixtureGlossaryTerms,
-  makeFixtureLinkTermToTable,
-  makeFixtureSubmitGlossaryTermVersion,
-  makeFixtureUnlinkTermFromTable,
-} from "../fixtures";
 
 /** Status values a `GlossaryTermVersion.status` can take, per
  *  `src/aida/glossary_api.py` (DRAFT -> REVIEW_REQUIRED via submit;
@@ -172,14 +164,16 @@ export async function listGlossaryTerms(
      below went to the live API unauthenticated and 401d. Harmless while the
      only caller was an optional side panel; visible as a broken picker once
      Context Products started composing approved terms. */
-  const page = USE_FIXTURES
-    ? await makeFixtureGlossaryTerms({
+  const page = await demoOr<Page>(
+    (fixtures) =>
+      fixtures.makeFixtureGlossaryTerms({
         status: query.status,
         q: query.q,
         limit: query.limit,
         offset: query.cursor ? Number(query.cursor) : 0,
-      })
-    : await apiRequest<Page>(path, { method: "GET" }, signal);
+      }),
+    () => apiRequest<Page>(path, { method: "GET" }, signal),
+  );
   const items = (page.items as GlossaryTermRead[]) ?? [];
   // Client-side business-node filter -- the endpoint has no server param
   // for it, so we filter the loaded page. This is a "narrow what is on
@@ -250,11 +244,14 @@ export async function createGlossaryTerm(
     synonyms: rest.synonyms ?? [],
     owner_principal: rest.owner_principal ?? null,
   };
-  if (USE_FIXTURES) return makeFixtureCreateGlossaryTerm(payload);
-  return apiRequest<GlossaryTermRead>(
-    `/v1/organizations/${organizationId}/glossary-terms`,
-    { method: "POST", body: JSON.stringify(payload) },
-    signal,
+  return demoOr(
+    (fixtures) => fixtures.makeFixtureCreateGlossaryTerm(payload),
+    () =>
+      apiRequest<GlossaryTermRead>(
+        `/v1/organizations/${organizationId}/glossary-terms`,
+        { method: "POST", body: JSON.stringify(payload) },
+        signal,
+      ),
   );
 }
 
@@ -266,11 +263,14 @@ export async function submitGlossaryTermVersion(
   versionId: string,
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
-  if (USE_FIXTURES) return makeFixtureSubmitGlossaryTermVersion(versionId);
-  return apiRequest<GovernanceReviewRead>(
-    `/v1/glossary-term-versions/${versionId}/submit`,
-    { method: "POST", body: JSON.stringify({}) },
-    signal,
+  return demoOr(
+    (fixtures) => fixtures.makeFixtureSubmitGlossaryTermVersion(versionId),
+    () =>
+      apiRequest<GovernanceReviewRead>(
+        `/v1/glossary-term-versions/${versionId}/submit`,
+        { method: "POST", body: JSON.stringify({}) },
+        signal,
+      ),
   );
 }
 
@@ -285,15 +285,19 @@ export async function linkTermToTable(
   opts: { reason?: string } = {},
   signal?: AbortSignal,
 ): Promise<AssetTermLinkRead> {
-  if (USE_FIXTURES) return makeFixtureLinkTermToTable(tableId, termId);
-  const body: AssetTermLinkCreate = { term_id: termId };
-  const extraHeaders: Record<string, string> = opts.reason
-    ? { "X-Link-Reason": opts.reason }
-    : {};
-  return apiRequest<AssetTermLinkRead>(
-    `/v1/metadata/tables/${tableId}/glossary-links`,
-    { method: "POST", body: JSON.stringify(body), headers: extraHeaders },
-    signal,
+  return demoOr(
+    (fixtures) => fixtures.makeFixtureLinkTermToTable(tableId, termId),
+    () => {
+      const body: AssetTermLinkCreate = { term_id: termId };
+      const extraHeaders: Record<string, string> = opts.reason
+        ? { "X-Link-Reason": opts.reason }
+        : {};
+      return apiRequest<AssetTermLinkRead>(
+        `/v1/metadata/tables/${tableId}/glossary-links`,
+        { method: "POST", body: JSON.stringify(body), headers: extraHeaders },
+        signal,
+      );
+    },
   );
 }
 
@@ -304,11 +308,9 @@ export async function unlinkTermFromTable(
   linkId: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  if (USE_FIXTURES) return makeFixtureUnlinkTermFromTable(linkId);
-  await apiRequest<void>(
-    `/v1/asset-term-links/${linkId}`,
-    { method: "DELETE" },
-    signal,
+  await demoOr<void>(
+    (fixtures) => fixtures.makeFixtureUnlinkTermFromTable(linkId),
+    () => apiRequest<void>(`/v1/asset-term-links/${linkId}`, { method: "DELETE" }, signal),
   );
 }
 
@@ -322,7 +324,8 @@ export async function listAssetTermLinks(
   query: ListAssetTermLinksQuery = {},
   signal?: AbortSignal,
 ): Promise<AssetTermLinksPage> {
-  if (!query.tableId) {
+  const tableId = query.tableId;
+  if (!tableId) {
     return { items: [], limit: query.limit ?? 100, offset: 0, total: 0 };
   }
   const params = new URLSearchParams();
@@ -331,13 +334,15 @@ export async function listAssetTermLinks(
   // omitting it made the two paths disagree about the page size.
   params.set("limit", String(query.limit ?? 100));
   if (query.cursor) params.set("offset", query.cursor);
-  const path = `/v1/metadata/tables/${query.tableId}/glossary-links?${params.toString()}`;
-  const page = USE_FIXTURES
-    ? await makeFixtureAssetTermLinks(query.tableId, {
+  const path = `/v1/metadata/tables/${tableId}/glossary-links?${params.toString()}`;
+  const page = await demoOr<Page>(
+    (fixtures) =>
+      fixtures.makeFixtureAssetTermLinks(tableId, {
         limit: query.limit,
         offset: query.cursor ? Number(query.cursor) : 0,
-      })
-    : await apiRequest<Page>(path, { method: "GET" }, signal);
+      }),
+    () => apiRequest<Page>(path, { method: "GET" }, signal),
+  );
   let items = (page.items as AssetTermLinkRead[]) ?? [];
   if (query.termId) items = items.filter((l) => l.term_id === query.termId);
   if (query.linkType) items = items.filter((l) => l.link_type === query.linkType);

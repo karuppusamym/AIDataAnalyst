@@ -14,24 +14,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
-import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureAuditEvents,
-  makeFixtureBulkDecideRelationshipCandidates,
-  makeFixtureCompliancePacks,
-  makeFixtureDecideRelationshipCandidate,
-  makeFixtureDecideReview,
-  makeFixtureDownloadCompliancePack,
-  makeFixtureGenerateCompliancePack,
-  makeFixtureLiftSuppression,
-  makeFixtureNegativeKnowledgeSearch,
-  makeFixtureNegativeKnowledgeSubject,
-  makeFixtureRelationshipCandidateCalibration,
-  makeFixtureRelationshipCandidateReviewQueue,
-  makeFixtureRelationshipCandidates,
-  makeFixtureReviewQueue,
-  makeFixtureParsedLineageReviewQueue,
-} from "../fixtures";
 import type {
   CompliancePackRead,
   GeneratePackRequest,
@@ -78,7 +60,7 @@ export function fetchReviewQueue(
   signal?: AbortSignal,
 ): Promise<ReviewQueueRead> {
   return demoOr(
-    async () => makeFixtureReviewQueue(query),
+    async (fixtures) => fixtures.makeFixtureReviewQueue(query),
     async () => {
       const params = new URLSearchParams();
       // `status=` (empty string) is the endpoint's own "every status" escape
@@ -102,7 +84,7 @@ export function decideGovernanceReview(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureDecideReview(reviewId, body),
+    async (fixtures) => fixtures.makeFixtureDecideReview(reviewId, body),
     async () => {
       return postJson<GovernanceReviewRead>(
         `/v1/governance/reviews/${reviewId}/decision`,
@@ -136,7 +118,7 @@ export function fetchRelationshipCandidates(
   signal?: AbortSignal,
 ): Promise<PageOf<RelationshipCandidateRead>> {
   return demoOr(
-    async () => makeFixtureRelationshipCandidates(datasourceId, opts.status),
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidates(datasourceId, opts.status),
     async () => {
       const params = new URLSearchParams();
       if (opts.status && opts.status !== "ALL") params.set("candidate_status", opts.status);
@@ -164,7 +146,7 @@ export function fetchRelationshipCandidateReviewQueue(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateReviewQueueRead> {
   return demoOr(
-    async () => makeFixtureRelationshipCandidateReviewQueue(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidateReviewQueue(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -188,7 +170,7 @@ export function decideRelationshipCandidate(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateRead> {
   return demoOr(
-    async () => makeFixtureDecideRelationshipCandidate(candidateId, body),
+    async (fixtures) => fixtures.makeFixtureDecideRelationshipCandidate(candidateId, body),
     async () => {
       return postJson<RelationshipCandidateRead>(
         `/v1/relationship-candidates/${candidateId}/decision`,
@@ -208,7 +190,7 @@ export function bulkDecideRelationshipCandidates(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateBulkDecisionResultRead> {
   return demoOr(
-    async () => makeFixtureBulkDecideRelationshipCandidates(body),
+    async (fixtures) => fixtures.makeFixtureBulkDecideRelationshipCandidates(body),
     async () => {
       return postJson<RelationshipCandidateBulkDecisionResultRead>(
         `/v1/relationship-candidates/bulk-decision`,
@@ -230,7 +212,7 @@ export function fetchRelationshipCandidateCalibration(
   signal?: AbortSignal,
 ): Promise<RelationshipCandidateCalibrationRead> {
   return demoOr(
-    async () => makeFixtureRelationshipCandidateCalibration(datasourceId),
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidateCalibration(datasourceId),
     async () => {
       const params = new URLSearchParams();
       if (datasourceId) params.set("datasource_id", datasourceId);
@@ -285,20 +267,24 @@ export async function fetchAuditEvents(
 ): Promise<PageOf<AuditEventRead>> {
   if (query.since) assertTimezoneAware("since", query.since);
   if (query.until) assertTimezoneAware("until", query.until);
-  if (USE_FIXTURES) return makeFixtureAuditEvents(query);
 
-  const params = new URLSearchParams();
-  if (query.action) params.set("action", query.action);
-  if (query.resourceType) params.set("resource_type", query.resourceType);
-  if (query.correlationId) params.set("correlation_id", query.correlationId);
-  if (query.since) params.set("since", query.since);
-  if (query.until) params.set("until", query.until);
-  params.set("limit", String(query.limit ?? 100));
-  params.set("offset", String(query.offset ?? 0));
+  return demoOr(
+    (fixtures) => fixtures.makeFixtureAuditEvents(query),
+    () => {
+      const params = new URLSearchParams();
+      if (query.action) params.set("action", query.action);
+      if (query.resourceType) params.set("resource_type", query.resourceType);
+      if (query.correlationId) params.set("correlation_id", query.correlationId);
+      if (query.since) params.set("since", query.since);
+      if (query.until) params.set("until", query.until);
+      params.set("limit", String(query.limit ?? 100));
+      params.set("offset", String(query.offset ?? 0));
 
-  return get<PageOf<AuditEventRead>>(
-    `/v1/organizations/${query.organizationId}/audit-events?${params}`,
-    signal,
+      return get<PageOf<AuditEventRead>>(
+        `/v1/organizations/${query.organizationId}/audit-events?${params}`,
+        signal,
+      );
+    },
   );
 }
 
@@ -330,7 +316,7 @@ export function searchNegativeKnowledge(
   signal?: AbortSignal,
 ): Promise<PageOf<NegativeAssertionRead>> {
   return demoOr(
-    async () => makeFixtureNegativeKnowledgeSearch(query),
+    async (fixtures) => fixtures.makeFixtureNegativeKnowledgeSearch(query),
     async () => {
       const params = new URLSearchParams();
       if (query.assertionType) params.set("assertion_type", query.assertionType);
@@ -358,7 +344,7 @@ export function fetchNegativeKnowledgeForSubject(
   signal?: AbortSignal,
 ): Promise<PageOf<NegativeAssertionRead>> {
   return demoOr(
-    async () => makeFixtureNegativeKnowledgeSubject(subjectId, query),
+    async (fixtures) => fixtures.makeFixtureNegativeKnowledgeSubject(subjectId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -381,7 +367,7 @@ export function liftNegativeAssertionSuppression(
   signal?: AbortSignal,
 ): Promise<NegativeAssertionRead> {
   return demoOr(
-    async () => makeFixtureLiftSuppression(assertionId, body),
+    async (fixtures) => fixtures.makeFixtureLiftSuppression(assertionId, body),
     async () => {
       return postJson<NegativeAssertionRead>(
         `/v1/negative-knowledge/${assertionId}/lift-suppression`,
@@ -416,7 +402,7 @@ export function fetchCompliancePacks(
   signal?: AbortSignal,
 ): Promise<PageOf<CompliancePackRead>> {
   return demoOr(
-    async () => makeFixtureCompliancePacks(query),
+    async (fixtures) => fixtures.makeFixtureCompliancePacks(query),
     async () => {
       const params = new URLSearchParams();
       if (query.framework) params.set("framework", query.framework);
@@ -437,7 +423,7 @@ export function generateCompliancePack(
   signal?: AbortSignal,
 ): Promise<CompliancePackRead> {
   return demoOr(
-    async () => makeFixtureGenerateCompliancePack(body),
+    async (fixtures) => fixtures.makeFixtureGenerateCompliancePack(body),
     async () => {
       return postJson<CompliancePackRead>("/v1/compliance/packs/generate", body, signal);
     },
@@ -458,7 +444,7 @@ export function downloadCompliancePack(
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   return demoOr(
-    async () => makeFixtureDownloadCompliancePack(packId),
+    async (fixtures) => fixtures.makeFixtureDownloadCompliancePack(packId),
     async () => {
       return get<Record<string, unknown>>(`/v1/compliance/packs/${packId}/download`, signal);
     },
@@ -499,7 +485,7 @@ export async function listParsedLineageReviewQueue(
   // it issued a live request in the default fixtures build and rendered the
   // backend's "X-Principal-Id is required" as a load failure.
   return demoOr(
-    () => makeFixtureParsedLineageReviewQueue(query),
+    (fixtures) => fixtures.makeFixtureParsedLineageReviewQueue(query),
     () =>
       get<import("../types").ParsedLineageEdgeReviewQueueRead>(
         `/v1/lineage/parsed-edges/review-queue?${params}`,

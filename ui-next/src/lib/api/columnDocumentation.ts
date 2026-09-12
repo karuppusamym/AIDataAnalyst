@@ -76,8 +76,10 @@ export function saveColumnWorksheet(tableId: string, changes: {column_id: string
 
 const readJson = get;
 
-/** Fixture columns for a table, so the pane renders something recognisable
- *  under the default `VITE_USE_FIXTURES=1`.
+/** Fixture columns for a table, so the pane renders something recognisable in
+ *  a demo build. These are written here rather than in `lib/fixtures.ts`, and
+ *  stay here: that module is dropped from a live build (R11-X1), which this
+ *  branch is never reached in anyway.
  *
  *  Deliberately mixed: some columns carry only a source comment, some carry
  *  an authored description, some carry neither -- because "most columns have
