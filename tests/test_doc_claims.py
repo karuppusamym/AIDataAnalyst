@@ -168,9 +168,55 @@ RETIRED_TEST_PATHS: dict[str, str] = {
     "tests/test_ui_lineage_graph_clustering.py": (
         "legacy `ui/` lineage graph; removed with that portal (D05)."
     ),
+    "tests/test_view_lineage_api.py": (
+        "covered `view_lineage_api.py`'s four routes, removed with that router by "
+        "R11-X5 (2026-09-11). The router had no caller outside this file; proposing "
+        "view lineage is the lineage agent's job (`aida.lineage_agent`) and the "
+        "review lifecycle it fed is covered by tests/test_parsed_lineage_review.py."
+    ),
 }
 
 RETIRED_TEST_BASENAMES = {path.rsplit("/", 1)[-1] for path in RETIRED_TEST_PATHS}
+
+# Source modules a *deliberate removal* deleted, still cited by the append-only
+# history documents (`60-delivery/06-accomplishment-log.md`, the dated reviews) that
+# recorded the work when it was done, and by the tracker rows that recorded shipping
+# them. Those citations are true as history and must not be rewritten; the modules are
+# gone and must not be resurrected. Same standing as `RETIRED_TEST_PATHS` above: an
+# investigated baseline, guarded by a staleness test that fires if the file comes back.
+RETIRED_SOURCE_PATHS: dict[str, str] = {
+    "src/aida/view_lineage_api.py": (
+        "four raw-SQL view/procedure lineage parse-and-list routes, removed by R11-X5 "
+        "(2026-09-11). Superseded by the lineage agent (`aida.lineage_agent`) and the "
+        "parsed-edges review queue, both UI-wired; `sql_lineage_parser.py` and the "
+        "`view_lineage_edge`/`procedure_lineage_edge` tables it wrote are kept."
+    ),
+    "src/aida/graph_perspectives_api.py": (
+        "five saved-Graph-Explorer-perspective routes (KG-5), removed by R11-X5 "
+        "(2026-09-11) together with the `graph_perspective` table (migration "
+        "`d41a7b8e6c02`). No screen was ever built against it and nothing outside its "
+        "own test module called it; KG-5 is open again, not delivered."
+    ),
+}
+
+RETIRED_SOURCE_BASENAMES = {path.rsplit("/", 1)[-1] for path in RETIRED_SOURCE_PATHS}
+
+# Test *functions* a deliberate removal deleted or renamed, still cited by the
+# append-only history documents. Values say where the guarantee lives now, so a reader
+# of the old entry can still find it. Guarded by the same staleness test.
+RETIRED_TEST_FUNCTION_NAMES: dict[str, str] = {
+    "test_procedure_reparse_with_a_standalone_select_does_not_double": (
+        "lived in tests/test_view_lineage_api.py, deleted with that router by R11-X5. "
+        "It pinned `_persist_edges`' re-parse behaviour for the parser's shared "
+        "`PROCEDURE_RESULT_TARGET` bucket; `_persist_edges` went with the router."
+    ),
+    "test_view_and_procedure_parse_of_equally_certain_sql_agree": (
+        "renamed by R11-X5 to "
+        "`test_statements_of_equal_certainty_agree_on_confidence` in "
+        "tests/test_sql_lineage_parser.py. The assertion is unchanged; there is no "
+        "longer a separate procedure entry point for it to name."
+    ),
+}
 
 EXCLUDED_BARE_TEST_NAMES = {
     "test_connection",
@@ -590,6 +636,8 @@ def test_cited_test_path_resolves(citation: Citation, path_str: str, func: str |
 
 @pytest.mark.parametrize("citation", BARE_TEST_NAME_CITATIONS, ids=_ids(BARE_TEST_NAME_CITATIONS))
 def test_cited_bare_test_name_resolves(citation: Citation):
+    if citation.text in RETIRED_TEST_FUNCTION_NAMES:
+        pytest.skip(f"{citation.text}: {RETIRED_TEST_FUNCTION_NAMES[citation.text]}")
     # A bare `test_xxx` citation with no `.py` is ambiguous between "a test function
     # named this" and "the test module named this" (e.g. `test_tier0_invariants`,
     # `test_inv1_single_authoritative_store` are module names, not functions) — accept
@@ -611,6 +659,8 @@ def test_cited_bare_test_name_resolves(citation: Citation):
 
 @pytest.mark.parametrize("citation", SRC_PATH_CITATIONS, ids=_ids(SRC_PATH_CITATIONS))
 def test_cited_src_path_resolves(citation: Citation):
+    if citation.text in RETIRED_SOURCE_PATHS:
+        pytest.skip(f"{citation.text}: {RETIRED_SOURCE_PATHS[citation.text]}")
     full_path = REPO_ROOT / citation.text
     suffix = f" {citation.extra}" if citation.extra else ""
     assert full_path.is_file() or full_path.is_dir(), (
@@ -623,6 +673,8 @@ def test_cited_src_path_resolves(citation: Citation):
 def test_cited_bare_filename_resolves(citation: Citation):
     if citation.text in RETIRED_TEST_BASENAMES:
         pytest.skip(f"{citation.text}: retired, see RETIRED_TEST_PATHS")
+    if citation.text in RETIRED_SOURCE_BASENAMES:
+        pytest.skip(f"{citation.text}: retired, see RETIRED_SOURCE_PATHS")
     name = citation.text
     direct = SRC_ROOT / name
     if direct.is_file():
@@ -812,4 +864,27 @@ def test_retired_test_paths_are_still_actually_absent():
     assert not resurrected, (
         "These paths in RETIRED_TEST_PATHS exist again in the repository — remove them "
         f"from the baseline so their citations are checked: {sorted(resurrected)}"
+    )
+
+
+def test_retired_source_paths_are_still_actually_absent():
+    """Same guard as above, for source modules a deliberate removal deleted. If one of
+    these files exists again -- restored, or a new module written under the same name --
+    the entry is stale and must be deleted so its citations are checked for real again.
+    """
+    resurrected = [path for path in RETIRED_SOURCE_PATHS if (REPO_ROOT / path).is_file()]
+    assert not resurrected, (
+        "These paths in RETIRED_SOURCE_PATHS exist again in the repository — remove "
+        f"them from the baseline so their citations are checked: {sorted(resurrected)}"
+    )
+
+
+def test_retired_test_function_names_are_still_actually_absent():
+    """Same guard again, for test functions a deliberate removal deleted or renamed. A
+    name that exists once more is a real, citable artefact and must leave the baseline.
+    """
+    resurrected = sorted(RETIRED_TEST_FUNCTION_NAMES.keys() & ALL_TEST_FUNCTION_NAMES)
+    assert not resurrected, (
+        "These names in RETIRED_TEST_FUNCTION_NAMES exist again under tests/ — remove "
+        f"them from the baseline so their citations are checked: {resurrected}"
     )

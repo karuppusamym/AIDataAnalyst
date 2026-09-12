@@ -1,8 +1,8 @@
 """N3 endpoint coverage: routine-identity-aware procedure lineage parse and
 persistence (`procedure_lineage_api.py`).
 
-Mirrors `tests/test_view_lineage_api.py`'s pattern (real ORM session backed
-by in-memory SQLite, no mocking of the persistence layer) but for the new,
+Mirrors `tests/test_parsed_lineage_review.py`'s pattern (real ORM session
+backed by in-memory SQLite, no mocking of the persistence layer) but for the new,
 routine-identity-aware `DeepProcedureLineageEdge` table -- proving the
 eligibility gate (missing/unavailable/unparsed/quarantined routine body all
 refuse outright), `source_table_id`/`target_table_id` resolution, and that a

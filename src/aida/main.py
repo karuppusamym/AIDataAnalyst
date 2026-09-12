@@ -42,7 +42,6 @@ from aida.description_withdrawal_api import router as description_withdrawal_rou
 from aida.detokenization_api import router as detokenization_router
 from aida.document_ingestion_api import router as document_ingestion_router
 from aida.glossary_api import router as glossary_router
-from aida.graph_perspectives_api import router as graph_perspectives_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.lineage_agent_api import router as lineage_agent_router
@@ -100,7 +99,6 @@ from aida.token_revocation_api import router as token_revocation_router
 from aida.tool_api import router as tool_router
 from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
-from aida.view_lineage_api import router as view_lineage_router
 from aida.workspace_api import router as workspace_router
 from aida.worm_archive import (
     ArchiveConfig,
@@ -419,7 +417,6 @@ app.include_router(model_export_router)
 app.include_router(model_import_router)
 app.include_router(description_withdrawal_router)
 app.include_router(composite_key_router)
-app.include_router(graph_perspectives_router)
 app.include_router(openlineage_router)
 app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
@@ -438,7 +435,6 @@ app.include_router(marketplace_discovery_router)
 app.include_router(search_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
-app.include_router(view_lineage_router)
 app.include_router(studio_router)
 app.include_router(notification_router)
 app.include_router(observability_router)

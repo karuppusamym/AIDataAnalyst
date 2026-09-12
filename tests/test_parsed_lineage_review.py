@@ -1,11 +1,20 @@
 """P1-05 / ADR-0026: coverage for the parsed-lineage-edge review lifecycle.
 
-Uses the same in-memory-SQLite + real-ORM pattern as
-`tests/test_view_lineage_api.py`. No mocked persistence -- the point of
-these tests is to exercise the actual `_persist_edges` decision
-(delete-only-PROPOSED-on-re-parse, existing-ACTIVE-idempotency), the
-actual review endpoint (maker-checker + status flip + audit + outbox),
-and the actual unified-lineage-read filter.
+Uses an in-memory-SQLite + real-ORM pattern. No mocked persistence -- the
+point of these tests is to exercise the actual review endpoint
+(maker-checker + status flip + audit + outbox), the actual routine-parse
+write path under each review mode, and the actual unified-lineage-read
+filter.
+
+R11-X5 (2026-09-11) removed `view_lineage_api` and with it the
+`_persist_edges` helper these tests once drove for their view-edge setup:
+the router had no caller outside this repository's tests, and the
+lineage agent (`aida.lineage_agent`) now owns proposing view edges. The
+view-edge cases that only existed to pin `_persist_edges`' own re-parse
+semantics went with it; the equivalent guarantees on the surviving write
+paths are pinned by `TestRoutineEdgesUnderReview` below and by
+`tests/test_lineage_agent.py`. Everything else here seeds its view edges
+directly through the ORM.
 """
 
 from __future__ import annotations
@@ -44,10 +53,8 @@ from aida.schemas import (
     ParsedLineageEdgeBulkDecisionItem,
     ParsedLineageEdgeBulkDecisionRequest,
     ParsedLineageEdgeDecisionRequest,
-    ViewLineageParseRequest,
 )
 from aida.security_types import SecurityContext
-from aida.view_lineage_api import parse_view_lineage_endpoint
 from atlas.platform.config import get_settings
 
 pytestmark = pytest.mark.asyncio
@@ -153,8 +160,40 @@ def _context(datasource, principal_id: str = "author") -> SecurityContext:
     )
 
 
-def _request(sql: str) -> ViewLineageParseRequest:
-    return ViewLineageParseRequest(sql=sql, dialect="postgres")
+async def _add_view_edge(
+    session: AsyncSession,
+    datasource,
+    tables: dict[str, MetadataTable],
+    *,
+    source_table: str,
+    target_table: str,
+    review_status: str = "PROPOSED",
+    created_by: str = "author",
+    sql_hash: str = "h1",
+) -> ViewLineageEdge:
+    """One stored view-lineage edge, shaped exactly as a parse would have
+    written it. Seeding through the ORM rather than through a parse keeps
+    these review-lifecycle tests independent of whichever component
+    proposed the edge."""
+    edge = ViewLineageEdge(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        source_table=source_table,
+        source_column="col_a",
+        target_table=target_table,
+        target_column="col_a",
+        source_table_id=tables[source_table].id,
+        target_table_id=tables[target_table].id,
+        transformation_type="DIRECT",
+        confidence="FULL",
+        dialect="postgres",
+        sql_hash=sql_hash,
+        review_status=review_status,
+        created_by=created_by,
+    )
+    session.add(edge)
+    await session.flush()
+    return edge
 
 
 class TestResolveReviewStatusForNewEdge:
@@ -207,100 +246,6 @@ class TestResolveReviewStatusForNewEdge:
         )
 
 
-class TestAutoActiveMode:
-    """Backward-compat: the default `auto_active` config MUST land every
-    parsed edge as ACTIVE, so nothing about an existing deployment
-    changes on the P1-05 code being present."""
-
-    async def test_view_parse_lands_active(self, session, monkeypatch):
-        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
-        # No env override for review mode -> the default "auto_active".
-        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
-        context = _context(datasource)
-        await parse_view_lineage_endpoint(
-            datasource.id,
-            _request("CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"),
-            context=context,
-            session=session,
-        )
-        rows = (
-            await session.scalars(
-                select(ViewLineageEdge).where(
-                    ViewLineageEdge.datasource_id == datasource.id
-                )
-            )
-        ).all()
-        assert len(rows) == 1
-        assert rows[0].review_status == "ACTIVE"
-        # No PROPOSED rows exist -> the queue is empty.
-        proposed = (
-            await session.scalars(
-                select(ViewLineageEdge).where(
-                    ViewLineageEdge.review_status == "PROPOSED"
-                )
-            )
-        ).all()
-        assert proposed == []
-
-
-class TestRequireReviewMode:
-    async def test_low_confidence_parse_lands_proposed(
-        self, session, monkeypatch
-    ):
-        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
-        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
-        # threshold at 1.01 -> even FULL (=1.0) is below it, so
-        # everything the parser emits lands PROPOSED regardless of its
-        # confidence value.
-        monkeypatch.setenv(
-            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
-        )
-        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
-        context = _context(datasource)
-        await parse_view_lineage_endpoint(
-            datasource.id,
-            _request("CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"),
-            context=context,
-            session=session,
-        )
-        rows = (
-            await session.scalars(
-                select(ViewLineageEdge).where(
-                    ViewLineageEdge.datasource_id == datasource.id
-                )
-            )
-        ).all()
-        assert len(rows) == 1
-        assert rows[0].review_status == "PROPOSED"
-        assert rows[0].created_by == "author"
-
-    async def test_full_confidence_edge_lands_active_via_threshold(
-        self, session, monkeypatch
-    ):
-        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
-        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
-        # Default threshold 0.9 -> a FULL (1.0) parse still lands ACTIVE
-        # even under require_review; mirrors ADR-0025's spirit.
-        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
-        context = _context(datasource)
-        await parse_view_lineage_endpoint(
-            datasource.id,
-            _request("CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"),
-            context=context,
-            session=session,
-        )
-        rows = (
-            await session.scalars(
-                select(ViewLineageEdge).where(
-                    ViewLineageEdge.datasource_id == datasource.id
-                )
-            )
-        ).all()
-        assert len(rows) == 1
-        # A FULL-confidence view parse maps to 1.0 >= threshold -> ACTIVE.
-        assert rows[0].review_status == "ACTIVE"
-
-
 class TestDecideParsedLineageEdge:
     async def _seed_proposed_edge(self, session, monkeypatch):
         monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
@@ -308,13 +253,15 @@ class TestDecideParsedLineageEdge:
         monkeypatch.setenv(
             "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
         )
-        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
-        author_context = _context(datasource, principal_id="author")
-        await parse_view_lineage_endpoint(
-            datasource.id,
-            _request("CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"),
-            context=author_context,
-            session=session,
+        datasource, tables = await _seed(
+            session, table_names=["source_table", "my_view"]
+        )
+        await _add_view_edge(
+            session,
+            datasource,
+            tables,
+            source_table="source_table",
+            target_table="my_view",
         )
         edge = (
             await session.scalars(
@@ -407,7 +354,6 @@ class TestBulkDecide:
                 "view_e",
             ],
         )
-        author_context = _context(datasource, principal_id="author")
         for src, view in [
             ("src_a", "view_a"),
             ("src_b", "view_b"),
@@ -415,13 +361,12 @@ class TestBulkDecide:
             ("src_d", "view_d"),
             ("src_e", "view_e"),
         ]:
-            await parse_view_lineage_endpoint(
-                datasource.id,
-                _request(
-                    f"CREATE VIEW {view} AS SELECT a.col_a FROM {src} a"  # noqa: S608
-                ),
-                context=author_context,
-                session=session,
+            await _add_view_edge(
+                session,
+                datasource,
+                tables,
+                source_table=src,
+                target_table=view,
             )
         edges = (
             await session.scalars(
@@ -458,90 +403,6 @@ class TestBulkDecide:
         failed = [r for r in result.results if r.status == "FAILED"]
         assert len(failed) == 1
         assert failed[0].edge_id == edges[2].id
-
-
-class TestReparseIdempotency:
-    async def test_reparse_does_not_delete_active_approved_edge(
-        self, session, monkeypatch
-    ):
-        # Mode 1: parse under require_review, get a PROPOSED edge, then
-        # a reviewer approves it -> ACTIVE with reviewed_by set.
-        # Mode 2: re-parse the same view definition. The new parse
-        # produces an edge with the SAME natural key. The ACTIVE edge
-        # must stay untouched (idempotency); no new PROPOSED duplicate
-        # is added.
-        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
-        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
-        monkeypatch.setenv(
-            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
-        )
-        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
-        author = _context(datasource, principal_id="author")
-        sql = "CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"
-        await parse_view_lineage_endpoint(
-            datasource.id, _request(sql), context=author, session=session
-        )
-        edge = (
-            await session.scalars(select(ViewLineageEdge))
-        ).one()
-        # Reviewer approves.
-        reviewer = _context(datasource, principal_id="reviewer")
-        await decide_parsed_lineage_edge(
-            edge.id,
-            ParsedLineageEdgeDecisionRequest(
-                edge_type="VIEW", decision="APPROVED", reason="ok"
-            ),
-            context=reviewer,
-            session=session,
-        )
-        # Re-parse.
-        await parse_view_lineage_endpoint(
-            datasource.id, _request(sql), context=author, session=session
-        )
-        rows = (
-            await session.scalars(select(ViewLineageEdge))
-        ).all()
-        # Exactly one edge, still ACTIVE, reviewer trail intact.
-        assert len(rows) == 1
-        assert rows[0].review_status == "ACTIVE"
-        assert rows[0].reviewed_by == "reviewer"
-
-    async def test_reparse_after_a_rejection_keeps_the_rejection(
-        self, session, monkeypatch
-    ):
-        # A reviewer's REJECTED is an answer already given. Re-parsing the
-        # same definition must neither propose the edge again nor collide
-        # with the natural key the rejected row still holds.
-        monkeypatch.setenv("AIDA_ENVIRONMENT", "test")
-        monkeypatch.setenv("AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE", "require_review")
-        monkeypatch.setenv(
-            "AIDA_LINEAGE_HIGH_CONFIDENCE_AUTO_ACTIVE_THRESHOLD", "1.01"
-        )
-        datasource, _ = await _seed(session, table_names=["source_table", "my_view"])
-        author = _context(datasource, principal_id="author")
-        sql = "CREATE VIEW my_view AS SELECT a.col_a FROM source_table a"
-        await parse_view_lineage_endpoint(
-            datasource.id, _request(sql), context=author, session=session
-        )
-        edge = (await session.scalars(select(ViewLineageEdge))).one()
-        await decide_parsed_lineage_edge(
-            edge.id,
-            ParsedLineageEdgeDecisionRequest(
-                edge_type="VIEW", decision="REJECTED", reason="wrong source"
-            ),
-            context=_context(datasource, principal_id="reviewer"),
-            session=session,
-        )
-
-        await parse_view_lineage_endpoint(
-            datasource.id, _request(sql), context=author, session=session
-        )
-        await session.flush()
-
-        rows = (await session.scalars(select(ViewLineageEdge))).all()
-        assert [(row.review_status, row.reviewed_by) for row in rows] == [
-            ("REJECTED", "reviewer")
-        ]
 
 
 _ROUTINE_INSERT = (

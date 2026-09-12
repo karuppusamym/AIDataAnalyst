@@ -19,7 +19,6 @@ from aida.sql_lineage_parser import (
     TransformationType,
     _compute_sql_hash,
     _redact_literals,
-    parse_procedure_lineage,
     parse_view_lineage,
 )
 
@@ -426,31 +425,34 @@ class TestDifferentiatedConfidence:
         assert clean.confidence == Confidence.FULL.value
         assert uncertain.confidence != Confidence.FULL.value
 
-    def test_view_and_procedure_parse_of_equally_certain_sql_agree(self) -> None:
+    def test_statements_of_equal_certainty_agree_on_confidence(self) -> None:
         # Confidence is computed from what was actually resolved, not from
-        # which entry point was called -- a view and a procedure body that
+        # the shape of the statement -- a CREATE VIEW and a bare SELECT that
         # extract equally certain lineage get the same, non-arbitrary answer.
         view_result = parse_view_lineage("CREATE VIEW v AS SELECT a.id FROM t a", "postgres")
-        procedure_result = parse_procedure_lineage("SELECT a.id FROM t a", "postgres")
+        select_result = parse_view_lineage("SELECT a.id FROM t a", "postgres")
 
-        assert view_result.confidence == procedure_result.confidence == Confidence.FULL.value
+        assert view_result.confidence == select_result.confidence == Confidence.FULL.value
 
-    def test_procedure_standalone_select_target_is_reserved_marker(self) -> None:
-        result = parse_procedure_lineage("SELECT a.id FROM t a", "postgres")
+    def test_standalone_select_target_is_reserved_marker(self) -> None:
+        result = parse_view_lineage("SELECT a.id FROM t a", "postgres")
         assert result.edges[0].target_table == PROCEDURE_RESULT_TARGET
 
 
 # ---------------------------------------------------------------------------
-# Procedure lineage
+# DML statements outside a CREATE VIEW wrapper. Procedure *bodies* are
+# `aida.procedure_lineage`'s job (see `tests/test_procedure_lineage.py`);
+# what this module extracts from a bare INSERT/SELECT is the flat,
+# per-statement sweep, nothing procedure-aware.
 # ---------------------------------------------------------------------------
 
 
-class TestProcedureLineage:
+class TestBareStatementLineage:
     def test_insert_into_select(self) -> None:
         # Use INSERT without explicit column list to let sqlglot parse the
         # SELECT columns as the lineage target
         sql = "INSERT INTO target_table SELECT src_a, src_b FROM source_table"
-        result = parse_procedure_lineage(sql, "postgres")
+        result = parse_view_lineage(sql, "postgres")
 
         assert len(result.edges) >= 2
         for edge in result.edges:
@@ -462,15 +464,15 @@ class TestProcedureLineage:
 
     def test_standalone_select(self) -> None:
         sql = "SELECT col_a, col_b FROM t"
-        result = parse_procedure_lineage(sql, "postgres")
+        result = parse_view_lineage(sql, "postgres")
 
         assert len(result.edges) >= 2
         for edge in result.edges:
             assert edge.target_table == "<RESULT>"
 
-    def test_procedure_shares_same_confidence_levels(self) -> None:
+    def test_bare_insert_shares_same_confidence_levels(self) -> None:
         sql = "INSERT INTO dest (x) SELECT x FROM src"
-        result = parse_procedure_lineage(sql, "postgres")
+        result = parse_view_lineage(sql, "postgres")
         assert result.confidence in (
             Confidence.FULL.value,
             Confidence.PARTIAL.value,
@@ -517,7 +519,7 @@ class TestMultiDialect:
     @pytest.mark.parametrize("dialect", ["postgres", "snowflake", "bigquery", "tsql", "oracle"])
     def test_insert_parses_in_all_dialects(self, dialect: str) -> None:
         sql = "INSERT INTO dest (x) SELECT x FROM src"
-        result = parse_procedure_lineage(sql, dialect)
+        result = parse_view_lineage(sql, dialect)
 
         assert result.dialect == dialect
         assert result.sql_hash

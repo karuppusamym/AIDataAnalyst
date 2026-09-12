@@ -1,9 +1,9 @@
 """N3: API for procedure-aware SQL lineage parsing and storage.
 
-Mirrors `view_lineage_api.py`'s parse-and-persist shape (`_load_datasource`,
-delete-then-insert scoped to what a parse actually produced) but is
-routine-identity-aware from the start: rather than taking raw SQL text
-with no identity (the gap AT-19 documents for the existing
+Keeps the parse-and-persist shape the removed `view_lineage_api.py` had
+(`_load_datasource`, delete-then-insert scoped to what a parse actually
+produced) but is routine-identity-aware from the start: rather than taking
+raw SQL text with no identity (the gap AT-19 documents for the former
 `ProcedureLineageEdge`/`.../procedure-lineage/parse` path), this endpoint
 takes a `MetadataRoutine.id` and parses that routine's own captured,
 redacted body -- gated the same way `view_tool_blueprint.py` gates a view's

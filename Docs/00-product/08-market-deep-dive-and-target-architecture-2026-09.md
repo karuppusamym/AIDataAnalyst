@@ -194,7 +194,7 @@ A role is a bundle of jobs. Some of those jobs are *making* (draft, propose, cla
 | Agent | Purpose | Tier | Built from |
 |---|---|---|---|
 | **Onboarding agent** | Registers a source from a ticket, runs certification, proposes bindings, opens the fleet schedule | T1 | Connectivity certification, workspace bindings, fleet |
-| **Lineage agent** | Parses views and procedures, proposes edges, attaches parser evidence, files review items | T1 (T2 for trusted sources) | `procedure_lineage.py`, `view_lineage_api.py`, per-edge review (LR-1), `Datasource.trusted_for_lineage` |
+| **Lineage agent** | Parses views and procedures, proposes edges, attaches parser evidence, files review items | T1 (T2 for trusted sources) | `procedure_lineage.py`, `sql_lineage_parser.py`, per-edge review (LR-1), `Datasource.trusted_for_lineage` |
 | **Quality agent** | Proposes rule packs from profiles and query history, tunes thresholds, triages incidents, routes | T1, T2 for routing | `quality_service.py`, `dbt_quality_bridge.py`, DQ-1..4 |
 | **Glossary agent** | Mines terms from query history and documents, detects conflicting definitions across LOBs | T1 | `query_history_miner.py`, SM-2 bindings, conflict resolution |
 | **Access agent** | Simulates policy impact, proposes ABAC policies from classification patterns, handles marketplace access requests | T1; never grants | PG-8 simulation, `policy_native_sync.py`, marketplace lifecycle |

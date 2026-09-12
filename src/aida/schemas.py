@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -830,98 +829,6 @@ class CrossSourceResolutionCandidateRead(ApiModel):
     reviewed_by: str | None
     review_reason: str | None
     reviewed_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-
-# ---------------------------------------------------------------------------
-# KG-5: saved Knowledge Graph / Graph Explorer perspectives
-# ---------------------------------------------------------------------------
-
-#: Same order of magnitude as ``openlineage.MAX_OPENLINEAGE_EVENT_BYTES`` (1 MiB) for a single
-#: caller-supplied JSON blob, but a Graph Explorer view-state snapshot (a center node, a depth,
-#: a handful of edge-kind filters, layout/pan/zoom) is far smaller than an OpenLineage run event
-#: with its nested datasets/facets, so 256 KiB is a comfortably generous bound rather than a
-#: tight one.
-GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES = 256 * 1024
-
-
-def _validate_view_state_size(value: dict[str, Any]) -> dict[str, Any]:
-    encoded_length = len(json.dumps(value).encode("utf-8"))
-    if encoded_length > GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES:
-        raise ValueError(
-            "view_state exceeds the "
-            f"{GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES}-byte limit "
-            f"({encoded_length} bytes)"
-        )
-    return value
-
-
-class GraphPerspectiveCreate(ApiModel):
-    """Opaque frontend Graph Explorer state, plus queryable metadata.
-
-    ``view_state`` is never interpreted server-side -- only validated as a
-    JSON object bounded in size. See ``models.GraphPerspective`` for an
-    example shape and the sharing model.
-    """
-
-    datasource_id: UUID | None = None
-    name: str = Field(min_length=2, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    allowed_viewer_roles: list[str] = Field(default_factory=list, max_length=100)
-    view_state: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("view_state")
-    @classmethod
-    def validate_view_state_size(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return _validate_view_state_size(value)
-
-    @field_validator("allowed_viewer_roles")
-    @classmethod
-    def validate_allowed_viewer_roles(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("allowed_viewer_roles must be unique")
-        if any(not role or len(role) > 100 for role in value):
-            raise ValueError("allowed_viewer_roles entries must be non-empty and <= 100 chars")
-        return value
-
-
-class GraphPerspectiveUpdate(ApiModel):
-    """All fields optional: only owner-supplied fields are applied (owner-only, see the API)."""
-
-    name: str | None = Field(default=None, min_length=2, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    allowed_viewer_roles: list[str] | None = Field(default=None, max_length=100)
-    view_state: dict[str, Any] | None = None
-
-    @field_validator("view_state")
-    @classmethod
-    def validate_view_state_size(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        return _validate_view_state_size(value)
-
-    @field_validator("allowed_viewer_roles")
-    @classmethod
-    def validate_allowed_viewer_roles(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        if len(value) != len(set(value)):
-            raise ValueError("allowed_viewer_roles must be unique")
-        if any(not role or len(role) > 100 for role in value):
-            raise ValueError("allowed_viewer_roles entries must be non-empty and <= 100 chars")
-        return value
-
-
-class GraphPerspectiveRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID | None
-    name: str
-    description: str | None
-    owner_principal: str
-    allowed_viewer_roles: list[str]
-    view_state: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
@@ -2559,72 +2466,6 @@ class ContextProductConsumerBindingRead(ApiModel):
     updated_at: datetime
 
 
-class LineageEdgeRead(ApiModel):
-    """One column-level lineage edge extracted from SQL."""
-
-    source_table: str
-    source_column: str
-    target_table: str
-    target_column: str
-    transformation_type: str
-    confidence: str
-    dialect: str
-
-
-class ViewLineageParseRequest(ApiModel):
-    sql: str = Field(min_length=1, max_length=500_000)
-    dialect: str = Field(default="postgres", pattern=r"^[a-z][a-z0-9_-]{1,49}$")
-
-
-class ViewLineageParseResponse(ApiModel):
-    edges: list[LineageEdgeRead]
-    confidence: str
-    dialect: str
-    sql_hash: str
-    errors: list[str] = Field(default_factory=list)
-    persisted_edge_count: int = 0
-
-
-class ViewLineageEdgeRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    source_table: str
-    source_column: str
-    target_table: str
-    target_column: str
-    source_table_id: UUID | None
-    source_column_id: UUID | None
-    target_table_id: UUID | None
-    target_column_id: UUID | None
-    transformation_type: str
-    confidence: str
-    dialect: str
-    sql_hash: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class ProcedureLineageEdgeRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    source_table: str
-    source_column: str
-    target_table: str
-    target_column: str
-    source_table_id: UUID | None
-    source_column_id: UUID | None
-    target_table_id: UUID | None
-    target_column_id: UUID | None
-    transformation_type: str
-    confidence: str
-    dialect: str
-    sql_hash: str
-    created_at: datetime
-    updated_at: datetime
-
-
 # ---------------------------------------------------------------------------
 # Group I addition (Atlas Wave-2, tracker N3/N12): API schemas for
 # `procedure_lineage_api.py`'s routine-identity-aware, procedure-aware
@@ -2634,8 +2475,8 @@ class ProcedureLineageEdgeRead(ApiModel):
 
 
 class DeepProcedureLineageEdgeRead(ApiModel):
-    """One edge from the procedure-aware parser (N3) -- richer than
-    `LineageEdgeRead`/`ProcedureLineageEdgeRead`: carries the statement it
+    """One edge from the procedure-aware parser (N3) -- richer than a flat
+    `view_lineage_edge`/`procedure_lineage_edge` row: carries the statement it
     came from, whether that statement was a write, whether either side is an
     intermediate (temp table/variable) local to the procedure body, and,
     for a construct the parser could not resolve, the named reason why

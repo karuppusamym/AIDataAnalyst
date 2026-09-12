@@ -290,15 +290,6 @@ async def upload_model_workbook(
     return batch
 
 
-@router.get("/model-imports/{batch_id}", response_model=ModelImportBatchRead)
-async def get_model_import(
-    batch_id: UUID,
-    context: SecurityContext = Depends(require_roles(*_IMPORT_READ_ROLES)),
-    session: AsyncSession = Depends(get_session),
-) -> ModelImportBatch:
-    return await _authorized_batch(batch_id, context, session)
-
-
 @router.get("/model-imports/{batch_id}/changes", response_model=Page)
 async def list_model_import_changes(
     batch_id: UUID,

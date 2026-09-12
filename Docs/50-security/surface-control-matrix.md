@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **480**
-- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 429, SDK 1
+- Surfaces covered: **470**
+- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 419, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -111,7 +111,6 @@ graph. Nothing here is hand-maintained.
 | `POST /mcp` | MCP | `aida.mcp_server.mcp_endpoint` | none declared | yes | yes | writes | yes | cooperative |
 | `DELETE /v1/asset-term-links/{link_id}` | REST | `aida.glossary_api.delete_asset_term_link` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/context-products/{product_id}/bindings/{consumer_principal_id}` | REST | `aida.context_product_api.delete_context_product_consumer_binding` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
-| `DELETE /v1/graph-perspectives/{perspective_id}` | REST | `aida.graph_perspectives_api.delete_graph_perspective` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/notification-rules/{rule_id}` | REST | `aida.notification_api.delete_notification_rule` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.delete_playbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/quality-rule-packs/{rule_pack_id}` | REST | `aida.quality_api.delete_rule_pack` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -170,7 +169,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.list_metadata_ingestions` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/model-imports` | REST | `aida.model_import_api.list_model_imports` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/openlineage-events` | REST | `aida.openlineage_api.list_openlineage_run_events` | Auditor, DataAdmin, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
-| `GET /v1/datasources/{datasource_id}/procedure-lineage` | REST | `aida.view_lineage_api.list_procedure_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage` | REST | `aida.procedure_lineage_api.list_deep_procedure_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/profiling-exception-policies` | REST | `aida.api.list_profiling_exception_policies` | DataAdmin, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/quality-incidents` | REST | `aida.quality_api.list_quality_incidents` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -189,7 +187,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/tables` | REST | `aida.api.list_tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/graph` | REST | `aida.unified_lineage_api.get_unified_lineage_graph` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}` | REST | `aida.unified_lineage_api.get_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/datasources/{datasource_id}/view-lineage` | REST | `aida.view_lineage_api.list_view_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}` | REST | `aida.operational_api.get_datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/dbt-artifact-imports/{artifact_id}/lineage` | REST | `aida.dbt_api.get_dbt_lineage` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/dbt-artifact-imports/{artifact_id}/resources` | REST | `aida.dbt_api.list_dbt_resources` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
@@ -205,7 +202,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/governance/reviews/queue` | REST | `aida.review_queue_api.get_review_queue` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/{review_id}/diff` | REST | `aida.semantic_api.get_governance_review_diff` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews` | REST | `aida.semantic_api.list_governance_reviews` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
-| `GET /v1/graph-perspectives/{perspective_id}` | REST | `aida.graph_perspectives_api.get_graph_perspective` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/lineage/parsed-edges/review-queue` | REST | `aida.parsed_lineage_review_api.get_parsed_lineage_review_queue` | DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/lines-of-business/{lob_id}/data-domains` | REST | `atlas.modules.identity_tenancy.router.list_data_domains` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/lines-of-business/{lob_id}/projects` | REST | `atlas.modules.identity_tenancy.router.list_projects` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -221,7 +217,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/metadata/tables/{table_id}/glossary-links` | REST | `aida.glossary_api.list_asset_term_links` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/impact` | REST | `aida.intelligence_api.table_impact_analysis` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/model-imports/{batch_id}/changes` | REST | `aida.model_import_api.list_model_import_changes` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/model-imports/{batch_id}` | REST | `aida.model_import_api.get_model_import` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/negative-knowledge/search` | REST | `aida.negative_knowledge_api.search_negative_assertions` | DataEngineer, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/negative-knowledge/{subject_id}` | REST | `aida.negative_knowledge_api.get_subject_assertions` | DataEngineer, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/notification-rules` | REST | `aida.notification_api.list_notification_rules` | DataAdmin, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -260,7 +255,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/glossary-conflicts` | REST | `aida.stewardship_api.list_glossary_conflicts` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/glossary-link-proposals` | REST | `aida.stewardship_api.list_glossary_link_proposals` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/glossary-terms` | REST | `aida.glossary_api.list_glossary_terms` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/organizations/{organization_id}/graph-perspectives` | REST | `aida.graph_perspectives_api.list_graph_perspectives` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/integration-policy` | REST | `aida.api.get_organization_integration_policy` | OrganizationAdmin, PlatformAdmin | yes | no | writes | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/kill-switch` | REST | `aida.ai_governance_api.list_kill_switch_state` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/lineage-agent` | REST | `aida.lineage_agent_api.get_lineage_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
@@ -340,7 +334,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/workspaces/{workspace_id}/source-bindings` | REST | `atlas.modules.identity_tenancy.router.list_source_bindings` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
 | `GET /v1/workspaces/{workspace_id}` | REST | `atlas.modules.identity_tenancy.router.get_workspace` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
 | `PATCH /v1/datasources/{datasource_id}` | REST | `atlas.modules.connectivity.router.update_datasource` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `PATCH /v1/graph-perspectives/{perspective_id}` | REST | `aida.graph_perspectives_api.update_graph_perspective` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `PATCH /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.update_playbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/access-review/entitlements/generate` | REST | `aida.access_review_api.generate_entitlement_report` | none declared | yes | no | writes | yes | not cancellable |
 | `POST /v1/ai-asset-versions/{version_id}/assessments` | REST | `aida.ai_registry_api.assess_ai_asset_version` | Auditor, ModelRiskManager, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
@@ -382,7 +375,6 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.ingest_metadata_envelope` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/model/import` | REST | `aida.model_import_api.upload_model_workbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/native-policy-sync/preview` | REST | `aida.policy_native_sync_api.preview_native_policy_sync` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/datasources/{datasource_id}/procedure-lineage/parse` | REST | `aida.view_lineage_api.parse_procedure_lineage_endpoint` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage/parse` | REST | `aida.procedure_lineage_api.parse_deep_procedure_lineage_endpoint` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/profiling-exception-policies` | REST | `aida.api.request_profiling_exception_policy` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/quality-rule-packs` | REST | `aida.quality_api.create_rule_pack` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -392,7 +384,6 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/relationship-candidates/discover` | REST | `aida.intelligence_api.discover_relationship_candidates` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/sql-validations` | REST | `aida.sql_validation_api.validate_sql` | AgentDeveloper, Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/test` | REST | `atlas.modules.connectivity.router.test_datasource` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/datasources/{datasource_id}/view-lineage/parse` | REST | `aida.view_lineage_api.parse_view_lineage_endpoint` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/dbt-projects/{dbt_project_id}/artifact-imports` | REST | `aida.dbt_api.import_dbt_manifest` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/delegations/{delegation_id}/revoke` | REST | `aida.delegation_api.revoke_delegation` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/descriptions/withdrawals` | REST | `aida.description_withdrawal_api.create_description_withdrawal` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
@@ -447,7 +438,6 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/glossary-conflicts` | REST | `aida.stewardship_api.create_glossary_conflict` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-link-proposals/generate` | REST | `aida.stewardship_api.generate_glossary_link_proposals` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-terms` | REST | `aida.glossary_api.create_glossary_term` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/organizations/{organization_id}/graph-perspectives` | REST | `aida.graph_perspectives_api.create_graph_perspective` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/kill-switch/engage` | REST | `aida.ai_governance_api.engage_kill_switch` | PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/kill-switch/release` | REST | `aida.ai_governance_api.release_kill_switch` | PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/lines-of-business` | REST | `atlas.modules.identity_tenancy.router.create_line_of_business` | OrganizationAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |

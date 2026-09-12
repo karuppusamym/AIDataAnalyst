@@ -1,15 +1,17 @@
 """N3: procedure-body-aware SQL lineage extraction (T-SQL and PL/SQL first).
 
-AT-D5 established that `sql_lineage_parser.parse_procedure_lineage` is
-`_parse_sql` under a procedure-flavoured name: it hands the *entire*
-procedure body to `sqlglot.parse` as if it were a flat sequence of ordinary
-statements. That is provably wrong for a real `CREATE PROCEDURE ... AS
+AT-D5 established that `sql_lineage_parser.parse_procedure_lineage` was
+`_parse_sql` under a procedure-flavoured name (R11-X5 has since deleted that
+alias; `sql_lineage_parser.parse_view_lineage` is the same flat parse): it
+hands the *entire* procedure body to `sqlglot.parse` as if it were a flat
+sequence of ordinary statements. That is provably wrong for a real
+`CREATE PROCEDURE ... AS
 BEGIN ... END` body -- sqlglot's tsql/oracle dialects do not understand
 T-SQL/PL-SQL control-flow syntax (`IF`/`WHILE`/`BEGIN..END`/`LOOP`/cursor
 `FOR` loops), and `sqlglot.parse` on such a body does not raise: it falls
 back to an opaque `Command` node covering everything from the first
 unrecognised token onward, silently discarding every statement after that
-point. A caller relying on `parse_procedure_lineage` today gets a lineage
+point. A caller relying on that flat parse gets a lineage
 graph that is either right for a body with no control flow at all, or
 silently truncated for any body that has some -- with nothing distinguishing
 the two.
@@ -207,8 +209,8 @@ class ProcedureParseResult:
 # ---------------------------------------------------------------------------
 # Step 1: strip the CREATE PROCEDURE/FUNCTION header and outer BEGIN..END (or
 # $$..$$) wrapper, quote/comment-aware. If no such wrapper is recognised the
-# whole input is treated as already being the body -- matching the existing
-# convention (`sql_lineage_parser.parse_procedure_lineage`'s docstring) that
+# whole input is treated as already being the body -- matching the convention
+# the removed `sql_lineage_parser.parse_procedure_lineage` documented, that
 # a caller may hand in an already-unwrapped body.
 # ---------------------------------------------------------------------------
 
