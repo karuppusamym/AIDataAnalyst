@@ -2086,6 +2086,20 @@ class GlossaryConflict(Base, TimestampMixin):
 
 
 class BulkStewardshipOperation(Base, TimestampMixin):
+    """One reviewed bulk change, and -- since AR-11 -- what it actually did.
+
+    `subject_ids` is what was *asked for*; `applied_subject_ids` is what
+    changed. They differ on every run, because every branch of
+    `stewardship_service.apply_bulk_operation` skips a subject that is
+    already in the requested state or went stale between request and
+    decision. Until 2026-09-12 only `applied_count` survived, which made the
+    operation's effect unknowable after the fact: a LINK_TERM over forty
+    tables reporting 28 applied did not say *which* 28, so nothing could undo
+    it without also deleting the twelve links that already existed and were
+    never this operation's to remove. A compensating action needs the
+    identities, not the count.
+    """
+
     __tablename__ = "bulk_stewardship_operation"
     __table_args__ = (Index("ix_bulk_stewardship_org_status", "organization_id", "status"),)
 
@@ -2105,6 +2119,35 @@ class BulkStewardshipOperation(Base, TimestampMixin):
     applied_by: Mapped[str | None] = mapped_column(String(255))
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     applied_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: AR-11: exactly the subjects this operation changed, in the same id
+    #: vocabulary its own `subject_ids` uses (table ids for LINK_TERM,
+    #: `OwnershipAssignment` ids for REASSIGN_LEAVER, and so on). Always a
+    #: subset of `subject_ids`, and `len()` of it is `applied_count`. Empty on
+    #: rows written before this column existed -- which is why
+    #: `request_bulk_operation_reversal` refuses those explicitly rather than
+    #: reading the empty list as "nothing to undo".
+    applied_subject_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    #: AR-11: set when this operation exists to undo `reverses_operation_id`.
+    #: A reversal is itself an ordinary bulk operation -- same table, same
+    #: review, same maker-checker -- because it is the same decision shape,
+    #: and a second vocabulary for "governed change to many assets" would be
+    #: a cost paid forever. What differs is the tier: `review_risk_tiers`
+    #: escalates any operation carrying this to T2, so no agent may decide
+    #: one whatever its size (see `risk_tier_for`).
+    reverses_operation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("bulk_stewardship_operation.id", ondelete="SET NULL"), index=True
+    )
+    #: AR-11's sample-to-correction link. Set when this operation was raised
+    #: from a human's DISAGREED verdict on a sampled agent decision, naming
+    #: the sample that prompted it. This is the edge that makes a correction
+    #: traceable in both directions: forward from the sample to every
+    #: correction raised against it, and back from the correction to the
+    #: sampled decision, its `GovernanceReview`, and the agent that made it.
+    #: Nullable because a steward may also reverse an operation nobody
+    #: sampled -- the link records provenance, it is not a precondition.
+    review_audit_sample_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("review_audit_sample.id", ondelete="SET NULL"), index=True
+    )
 
 
 class GlossaryLinkProposal(Base, TimestampMixin):

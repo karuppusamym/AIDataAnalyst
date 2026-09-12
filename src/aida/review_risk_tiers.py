@@ -183,6 +183,18 @@ def risk_tier_for(object_type: str, payload: Mapping[str, Any] | None = None) ->
     tier = _TIERS.get(object_type)
     if tier is None:
         return TIER_T3
+    if payload is not None and payload.get("reverses_operation_id"):
+        # AR-11: an operation that exists to undo an applied one is T2 whatever
+        # its size, so no agent may decide it. The same asymmetry that puts
+        # DESCRIPTION_WITHDRAWAL (T2) above publishing a description (T0):
+        # undoing removes a change a reviewer already accepted and that
+        # downstream readers may have acted on, and a three-table reversal is
+        # not a smaller *kind* of act than a thirty-table one. It also closes
+        # the specific loop AR-11 is about -- a reversal is usually raised
+        # because a human disagreed with this agent, so letting the agent wave
+        # the correction through would put the disputed party back in charge
+        # of the dispute.
+        return TIER_T2
     if object_type in _COUNT_ESCALATED and payload is not None:
         count = (
             payload.get("item_count")

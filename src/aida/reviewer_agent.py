@@ -502,6 +502,27 @@ async def _authoritative_change_count(
     return None
 
 
+async def _reverses_operation_id(
+    session: AsyncSession, review: GovernanceReview
+) -> UUID | None:
+    """The operation this review's bulk operation undoes, if it undoes one.
+
+    Read from the row rather than from the review's payload for the same
+    reason `_authoritative_change_count` is (AR-02): the tier must be
+    recomputed from authoritative evidence at decision time, and a flag that
+    decides whether an agent may act on an item is exactly the flag a caller
+    must not be able to supply.
+    """
+    if review.object_type != "BULK_STEWARDSHIP_OPERATION":
+        return None
+    return await session.scalar(
+        select(BulkStewardshipOperation.reverses_operation_id).where(
+            BulkStewardshipOperation.governance_review_id == review.id,
+            BulkStewardshipOperation.organization_id == review.organization_id,
+        )
+    )
+
+
 async def _sized_risk_tier(
     session: AsyncSession, review: GovernanceReview, *, governance_threshold: int
 ) -> tuple[str, dict[str, Any]]:
@@ -518,15 +539,27 @@ async def _sized_risk_tier(
     count = await _authoritative_change_count(session, review)
     if count is None:
         return TIER_T2, {"size_evidence": EVIDENCE_SIZE_UNRESOLVED}
+    # AR-11: a bulk operation raised to undo an applied one is T2 whatever its
+    # size, so the flag has to reach `risk_tier_for` alongside the count --
+    # otherwise a three-table reversal tiers as T1 on size alone and lands
+    # back inside the agent's ceiling.
+    reverses = await _reverses_operation_id(session, review)
     tier = risk_tier_for(
         review.object_type,
-        {"item_count": count, "governance_threshold": governance_threshold},
+        {
+            "item_count": count,
+            "governance_threshold": governance_threshold,
+            "reverses_operation_id": reverses,
+        },
     )
-    return tier, {
+    evidence: dict[str, Any] = {
         "size_evidence": EVIDENCE_OK,
         "change_count": count,
         "governance_threshold": governance_threshold,
     }
+    if reverses is not None:
+        evidence["reverses_operation_id"] = str(reverses)
+    return tier, evidence
 
 
 def _recommendation(

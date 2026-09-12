@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
@@ -13,6 +13,7 @@ from aida.catalog_bulk_actions import (
 )
 from aida.certification_evidence import compute_certification_evidence
 from aida.config import get_settings
+from aida.description_withdrawal import WITHDRAWN
 from aida.models import (
     AssetCertification,
     AssetTag,
@@ -22,9 +23,11 @@ from aida.models import (
     GlossaryLinkProposal,
     GlossaryTerm,
     GlossaryTermVersion,
+    GovernanceReview,
     MetadataColumn,
     MetadataTable,
     OwnershipAssignment,
+    ReviewAuditSample,
 )
 from aida.schemas import CoverageDimensionRead, StewardshipCoverageRead
 
@@ -113,7 +116,7 @@ async def apply_bulk_operation(
     reviewer: str,
     now: datetime,
 ) -> tuple[str, int]:
-    applied = 0
+    applied_subjects: list[str] = []
     parameters = operation.parameters
     subject_ids = [UUID(value) for value in operation.subject_ids]
     if operation.operation_type == "ASSIGN_OWNERSHIP":
@@ -142,7 +145,7 @@ async def apply_bulk_operation(
                     # warning stamp so the row can warn again in its next cycle.
                     existing.expires_at = expires_at
                     existing.expiry_warning_emitted_at = None
-                    applied += 1
+                    applied_subjects.append(str(subject_id))
                 continue
             session.add(
                 OwnershipAssignment(
@@ -161,7 +164,7 @@ async def apply_bulk_operation(
                     expires_at=expires_at,
                 )
             )
-            applied += 1
+            applied_subjects.append(str(subject_id))
         event_type = "ownership.assigned.v1"
     elif operation.operation_type == "LINK_TERM":
         term_id = UUID(parameters["term_id"])
@@ -184,8 +187,71 @@ async def apply_bulk_operation(
                     confidence=1.0,
                 )
             )
-            applied += 1
+            applied_subjects.append(str(table_id))
         event_type = "glossary.term_linked_bulk.v1"
+    elif operation.operation_type == "UNLINK_TERM":
+        # AR-11: the compensating action for LINK_TERM. `subject_ids` here is
+        # the *original operation's* `applied_subject_ids` -- the links it
+        # actually created -- so a link that already existed before it ran is
+        # never this reversal's to remove. `request_bulk_operation_reversal`
+        # is what guarantees that; this branch would happily unlink anything
+        # it is handed, exactly as LINK_TERM will link anything it is handed.
+        term_id = UUID(parameters["term_id"])
+        links = (
+            await session.scalars(
+                select(AssetTermLink).where(
+                    AssetTermLink.organization_id == operation.organization_id,
+                    AssetTermLink.table_id.in_(subject_ids),
+                    AssetTermLink.term_id == term_id,
+                )
+            )
+        ).all()
+        for link in links:
+            # Deleted rather than status-flagged because `AssetTermLink` has
+            # no lifecycle column to flag: the link's existence *is* its
+            # state, and the audit row plus this reversal's own row are what
+            # preserve the history. The asset reads as unlinked again, the
+            # same shape `description_withdrawal` gives a retired
+            # description.
+            await session.delete(link)
+            applied_subjects.append(str(link.table_id))
+        event_type = "glossary.term_unlinked_bulk.v1"
+    elif operation.operation_type == "WITHDRAW_CERTIFICATION":
+        # AR-11: the compensating action for CERTIFY_ASSET.
+        #
+        # Deliberately `WITHDRAWN`, not `REVOKED`. The platform already has a
+        # revoke (P2-08, `POST /tables/{id}/certification/revoke`) and it
+        # means something else: `asset_usage_decision` maps REVOKED to
+        # BLOCKED, "a standing refusal, stronger than never certified". That
+        # is the right answer when a steward decides an asset must not be
+        # used, and the wrong one here -- overturning a certification the
+        # agent should never have granted must leave the asset *uncertified*,
+        # not refused. WITHDRAWN is the same word, and the same reasoning,
+        # `description_withdrawal` uses for a retracted description: the row
+        # keeps its content as evidence, the current-state projection stops
+        # counting it, and the asset reads as it did before the claim was
+        # made.
+        #
+        # It also does **not** resurrect whatever CERTIFY_ASSET superseded.
+        # Flipping a SUPERSEDED row back to ACTIVE would rewrite history and
+        # lose the fact that the asset was ever certified on the agent's
+        # word; a steward who wants the older attestation back re-grants it,
+        # the same "reinstatement is a fresh publish" rule.
+        certifications = (
+            await session.scalars(
+                select(AssetCertification).where(
+                    AssetCertification.organization_id == operation.organization_id,
+                    AssetCertification.table_id.in_(subject_ids),
+                    AssetCertification.asset_type == "TABLE",
+                    AssetCertification.status == "ACTIVE",
+                )
+            )
+        ).all()
+        for certification in certifications:
+            certification.status = WITHDRAWN
+            certification.updated_at = now
+            applied_subjects.append(str(certification.table_id))
+        event_type = "certification.withdrawn_bulk.v1"
     elif operation.operation_type == "DEPRECATE_TERM":
         terms = (
             await session.scalars(
@@ -210,7 +276,7 @@ async def apply_bulk_operation(
                 )
                 .values(status="DEPRECATED", updated_at=now)
             )
-            applied += 1
+            applied_subjects.append(str(term.id))
         event_type = "glossary.term_deprecated.v1"
     elif operation.operation_type == "CERTIFY_ASSET":
         expires_at = datetime.fromisoformat(parameters["expires_at"])
@@ -248,7 +314,7 @@ async def apply_bulk_operation(
                     evidence=evidence_blob,
                 )
             )
-            applied += 1
+            applied_subjects.append(str(table_id))
         event_type = "certification.granted.v1"
     elif operation.operation_type == "TAG":
         # AT-1: a playbook's TAG action, routed through review because its
@@ -291,7 +357,7 @@ async def apply_bulk_operation(
                 continue
             if is_new:
                 session.add(row)
-            applied += 1
+            applied_subjects.append(str(subject_id))
         event_type = "catalog.asset_tag.applied.v1"
     elif operation.operation_type == "CLASSIFY":
         # AT-1: a playbook's CLASSIFY action, same reuse as TAG above but of
@@ -313,7 +379,7 @@ async def apply_bulk_operation(
                 )
             except CatalogBulkItemError:
                 continue
-            applied += 1
+            applied_subjects.append(str(subject_id))
         event_type = "catalog.column.classified.v1"
     elif operation.operation_type == "REASSIGN_LEAVER":
         # GL-7: `subject_ids` here are `OwnershipAssignment.id` values (not
@@ -378,15 +444,149 @@ async def apply_bulk_operation(
                 )
                 session.add(successor_row)
                 successor_lookup[(assignment.subject_type, assignment.subject_id)] = successor_row
-            applied += 1
+            applied_subjects.append(str(subject_id))
         event_type = "ownership.leaver_reassigned.v1"
     else:
         raise HTTPException(status_code=422, detail="unsupported stewardship operation")
     operation.status = "APPLIED"
     operation.applied_by = reviewer
     operation.applied_at = now
-    operation.applied_count = applied
-    return event_type, applied
+    # AR-11: the identities, not only the count. Every branch above skips
+    # subjects already in the requested state or gone stale since the request,
+    # so this is a subset of `subject_ids` -- and it is the only record of
+    # which subset, which is what a compensating action has to act on.
+    operation.applied_subject_ids = applied_subjects
+    operation.applied_count = len(applied_subjects)
+    return event_type, operation.applied_count
+
+
+#: AR-11: which applied bulk operations have a compensating action, and what
+#: it is. Only the two purely *additive* operation types are here, and that is
+#: the whole rule rather than an accident of effort: LINK_TERM and
+#: CERTIFY_ASSET add a row that did not exist, so undoing them needs nothing
+#: but the list of rows they added, which `applied_subject_ids` now is.
+#:
+#: The others overwrite state nobody recorded the previous value of. TAG's
+#: `apply_tag_item` updates `tag_value` on a row that may already have had
+#: one; CLASSIFY replaces a column's classification; ASSIGN_OWNERSHIP
+#: reactivates an assignment that had a status and an expiry before;
+#: DEPRECATE_TERM moves a term's lifecycle and its approved versions;
+#: REASSIGN_LEAVER rewrites two assignment rows. Reversing any of them
+#: correctly needs a before-image the platform does not capture, and
+#: reversing them *incorrectly* -- deleting the tag rather than restoring the
+#: value it replaced -- is a second wrong change dressed as a correction.
+#: `request_bulk_operation_reversal` refuses them by name for that reason.
+_REVERSAL_OF: dict[str, str] = {
+    "LINK_TERM": "UNLINK_TERM",
+    "CERTIFY_ASSET": "WITHDRAW_CERTIFICATION",
+}
+
+
+async def request_bulk_operation_reversal(
+    session: AsyncSession,
+    original: BulkStewardshipOperation,
+    *,
+    reason: str,
+    requested_by: str,
+    sample: ReviewAuditSample | None = None,
+) -> tuple[BulkStewardshipOperation, GovernanceReview]:
+    """Raise a governed undo of one applied bulk operation (AR-11).
+
+    A reversal is an ordinary `BulkStewardshipOperation` -- same table, same
+    `GovernanceReview`, same maker-checker guard, same audit and outbox path
+    -- because it is the same decision shape, and a parallel "compensation"
+    vocabulary for "governed change to many assets" would be a cost paid
+    forever. What marks it is `reverses_operation_id`, which
+    `review_risk_tiers.risk_tier_for` reads to pin it at T2: no agent may
+    decide a reversal whatever its size, by the same asymmetry that puts
+    DESCRIPTION_WITHDRAWAL above publishing a description. Undoing is not a
+    smaller act than doing.
+
+    `sample` is AR-11's sample-to-correction link. When a human overturns a
+    sampled agent decision and reverses what it did, the reversal carries the
+    sample id, so the correction is reachable from the sample and the sampled
+    decision is reachable from the correction -- rather than the two being
+    joinable only by timestamp and hope.
+
+    Refuses, rather than half-undoing:
+
+    * an operation that was never applied -- there is nothing to compensate,
+      and a reversal of a rejected operation would be a change nobody asked
+      for;
+    * an operation whose type has no sound compensating action (`_REVERSAL_OF`
+      explains which and why);
+    * an operation with no recorded `applied_subject_ids`. This is the
+      important one: it is how a row written before that column existed
+      presents, and its empty list means "not recorded", not "changed
+      nothing". Reversing it would have to fall back to `subject_ids` -- what
+      was *requested* -- and so would strip links and certifications that
+      predated the operation and were never its to remove. Refusing names
+      that limit instead of silently exceeding the original's blast radius;
+    * an operation already reversed, so two stewards racing the same
+      correction do not raise two.
+    """
+    if original.status != "APPLIED":
+        raise HTTPException(
+            status_code=409,
+            detail="only an applied bulk operation can be reversed",
+        )
+    reversal_type = _REVERSAL_OF.get(original.operation_type)
+    if reversal_type is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{original.operation_type} has no compensating action: reversing it "
+                "would need a record of what it overwrote, which is not captured"
+            ),
+        )
+    if not original.applied_subject_ids:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this operation did not record which subjects it changed, so a "
+                "reversal cannot be bounded to them"
+            ),
+        )
+    existing = await session.scalar(
+        select(BulkStewardshipOperation).where(
+            BulkStewardshipOperation.reverses_operation_id == original.id,
+            BulkStewardshipOperation.status.in_(("REVIEW_REQUIRED", "APPLIED")),
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="a reversal of this operation is already pending or applied",
+        )
+
+    review = GovernanceReview(
+        organization_id=original.organization_id,
+        object_type="BULK_STEWARDSHIP_OPERATION",
+        object_id=str(uuid4()),  # replaced with the reversal's own id below
+        requested_action=reversal_type,
+        requested_by=requested_by,
+    )
+    session.add(review)
+    await session.flush()
+    reversal = BulkStewardshipOperation(
+        organization_id=original.organization_id,
+        operation_type=reversal_type,
+        subject_type=original.subject_type,
+        # Exactly what the original changed -- never what it was asked to
+        # change. This is the line the whole ledger exists for.
+        subject_ids=list(original.applied_subject_ids),
+        parameters=dict(original.parameters),
+        status="REVIEW_REQUIRED",
+        governance_review_id=review.id,
+        requested_by=requested_by,
+        reverses_operation_id=original.id,
+        review_audit_sample_id=sample.id if sample is not None else None,
+    )
+    session.add(reversal)
+    await session.flush()
+    review.object_id = str(reversal.id)
+    await session.flush()
+    return reversal, review
 
 
 async def apply_conflict_resolution(

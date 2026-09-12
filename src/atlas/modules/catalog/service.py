@@ -160,6 +160,15 @@ def _certification_state(
         return "CERTIFIED", expires_at, summarize_evidence(certification.evidence)
     if certification.status == "REVOKED":
         return "REVOKED", None, None
+    if certification.status == "WITHDRAWN":
+        # AR-11: a certification retracted because it should never have been
+        # granted (`stewardship_service`'s WITHDRAW_CERTIFICATION, the
+        # compensating action for a wrong bulk CERTIFY_ASSET). The platform
+        # is making no claim about this asset, which is exactly `NONE` --
+        # falling through to `EXPIRED` below would say the attestation ran
+        # its course, and REVOKED would say the asset is refused. Neither is
+        # true of a claim that was withdrawn.
+        return "NONE", None, None
     return "EXPIRED", None, None
 
 

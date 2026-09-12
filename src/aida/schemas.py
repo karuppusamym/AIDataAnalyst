@@ -1547,6 +1547,18 @@ class BulkStewardshipOperationRead(ApiModel):
     applied_by: str | None
     applied_at: datetime | None
     applied_count: int
+    #: AR-11: exactly which subjects the operation changed, as opposed to
+    #: which it was given. Always a subset of `subject_ids`; empty on rows
+    #: applied before the ledger existed, which is why an empty list here
+    #: means "not recorded" rather than "changed nothing".
+    applied_subject_ids: list[str]
+    #: AR-11: set when this operation exists to undo another one. Such an
+    #: operation is pinned to T2, so a person decides it and never the agent.
+    reverses_operation_id: UUID | None
+    #: AR-11: the sampled agent decision whose disputed verdict prompted this
+    #: correction, when it was raised that way. The edge that makes a
+    #: correction traceable to the decision it corrects.
+    review_audit_sample_id: UUID | None
     created_at: datetime
     updated_at: datetime
 

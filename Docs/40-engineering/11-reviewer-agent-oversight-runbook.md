@@ -43,13 +43,28 @@ The platform reports how long this takes but sets no target. As a working target
 
 ## 3. When the agent stops for the backlog
 
+There are two bounds, and the refusal code says which one tripped.
+
+| Reason code | What it means | What clears it |
+|---|---|---|
+| `reviewer_agent_audit_backlog_exceeded` | Unread samples reached `reviewer_agent_max_unresolved_samples` (default 50). Samples are arriving faster than they are read. | Resolve pending samples until the count is below the bound. |
+| `reviewer_agent_sample_age_exceeded` | The *oldest* unread sample has waited `reviewer_agent_max_sample_age_hours` (default 168, i.e. seven days). One item has been skipped, whatever the queue depth. | Resolve that sample. The state endpoint reports `oldest_pending_sample_hours`. |
+
+Both raise the same `REVIEWER_AGENT_AUDIT_BACKLOG` notification, because the operator's action is the same either way: go and read the sample. They emit different outbox events (`reviewer_agent.audit_backlog_exceeded.v1`, `reviewer_agent.sample_age_exceeded.v1`) so a dashboard can tell "we need more reviewers" from "one item is being skipped".
+
 1. The notification arrives, or the pill shows on the screen.
-2. Resolve pending samples until the count is below the bound. The agent picks up again on its next run, and there is nothing to re-enable.
-3. **Do not raise the bound to restart the agent.** The bound is the enforceable part of condition (b), so raising it is a configuration change that needs its own review. If the sample volume is genuinely too high, the fix is fewer agent decisions: narrow `reviewer_agent_max_tier` to T0, or suspend the agent.
+2. Clear the bound named by the reason code. The agent picks up again on its next run, and there is nothing to re-enable.
+3. **Do not raise either bound to restart the agent.** They are the enforceable part of condition (b), so raising one is a configuration change that needs its own review. If the sample volume is genuinely too high, the fix is fewer agent decisions: narrow `reviewer_agent_max_tier` to T0, or suspend the agent.
 
 ## 4. When a human disagrees with a decision
 
-Resolving a sample as `DISAGREED` records the verdict and notifies. **It does not undo the decision.** The approval already applied the object's side effects through the same decision path a human approval uses. The correction goes through the object type's own path, the same route a human reviewer's mistake would take.
+Resolving a sample as `DISAGREED` records the verdict and notifies. **By itself it does not undo the decision** — the approval already applied the object's side effects through the same decision path a human approval uses, and disagreeing with a decision and undoing what it did are two judgements. A reviewer who thinks the agent was wrong may still want the change to stand while a person authors a better one.
+
+For a sampled `BULK_STEWARDSHIP_OPERATION`, the resolve call can raise the undo at the same time: pass `reverse_applied_changes: true` alongside the `DISAGREED` verdict. That files a **reversal** — an ordinary bulk operation that undoes the original, carrying `reverses_operation_id` and `review_audit_sample_id`, so the correction is reachable from the sample and the sampled decision is reachable from the correction. It is `REVIEW_REQUIRED` like any other bulk operation and is pinned to T2 by `reverses_operation_id`, so a person decides it — never the agent whose decision is in dispute.
+
+A reversal acts on exactly the subjects the original operation *changed* (`applied_subject_ids`), never the subjects it was *asked* to change. A term link that existed before the operation ran is not removed by undoing it.
+
+For every other object type the correction still goes through that type's own path, the same route a human reviewer's mistake would take.
 
 | Object type (tier) | What the agent's approval did | How to correct it |
 |---|---|---|
@@ -57,7 +72,9 @@ Resolving a sample as `DISAGREED` records the verdict and notifies. **It does no
 | `COLUMN_DESCRIPTION_DRAFT` (T0) | Published a column description version | Same as above: a corrected draft or a withdrawal. |
 | `MODEL_IMPORT_BATCH` (T1, 10 changes or fewer) | Published the workbook's descriptions | Re-export, correct and re-import. The `*_version` columns stop a silent overwrite. Alternatively, withdraw the individual descriptions. |
 | `METADATA_ENRICHMENT_PROPOSAL` (T0, rules engine only) | Wrote a business annotation | Propose a corrected annotation. **There is no withdrawal path for an annotation** (see §6). |
-| `BULK_STEWARDSHIP_OPERATION` (T1, 10 subjects or fewer) | Applied ownership, term links or certifications | Submit a compensating operation where one exists, such as re-assigning ownership. **A term link or certification applied in bulk has no bulk reversal** (see §6). |
+| `BULK_STEWARDSHIP_OPERATION` — `LINK_TERM` (T1, 10 subjects or fewer) | Created asset/term links | Resolve `DISAGREED` with `reverse_applied_changes: true`. Files an `UNLINK_TERM` reversal over exactly the links this operation created, for a person to decide. |
+| `BULK_STEWARDSHIP_OPERATION` — `CERTIFY_ASSET` (T1) | Granted table certifications | Same: files a `WITHDRAW_CERTIFICATION` reversal. The certifications move to `WITHDRAWN` and the asset reads as **uncertified** — deliberately not `REVOKED`, which is a standing refusal that would block use of the asset. What the certify superseded is not resurrected; re-grant it if it was right. |
+| `BULK_STEWARDSHIP_OPERATION` — `TAG`, `CLASSIFY`, `ASSIGN_OWNERSHIP`, `DEPRECATE_TERM`, `REASSIGN_LEAVER` (T1) | Overwrote a tag value, a classification, or an ownership/lifecycle state | **No reversal**; the request is refused with `no compensating action`. These overwrite a previous value nothing recorded, so an automatic undo would delete rather than restore it. Correct by submitting a fresh operation setting the right value (see §6). |
 
 Since AR-03 (2026-09-11), the agent abstains on `GLOSSARY_LINK_PROPOSAL`, `DOCUMENT_CLAIM` and model-inferred enrichment. `QUERY_HISTORY_METRIC_CANDIDATE` is T2, outside its reach, so none of these can be agent decisions.
 
@@ -80,7 +97,10 @@ The metric reports and never acts; a person acts.
 
 These are recorded here so that nobody assumes they exist:
 
-- **Downstream harm is not measured.** Nothing links a disputed decision to the answers, tools or context products that consumed its output in the meantime.
-- **No automatic reversal, and some objects have no withdrawal at all:** business annotations from enrichment, and term links and certifications applied in bulk.
-- **A correction is not linked back to the sample that prompted it.** Whether a disagreement was ever acted on is visible only by reading the object's history.
-- **Targets are not enforced.** Only the backlog bound is. The time-to-verdict numbers are reported, not alarmed on.
+- **Downstream harm is not measured.** Nothing links a disputed decision to the answers, tools or context products that consumed its output in the meantime. A reversal undoes the catalog change; it does not find or re-issue an answer that cited the wrong term link while it stood.
+- **Only the two additive bulk operations can be reversed.** `LINK_TERM` and `CERTIFY_ASSET` add a row that did not exist, so undoing them needs only the list of rows they added. `TAG`, `CLASSIFY`, `ASSIGN_OWNERSHIP`, `DEPRECATE_TERM` and `REASSIGN_LEAVER` overwrite a previous value that nothing captures a before-image of; they are refused by name rather than half-undone. Capturing before-images is the work that would close this.
+- **Only operations applied since 2026-09-12 can be reversed at all.** `applied_subject_ids` was added then and was deliberately not backfilled: for an older row the empty list means "not recorded", not "changed nothing", and guessing from `subject_ids` would let a reversal remove links and certifications that predated the operation. Those are refused.
+- **Business annotations from enrichment still have no withdrawal path.** A wrong `METADATA_ENRICHMENT_PROPOSAL` is corrected by proposing a better annotation; requesting a reversal for one is refused by name.
+- **The sample-to-correction link exists only for bulk stewardship.** A description corrected through `DESCRIPTION_WITHDRAWAL` or a re-published draft still carries no reference to the sample that prompted it, so for those types "was this disagreement acted on?" is still answered by reading the object's history.
+- **Only the oldest-sample age is enforced, not the distribution.** §3's age bound stops the agent when one sample has waited too long. The median, 90th-percentile and slowest time-to-verdict in the report are still reported and not alarmed on — a team resolving every sample on day six, forever, breaches nothing.
+- **Nothing checks that a filed reversal is ever decided.** A reversal sits in the review queue like any other item; if nobody decides it, the original change stands and the sample still reads as resolved.

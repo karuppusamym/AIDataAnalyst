@@ -46,6 +46,7 @@ from aida.models import (
     AiAsset,
     AiAssetVersion,
     AuditEvent,
+    BulkStewardshipOperation,
     GovernanceReview,
     Organization,
     ReviewAuditSample,
@@ -71,6 +72,7 @@ from aida.reviewer_agent_metrics import (
 )
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.stewardship_service import request_bulk_operation_reversal
 from aida.task_agent_registry import task_agent_for_principal
 
 router = APIRouter(prefix="/v1", tags=["agent-workforce"])
@@ -271,6 +273,16 @@ class ReviewAuditSampleRead(ApiModel):
 class ResolveSampleRequest(ApiModel):
     human_outcome: Literal["AGREED", "DISAGREED"]
     rationale: str = Field(min_length=1, max_length=4000)
+    #: AR-11: also raise a governed reversal of what the disputed decision
+    #: did, linked to this sample. Only meaningful with DISAGREED, and only
+    #: for a sampled `BULK_STEWARDSHIP_OPERATION` whose type has a
+    #: compensating action -- `stewardship_service.request_bulk_operation_
+    #: reversal` refuses the rest by name rather than half-undoing them.
+    #: Opt-in rather than automatic: disagreeing with a decision and undoing
+    #: what it did are two judgements, and a reviewer who thinks the agent
+    #: was wrong may still think the change should stand while a human
+    #: authors a better one.
+    reverse_applied_changes: bool = False
 
 
 class ReviewerAgentStateRead(ApiModel):
@@ -1014,6 +1026,71 @@ async def _record_backlog_refusal(
     )
 
 
+async def _raise_sample_reversal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """AR-11: raise a governed undo of what the disputed decision applied.
+
+    The sampled decision names its `GovernanceReview`; the review names the
+    `BulkStewardshipOperation` it decided. That chain is what makes the
+    correction traceable without a free-text field or a timestamp join, and
+    it is walked here rather than trusted from the request body -- the
+    reviewer says "reverse this sample", never "reverse operation X".
+
+    Only bulk stewardship is reachable today, and the refusal for everything
+    else is deliberately explicit. The other object types an agent can
+    approve either already have a compensating path of their own
+    (`description_withdrawal`, for the two description draft types) or have
+    none at all (`METADATA_ENRICHMENT_PROPOSAL`), and answering "no such
+    reversal" is honest where quietly doing nothing would let a reviewer
+    believe a correction had been filed.
+    """
+    if sample.object_type != "BULK_STEWARDSHIP_OPERATION":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no compensating action exists for {sample.object_type}; "
+                "correct it through that object type's own path"
+            ),
+        )
+    operation = await session.scalar(
+        select(BulkStewardshipOperation).where(
+            BulkStewardshipOperation.governance_review_id == sample.governance_review_id,
+            BulkStewardshipOperation.organization_id == sample.organization_id,
+        )
+    )
+    if operation is None:
+        raise HTTPException(
+            status_code=409, detail="the sampled operation is no longer available"
+        )
+    reversal, review = await request_bulk_operation_reversal(
+        session,
+        operation,
+        reason=f"reverses a disputed reviewer-agent decision (sample {sample.id})",
+        requested_by=context.principal_id,
+        sample=sample,
+    )
+    record_audit(
+        session,
+        context,
+        action="stewardship.bulk_operation.reversal_requested",
+        resource_type="bulk_stewardship_operation",
+        resource_id=str(reversal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "reverses_operation_id": str(operation.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(review.id),
+            "operation_type": reversal.operation_type,
+            "subject_count": len(reversal.subject_ids),
+        },
+    )
+
+
 async def _record_sample_age_refusal(
     session: AsyncSession,
     organization_id: UUID,
@@ -1387,6 +1464,20 @@ async def resolve_sample(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.reverse_applied_changes:
+        if body.human_outcome != "DISAGREED":
+            raise HTTPException(
+                status_code=422,
+                detail="a reversal can only accompany a DISAGREED verdict",
+            )
+        # AR-11: this is the sample-to-correction link being written. Raised
+        # inside the same transaction as the verdict, so a sample can never be
+        # resolved as disputed with the reversal the reviewer asked for
+        # silently missing -- and the refusals inside
+        # `request_bulk_operation_reversal` (wrong object type, no
+        # compensating action, no recorded effect) surface as the reviewer's
+        # own 4xx rather than as a correction that quietly did not happen.
+        await _raise_sample_reversal(session, sample, context=context)
     await session.commit()
     if body.human_outcome == "DISAGREED":
         # AR-11: a human saying the agent was wrong starts a correction, and
