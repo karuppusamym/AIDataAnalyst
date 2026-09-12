@@ -383,6 +383,21 @@ class Settings(BaseSettings):
     #: an unbounded scan.
     classification_propagation_max_edges: int = Field(default=5_000, ge=1, le=100_000)
 
+    # --- DQ-2 (R11-B8): scheduled freshness evaluation --------------------
+    #: How often the scheduler evaluates approved watermark contracts and
+    #: files the verdict into the data-quality incident sink, in minutes. 0,
+    #: the default, means never -- the same convention as the task agents and
+    #: the propagation pass above, and for a sharper reason here: this pass
+    #: OPENS incidents, and an open CRITICAL incident fails governed tools
+    #: closed (DQ-3). An estate turns that on deliberately, after its
+    #: watermark contracts are approved, rather than discovering that a
+    #: never-observed table started blocking answers.
+    freshness_evaluation_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+    #: Watermark contracts one pass reads per datasource before it stops and
+    #: says so in its own audit record. A large estate degrades to "evaluated
+    #: the first N contracts", never an unbounded scan.
+    freshness_evaluation_max_tables: int = Field(default=500, ge=1, le=50_000)
+
     # --- ADR-0029: the lineage agent -------------------------------------
     # The same registration rules as the steward agent's: nothing until an
     # approved AGENT-kind version carries a contract for this principal.

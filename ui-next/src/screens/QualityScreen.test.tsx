@@ -5,8 +5,10 @@ import type {
   DataQualityIncidentTriageRead,
   DataQualitySummaryRead,
   DataSourceRead,
+  FreshnessConfigRead,
+  FreshnessStatusRead,
 } from "../lib/types";
-import type { PageOf } from "../lib/ui-types";
+import type { CursorPage, MetadataTableRead, PageOf } from "../lib/ui-types";
 
 /* ---------------------------------------------------------------------------
    UX-15/UX-16: Quality against the real `quality_api.py` endpoints
@@ -30,6 +32,21 @@ const transitionQualityIncident = vi.fn<
 const fetchQualityIncidentTriage = vi.fn<
   (incidentId: string, signal?: AbortSignal) => Promise<DataQualityIncidentTriageRead>
 >();
+const fetchFreshnessConfigs = vi.fn<
+  (datasourceId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<FreshnessConfigRead>>
+>();
+const fetchFreshnessStatus = vi.fn<
+  (datasourceId: string, tableId: string, signal?: AbortSignal) => Promise<FreshnessStatusRead>
+>();
+const upsertFreshnessConfig = vi.fn<
+  (datasourceId: string, tableId: string, body: unknown, signal?: AbortSignal) => Promise<FreshnessConfigRead>
+>();
+const approveFreshnessConfig = vi.fn<
+  (datasourceId: string, tableId: string, signal?: AbortSignal) => Promise<FreshnessConfigRead>
+>();
+const fetchTablesLegacy = vi.fn<
+  (datasourceId: string, opts: unknown, signal?: AbortSignal) => Promise<CursorPage<MetadataTableRead>>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -45,6 +62,16 @@ vi.mock("../lib/api", async (importOriginal) => {
       transitionQualityIncident(incidentId, body, signal),
     fetchQualityIncidentTriage: (incidentId: string, signal?: AbortSignal) =>
       fetchQualityIncidentTriage(incidentId, signal),
+    fetchFreshnessConfigs: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
+      fetchFreshnessConfigs(datasourceId, query, signal),
+    fetchFreshnessStatus: (datasourceId: string, tableId: string, signal?: AbortSignal) =>
+      fetchFreshnessStatus(datasourceId, tableId, signal),
+    upsertFreshnessConfig: (datasourceId: string, tableId: string, body: unknown, signal?: AbortSignal) =>
+      upsertFreshnessConfig(datasourceId, tableId, body, signal),
+    approveFreshnessConfig: (datasourceId: string, tableId: string, signal?: AbortSignal) =>
+      approveFreshnessConfig(datasourceId, tableId, signal),
+    fetchTablesLegacy: (datasourceId: string, opts: unknown, signal?: AbortSignal) =>
+      fetchTablesLegacy(datasourceId, opts, signal),
   };
 });
 
@@ -84,6 +111,36 @@ function incidentsPage(items: DataQualityIncidentRead[]): PageOf<DataQualityInci
   return { items, limit: 200, offset: 0, total: items.length };
 }
 
+/* --- DQ-2 watermark contracts (R11-B8) ----------------------------------- */
+
+const TABLES: MetadataTableRead[] = [
+  { id: "t_1", datasource_id: "ds_1", schema_id: "s_1", name: "raw_sales", object_type: "BASE_TABLE", status: "ACTIVE", fingerprint: "fp1" },
+  { id: "t_2", datasource_id: "ds_1", schema_id: "s_1", name: "orders_raw", object_type: "BASE_TABLE", status: "ACTIVE", fingerprint: "fp2" },
+];
+
+const PENDING_CONFIG: FreshnessConfigRead = {
+  id: "fc_1", organization_id: "org1", datasource_id: "ds_1", table_id: "t_1",
+  watermark_column: "updated_at", classification: "INTERNAL", threshold_minutes: 60,
+  retention_days: 365, status: "PENDING_APPROVAL", approved_by: null, approved_at: null,
+  created_by: "steward-maker", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
+};
+
+const ACTIVE_CONFIG: FreshnessConfigRead = {
+  ...PENDING_CONFIG, status: "ACTIVE", approved_by: "steward-checker",
+  approved_at: "2026-09-02T00:00:00Z",
+};
+
+function configsPage(items: FreshnessConfigRead[]): PageOf<FreshnessConfigRead> {
+  return { items, limit: 25, offset: 0, total: items.length };
+}
+
+function freshnessStatus(status: string, ageMinutes: number | null = null): FreshnessStatusRead {
+  return {
+    table_id: "t_1", status, last_watermark: null, age_minutes: ageMinutes,
+    threshold_minutes: 60, evidence: {},
+  };
+}
+
 async function loadScreen() {
   const { QualityScreen } = await import("./QualityScreen");
   return QualityScreen;
@@ -95,9 +152,17 @@ beforeEach(() => {
   fetchQualityIncidents.mockReset();
   transitionQualityIncident.mockReset();
   fetchQualityIncidentTriage.mockReset();
+  fetchFreshnessConfigs.mockReset();
+  fetchFreshnessStatus.mockReset();
+  upsertFreshnessConfig.mockReset();
+  approveFreshnessConfig.mockReset();
+  fetchTablesLegacy.mockReset();
   listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchQualitySummary.mockResolvedValue(SUMMARY);
   fetchQualityIncidents.mockResolvedValue(incidentsPage([INCIDENT]));
+  fetchFreshnessConfigs.mockResolvedValue(configsPage([]));
+  fetchFreshnessStatus.mockResolvedValue(freshnessStatus("NOT_CONFIGURED"));
+  fetchTablesLegacy.mockResolvedValue({ items: TABLES, limit: 200, offset: 0, next_cursor: null });
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -310,5 +375,166 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
     fireEvent.click(screen.getByRole("button", { name: "Suggest root cause" }));
 
     await waitFor(() => expect(screen.getByText(/triage unavailable/)).toBeInTheDocument());
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   DQ-2 watermark contracts (R11-B8).
+
+   `quality_api.py` has had the upsert/approve/list/status routes all along and
+   no screen called any of them, so a contract could never be created and
+   never leave PENDING_APPROVAL -- every table reported AWAITING_APPROVAL
+   forever. These cover the two halves that were unreachable (configure,
+   approve) and the refusal that proves maker-checker is real.
+--------------------------------------------------------------------------- */
+
+describe("QualityScreen freshness watermark contracts", () => {
+  it("shows an approved contract's real freshness state instead of NOT_CONFIGURED", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    fetchFreshnessConfigs.mockResolvedValue(configsPage([ACTIVE_CONFIG]));
+    fetchFreshnessStatus.mockResolvedValue(freshnessStatus("STALE", 145));
+
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+
+    const panel = await screen.findByRole("region", { name: "Freshness watermarks" });
+    await waitFor(() =>
+      expect(fetchFreshnessStatus).toHaveBeenCalledWith("ds_1", "t_1", expect.anything()),
+    );
+    // The table is named, not shown as a bare id, and both states are
+    // reported: the contract is ACTIVE and the data behind it is STALE.
+    expect(within(panel).getByText("raw_sales")).toBeInTheDocument();
+    expect(within(panel).getByText("active")).toBeInTheDocument();
+    expect(within(panel).getByText("stale")).toBeInTheDocument();
+    expect(within(panel).getByText(/watermark 145m old/)).toBeInTheDocument();
+    expect(within(panel).getByText(/approved by steward-checker/)).toBeInTheDocument();
+    // Nothing left to approve on an already-active contract.
+    expect(within(panel).queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it("configuring a watermark PUTs the contract and says it is not evaluated until approved", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    upsertFreshnessConfig.mockResolvedValue(PENDING_CONFIG);
+
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+
+    const panel = await screen.findByRole("region", { name: "Freshness watermarks" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Configure a watermark" }));
+
+    fireEvent.change(within(panel).getByLabelText("Table"), { target: { value: "t_1" } });
+    fireEvent.change(within(panel).getByLabelText("Watermark column"), {
+      target: { value: "ingested_at" },
+    });
+    fireEvent.change(within(panel).getByLabelText("Threshold (minutes)"), {
+      target: { value: "30" },
+    });
+    fetchFreshnessConfigs.mockResolvedValue(configsPage([PENDING_CONFIG]));
+    fireEvent.click(within(panel).getByRole("button", { name: "Save contract" }));
+
+    await waitFor(() =>
+      expect(upsertFreshnessConfig).toHaveBeenCalledWith(
+        "ds_1",
+        "t_1",
+        { watermark_column: "ingested_at", threshold_minutes: 30 },
+        undefined,
+      ),
+    );
+    // The screen states the half of the contract a maker does not control.
+    expect(
+      await within(panel).findByText(/stays pending until a second principal approves it/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(panel).getByRole("button", { name: "Approve" })).toBeInTheDocument(),
+    );
+  });
+
+  it("refuses a threshold the server would reject, without calling the endpoint", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+
+    const panel = await screen.findByRole("region", { name: "Freshness watermarks" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Configure a watermark" }));
+    fireEvent.change(within(panel).getByLabelText("Table"), { target: { value: "t_1" } });
+    fireEvent.change(within(panel).getByLabelText("Watermark column"), {
+      target: { value: "updated_at" },
+    });
+    fireEvent.change(within(panel).getByLabelText("Threshold (minutes)"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Save contract" }));
+
+    expect(await within(panel).findByRole("alert")).toHaveTextContent(
+      "The threshold is a whole number of minutes, at least 1.",
+    );
+    expect(upsertFreshnessConfig).not.toHaveBeenCalled();
+  });
+
+  it("approving a pending contract calls the checker route and reloads its state", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    fetchFreshnessConfigs.mockResolvedValue(configsPage([PENDING_CONFIG]));
+    fetchFreshnessStatus.mockResolvedValue(freshnessStatus("AWAITING_APPROVAL"));
+    approveFreshnessConfig.mockResolvedValue(ACTIVE_CONFIG);
+
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+
+    const panel = await screen.findByRole("region", { name: "Freshness watermarks" });
+    await waitFor(() =>
+      expect(within(panel).getByText("awaiting approval")).toBeInTheDocument(),
+    );
+
+    fetchFreshnessConfigs.mockResolvedValue(configsPage([ACTIVE_CONFIG]));
+    fetchFreshnessStatus.mockResolvedValue(freshnessStatus("FRESH", 4));
+    fireEvent.click(within(panel).getByRole("button", { name: "Approve" }));
+
+    await waitFor(() =>
+      expect(approveFreshnessConfig).toHaveBeenCalledWith("ds_1", "t_1", undefined),
+    );
+    // The point of the whole row: after approval the table reports a real
+    // freshness state rather than a permanent AWAITING_APPROVAL.
+    await waitFor(() => expect(within(panel).getByText("fresh")).toBeInTheDocument());
+    expect(within(panel).queryByText("awaiting approval")).not.toBeInTheDocument();
+  });
+
+  it("surfaces the server's 403 when someone tries to approve their own contract", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    fetchFreshnessConfigs.mockResolvedValue(configsPage([PENDING_CONFIG]));
+    fetchFreshnessStatus.mockResolvedValue(freshnessStatus("AWAITING_APPROVAL"));
+    const { ApiError } = await import("../lib/api");
+    approveFreshnessConfig.mockRejectedValue(
+      new ApiError(403, "the configuration's own author cannot approve it"),
+    );
+
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+
+    const panel = await screen.findByRole("region", { name: "Freshness watermarks" });
+    await waitFor(() =>
+      expect(within(panel).getByRole("button", { name: "Approve" })).toBeInTheDocument(),
+    );
+    fireEvent.click(within(panel).getByRole("button", { name: "Approve" }));
+
+    // Shown, not hidden -- and in the server's own words. The action stays
+    // available, because the person who may legitimately approve is a
+    // different principal on the same screen.
+    expect(await within(panel).findByRole("alert")).toHaveTextContent(
+      "the configuration's own author cannot approve it",
+    );
+    expect(within(panel).getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(within(panel).getByText("awaiting approval")).toBeInTheDocument();
+  });
+
+  it("says so plainly when a datasource has no freshness contract at all", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+
+    const panel = await screen.findByRole("region", { name: "Freshness watermarks" });
+    expect(
+      await within(panel).findByText("No table here has a freshness contract"),
+    ).toBeInTheDocument();
+    expect(fetchFreshnessStatus).not.toHaveBeenCalled();
   });
 });

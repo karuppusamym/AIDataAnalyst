@@ -1820,7 +1820,7 @@ export interface DataQualitySummaryRead {
   last_observed_at: string | null;
   metadata_scan_age_minutes: number | null;
   metadata_scan_status: string;
-  source_freshness_status: "NOT_CONFIGURED";
+  source_freshness_status: "FRESH" | "STALE" | "AWAITING_APPROVAL" | "NOT_CONFIGURED";
 }
 
 export interface DataSourceBulkOnboardItemRead {
@@ -4949,7 +4949,7 @@ export interface UnattributedRunsRead {
 /** One typed edge merged from declared FKs, approved/candidate column */
 export interface UnifiedLineageEdgeRead {
   id: string;
-  edge_source: "FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION";
+  edge_source: "FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE";
   source_node_id: string;
   target_node_id: string;
   source_label: string;
@@ -4976,11 +4976,11 @@ export interface UnifiedLineageGraphRead {
 
 export interface UnifiedLineageImpactNodeRead {
   node_id: string;
-  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET";
+  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET" | "BI_WORKBOOK" | "BI_DASHBOARD" | "BI_SHEET" | "BI_REPORT" | "BI_PAGE";
   label: string;
   qualified_name: string;
   depth: number;
-  contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION")[];
+  contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE")[];
   quality_state?: string;
 }
 
@@ -4988,7 +4988,7 @@ export interface UnifiedLineageImpactNodeRead {
 export interface UnifiedLineageImpactRead {
   datasource_id: string;
   focus_node_id: string;
-  focus_node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET";
+  focus_node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET" | "BI_WORKBOOK" | "BI_DASHBOARD" | "BI_SHEET" | "BI_REPORT" | "BI_PAGE";
   focus_label: string;
   upstream: UnifiedLineageImpactNodeRead[];
   downstream: UnifiedLineageImpactNodeRead[];
@@ -5001,7 +5001,7 @@ export interface UnifiedLineageImpactRead {
 /** One node in the merged lineage graph: a catalog table, or -- when a dbt */
 export interface UnifiedLineageNodeRead {
   id: string;
-  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET";
+  node_kind: "TABLE" | "DBT_MODEL" | "DBT_SOURCE" | "DBT_SEED" | "DBT_SNAPSHOT" | "UNRESOLVED_DATASET" | "BI_WORKBOOK" | "BI_DASHBOARD" | "BI_SHEET" | "BI_REPORT" | "BI_PAGE";
   label: string;
   qualified_name: string;
   matched_table_id?: string | null;

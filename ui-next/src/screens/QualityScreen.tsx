@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DataQualityIncidentRead, DataQualityIncidentTriageRead, DataQualitySummaryRead } from "../lib/types";
+import type {
+  DataQualityIncidentRead,
+  DataQualityIncidentTriageRead,
+  DataQualitySummaryRead,
+  FreshnessConfigRead,
+  FreshnessStatusRead,
+} from "../lib/types";
+import type { MetadataTableRead } from "../lib/ui-types";
 import {
   ApiError,
+  approveFreshnessConfig,
+  fetchFreshnessConfigs,
+  fetchFreshnessStatus,
   fetchQualityIncidentTriage,
   fetchQualityIncidents,
   fetchQualitySummary,
+  fetchTablesLegacy,
   transitionQualityIncident,
+  upsertFreshnessConfig,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
@@ -68,6 +80,12 @@ const severityTone = (severity: string): Tone =>
   severity === "CRITICAL" ? "bad" : severity === "WARNING" ? "warn" : "mute";
 const scanTone = (status: string): Tone =>
   status === "CURRENT" ? "ok" : status === "STALE" ? "warn" : "mute";
+/* FRESH is good, STALE is bad, and the two "we are not measuring this"
+   states are deliberately NOT green -- an unapproved contract measures
+   nothing, and colouring it as if it did is the exact misreading ADR-0016
+   exists to prevent. */
+const freshnessTone = (status: string): Tone =>
+  status === "FRESH" ? "ok" : status === "STALE" ? "bad" : status === "AWAITING_APPROVAL" ? "warn" : "mute";
 
 function humanize(s: string): string {
   return s.toLowerCase().replace(/_/g, " ");
@@ -194,6 +212,279 @@ function IncidentRow({
       </div>
       {triageOpen && <TriagePanel incidentId={incident.id} />}
     </article>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   DQ-2 watermark contracts (R11-B8).
+
+   `quality_api.py` has had all four of these routes for some time and no
+   screen called any of them. The consequence was not a missing panel, it was
+   a dead feature: a contract can only be created through the maker route and
+   can only leave PENDING_APPROVAL through the checker route, so with neither
+   reachable every table in the product reported AWAITING_APPROVAL forever and
+   the scheduled evaluation this row adds would have found nothing approved.
+
+   Maker-checker is enforced SERVER-SIDE (`approve_freshness_config` refuses
+   the contract's own author with 403). This panel deliberately shows the
+   Approve button to everyone and surfaces that 403 verbatim, rather than
+   hiding the action from whoever authored the contract. Hiding it would teach
+   the rule only to people who already know it, and would quietly imply the
+   client is the thing enforcing it -- an approval gate you cannot see refuse
+   is an approval gate nobody trusts.
+--------------------------------------------------------------------------- */
+
+/** One page of contracts, and the cap on the per-table status calls below. */
+const FRESHNESS_PAGE_LIMIT = 25;
+
+function FreshnessPanel({ datasourceId }: { datasourceId: string }) {
+  const [configs, setConfigs] = useState<FreshnessConfigRead[]>([]);
+  const [total, setTotal] = useState(0);
+  const [states, setStates] = useState<Record<string, FreshnessStatusRead>>({});
+  const [tables, setTables] = useState<MetadataTableRead[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [formOpen, setFormOpen] = useState(false);
+  const [tableId, setTableId] = useState("");
+  const [watermarkColumn, setWatermarkColumn] = useState("");
+  const [threshold, setThreshold] = useState("60");
+  const [busyTableId, setBusyTableId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const inflight = useRef<AbortController | null>(null);
+  const reqSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    inflight.current?.abort();
+    const ac = new AbortController();
+    inflight.current = ac;
+    const seq = ++reqSeq.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const [page, tablePage] = await Promise.all([
+        fetchFreshnessConfigs(datasourceId, { limit: FRESHNESS_PAGE_LIMIT }, ac.signal),
+        fetchTablesLegacy(datasourceId, { limit: 200 }, ac.signal),
+      ]);
+      if (seq !== reqSeq.current) return;
+      setConfigs(page.items);
+      setTotal(page.total);
+      setTables(tablePage.items);
+      /* N+1, and named rather than hidden: `list_freshness_configs` returns
+         the CONTRACTS, and the evaluated verdict for a table is a route of
+         its own (`get_freshness_status`) -- there is no bulk evaluate route
+         to call instead. Bounded by the page limit above, so the panel makes
+         at most FRESHNESS_PAGE_LIMIT of them and never grows with the
+         estate. A bulk route would be the right fix; it needs a new response
+         DTO, which is another session's file this round. */
+      const evaluated = await Promise.all(
+        page.items.map((config) =>
+          fetchFreshnessStatus(datasourceId, config.table_id, ac.signal).catch(() => null),
+        ),
+      );
+      if (seq !== reqSeq.current) return;
+      const byTable: Record<string, FreshnessStatusRead> = {};
+      evaluated.forEach((state) => {
+        if (state) byTable[state.table_id] = state;
+      });
+      setStates(byTable);
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") return;
+      if (seq !== reqSeq.current) return;
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      if (seq === reqSeq.current) setLoading(false);
+    }
+  }, [datasourceId]);
+
+  useEffect(() => {
+    void load();
+    return () => inflight.current?.abort();
+  }, [load]);
+
+  const tableName = useCallback(
+    (id: string) => tables.find((t) => t.id === id)?.name ?? id,
+    [tables],
+  );
+
+  const save = useCallback(async () => {
+    const minutes = Number(threshold);
+    if (!tableId) {
+      setActionError("Pick the table this contract is about.");
+      return;
+    }
+    if (!watermarkColumn.trim()) {
+      setActionError("Name the column that carries the data's own timestamp.");
+      return;
+    }
+    if (!Number.isInteger(minutes) || minutes < 1) {
+      setActionError("The threshold is a whole number of minutes, at least 1.");
+      return;
+    }
+    setBusyTableId(tableId);
+    setActionError(null);
+    setNotice(null);
+    try {
+      await upsertFreshnessConfig(datasourceId, tableId, {
+        watermark_column: watermarkColumn.trim(),
+        threshold_minutes: minutes,
+      });
+      setNotice(
+        `Saved for ${tableName(tableId)}. It stays pending until a second principal approves it — ` +
+          "freshness is not evaluated before then.",
+      );
+      setFormOpen(false);
+      setWatermarkColumn("");
+      await load();
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setBusyTableId(null);
+    }
+  }, [datasourceId, tableId, watermarkColumn, threshold, tableName, load]);
+
+  const approve = useCallback(
+    async (config: FreshnessConfigRead) => {
+      setBusyTableId(config.table_id);
+      setActionError(null);
+      setNotice(null);
+      try {
+        await approveFreshnessConfig(datasourceId, config.table_id);
+        setNotice(
+          `Approved for ${tableName(config.table_id)}. Freshness is evaluated against its watermark from now on.`,
+        );
+        await load();
+      } catch (e) {
+        // 403 (the author cannot approve their own contract) and 409 (not
+        // pending) both land here and are shown as the server worded them.
+        setActionError(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setBusyTableId(null);
+      }
+    },
+    [datasourceId, tableName, load],
+  );
+
+  return (
+    <section className="qfr" aria-label="Freshness watermarks">
+      <header className="qfr__head">
+        <div>
+          <h2 className="qfr__h2">Freshness watermarks</h2>
+          <p className="qfr__lede">
+            How late this table&rsquo;s <em>data</em> is, from a column it carries — not when
+            Atlas last scanned it. A contract is evaluated only after a second principal
+            approves it, and a scheduled violation opens an incident in the list below.
+          </p>
+        </div>
+        <Button onClick={() => setFormOpen((open) => !open)}>
+          {formOpen ? "Cancel" : "Configure a watermark"}
+        </Button>
+      </header>
+
+      {formOpen ? (
+        <div className="qfr__form">
+          <Field label="Table">
+            <select value={tableId} onChange={(e) => setTableId(e.target.value)}>
+              <option value="">Select a table…</option>
+              {tables.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Watermark column">
+            <input
+              value={watermarkColumn}
+              placeholder="updated_at"
+              onChange={(e) => setWatermarkColumn(e.target.value)}
+            />
+          </Field>
+          <Field label="Threshold (minutes)">
+            <input
+              type="number"
+              min={1}
+              value={threshold}
+              onChange={(e) => setThreshold(e.target.value)}
+            />
+          </Field>
+          <Button variant="primary" disabled={busyTableId !== null} onClick={() => void save()}>
+            Save contract
+          </Button>
+        </div>
+      ) : null}
+
+      {actionError ? (
+        <p className="qfr__error" role="alert">{actionError}</p>
+      ) : null}
+      {notice ? (
+        <p className="qfr__notice" role="status">{notice}</p>
+      ) : null}
+
+      {error ? (
+        <ErrorState
+          title="Freshness contracts could not be loaded"
+          detail={error}
+          onRetry={() => void load()}
+        />
+      ) : loading ? (
+        <p className="qfr__loading" role="status">Loading freshness contracts…</p>
+      ) : configs.length === 0 ? (
+        <Empty
+          title="No table here has a freshness contract"
+          hint="Configure a watermark column and a threshold, then have a second principal approve it."
+        />
+      ) : (
+        <>
+          <ul className="qfr__list">
+            {configs.map((config) => {
+              const state = states[config.table_id];
+              const pending = config.status === "PENDING_APPROVAL";
+              return (
+                <li className="qfr__row" key={config.id}>
+                  <div className="qfr__rowmain">
+                    <span className="qfr__name">{tableName(config.table_id)}</span>
+                    <span className="qfr__cfg">
+                      {config.watermark_column} · {nf.format(config.threshold_minutes)}m threshold
+                    </span>
+                  </div>
+                  <div className="qfr__badges">
+                    <Pill tone={pending ? "warn" : "ok"}>{humanize(config.status)}</Pill>
+                    {state ? (
+                      <Pill tone={freshnessTone(state.status)}>{humanize(state.status)}</Pill>
+                    ) : null}
+                    {state?.age_minutes !== null && state?.age_minutes !== undefined ? (
+                      <span className="qfr__age tnum">
+                        watermark {nf.format(Math.round(state.age_minutes))}m old
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="qfr__act">
+                    {config.approved_by ? (
+                      <span className="qfr__approved">approved by {config.approved_by}</span>
+                    ) : null}
+                    {pending ? (
+                      <Button
+                        disabled={busyTableId === config.table_id}
+                        onClick={() => void approve(config)}
+                        title="A different principal than the one who saved it — the server refuses self-approval"
+                      >
+                        Approve
+                      </Button>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          {total > configs.length ? (
+            <p className="qfr__more">
+              Showing {nf.format(configs.length)} of {nf.format(total)} contracts.
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -407,6 +698,8 @@ export function QualityScreen() {
               </div>
             </>
           ) : null}
+
+          <FreshnessPanel datasourceId={dsId} />
 
           <div className="qual__main">
             {error ? (

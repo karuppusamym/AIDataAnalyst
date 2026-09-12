@@ -17,6 +17,10 @@ from aida.db import session_factory
 from aida.delivery_intents import run_delivery_worker_pass
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
+from aida.freshness import (
+    FRESHNESS_SCHEDULER_PRINCIPAL,
+    evaluate_freshness_for_datasource,
+)
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
 from aida.governance_review_relay import run_review_notification_pass
 from aida.graph_reconciliation import run_graph_reconciliation_pass
@@ -560,6 +564,71 @@ async def run_classification_propagation_pass(
     return swept
 
 
+#: R11-B8: last freshness sweep per datasource, in process memory -- the same
+#: tradeoff every pass above accepts. A restart costs at most one redundant
+#: sweep, and a redundant sweep is a no-op: re-evaluating an unchanged
+#: watermark against an already-open incident only moves `last_observed_at`.
+_freshness_evaluation_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_freshness_evaluation_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Evaluate approved watermark contracts into the quality incident sink.
+
+    DQ-2 could evaluate freshness on request and nothing ever asked, so a
+    violation was something a person had to go and look for. This is the
+    schedule. `evaluate_freshness_for_datasource` owns the lifecycle --
+    STALE opens or updates one incident per table, recovery RESOLVES it --
+    and files into the same `DataQualityIncident` rows the built-in controls
+    and the custom rule packs use, so DQ-3's runtime coupling picks a
+    freshness incident up with no changes on its side.
+
+    Off unless an operator sets an interval, like the task agents and the
+    propagation pass above, and more pointedly than either: an open CRITICAL
+    incident fails governed tools closed, so an estate opts into that after
+    its contracts are approved rather than discovering it.
+
+    Returns how many datasources were swept. One datasource's failure is
+    logged and skipped, never aborting the rest, matching every pass above.
+    """
+    interval = settings.freshness_evaluation_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(select(DataSource.id, DataSource.organization_id))
+        ).all()
+    swept = 0
+    for datasource_id, organization_id in rows:
+        previous = _freshness_evaluation_last_run_at.get(datasource_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await evaluate_freshness_for_datasource(
+                    session,
+                    organization_id=organization_id,
+                    datasource_id=datasource_id,
+                    context=SecurityContext(
+                        principal_id=FRESHNESS_SCHEDULER_PRINCIPAL,
+                        principal_type="WORKER",
+                        organization_id=organization_id,
+                        roles=frozenset({"SchedulerWorker"}),
+                    ),
+                    now=effective_now,
+                    max_tables=settings.freshness_evaluation_max_tables,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one datasource must not stop the sweep
+            logger.exception("freshness_evaluation_failed", datasource_id=str(datasource_id))
+            continue
+        _freshness_evaluation_last_run_at[datasource_id] = effective_now
+        swept += 1
+    return swept
+
+
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
     try:
         await client.start_workflow(
@@ -681,6 +750,13 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await run_custom_rule_pack_pass(now=now)
     await run_graph_reconciliation_scheduler_pass(settings, now=now)
     await run_classification_propagation_pass(settings, now=now)
+    # R11-B8: DQ-2's watermark contracts, evaluated on a cadence instead of
+    # only when a screen asks. Off by default
+    # (`freshness_evaluation_interval_minutes`), and the pass returns before
+    # opening a session when off -- the same shape as the propagation pass
+    # above. Violations and recoveries both land in the shared quality
+    # incident sink, so nothing downstream of DQ-3 needed a second consumer.
+    await run_freshness_evaluation_pass(settings, now=now)
     await run_due_playbooks_pass(now=now)
     # ADR-0029: scheduled task-agent runs. Off by default -- every
     # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening

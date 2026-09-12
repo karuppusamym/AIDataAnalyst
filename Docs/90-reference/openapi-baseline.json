@@ -10966,7 +10966,12 @@
             "type": "integer"
           },
           "source_freshness_status": {
-            "const": "NOT_CONFIGURED",
+            "enum": [
+              "FRESH",
+              "STALE",
+              "AWAITING_APPROVAL",
+              "NOT_CONFIGURED"
+            ],
             "title": "Source Freshness Status",
             "type": "string"
           },

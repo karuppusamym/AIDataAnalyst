@@ -12,7 +12,11 @@ from aida.db import get_session
 from aida.dq_triage_agent import suggest_triage
 from aida.events import record_audit, record_outbox
 from aida.external_quality_signals import ingest_external_signal
-from aida.freshness import WatermarkConfig, evaluate_freshness
+from aida.freshness import (
+    evaluate_freshness,
+    load_freshness_states,
+    watermark_config_from_row,
+)
 from aida.models import (
     AnalysisRun,
     DataQualityIncident,
@@ -477,6 +481,7 @@ async def quality_summary(
         else int(DEFAULT_POLICY["metadata_scan_max_age_minutes"])
     )
     scan_status = "NOT_OBSERVED" if age is None else "STALE" if age > max_age else "CURRENT"
+    freshness_states = await load_freshness_states(session, datasource_id=datasource_id)
     return DataQualitySummaryRead(
         datasource_id=source.id,
         table_count=table_count or 0,
@@ -490,7 +495,24 @@ async def quality_summary(
         last_observed_at=last_observed,
         metadata_scan_age_minutes=round(age, 2) if age is not None else None,
         metadata_scan_status=scan_status,
-        source_freshness_status="NOT_CONFIGURED",
+        # R11-B8: this was the hardcoded string "NOT_CONFIGURED", so a
+        # datasource whose watermark contracts were configured AND approved
+        # still reported that freshness had never been set up -- the one field
+        # on this summary that could not be true. It now rolls up the
+        # datasource's own contracts, worst state first, and still answers
+        # NOT_CONFIGURED when there genuinely are none.
+        #
+        # DEPENDS ON a widening owned by another session this round:
+        # `DataQualitySummaryRead.source_freshness_status` is typed
+        # `Literal["NOT_CONFIGURED"]` (`schemas.py`), so until it accepts
+        # FRESH / STALE / AWAITING_APPROVAL / NOT_CONFIGURED this response
+        # fails validation for any datasource that has a contract. The
+        # evaluation behind it is proven either way -- see
+        # `tests/test_r11b8_freshness_incident_sink.py`.
+        #
+        # Distinct from `metadata_scan_status` beside it: ADR-0016 forbids
+        # presenting scan age as freshness, which is exactly why both exist.
+        source_freshness_status=freshness_states.rolled_up_status,
     )
 
 
@@ -719,19 +741,7 @@ async def get_freshness_status(
         )
     )
 
-    if config_row is None:
-        wm_config = None
-    else:
-        wm_config = WatermarkConfig(
-            table_id=str(config_row.table_id),
-            watermark_column=config_row.watermark_column,
-            classification=config_row.classification,
-            threshold_minutes=config_row.threshold_minutes,
-            retention_days=config_row.retention_days,
-            approved_by=config_row.approved_by,
-            approved_at=config_row.approved_at,
-            status=config_row.status,
-        )
+    wm_config = None if config_row is None else watermark_config_from_row(config_row)
 
     latest_observation = await session.scalar(
         select(FreshnessObservation)

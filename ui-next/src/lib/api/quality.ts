@@ -7,12 +7,16 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get, postJson } from "./transport";
+import { USE_FIXTURES } from "../appConfig";
+import { demoOr, get, postJson, putJson } from "./transport";
 import type {
   DataQualityIncidentRead,
   DataQualityIncidentTransition,
   DataQualityIncidentTriageRead,
   DataQualitySummaryRead,
+  FreshnessConfigRead,
+  FreshnessConfigUpsert,
+  FreshnessStatusRead,
 } from "../types";
 import type { PageOf } from "../ui-types";
 
@@ -114,5 +118,110 @@ export function fetchQualityIncidentTriage(
     async () => {
       return get<DataQualityIncidentTriageRead>(`/v1/quality-incidents/${incidentId}/triage`, signal);
     },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   DQ-2 freshness watermark contracts (R11-B8), `QualityScreen`.
+
+   All four routes already existed in `quality_api.py` and no screen called
+   any of them, so a watermark contract could not be created, could not be
+   approved, and therefore never left PENDING_APPROVAL -- which is why every
+   table reported AWAITING_APPROVAL forever and the scheduled evaluation this
+   row adds would have had nothing approved to evaluate.
+
+   NO DEMO ARM. `demoOr` needs a fixture generator per call and
+   `lib/fixtures.ts` has none for freshness; inventing one would mean the demo
+   estate showing an approval flow whose 403 is the whole point of the
+   feature. These four use the inline `USE_FIXTURES` branch the transport's
+   own docstring reserves for exactly this ("the demo arm refuses"), so a demo
+   build renders the panel's empty state instead of a fake contract.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/datasources/{id}/freshness` (`quality_api.py::list_freshness_configs`)
+ *  — every watermark contract on a datasource, approved or not. Paged; the
+ *  screen reads one page, because the evaluated state of each contract costs
+ *  a call of its own below. */
+export async function fetchFreshnessConfigs(
+  datasourceId: string,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<FreshnessConfigRead>> {
+  if (USE_FIXTURES) return { items: [], limit: query.limit ?? 100, offset: 0, total: 0 };
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<FreshnessConfigRead>>(
+    `/v1/datasources/${datasourceId}/freshness?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/datasources/{id}/freshness/{table_id}` (`quality_api.py::get_freshness_status`)
+ *  — the evaluated state of ONE table: FRESH / STALE / AWAITING_APPROVAL /
+ *  NOT_CONFIGURED, from the real data watermark.
+ *
+ *  ADR-0016, worth restating at the call site: this is not scan age. The
+ *  summary tile beside it (`metadata_scan_status`) is when Atlas last looked;
+ *  this is when the data itself last moved. Presenting the first as the
+ *  second is the invariant that ADR forbids. */
+export async function fetchFreshnessStatus(
+  datasourceId: string,
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<FreshnessStatusRead> {
+  if (USE_FIXTURES) {
+    return {
+      table_id: tableId,
+      status: "NOT_CONFIGURED",
+      last_watermark: null,
+      age_minutes: null,
+      threshold_minutes: null,
+      evidence: { reason: "demo data mode does not model freshness observations" },
+    };
+  }
+  return get<FreshnessStatusRead>(
+    `/v1/datasources/${datasourceId}/freshness/${tableId}`,
+    signal,
+  );
+}
+
+/** `PUT /v1/datasources/{id}/freshness-config/{table_id}` (`quality_api.py::
+ *  upsert_freshness_config`) — the MAKER half. Creating or editing a contract
+ *  always leaves it PENDING_APPROVAL: an edit to an already-approved contract
+ *  resets its approval, by design, so a threshold cannot be quietly relaxed
+ *  by the person it would excuse. */
+export async function upsertFreshnessConfig(
+  datasourceId: string,
+  tableId: string,
+  body: FreshnessConfigUpsert,
+  signal?: AbortSignal,
+): Promise<FreshnessConfigRead> {
+  if (USE_FIXTURES) throw new Error("Demo data mode cannot save a freshness contract.");
+  return putJson<FreshnessConfigRead>(
+    `/v1/datasources/${datasourceId}/freshness-config/${tableId}`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/datasources/{id}/freshness-config/{table_id}/approve`
+ *  (`quality_api.py::approve_freshness_config`) — the CHECKER half, and the
+ *  step that actually activates freshness evaluation for a table.
+ *
+ *  Refuses with 403 when the approver is the contract's own author, and 409
+ *  when it is not PENDING_APPROVAL. Both are surfaced, never hidden: the
+ *  caller shows the server's own detail, because "you cannot approve your own
+ *  contract" is the rule working, not an error to swallow. */
+export async function approveFreshnessConfig(
+  datasourceId: string,
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<FreshnessConfigRead> {
+  if (USE_FIXTURES) throw new Error("Demo data mode cannot approve a freshness contract.");
+  return postJson<FreshnessConfigRead>(
+    `/v1/datasources/${datasourceId}/freshness-config/${tableId}/approve`,
+    {},
+    signal,
   );
 }

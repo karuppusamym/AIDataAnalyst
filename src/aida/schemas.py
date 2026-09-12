@@ -2305,7 +2305,11 @@ class DataQualitySummaryRead(ApiModel):
     last_observed_at: datetime | None
     metadata_scan_age_minutes: float | None
     metadata_scan_status: str
-    source_freshness_status: Literal["NOT_CONFIGURED"]
+    # The four states `freshness.worst_freshness_state` can roll up to. This was
+    # `Literal["NOT_CONFIGURED"]`, which is why every table reported that
+    # forever: not merely unconfigured, but a response type that could not
+    # express any other answer, so even a working evaluation had nowhere to go.
+    source_freshness_status: Literal["FRESH", "STALE", "AWAITING_APPROVAL", "NOT_CONFIGURED"]
 
 
 class QualityRulePackUpsert(ApiModel):
