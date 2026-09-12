@@ -87,8 +87,36 @@ def context_from_claims(claims: dict[str, Any], settings: Settings) -> SecurityC
     external_roles = _string_list_claim(claims, settings.oidc_roles_claim, claim_name="roles")
     mapped_roles: set[str] = set()
     for role in external_roles:
-        mappings = settings.oidc_role_mappings.get(role, [role])
-        mapped_roles.update(mapped for mapped in mappings if mapped in PLATFORM_ROLES)
+        # `oidc_role_mappings` is a CLOSED contract: an external role with no
+        # entry grants nothing.
+        #
+        # This read `.get(role, [role])` -- defaulting to the role's own name --
+        # and then kept whatever survived `in PLATFORM_ROLES`. Those two lines
+        # together were a privilege escalation, not a convenience: a token whose
+        # roles claim contained the literal string "PlatformAdmin" was granted
+        # PlatformAdmin, with no entry for it anywhere in the deployment's
+        # configuration. Verified end to end against a real OIDC issuer on
+        # 2026-09-12: a token claiming `["totally-unmapped-group",
+        # "PlatformAdmin"]` against a deployment mapping only `atlas-admin`,
+        # `atlas-steward` and `atlas-viewer` came back from `/v1/me` as
+        # `roles: ["PlatformAdmin"]`.
+        #
+        # In a bank the roles claim is a directory group name, and group names
+        # are frequently something a delegated administrator, a self-service
+        # group feature or an over-scoped app registration can influence. The
+        # platform's own role vocabulary must not be reachable by naming it.
+        #
+        # `oidc_role_mappings` defaults to `{}`, so the old default meant a
+        # deployment that configured no mapping at all accepted whatever the
+        # IdP called a role. Closing it makes that deployment grant nothing,
+        # which is loudly wrong rather than quietly dangerous (INV-4).
+        #
+        # A deployment that genuinely wants a name accepted as-is says so by
+        # mapping it to itself -- `{"PlatformAdmin": ["PlatformAdmin"]}` -- which
+        # is self-documenting and needs no new setting.
+        for mapped in settings.oidc_role_mappings.get(role, ()):
+            if mapped in PLATFORM_ROLES:
+                mapped_roles.add(mapped)
     external_groups = _string_list_claim(claims, settings.oidc_groups_claim, claim_name="groups")
     persona = _persona_from_groups(external_groups, settings)
     raw_organization = _claim(claims, settings.oidc_organization_claim)

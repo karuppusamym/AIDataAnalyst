@@ -79,10 +79,22 @@ services:
 
       # External claim -> platform role. This is the bank's group contract in
       # miniature: the IdP knows "atlas-admin"; the platform knows
-      # "PlatformAdmin". Nothing in the token names a platform role directly,
-      # and an unmapped claim maps to nothing (`aida.oidc.context_from_claims`
-      # keeps only names in PLATFORM_ROLES), so a token cannot invent a role by
-      # asking for it.
+      # "PlatformAdmin".
+      #
+      # This comment used to claim that "an unmapped claim maps to nothing
+      # (`context_from_claims` keeps only names in PLATFORM_ROLES), so a token
+      # cannot invent a role by asking for it". The parenthetical was exactly
+      # backwards, and the conclusion was false: keeping "only names in
+      # PLATFORM_ROLES" was what ADMITTED a token that named one, because the
+      # lookup fell back to the role's own string. A token claiming
+      # "PlatformAdmin" against this very file's mapping was granted
+      # PlatformAdmin -- verified end to end on 2026-09-12 and fixed the same
+      # day. The mapping is now closed: no entry, no role.
+      #
+      # So the claim the comment always wanted to make is finally true, and it
+      # is true because of the mapping's closure rather than because of the
+      # filter. A deployment that wants a name accepted as-is maps it to
+      # itself.
       AIDA_OIDC_ROLE_MAPPINGS: >-
         {"atlas-admin":["PlatformAdmin","OrganizationAdmin","MetadataAdmin","DataAdmin",
         "SemanticAdmin","DataSteward","Reviewer","MetadataReviewer","Auditor","Operations",
