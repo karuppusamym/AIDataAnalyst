@@ -202,6 +202,123 @@ def validate_contract_definition(
         )
 
 
+#: `contract_widening`'s reason code, carried by the 409 the direct-write
+#: path raises and written into the DENIED audit row's `details.reason`.
+REASON_WIDENING_NEEDS_REVIEW = "agent_contract_widening_requires_review"
+
+
+def contract_widening(
+    existing: AgentContract, definition: AgentContractDefinition
+) -> tuple[str, ...]:
+    """Which of `existing`'s authority dimensions `definition` would *widen*.
+
+    A contract is the agent's authority, so the interesting question about a
+    contract edit is not "is this principal trusted" but "does this edit hand
+    the agent more than it had". Narrowing and lateral edits are corrections:
+    anyone accountable for an agent should be able to tighten its leash
+    without convening a committee, and making them wait would push operators
+    towards leaving it loose. Widening is a *grant*, and a grant of T3
+    authority (`review_risk_tiers`: `AGENT_CONTRACT` is T3, alongside model
+    routes and access policies) is not something one principal decides alone.
+
+    Returned as stable machine-readable dimension names, sorted, so a refusal
+    can name exactly what it objected to and an audit row years later still
+    parses. Empty means the edit takes nothing away from the platform's side
+    of the bargain.
+
+    The dimensions, and why each counts as more authority:
+
+    - `capability_envelope.tool_slugs` / `.context_product_ids` /
+      `.write_lanes` -- an allowlist gained an entry. These are the envelope
+      the orchestrator, the MCP boundary and the REST context-product reads
+      all enforce.
+    - `autonomy_tier` -- a higher tier acts with less supervision.
+    - `kill_scope` -- *narrowing* the scope is widening the agent: `ALL`
+      stops every agent in the organization, `TIER` stops its tier, `AGENT`
+      stops only this one. Editing `ALL` down to `AGENT` disengages the
+      switch for everything else it was covering, which is why the PUT path
+      can weaken a kill switch even though it never touches `kill_engaged`.
+    - `sampling_rate` -- lower means less of the agent's work is audited.
+    - the three caps -- a higher ceiling, or `None` where a number stood, is
+      an unbounded budget where a bounded one was agreed.
+    - `eval_gate_threshold` -- a lower bar to pass, or none at all.
+    - `agent_principal_id` -- re-pointing the contract at a different
+      workload identity hands that identity everything this contract holds,
+      which is the largest grant on the list however small the diff looks.
+
+    A missing or unparseable stored envelope is treated as empty, matching
+    `envelope_violation`: an envelope the platform cannot interpret allows
+    nothing, so anything the edit names is new.
+    """
+    widened: set[str] = set()
+    try:
+        before = parse_capability_envelope(dict(existing.capability_envelope or {}))
+    except AgentContractValidationError:
+        before = CapabilityEnvelope(tool_slugs=(), context_product_ids=(), write_lanes=())
+    after = definition.capability_envelope
+    for field in ("tool_slugs", "context_product_ids", "write_lanes"):
+        if set(getattr(after, field)) - set(getattr(before, field)):
+            widened.add(f"capability_envelope.{field}")
+
+    if definition.agent_principal_id.strip() != existing.agent_principal_id:
+        widened.add("agent_principal_id")
+    if _moved_up(existing.autonomy_tier, definition.autonomy_tier, AGENT_AUTONOMY_TIERS):
+        widened.add("autonomy_tier")
+    # `AGENT_KILL_SCOPES` is ordered narrow-to-broad, so moving *down* it is
+    # the widening direction -- see the note on `kill_scope` above.
+    if _moved_up(definition.kill_scope, existing.kill_scope, AGENT_KILL_SCOPES):
+        widened.add("kill_scope")
+    if definition.sampling_rate < existing.sampling_rate:
+        widened.add("sampling_rate")
+    for field in ("daily_token_cap", "per_run_token_cap", "wall_clock_seconds_cap"):
+        if _ceiling_raised(getattr(existing, field), getattr(definition, field)):
+            widened.add(field)
+    if _floor_lowered(existing.eval_gate_threshold, definition.eval_gate_threshold):
+        widened.add("eval_gate_threshold")
+    return tuple(sorted(widened))
+
+
+def _moved_up(before: str, after: str, order: tuple[str, ...]) -> bool:
+    """Whether `after` sits further along a closed, ordered enum than `before`.
+
+    A value the order does not contain cannot be compared, so *any* change
+    away from or towards it counts -- the same fail-closed choice
+    `envelope_violation` makes for an unparseable envelope. A stored row
+    should never hold one (both enums carry a `CheckConstraint`, and the
+    submitted side has already cleared `validate_contract_definition`), and
+    the one corner where it could -- a value retired from the enum after the
+    row was written -- is exactly where guessing is worst: routing that edit
+    to review costs a reviewer's minute, and answering False silently would
+    let a kill scope widen on a technicality.
+    """
+    if before not in order or after not in order:
+        return before != after
+    return order.index(after) > order.index(before)
+
+
+def _ceiling_raised(before: int | None, after: int | None) -> bool:
+    """Whether a cap got looser. `None` is *no cap*, so it is the loosest
+    value there is -- the direction that trips people up, because `None`
+    sorts nowhere near "big number".
+    """
+    if after is None:
+        return before is not None
+    if before is None:
+        return False
+    return after > before
+
+
+def _floor_lowered(before: float | None, after: float | None) -> bool:
+    """Whether a threshold got easier to clear. `None` is *no gate*, the
+    mirror image of `_ceiling_raised`'s `None`.
+    """
+    if after is None:
+        return before is not None
+    if before is None:
+        return False
+    return after < before
+
+
 def apply_definition(contract: AgentContract, definition: AgentContractDefinition) -> None:
     contract.agent_principal_id = definition.agent_principal_id.strip()
     contract.capability_envelope = definition.capability_envelope.as_json()
@@ -317,12 +434,20 @@ def context_product_violation(
 
     `capability_envelope.context_product_ids` was parsed and stored from the
     day AG-10 shipped and read by nothing -- the 2026-09-09 review found the
-    declaration but no enforcement. This is the enforcement, at the MCP
-    server's `tools/list` and `tools/call`, when the caller scopes a request
-    to a product with `contextProductUri`. An earlier version of this note
-    also claimed the resource path; `resources/read` and `prompts/get` do not
-    call it, and neither do the REST context-product routes -- see
-    `Docs/10-architecture/18-agent-capability-enforcement-matrix.md`.
+    declaration but no enforcement. This is the enforcement, and every door
+    to a context product now calls it:
+
+    - MCP `tools/list` and `tools/call`, when the caller scopes a request to
+      a product with `contextProductUri`;
+    - MCP `resources/read` and `prompts/get` (R11-C6);
+    - the REST context-product reads -- `GET /context-product-versions/{id}`,
+      its `/scope` companion and `GET /context-products/{id}/versions`
+      (`context_product_api._enforce_capability_envelope`, R11-C6). REST was
+      the last open door: the same product, a different transport, and which
+      one an agent knocks on is not a governance boundary.
+
+    Keep `Docs/10-architecture/18-agent-capability-enforcement-matrix.md` in
+    step with this list; it is the page that answers "checked where".
 
     Either identifier matches, because a contract is written by a human who
     may reasonably name the product by its stable `product_key` or by its

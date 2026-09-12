@@ -64,6 +64,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.agent_contracts import (
     REASON_CONTEXT_PRODUCT_VIOLATION,
     AgentContractValidationError,
+    agent_kill_blocking_reason,
     context_product_violation,
     load_contract_for_principal,
 )
@@ -389,6 +390,15 @@ NATIVE_VALIDATION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 NATIVE_VALIDATION_TOOL_SLUGS = frozenset(
     item["slug"] for item in NATIVE_VALIDATION_TOOL_DEFINITIONS
+)
+
+#: Every tool `tools/call` serves without a `GovernedToolVersion` behind it.
+#: R11-C6: the three families were dispatched by three near-identical
+#: branches, and a control added to one of them was a control the other two
+#: silently did not get -- which is how the contract came to be enforced on
+#: the governed-tool path below and on none of these. One set, one gate.
+NATIVE_ALL_TOOL_SLUGS = (
+    NATIVE_LINEAGE_TOOL_SLUGS | NATIVE_MARKETPLACE_TOOL_SLUGS | NATIVE_VALIDATION_TOOL_SLUGS
 )
 
 
@@ -1580,6 +1590,124 @@ async def _handle_native_lineage_tool_call(
     }
 
 
+async def _native_tool_contract_denial(
+    slug: str,
+    session: AsyncSession,
+    context: SecurityContext,
+    correlation_id: str,
+) -> dict[str, Any] | None:
+    """R11-C6: the contract's kill switch, on the native-tool door.
+
+    The seven native platform tools (`NATIVE_LINEAGE_TOOL_SLUGS`,
+    `NATIVE_MARKETPLACE_TOOL_SLUGS`, `NATIVE_VALIDATION_TOOL_SLUGS`) are
+    dispatched from `_handle_tools_call` *before* it resolves the caller's
+    contract for the governed-tool path, so they ran with no contract at all:
+    a contracted agent whose kill switch an operator had just engaged kept
+    answering on this door. Establishing what they expose decided how much of
+    the contract they need:
+
+    - **The five lineage tools are read-only, value-free metadata** --
+      `get_lineage_graph`, `get_lineage_impact`, `resolve_entity`,
+      `get_transformation_detail`, `get_asset_context`. They wrap the same
+      payload builders `unified_lineage_api`'s REST routes use, and return
+      table/column/dbt-resource names and redacted transformation SQL, never
+      row values.
+    - **`request_data_product_access` mutates.** It calls
+      `request_marketplace_access`, which inserts a
+      `DataProductAccessRequest` and opens a `GovernanceReview`. Bounded by
+      maker-checker (the requester cannot self-approve), but a write.
+    - **`validate_sql` reaches the data plane.** `QueryExecutionGateway.
+      validate` runs the real pipeline as far as `estimate_read_query`, which
+      is a dry-run call against the customer's warehouse. Nothing is
+      executed and no row is read, but it costs the customer money and it
+      answers questions about which objects exist.
+
+    So this was not a documentation fix: two of the seven mutate or leave the
+    platform, and an engaged kill switch means *stop*, on every door, not
+    only the doors that read rows. Contract existence comes with it -- an
+    `agent:`/`AGENT` identity that resolves no contract, or several, is
+    refused rather than served as an uncontracted human
+    (`load_contract_for_principal`).
+
+    What deliberately does **not** apply here, and why:
+
+    - `capability_envelope.tool_slugs` names `GovernedToolVersion` slugs --
+      that is what `envelope_violation` is called with on every other path.
+      A native tool has no governed-tool version, so an envelope cannot name
+      one in the sense the field means, and reading it as though it could
+      would silently redefine the field for every stored contract. The
+      residual is real and is recorded as such: `validate_sql` and
+      `request_data_product_access` are bounded by roles, per-object
+      gateway authorization, maker-checker and now the kill switch -- but not
+      by a per-agent allowlist. Giving native tools their own envelope
+      dimension is a contract-schema change, not a check.
+    - `context_product_ids` already applies: a native call that arrives with
+      a `contextProductUri` is refused outright by the branches below, so
+      there is no product-scoped native path for an envelope to bound.
+
+    Returns the MCP error result to hand back, or `None` to proceed. A human
+    principal holds no contract and is unaffected.
+    """
+
+    async def _denied(action: str, reason: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        record_audit(
+            session,
+            context,
+            action=action,
+            resource_type="native_platform_tool",
+            resource_id=slug,
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={"tool_slug": slug, "reason": reason, **evidence},
+        )
+        await session.commit()
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Blocked by agent contract: {reason}"}],
+        }
+
+    organization_id = context.organization_id
+    if organization_id is None:
+        # `AgentContract.organization_id` is non-nullable, so a caller with no
+        # tenant can hold no contract. For a human that just means
+        # "uncontracted". For an `AGENT` identity it is exactly the unresolved
+        # case `load_contract_for_principal` refuses, and it has to be refused
+        # here for the same reason: an agent must not be able to shed its
+        # contract by arriving without a tenant. Same condition that function
+        # uses, so the two cannot drift into disagreeing.
+        if context.principal_type == "AGENT" or context.principal_id.startswith("agent:"):
+            return await _denied(
+                "mcp.native_tool.agent_contract_denied",
+                "agent_contract_unresolved",
+                {"organization_id": None},
+            )
+        return None
+    try:
+        contract = await load_contract_for_principal(
+            session,
+            organization_id=organization_id,
+            agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
+        )
+    except AgentContractValidationError as exc:
+        return await _denied(
+            "mcp.native_tool.agent_contract_denied", exc.code, {}
+        )
+    if contract is None:
+        return None
+    blocked = await agent_kill_blocking_reason(session, contract)
+    if blocked is None:
+        return None
+    return await _denied(
+        "mcp.native_tool.kill_switch_denied",
+        blocked,
+        {
+            "kill_scope": contract.kill_scope,
+            "agent_principal_id": contract.agent_principal_id,
+        },
+    )
+
+
 async def _handle_tools_call(
     params: dict[str, Any],
     session: AsyncSession,
@@ -1629,28 +1757,27 @@ async def _handle_tools_call(
             "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
         }
 
-    if slug in NATIVE_LINEAGE_TOOL_SLUGS:
+    if slug in NATIVE_ALL_TOOL_SLUGS:
         if scoped_product is not None:
             return {
                 "isError": True,
                 "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
             }
-        return await _handle_native_lineage_tool_call(
-            slug, arguments, session, context, correlation_id, settings
-        )
-    if slug in NATIVE_MARKETPLACE_TOOL_SLUGS:
-        if scoped_product is not None:
-            return {
-                "isError": True,
-                "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
-            }
-        return await _handle_native_marketplace_tool_call(slug, arguments, session, context)
-    if slug in NATIVE_VALIDATION_TOOL_SLUGS:
-        if scoped_product is not None:
-            return {
-                "isError": True,
-                "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
-            }
+        # R11-C6: before the dispatch, not after. These branches used to
+        # return above the contract resolution the governed-tool path does
+        # further down, so an engaged kill switch stopped nothing here --
+        # including the one native tool that writes and the one that reaches
+        # the customer's warehouse. See `_native_tool_contract_denial` for
+        # what each tool exposes and which parts of the contract apply.
+        denial = await _native_tool_contract_denial(slug, session, context, correlation_id)
+        if denial is not None:
+            return denial
+        if slug in NATIVE_LINEAGE_TOOL_SLUGS:
+            return await _handle_native_lineage_tool_call(
+                slug, arguments, session, context, correlation_id, settings
+            )
+        if slug in NATIVE_MARKETPLACE_TOOL_SLUGS:
+            return await _handle_native_marketplace_tool_call(slug, arguments, session, context)
         return await _handle_native_validation_tool_call(
             slug, arguments, session, context, settings, correlation_id
         )

@@ -689,6 +689,20 @@ class _RestRetiredVersionReadSession:
     async def get(self, _model: type[object], _identity: object) -> object:
         return self._get_queue.pop(0)
 
+    async def scalars(self, _statement: object) -> object:
+        """R11-C6: `_enforce_capability_envelope` resolves the caller's agent
+        contract on this path now. Both callers below are `USER` principals,
+        which hold no contract -- an empty result is what the real
+        organization-scoped query returns for them, and the envelope check
+        then passes through to the retirement branch these tests are about.
+        """
+
+        class _Scalars:
+            def all(self_inner) -> list[object]:
+                return []
+
+        return _Scalars()
+
     async def scalar(self, _statement: object) -> object:
         return self._scalar_queue.pop(0)
 

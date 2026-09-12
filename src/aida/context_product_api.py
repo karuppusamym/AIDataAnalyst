@@ -9,6 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.agent_contracts import (
+    REASON_CONTEXT_PRODUCT_VIOLATION,
+    AgentContractValidationError,
+    context_product_violation,
+    load_contract_for_principal,
+)
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
@@ -222,6 +228,97 @@ async def _version_scope(
     if product is None or product.organization_id != version.organization_id:
         raise HTTPException(status_code=409, detail="context product identity is unavailable")
     return product, version
+
+
+async def _enforce_capability_envelope(
+    session: AsyncSession,
+    context: SecurityContext,
+    product: ContextProduct,
+    version: ContextProductVersion | None = None,
+) -> None:
+    """AR-06 (R11-C6): a contracted agent's capability envelope, on the REST
+    door too.
+
+    `mcp_server` resolves the caller's contract and refuses a context product
+    `capability_envelope.context_product_ids` does not name -- on
+    `tools/list`, `tools/call`, `resources/read` and `prompts/get`. REST is
+    the same product through a different transport, and it only checked
+    roles. So a contracted agent whose envelope named product A could read
+    product B by asking this API for it instead of asking MCP: one product,
+    two doors, one of them locked. Which door an agent knocks on is not a
+    governance boundary.
+
+    Deliberately *not* symmetric with the MCP fix in one respect: the AR-10
+    outbound screening that accompanies it there is not applied here. REST
+    serves the UI, and the screening design keeps quarantined text visible to
+    a human looking at the object -- withholding it here would hide an
+    author's own prose from the author. The envelope is about *who may reach
+    the product*; the screening is about *what text leaves for a model*. Only
+    the first belongs on this path.
+
+    A human principal has no contract and is unaffected (`None` from
+    `load_contract_for_principal`), so this never becomes a second role
+    check. An `agent:`/`AGENT` identity with no contract, or with more than
+    one, is refused -- ambiguity must not disable the restriction.
+
+    Both denials raise the identical anti-enumeration 404 the role denial
+    beside them already raises, and both are audited: an operator needs to
+    see that an agent reached past its envelope, while the agent must not
+    learn from the response that the product exists.
+
+    `version` is the version being read where there is one, and `None` on the
+    version *listing*, which is a per-product decision. The envelope names
+    products, never versions, so the answer does not depend on it -- it only
+    decides which object the denial is recorded against.
+    """
+    resource_type = "context_product_version" if version is not None else "context_product"
+    resource_id = str(version.id) if version is not None else str(product.id)
+    evidence: dict[str, object] = {"product_key": product.product_key}
+    if version is not None:
+        evidence["version"] = version.version
+    try:
+        contract = await load_contract_for_principal(
+            session,
+            organization_id=product.organization_id,
+            agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
+        )
+    except AgentContractValidationError as exc:
+        record_audit(
+            session,
+            context,
+            action="context_product.read.agent_contract_denied",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details={**evidence, "reason": exc.code},
+        )
+        await session.commit()
+        raise HTTPException(
+            status_code=404, detail="context product version not found"
+        ) from exc
+    if contract is None:
+        return
+    if (
+        context_product_violation(
+            contract, product_key=product.product_key, product_id=str(product.id)
+        )
+        is None
+    ):
+        return
+    record_audit(
+        session,
+        context,
+        action="context_product.read.envelope_denied",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={**evidence, "reason": REASON_CONTEXT_PRODUCT_VIOLATION},
+    )
+    await session.commit()
+    raise HTTPException(status_code=404, detail="context product version not found")
 
 
 async def _require_exact_ids(
@@ -442,6 +539,11 @@ async def list_context_product_versions(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     product = await _product_scope(session, product_id, context)
+    # AR-06 (R11-C6): this listing is one product's versions, so it is the
+    # same envelope decision as reading one of them -- and the cheapest
+    # remaining door to "does product B exist and what versions does it have"
+    # for an agent whose envelope names only product A.
+    await _enforce_capability_envelope(session, context, product)
     statement = select(ContextProductVersion)
     count_statement = select(func.count()).select_from(ContextProductVersion)
     visibility: tuple[ColumnElement[bool], ...] = ()
@@ -490,6 +592,12 @@ async def get_context_product_version(
     session: AsyncSession = Depends(get_session),
 ) -> ContextProductVersionRead:
     product, version = await _version_scope(session, version_id, context)
+    # AR-06 (R11-C6): before any lifecycle disclosure. The retirement branch
+    # below deliberately tells a previously-authorized caller that a version
+    # was retired rather than that it does not exist; an agent whose envelope
+    # excludes this product must not be able to use that branch to learn the
+    # version exists at all.
+    await _enforce_capability_envelope(session, context, product, version)
     if not _can_read_context_product_version(context, version):
         # AT-7(a)/AT-D1: a retired version (SUPERSEDED/DEPRECATED, or a
         # SUPPORTED version past its window) is not always the same "not
@@ -654,6 +762,9 @@ async def get_context_product_version_scope(
     quality gate) -- it describes scope, it is not itself a retrieval.
     """
     product, version = await _version_scope(session, version_id, context)
+    # AR-06 (R11-C6): the scope composition is still this product, so the
+    # envelope still bounds who may see how far it reaches.
+    await _enforce_capability_envelope(session, context, product, version)
     if not _can_read_context_product_version(context, version):
         raise HTTPException(status_code=404, detail="context product version not found")
     project = await session.get(Project, product.project_id)
@@ -1039,6 +1150,12 @@ async def list_context_product_consumer_bindings(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     product = await _product_scope(session, product_id, context)
+    # AR-06 (R11-C6): the fourth door to one named product, and the same
+    # per-product decision as the three above. The governance roles this
+    # listing is restricted to make it a *narrower* door, not an exempt one:
+    # a contracted agent holding `DataSteward` has no more business
+    # administering a product outside its envelope than consuming one.
+    await _enforce_capability_envelope(session, context, product)
     statement = (
         select(ContextProductConsumerBinding, ContextProductVersion)
         .join(

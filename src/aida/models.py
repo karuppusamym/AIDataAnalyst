@@ -5062,13 +5062,17 @@ class AgentContractRequest(Base, TimestampMixin):
     codebase already uses) AND a passing AT-8/N17 evaluation gate
     (`aida.agent_eval_gate.compute_agent_eval_gate`) at decision time.
 
-    This does not replace `AgentContract`'s existing direct-write path
-    (`PUT .../agents/{version}/contract`, still available to
-    `PlatformAdmin`/`AgentDeveloper`/`ModelRiskManager` for corrections) — it
-    adds a *reviewed, eval-gated* path alongside it, which is what makes a
-    contract change from an external or newly-onboarded agent developer
-    something the platform actually checked rather than something it merely
-    accepted.
+    This does not replace `AgentContract`'s direct-write path
+    (`PUT .../agents/{version}/contract`) — it adds a *reviewed, eval-gated*
+    path alongside it, which is what makes a contract change from an external
+    or newly-onboarded agent developer something the platform actually checked
+    rather than something it merely accepted.
+
+    Since R11-C6 (2026-09-12) the division between the two is enforced rather
+    than advisory: the direct write is bound to the agent version's registered
+    owner and refuses any edit that *widens* the contract's authority
+    (`agent_contracts.contract_widening`), so it really is limited to
+    corrections and this is the only path by which an agent's authority grows.
 
     `definition` stores exactly the fields `agent_contracts.
     AgentContractDefinition` needs to reconstruct itself

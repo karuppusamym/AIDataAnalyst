@@ -1,14 +1,25 @@
 """AG-10 extension: reviewed, eval-gated agent contract requests.
 
 `agent_contract_api.put_agent_contract` (`PUT .../agents/{version}/contract`)
-is a direct write: any `CONTRACT_AUTHORS` principal can create or replace an
-agent's contract unilaterally, with no second opinion and no check that the
-agent has ever actually been evaluated. That path is unchanged here and stays
-available for corrections -- this module adds a second, *reviewed* path
-alongside it, for the case that actually needs one: bringing a new or
-externally-developed agent onto the platform, where "a trusted-enough
-principal typed some values into a form" should not by itself be enough to
-grant the resulting workload identity production capability.
+is the direct write. When this module was built that path was unbounded: any
+`CONTRACT_AUTHORS` principal could create or replace *any* agent's contract
+unilaterally, with no second opinion and no check that the agent had ever
+been evaluated. This module added a second, *reviewed* path alongside it for
+the case that most needed one -- bringing a new or externally-developed agent
+onto the platform, where "a trusted-enough principal typed some values into a
+form" should not by itself grant the resulting workload identity production
+capability.
+
+R11-C6 (2026-09-12) then narrowed the direct path to what the paragraph above
+always claimed it was for. It is now bound to the agent version's registered
+owner, and `agent_contracts.contract_widening` refuses any edit that *widens*
+the contract's authority and points it here instead. So this is no longer
+merely the alternative route for onboarding: it is the **only** route by
+which an agent's authority grows, and the direct write is genuinely limited
+to corrections that take nothing away from the platform's side of the
+bargain. See `agent_contract_api._require_agent_steward` for why ownership
+was the binding chosen, and `Docs/10-architecture/18-agent-capability-
+enforcement-matrix.md` for the row.
 
 The flow:
 

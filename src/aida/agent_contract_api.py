@@ -24,9 +24,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import (
+    REASON_WIDENING_NEEDS_REVIEW,
     AgentContractDefinition,
     AgentContractValidationError,
     CapabilityEnvelope,
+    contract_widening,
     load_agent_asset_version,
     load_agent_contract,
     parse_capability_envelope,
@@ -80,7 +82,20 @@ router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 #: Who may author or change an agent's contract. Deliberately narrow: a
 #: contract is the agent's authority, so editing one is a T3-shaped action
 #: even though the contract itself is not routed through review.
+#:
+#: R11-C6: holding one of these roles is necessary and no longer sufficient.
+#: The role says "you work on agents"; it never said *which* agents, so any
+#: `AgentDeveloper` could rewrite any other developer's agent inside the
+#: organization. `_require_agent_steward` binds a direct write to the agent
+#: version's registered owner, and `contract_widening` sends every widening
+#: edit to the reviewed path instead. See `_require_agent_steward`.
 CONTRACT_AUTHORS = ("PlatformAdmin", "AgentDeveloper", "ModelRiskManager")
+
+#: The break-glass role for the two controls below, and the only role that
+#: may act on an agent it does not own. Deliberately *not* the whole of
+#: `CONTRACT_AUTHORS`: `AgentDeveloper` is the role the controls exist to
+#: bound, so letting it break its own glass would leave nothing.
+CONTRACT_BREAK_GLASS = "PlatformAdmin"
 CONTRACT_READERS = (*CONTRACT_AUTHORS, "Reviewer", "Auditor", "DataSteward", "Operations")
 INBOX_READERS = (
     "PlatformAdmin",
@@ -387,6 +402,134 @@ async def _require_agent_version(
 # ---------------------------------------------------------------------------
 
 
+async def _refuse(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    organization_id: UUID,
+    ai_asset_version_id: UUID,
+    action: str,
+    reason: str,
+    status_code: int,
+    detail: str,
+    evidence: dict[str, Any] | None = None,
+) -> HTTPException:
+    """Record a DENIED row for one refused contract control and return the
+    exception to raise. Refusals here are evidence, not just answers: an
+    operator needs to see that someone reached for another team's agent.
+    """
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action=action,
+        resource_type="agent_contract",
+        resource_id=str(ai_asset_version_id),
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={"reason": reason, **(evidence or {})},
+    )
+    await session.commit()
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+async def _require_agent_steward(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    organization_id: UUID,
+    ai_asset_version_id: UUID,
+    version: AiAssetVersion,
+    action: str,
+) -> None:
+    """R11-C6: bind a direct contract control to *this* agent's registered owner.
+
+    `put_agent_contract` and the kill-switch endpoints gated on a role plus
+    an organization, and nothing else. `validate_contract_definition` blocks
+    naming *yourself* as the agent principal (INV-8), which stops the
+    single-developer self-supervision case -- but two developers editing each
+    other's agents defeats it trivially, and the plainer problem needed no
+    collusion at all: any one `AgentDeveloper` could widen any other agent's
+    envelope, or release its kill switch, anywhere in the organization.
+
+    The binding is `AiAssetVersion.owner_principal` -- the accountable human
+    already recorded against the agent version, non-nullable, and already the
+    identity `validate_contract_definition` refuses to let a contract name as
+    its agent. Using it here needs no new column and no new role: the
+    platform already knew who owns this agent, and simply never asked.
+
+    `PlatformAdmin` is the break-glass, audited like everything else. It is
+    not a hole in the control: a PlatformAdmin's *widening* edits are still
+    refused by `contract_widening` below, and their kill-switch release is
+    still held to maker != checker. Ownership decides who may touch an agent
+    at all; those two decide what may be done to it unilaterally.
+    """
+    if context.principal_id == version.owner_principal:
+        return
+    if CONTRACT_BREAK_GLASS in context.roles:
+        record_audit(
+            session,
+            replace(context, organization_id=organization_id),
+            action=f"{action}.break_glass",
+            resource_type="agent_contract",
+            resource_id=str(ai_asset_version_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "owner_principal": version.owner_principal,
+                "reason": "platform_admin_break_glass",
+            },
+        )
+        return
+    raise await _refuse(
+        session,
+        context,
+        organization_id=organization_id,
+        ai_asset_version_id=ai_asset_version_id,
+        action=action,
+        reason="agent_contract_not_steward",
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "only this agent version's registered owner may change its contract "
+            "directly; submit an agent contract request for review instead"
+        ),
+        evidence={"owner_principal": version.owner_principal},
+    )
+
+
+async def _kill_switch_engaged_by(
+    session: AsyncSession, *, organization_id: UUID, ai_asset_version_id: UUID
+) -> str | None:
+    """The principal who engaged the switch currently in force, or `None`.
+
+    `AgentContract` stores only the current-state flag; its own docstring
+    names `AuditEvent` as where "the immutable engage/release history lives",
+    so this reads the designed authority rather than adding a column that
+    would duplicate it. The most recent successful `agent_contract.kill` row
+    for this version is the engagement in force -- a release writes
+    `agent_contract.release`, so it cannot be mistaken for one.
+
+    `None` means the evidence is not there (an engagement older than the
+    audit retention window, or a flag set outside this API). That degrades
+    the maker != checker half of the release control, and deliberately does
+    not brick the switch: a kill switch nobody can ever release is its own
+    outage. The ownership half still applies, and the release audit records
+    `engaged_by: null` so the weaker decision is visible as such.
+    """
+    engaged_by: str | None = await session.scalar(
+        select(AuditEvent.principal_id)
+        .where(
+            AuditEvent.organization_id == organization_id,
+            AuditEvent.resource_type == "agent_contract",
+            AuditEvent.resource_id == str(ai_asset_version_id),
+            AuditEvent.action == "agent_contract.kill",
+            AuditEvent.outcome == "SUCCESS",
+        )
+        .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+        .limit(1)
+    )
+    return engaged_by
+
+
 @router.get(
     "/organizations/{organization_id}/agents/{ai_asset_version_id}/contract",
     response_model=AgentContractRead,
@@ -422,9 +565,44 @@ async def put_agent_contract(
 
     Idempotent by (organization, version): a second PUT edits the same row
     rather than creating a rival authority for the same agent.
+
+    R11-C6 narrowed this path to what its own siblings always said it was
+    for -- *corrections*. Two controls bound it now:
+
+    1. the caller must be the agent version's registered owner, or break the
+       `PlatformAdmin` glass (`_require_agent_steward`);
+    2. an edit that **widens** the contract's authority is refused outright,
+       whoever asks, and pointed at the reviewed path
+       (`POST .../agent-contract-requests` -> `GovernanceReview`
+       `AGENT_CONTRACT_REQUEST`, maker != checker, plus a live AT-8/N17
+       evaluation gate at decision time). `contract_widening` says which
+       dimensions count and why.
+
+    The asymmetry is the design: tightening an agent's leash stays a one-
+    principal action, because an operator who has to convene a committee to
+    reduce an agent's blast radius will leave it wide instead. Handing an
+    agent *more* -- a tool slug, a context product, a higher tier, a looser
+    cap, a narrower kill scope -- is a grant of T3 authority
+    (`review_risk_tiers`: `AGENT_CONTRACT` sits with model routes and access
+    policies), and this platform does not let one principal make a T3 grant
+    alone anywhere else either.
+
+    Creating a *first* contract is not a widening: there is no prior
+    authority to widen, and the reviewed path already exists precisely for
+    onboarding an agent. It is still bound to the registered owner by (1),
+    and the granted dimensions are written into the audit row so the grant
+    is legible as one.
     """
     enforce_organization(context, organization_id)
     asset, version = await _require_agent_version(session, organization_id, ai_asset_version_id)
+    await _require_agent_steward(
+        session,
+        context,
+        organization_id=organization_id,
+        ai_asset_version_id=ai_asset_version_id,
+        version=version,
+        action="agent_contract.update",
+    )
     definition = _definition_from(body)
     try:
         validate_contract_definition(
@@ -441,6 +619,24 @@ async def put_agent_contract(
         session, organization_id=organization_id, ai_asset_version_id=ai_asset_version_id
     )
     created = contract is None
+    widened = () if contract is None else contract_widening(contract, definition)
+    if widened:
+        raise await _refuse(
+            session,
+            context,
+            organization_id=organization_id,
+            ai_asset_version_id=ai_asset_version_id,
+            action="agent_contract.update",
+            reason=REASON_WIDENING_NEEDS_REVIEW,
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "this change widens the agent's authority and cannot be applied "
+                "directly; submit it as an agent contract request so a second "
+                "principal decides it and the evaluation gate is checked "
+                f"({', '.join(widened)})"
+            ),
+            evidence={"widened": list(widened)},
+        )
     if contract is None:
         contract = AgentContract(
             organization_id=organization_id,
@@ -475,6 +671,29 @@ async def put_agent_contract(
             "kill_scope": contract.kill_scope,
             "sampling_rate": contract.sampling_rate,
             "tool_slug_count": len(definition.capability_envelope.tool_slugs),
+            # R11-C6: a first contract is a grant with nothing to compare
+            # against, so the dimensions it hands the agent are written out
+            # here rather than inferred later from a diff that has no
+            # left-hand side.
+            "granted_on_create": (
+                sorted(
+                    {
+                        *(
+                            f"capability_envelope.{field}"
+                            for field in (
+                                "tool_slugs",
+                                "context_product_ids",
+                                "write_lanes",
+                            )
+                            if getattr(definition.capability_envelope, field)
+                        ),
+                        "autonomy_tier",
+                        "kill_scope",
+                    }
+                )
+                if created
+                else []
+            ),
         },
     )
     record_outbox(
@@ -512,6 +731,53 @@ async def _set_kill(
     )
     if contract is None:
         raise HTTPException(status_code=404, detail="this agent version has no contract")
+    engaged_by: str | None = None
+    if not engaged:
+        # R11-C6: *releasing* is the controlled direction. Engaging stays open
+        # to every `CONTRACT_AUTHORS` principal on purpose -- an emergency
+        # brake that only the accountable owner can pull is a brake that is
+        # not there at 3am -- but disengaging one had exactly the same gate,
+        # so any `AgentDeveloper` could quietly undo any operator's stop.
+        #
+        # Two conditions, and the pair is what makes this "at least as
+        # controlled as approving a model route": ownership decides who may
+        # act on this agent at all, and maker != checker (the same INV-8 rule
+        # `governance_decision_service.check_decision_permitted` applies to
+        # every review in this codebase, delegation included) stops the
+        # principal who engaged the switch from being the one who lifts it.
+        _, release_version = await _require_agent_version(
+            session, organization_id, ai_asset_version_id
+        )
+        await _require_agent_steward(
+            session,
+            context,
+            organization_id=organization_id,
+            ai_asset_version_id=ai_asset_version_id,
+            version=release_version,
+            action="agent_contract.release",
+        )
+        engaged_by = await _kill_switch_engaged_by(
+            session,
+            organization_id=organization_id,
+            ai_asset_version_id=ai_asset_version_id,
+        )
+        if engaged_by is not None and (
+            engaged_by == context.principal_id
+            or engaged_by == context.active_delegator_principal_id
+        ):
+            raise await _refuse(
+                session,
+                context,
+                organization_id=organization_id,
+                ai_asset_version_id=ai_asset_version_id,
+                action="agent_contract.release",
+                reason="agent_kill_switch_self_release",
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "maker-checker separation is required: the principal who "
+                    "engaged this kill switch may not release it"
+                ),
+            )
     contract.kill_engaged = engaged
     record_audit(
         session,
@@ -525,6 +791,11 @@ async def _set_kill(
             "kill_engaged": engaged,
             "kill_scope": contract.kill_scope,
             "reason": reason,
+            # R11-C6: on a release, who the maker-checker check was made
+            # against. `null` says the engagement's audit evidence was not
+            # available and the check therefore only enforced ownership --
+            # the weaker decision, recorded as such rather than hidden.
+            **({} if engaged else {"engaged_by": engaged_by}),
         },
     )
     record_outbox(
