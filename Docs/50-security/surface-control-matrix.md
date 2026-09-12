@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **472**
-- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 421, SDK 1
+- Surfaces covered: **473**
+- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 421, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -75,6 +75,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/model/export.xlsx` | EXPORT | `aida.model_export_api.export_datasource_model` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export` | EXPORT | `aida.lineage_evidence_export_api.export_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/evidence/export` | EXPORT | `aida.asset_evidence_api.export_asset_evidence` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/audit-events/export.jsonl` | EXPORT | `aida.audit_export_api.export_audit_events` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}/grounding-receipts` | JOB | `aida.api.get_agent_run_grounding_receipts` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}` | JOB | `aida.api.get_agent_run` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/ai/runtime-status` | JOB | `aida.api.ai_runtime_status` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | no | no | read | no | not cancellable |

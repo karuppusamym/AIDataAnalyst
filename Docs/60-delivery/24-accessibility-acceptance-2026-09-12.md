@@ -43,7 +43,7 @@ The accessibility-specific coverage added for this row:
 ### 1.1 Rules deliberately not run, and why
 
 `color-contrast` is disabled in the harness (`RULES_JSDOM_CANNOT_JUDGE` in
-`src/test/a11y.ts`). It needs real rendering and a composited background
+`ui-next/src/test/a11y.ts`). It needs real rendering and a composited background
 colour; jsdom lays nothing out, so running it produces an error or an
 "incomplete", never an answer. **Contrast is therefore entirely on §2.**
 
