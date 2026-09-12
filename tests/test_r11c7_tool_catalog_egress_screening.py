@@ -48,12 +48,15 @@ HOSTILE = (
 
 
 @pytest_asyncio.fixture
-async def scenario(db: AsyncSession) -> _Scenario:
+async def scenario(db: AsyncSession) -> _Scenario:  # noqa: F811 - see below
     """The estate harness from the ranking tests, reused rather than rebuilt.
 
     Its `build()` seeds the organization -> LOB -> domain -> project ->
     datasource -> catalog chain a governed tool version needs, which is the
     same chain this file needs and no part of what it is testing.
+
+    The parameter shadows the imported `db` fixture and has to: pytest injects
+    fixtures by parameter *name*, so requesting `db` means naming it `db`.
     """
     return await _Scenario(db).build()
 
@@ -67,10 +70,10 @@ def _governed(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {t["name"]: t for t in tools if t["_atlas_meta"].get("tool_id")}
 
 
-async def _quarantine_events(db: AsyncSession) -> list[AuditEvent]:
+async def _quarantine_events(session: AsyncSession) -> list[AuditEvent]:
     return list(
         (
-            await db.scalars(
+            await session.scalars(
                 select(AuditEvent).where(
                     AuditEvent.action == "mcp.tools_list.egress_quarantined"
                 )

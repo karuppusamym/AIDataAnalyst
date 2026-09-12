@@ -55,6 +55,31 @@ name: aida-platform
 # from the environment with an off default instead of being hard-coded to true.
 # ---------------------------------------------------------------------------
 
+# Every AIDA_* setting in `.env` reaches the app services, and the explicit
+# `environment` block below still wins for anything it names.
+#
+# Without this, a setting the documentation tells an operator to put in `.env`
+# silently did nothing in Docker: only the ~35 names listed below were
+# forwarded, so `AIDA_DELIVERY_WORKER_ENABLED`, the governance-notification
+# flag, the webhook URLs, the reviewer-agent controls and every task agent's
+# interval were read from a file the container could not see. The features
+# looked broken and the configuration looked correct, which is the worst
+# possible pairing.
+#
+# `required: false` so a fresh clone with no `.env` still starts.
+#
+# The precedence is what makes this safe -- Compose lets `environment`
+# override `env_file`, and every container-internal address below is named
+# there: `AIDA_DATABASE_URL`, `AIDA_REDIS_URL`, `AIDA_KAFKA_BOOTSTRAP_SERVERS`,
+# `AIDA_TEMPORAL_ADDRESS` and the object-store trio all point at service
+# hostnames, while a developer's `.env` points the same names at localhost for
+# host-side scripts. `tests/test_compose_environment.py` pins that every one of
+# them stays explicit, because removing one from the block below would silently
+# let a localhost value take over inside the container.
+x-app-env-file: &app-env-file
+  - path: .env
+    required: false
+
 x-app-environment: &app-environment
   AIDA_ENVIRONMENT: development
   AIDA_LOG_LEVEL: INFO
@@ -343,6 +368,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     # This repository intentionally has independent Alembic branches. `heads`
     # upgrades each of them; `head` fails as soon as more than one branch exists.
@@ -363,6 +389,7 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     ports:
       - "8000:8000"
@@ -398,6 +425,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    env_file: *app-env-file
     environment:
       <<: *app-environment
       AIDA_BASE_URL: http://api:8000
@@ -415,6 +443,7 @@ services:
         condition: service_healthy
       sample-source:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     command: ["python", "-m", "aida.workflows.worker"]
     restart: unless-stopped
@@ -426,6 +455,7 @@ services:
         condition: service_completed_successfully
       temporal:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     command: ["python", "-m", "aida.workflows.scheduler"]
     restart: unless-stopped
@@ -441,6 +471,7 @@ services:
         condition: service_completed_successfully
       redpanda:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     command: ["python", "-m", "aida.projectors.outbox_publisher"]
     restart: unless-stopped
@@ -458,6 +489,7 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+    env_file: *app-env-file
     environment: *app-environment
     command: ["python", "-m", "aida.projectors.graph_projector"]
     restart: unless-stopped

@@ -150,7 +150,7 @@ The nine that ship **on**: `audit_archive`, `business_rollup_rebuild`,
 `temporal`, `vector_index_rebuild`.
 
 To see everything except the reviewer agent, add this block to `.env` and
-rebuild `api` and `fleet-scheduler`:
+recreate `api` and `fleet-scheduler`:
 
 ```
 AIDA_DELIVERY_WORKER_ENABLED=true
@@ -164,13 +164,27 @@ AIDA_QUALITY_CERTIFICATION_EXPIRY_ENABLED=true
 ```
 
 ```bash
-docker compose up -d --build api fleet-scheduler
+docker compose up -d api fleet-scheduler
 ```
 
 **A running container keeps the image and environment it started with.** An
-edit to `.env` does nothing until you rebuild. This has bitten twice: a stack
+edit to `.env` does nothing until you recreate the container. This has bitten twice: a stack
 ten hours old silently lacked a whole feature's code and every embedding
 variable, while looking perfectly healthy.
+
+**If you are on a build from before 2026-09-12, none of that worked.**
+`compose.yaml` had no `env_file` and each app service declared an explicit
+list of about thirty-five variables, so a setting reached the container only
+if it happened to be on that list. Of the fifteen flags above, five were:
+generation, the MCP budget, both lineage flags and the vector rebuild.
+`AIDA_DELIVERY_WORKER_ENABLED`, `AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED`, the
+Slack and Teams webhook URLs, the reviewer-agent controls and **every task
+agent's interval** were not, so setting them in `.env` did nothing at all
+while the configuration looked perfectly correct. Found the hard way, trying
+to produce a single delivery attempt. Every app service now reads `.env`, with
+the container-internal addresses still pinned in `compose.yaml` so a
+host-side `.env` cannot redirect a container at localhost -- and
+`tests/test_compose_environment.py` fails if one of them stops being pinned.
 
 ### 3.3 A model route is a governed object, not a setting
 
@@ -337,7 +351,31 @@ and nothing leaves the process — visible in `/health/ready` as
 `delivery_backlog.detail = failed=0;queued=0;worker=disabled`.
 
 Turn the worker on to drain it. Where it drains *to* needs an account you own;
-see section 7.
+see section 7. But you can exercise the whole path with no account at all, by
+pointing it at a port nothing is listening on:
+
+```
+AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED=true
+AIDA_DELIVERY_WORKER_ENABLED=true
+AIDA_SLACK_WEBHOOK_URL=http://127.0.0.1:9/services/T0/B0/deadend
+```
+
+Port 9 is the discard port, so nothing leaves the machine and every attempt
+fails with a connection error -- which is the history worth reading:
+
+```bash
+AIDA_ENVIRONMENT=development ./.venv/Scripts/python.exe scripts/delivery_history.py
+```
+
+That prints each intent with its full attempt history: how many times, how far
+apart, with what status code, and whether the destination ever answered. Note
+that the destination comes back as `scheme://host/#digest` -- a webhook URL is
+a bearer credential in its path, so the path is never stored.
+
+Two readings to know. **An intent with no attempt rows was never tried**,
+which is almost always the worker being off, and is a different problem from
+having been tried and refused. And for Teams the output says so explicitly: a
+2xx there is the Workflows *trigger* answering, not a posted card.
 
 ---
 
