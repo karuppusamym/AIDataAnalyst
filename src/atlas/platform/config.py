@@ -341,6 +341,16 @@ class Settings(BaseSettings):
     #: it already decided. Set to 0 to disable the check (and to accept that
     #: the oversight claim is then unbacked).
     reviewer_agent_max_unresolved_samples: int = Field(default=50, ge=0, le=100_000)
+    #: AR-11: how long the *oldest* unread sample may sit before the agent
+    #: stops deciding. The count bound above is necessary but not sufficient:
+    #: forty-nine samples nobody has looked at in eight months is inside the
+    #: default count bound and is plainly not oversight. Condition (b)'s
+    #: argument is that a human reads the sample, and a claim with no deadline
+    #: on it cannot be breached, so it was reported (`oldest_pending_hours`)
+    #: rather than enforced. This is the deadline. Set to 0 to disable, the
+    #: same explicit operator choice `reviewer_agent_max_unresolved_samples`
+    #: offers, and with the same consequence: the oversight claim is unbacked.
+    reviewer_agent_max_sample_age_hours: int = Field(default=168, ge=0, le=8_760)
     #: AR-04: how old a pre-review may be and still be acted on. Beyond this
     #: the item is left for the next pre-review pass to re-derive rather than
     #: decided on evidence gathered before the world moved. The decision path

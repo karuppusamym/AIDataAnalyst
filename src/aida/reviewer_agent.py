@@ -47,6 +47,14 @@ Guards, in order, on every auto-decision:
 7. The unresolved audit-sample backlog must be inside its bound. Condition
    (b)'s safety argument is that humans read a 5% sample; an unread queue is
    not oversight, so the agent stops deciding rather than adding to it.
+8. And the sample must be read *in time*: the oldest unread one must be
+   younger than `reviewer_agent_max_sample_age_hours`. Guard 7 alone does not
+   imply this -- a queue that stays just under the count bound while nobody
+   opens its oldest item satisfies it forever, which is the shape unattended
+   oversight actually decays into. Added 2026-09-12 for AR-11, whose exit
+   condition recorded the time-to-verdict targets as reported but not
+   enforced; `reviewer_agent_metrics.oldest_pending_hours` was already the
+   number, and this is that number asked as a precondition.
 
 Guards 2, 3, 4 and the per-item half of 6 were added on 2026-09-09 closing
 AR-01 through AR-04 of `Docs/10-architecture/15-agent-architecture-critical-
@@ -118,6 +126,12 @@ REASON_AUDIT_BACKLOG = "reviewer_agent_audit_backlog_exceeded"
 #: AR-04: the batch is running at a transaction isolation level under which
 #: the per-item suspension re-read cannot see the kill switch being thrown.
 REASON_UNSUPPORTED_ISOLATION = "reviewer_agent_unsupported_isolation"
+
+#: AR-11: the *oldest* unread sample has sat past its deadline. Distinct from
+#: the count bound above because the two fail differently: a small queue that
+#: nobody ever drains passes the count check forever, and is the shape
+#: unattended oversight actually rots into.
+REASON_SAMPLE_AGE = "reviewer_agent_sample_age_exceeded"
 
 #: AR-04: the only transaction isolation level at which
 #: `auto_decide_tier0_tier1`'s per-item suspension re-read can observe a
@@ -701,6 +715,38 @@ async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID)
     return int(count or 0)
 
 
+async def oldest_unresolved_sample_age_hours(
+    session: AsyncSession, organization_id: UUID, *, now: datetime
+) -> float | None:
+    """How long the longest-unread sample has been waiting, or `None` (AR-11).
+
+    The companion to `unresolved_audit_samples`, and not derivable from it:
+    the count answers "how much is outstanding", this answers "for how long",
+    and only the second one notices a small queue that never drains. Forty-nine
+    samples untouched since February sit inside the default count bound
+    indefinitely while ADR-0027 condition (b)'s claim that humans read the
+    sample has been false for months.
+
+    `reviewer_agent_metrics` already reports this number as
+    `oldest_pending_hours`; this is the same quantity asked as a precondition
+    rather than a statistic. Computed in Python from `min(sampled_at)` rather
+    than as a SQL interval because SQLite and PostgreSQL disagree about
+    date arithmetic, and because the stored value comes back naive on SQLite
+    -- the same `.replace(tzinfo=UTC)` normalisation the metrics module does.
+    """
+    oldest = await session.scalar(
+        select(func.min(ReviewAuditSample.sampled_at)).where(
+            ReviewAuditSample.organization_id == organization_id,
+            ReviewAuditSample.human_outcome == "PENDING",
+        )
+    )
+    if oldest is None:
+        return None
+    if oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=UTC)
+    return round((now - oldest).total_seconds() / 3600, 2)
+
+
 def record_audit_backlog_refusal(
     session: AsyncSession,
     organization_id: UUID,
@@ -718,15 +764,8 @@ def record_audit_backlog_refusal(
     notification or a dashboard can act on.
     """
     details = {"unresolved_samples": unresolved, "max_unresolved_samples": limit}
-    record_audit(
-        session,
-        replace(context, organization_id=organization_id),
-        action="reviewer_agent.run",
-        resource_type="reviewer_agent_state",
-        resource_id=str(organization_id),
-        outcome="DENIED",
-        correlation_id=get_correlation_id(),
-        details={"reason": REASON_AUDIT_BACKLOG, **details},
+    _record_oversight_denial(
+        session, organization_id, context=context, reason=REASON_AUDIT_BACKLOG, details=details
     )
     record_outbox(
         session,
@@ -796,6 +835,71 @@ async def refuse_unsupported_isolation(session: AsyncSession) -> None:
         supported_isolation_level=SUPPORTED_ISOLATION_LEVEL,
     )
     raise ReviewerAgentUnavailable(REASON_UNSUPPORTED_ISOLATION)
+def record_sample_age_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    context: SecurityContext,
+    oldest_hours: float,
+    limit_hours: int,
+) -> None:
+    """The age half of the same refusal (AR-11).
+
+    Deliberately a *different* outbox event from the count bound rather than
+    the same event carrying a reason field. A consumer's correct response
+    differs: a count breach says samples arrive faster than they are read and
+    wants more reviewers on the queue, an age breach says one item has been
+    skipped and wants someone to open that item. Collapsing them would make
+    the two indistinguishable to exactly the dashboard that has to tell them
+    apart.
+    """
+    details = {"oldest_pending_hours": oldest_hours, "max_sample_age_hours": limit_hours}
+    _record_oversight_denial(
+        session, organization_id, context=context, reason=REASON_SAMPLE_AGE, details=details
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="reviewer_agent_state",
+        aggregate_id=str(organization_id),
+        event_type="reviewer_agent.sample_age_exceeded.v1",
+        payload=details,
+    )
+
+
+def _record_oversight_denial(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    context: SecurityContext,
+    reason: str,
+    details: dict[str, Any],
+) -> None:
+    """The DENIED audit row shared by both oversight bounds.
+
+    One funnel deliberately: both refusals are the same governance fact --
+    the agent's licence to decide lapsed because condition (b)'s oversight
+    stopped happening -- so an auditor reconstructing why the agent went
+    quiet finds them under one `action` and one `resource_type`, with
+    `details["reason"]` naming which bound tripped.
+
+    The *outbox* call stays at each caller with its event name written as a
+    literal, rather than being folded in here too. `tests/
+    test_event_catalog_gate.py` resolves `event_type=` statically, and an
+    event handed in as a parameter is invisible to it -- the catalog row
+    would stop being checked against a real emitter, which is the one thing
+    that gate exists to prevent.
+    """
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action="reviewer_agent.run",
+        resource_type="reviewer_agent_state",
+        resource_id=str(organization_id),
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={"reason": reason, **details},
+    )
 
 
 async def organization_suspended(session: AsyncSession, organization_id: UUID) -> bool:
@@ -892,6 +996,19 @@ async def auto_decide_tier0_tier1(
         raise ReviewerAgentUnavailable(REASON_AUDIT_BACKLOG)
 
     moment = now or datetime.now(UTC)
+    # AR-11: and the sample must be read *in time*. The count bound above is
+    # necessary but not sufficient -- a queue that stays just under it while
+    # nobody opens the oldest item passes it forever, which is the shape
+    # unattended oversight actually decays into. Checked after `moment` is
+    # fixed so the age is measured against the same clock the run uses.
+    age_limit = settings.reviewer_agent_max_sample_age_hours
+    if age_limit:
+        oldest_hours = await oldest_unresolved_sample_age_hours(
+            session, organization_id, now=moment
+        )
+        if oldest_hours is not None and oldest_hours >= age_limit:
+            raise ReviewerAgentUnavailable(REASON_SAMPLE_AGE)
+
     # AR-01: the configured value is clamped before anything derives from it,
     # so a T2/T3 ceiling narrows nothing and widens nothing.
     ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)

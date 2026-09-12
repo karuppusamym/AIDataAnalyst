@@ -299,6 +299,7 @@ and carry no actions: a notification here is never a control surface.
 | `agent.kill_switch_released.v1` | AG-10: an agent's kill switch was released and its runs may resume | ai_asset_version_id, kill_scope, agent_principal_id |
 | `reviewer_agent.sample_resolved.v1` | ADR-0027 condition (b): a human resolved one sampled agent decision. The DISAGREED rate per object type is the metric ADR-0027's revisit trigger watches | sample_id, human_outcome, object_type, risk_tier |
 | `reviewer_agent.audit_backlog_exceeded.v1` | AR-11: the reviewer agent refused a run because its unread audit sample had reached `reviewer_agent_max_unresolved_samples`. Recorded after the refused run's rollback, beside a DENIED `reviewer_agent.run` audit row and a `REVIEWER_AGENT_AUDIT_BACKLOG` notification. The agent resumes by itself once humans bring the backlog under the bound | unresolved_samples, max_unresolved_samples |
+| `reviewer_agent.sample_age_exceeded.v1` | AR-11: the reviewer agent refused a run because its *oldest* unread sample had been waiting `reviewer_agent_max_sample_age_hours` or longer. The count bound above and this one fail differently -- a small queue nobody ever drains stays inside the count bound forever -- so they are separate events, though both share the DENIED `reviewer_agent.run` audit row and the `REVIEWER_AGENT_AUDIT_BACKLOG` notification. The agent resumes by itself once the oldest sample is resolved | oldest_pending_hours, max_sample_age_hours |
 
 ### AI registry — topic `atlas.governance.v1`
 

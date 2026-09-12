@@ -41,7 +41,13 @@ from aida.config import Settings
 from aida.db import Base
 from aida.governance_notifications import EVENT_KINDS, deep_link
 from aida.models import Organization, ReviewAuditSample
-from aida.reviewer_agent import REASON_AUDIT_BACKLOG, REASON_DISABLED
+from aida.reviewer_agent import (
+    REASON_AUDIT_BACKLOG,
+    REASON_DISABLED,
+    REASON_SAMPLE_AGE,
+    ReviewerAgentUnavailable,
+    auto_decide_tier0_tier1,
+)
 from aida.reviewer_agent_metrics import AuditResolutionTime, disagreement_rates
 from aida.security import SecurityContext
 from atlas.modules.observability_audit.models import AuditEvent, OutboxEvent
@@ -49,6 +55,7 @@ from tests.support.doubles import security_context
 
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 _BACKLOG_EVENT = "reviewer_agent.audit_backlog_exceeded.v1"
+_AGE_EVENT = "reviewer_agent.sample_age_exceeded.v1"
 
 
 @pytest.fixture
@@ -331,6 +338,187 @@ async def test_disputing_a_sampled_decision_notifies_and_agreeing_does_not(
     # The link a notification carries is the review, where the object is.
     assert payload["object_id"] == str(disputed.governance_review_id)
     assert payload["risk_tier"] == "T1"
+
+
+# --- enforced: read the sample, and read it in time -------------------------
+#
+# The count bound was already enforced. The age bound was only *reported*
+# (`oldest_pending_hours`), and the two fail differently: a queue that sits
+# just under the count bound while nobody opens its oldest item passes the
+# count check forever. Every test below keeps the count bound comfortably
+# satisfied, so only the age guard can produce the refusal -- delete the guard
+# in `auto_decide_tier0_tier1` and they fail rather than silently still pass.
+
+
+async def test_the_agent_stops_when_the_oldest_sample_is_past_its_deadline(
+    session: AsyncSession,
+) -> None:
+    org = await _org(session)
+    session.add(_sample(org, tier="T0", outcome="PENDING", sampled_hours_ago=200))
+    await session.flush()
+
+    with pytest.raises(ReviewerAgentUnavailable) as refused:
+        await auto_decide_tier0_tier1(
+            session,
+            org.id,
+            settings=_settings(
+                # One sample against a bound of fifty: the count check cannot
+                # be what refuses here.
+                reviewer_agent_max_unresolved_samples=50,
+                reviewer_agent_max_sample_age_hours=168,
+            ),
+            now=NOW,
+        )
+
+    assert refused.value.reason_code == REASON_SAMPLE_AGE
+
+
+@pytest.mark.parametrize(
+    ("sampled_hours_ago", "age_bound", "outcome"),
+    [
+        # Inside the deadline: the agent runs.
+        (24, 168, "PENDING"),
+        # Past it, but the bound is disabled -- the same explicit operator
+        # choice a zero count bound is.
+        (200, 0, "PENDING"),
+        # Past it, but somebody read it. Only *unread* samples are a breach;
+        # an eight-month-old resolved verdict is oversight that happened.
+        (200, 168, "AGREED"),
+    ],
+)
+async def test_what_the_deadline_does_not_stop(
+    session: AsyncSession, sampled_hours_ago: float, age_bound: int, outcome: str
+) -> None:
+    org = await _org(session)
+    session.add(
+        _sample(
+            org,
+            tier="T0",
+            outcome=outcome,
+            sampled_hours_ago=sampled_hours_ago,
+            waited_hours=1 if outcome != "PENDING" else None,
+        )
+    )
+    await session.flush()
+
+    # No pending review rows exist, so a run that is *allowed* decides nothing
+    # and returns empty. The assertion is that it returned at all.
+    assert (
+        await auto_decide_tier0_tier1(
+            session,
+            org.id,
+            settings=_settings(
+                reviewer_agent_max_unresolved_samples=50,
+                reviewer_agent_max_sample_age_hours=age_bound,
+            ),
+            now=NOW,
+        )
+        == []
+    )
+
+
+async def test_a_sample_age_refusal_is_its_own_event_and_still_notifies(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    org = await _org(session)
+    stale = _sample(org, tier="T0", outcome="PENDING", sampled_hours_ago=1)
+    # The endpoint takes its own clock, so anchor the fixture to that one
+    # rather than to this module's fixed NOW.
+    stale.sampled_at = datetime.now(UTC) - timedelta(hours=400)
+    session.add(stale)
+    await session.commit()
+    notifications = _Notifications()
+    monkeypatch.setattr(agent_contract_api, "notify_safely", notifications)
+
+    with pytest.raises(HTTPException) as refused:
+        await run_reviewer_agent(
+            org.id,
+            limit=10,
+            context=_context(org, "ops-b"),
+            session=session,
+            settings=_settings(
+                reviewer_agent_max_unresolved_samples=50,
+                reviewer_agent_max_sample_age_hours=168,
+            ),
+        )
+
+    assert (refused.value.status_code, refused.value.detail) == (409, REASON_SAMPLE_AGE)
+    # Distinct from the count bound's event: a consumer's correct response to
+    # "samples arrive faster than they are read" is not its response to "one
+    # item has been skipped for weeks", so the two must be tellable apart.
+    assert (
+        await session.scalars(select(OutboxEvent).where(OutboxEvent.event_type == _BACKLOG_EVENT))
+    ).all() == []
+    [event] = (
+        await session.scalars(select(OutboxEvent).where(OutboxEvent.event_type == _AGE_EVENT))
+    ).all()
+    assert event.payload["max_sample_age_hours"] == 168
+    assert event.payload["oldest_pending_hours"] >= 400
+    # Survives the refused run's rollback, under the same audit action the
+    # count bound uses, with the reason naming which bound tripped.
+    audit = (
+        await session.scalars(select(AuditEvent).where(AuditEvent.action == "reviewer_agent.run"))
+    ).all()
+    assert [(row.outcome, row.principal_id, row.details["reason"]) for row in audit] == [
+        ("DENIED", "ops-b", REASON_SAMPLE_AGE)
+    ]
+    # One human-facing instruction ("go read the sample"), so one kind.
+    assert [kind for kind, _payload in notifications.sent] == ["REVIEWER_AGENT_AUDIT_BACKLOG"]
+
+
+async def test_the_state_endpoint_reports_the_deadline_beside_the_backlog(
+    session: AsyncSession,
+) -> None:
+    org = await _org(session)
+    stale = _sample(org, tier="T0", outcome="PENDING", sampled_hours_ago=1)
+    stale.sampled_at = datetime.now(UTC) - timedelta(hours=400)
+    session.add(stale)
+    await session.flush()
+
+    async def state(age_bound: int) -> tuple[int, bool, int, bool]:
+        read = await get_reviewer_agent_state(
+            org.id,
+            context=_context(org),
+            session=session,
+            settings=_settings(
+                reviewer_agent_max_unresolved_samples=50,
+                reviewer_agent_max_sample_age_hours=age_bound,
+            ),
+        )
+        assert read.oldest_pending_sample_hours is not None
+        assert read.oldest_pending_sample_hours >= 400
+        return (
+            read.unresolved_samples,
+            read.audit_backlog_exceeded,
+            read.max_sample_age_hours,
+            read.sample_age_exceeded,
+        )
+
+    # One sample, far inside the count bound, and far outside the age bound:
+    # an operator reading only the backlog would call this healthy.
+    assert await state(168) == (1, False, 168, True)
+    assert await state(500) == (1, False, 500, False)
+    # A zero bound disables the check, here as in the agent itself.
+    assert await state(0) == (1, False, 0, False)
+
+
+async def test_nothing_pending_has_no_age_to_breach(session: AsyncSession) -> None:
+    org = await _org(session)
+    session.add(
+        _sample(org, tier="T0", outcome="AGREED", sampled_hours_ago=900, waited_hours=1)
+    )
+    await session.flush()
+
+    read = await get_reviewer_agent_state(
+        org.id,
+        context=_context(org),
+        session=session,
+        settings=_settings(reviewer_agent_max_sample_age_hours=1),
+    )
+    # `None`, not zero: "no sample is waiting" and "a sample has waited no
+    # time" are different facts, and only the second one is a measurement.
+    assert read.oldest_pending_sample_hours is None
+    assert read.sample_age_exceeded is False
 
 
 def test_both_oversight_events_are_delivered_by_default_and_link_to_the_agent() -> None:

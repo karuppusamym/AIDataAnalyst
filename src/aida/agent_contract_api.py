@@ -53,11 +53,14 @@ from aida.models import (
 from aida.review_risk_tiers import effective_agent_ceiling, risk_tier_for
 from aida.reviewer_agent import (
     REASON_AUDIT_BACKLOG,
+    REASON_SAMPLE_AGE,
     ReviewerAgentUnavailable,
     auto_decide_tier0_tier1,
+    oldest_unresolved_sample_age_hours,
     organization_suspended,
     pre_review_pending,
     record_audit_backlog_refusal,
+    record_sample_age_refusal,
     resolve_audit_sample,
     set_suspended,
     unresolved_audit_samples,
@@ -293,6 +296,15 @@ class ReviewerAgentStateRead(ApiModel):
     unresolved_samples: int
     max_unresolved_samples: int
     audit_backlog_exceeded: bool
+    #: AR-11: the same licence, bounded in time rather than in count. The age
+    #: of the oldest unread sample (`None` when nothing is pending), the
+    #: deadline it is measured against, and whether that deadline is what is
+    #: stopping the agent now. Reported next to the count bound because an
+    #: operator seeing "12 unresolved, bound 50" needs to know the oldest of
+    #: the twelve arrived in February before concluding oversight is healthy.
+    oldest_pending_sample_hours: float | None
+    max_sample_age_hours: int
+    sample_age_exceeded: bool
 
 
 # ---------------------------------------------------------------------------
@@ -943,6 +955,10 @@ async def _reviewer_agent_state(
     ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)
     unresolved = await unresolved_audit_samples(session, organization_id)
     limit = settings.reviewer_agent_max_unresolved_samples
+    age_limit = settings.reviewer_agent_max_sample_age_hours
+    oldest_hours = await oldest_unresolved_sample_age_hours(
+        session, organization_id, now=datetime.now(UTC)
+    )
     return ReviewerAgentStateRead(
         organization_id=organization_id,
         enabled=settings.reviewer_agent_enabled,
@@ -957,6 +973,11 @@ async def _reviewer_agent_state(
         max_unresolved_samples=limit,
         # A zero bound disables the check, as it does in `auto_decide_tier0_tier1`.
         audit_backlog_exceeded=bool(limit) and unresolved >= limit,
+        oldest_pending_sample_hours=oldest_hours,
+        max_sample_age_hours=age_limit,
+        sample_age_exceeded=(
+            bool(age_limit) and oldest_hours is not None and oldest_hours >= age_limit
+        ),
     )
 
 
@@ -986,6 +1007,54 @@ async def _record_backlog_refusal(
             "object_type": "REVIEWER_AGENT",
             "object_id": str(organization_id),
             "object_name": f"{unresolved} sampled decisions unread; the bound is {limit}",
+            "principal_id": context.principal_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
+
+
+async def _record_sample_age_refusal(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+) -> None:
+    """AR-11: the age bound stopping the agent is an event too.
+
+    Same shape and same rollback-survival reasoning as
+    `_record_backlog_refusal`, and the same governance notification kind --
+    an operator's action is identical either way ("go read the sample"), so a
+    second notification kind would be two names for one instruction. The
+    outbox events stay distinct; only the human-facing channel is shared, and
+    the message says which bound tripped.
+    """
+    oldest_hours = await oldest_unresolved_sample_age_hours(
+        session, organization_id, now=datetime.now(UTC)
+    )
+    limit_hours = settings.reviewer_agent_max_sample_age_hours
+    record_sample_age_refusal(
+        session,
+        organization_id,
+        context=context,
+        # The guard only raises with a real age, but the read is re-done here
+        # after a rollback, so treat a vanished row as zero rather than crash
+        # the refusal path that exists to explain the refusal.
+        oldest_hours=oldest_hours if oldest_hours is not None else 0.0,
+        limit_hours=limit_hours,
+    )
+    await session.commit()
+    await notify_safely(
+        session,
+        organization_id,
+        "REVIEWER_AGENT_AUDIT_BACKLOG",
+        {
+            "object_type": "REVIEWER_AGENT",
+            "object_id": str(organization_id),
+            "object_name": (
+                f"the oldest sampled decision has been unread for {oldest_hours} hours; "
+                f"the bound is {limit_hours}"
+            ),
             "principal_id": context.principal_id,
             "occurred_at": datetime.now(UTC).isoformat(),
         },
@@ -1056,6 +1125,8 @@ async def run_reviewer_agent(
         await session.rollback()
         if exc.reason_code == REASON_AUDIT_BACKLOG:
             await _record_backlog_refusal(session, organization_id, context, settings)
+        elif exc.reason_code == REASON_SAMPLE_AGE:
+            await _record_sample_age_refusal(session, organization_id, context, settings)
         raise HTTPException(status_code=409, detail=exc.reason_code) from exc
     await session.commit()
     return ReviewerAgentRunResult(
