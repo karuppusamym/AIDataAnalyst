@@ -66,6 +66,7 @@ from aida.events import record_audit, record_outbox
 from aida.governance_decision_contracts import (
     CLAIMABLE_STATUS,
     TERMINAL_STATUS,
+    AgentOversightOutcome,
     DecisionOutcome,
     GovernanceDecisionRefused,
     ReviewStateSnapshot,
@@ -83,11 +84,13 @@ __all__ = [
     "ReviewStateSnapshot",
     "TargetEffect",
     "TargetEffectAdapter",
+    "AgentDecisionGuard",
     "check_decision_permitted",
     "claim_review",
     "decide_review",
     "lock_reviews_for_decision",
     "record_decision_outbox",
+    "register_agent_decision_guard",
     "register_target_adapters",
     "registered_object_types",
 ]
@@ -136,6 +139,95 @@ def register_target_adapters(adapters: Mapping[str, TargetEffectAdapter]) -> Non
                 f"governance decision adapter for {object_type} is already registered"
             )
         _ADAPTERS[object_type] = adapter
+
+
+class AgentDecisionGuard(Protocol):
+    """The oversight regime a **non-human** principal's decision must pass.
+
+    ADR-0027's safety case for automated review rests on four things: a risk
+    tier ceiling, a sampled fraction that humans actually read, a suspension
+    switch an operator can throw, and the backlog bounds that keep the sample
+    honest. All four lived in `reviewer_agent.auto_decide_tier0_tier1` --
+    *above* this service -- so they applied to the platform's own reviewer
+    agent and to nothing else. An externally-supplied agent identity holding
+    the `Reviewer` role reached the decision endpoints directly and got none
+    of them: no ceiling, no sample, and an operator's suspension did not stop
+    it. The switch was believed to have stopped automated review. It had
+    stopped one implementation of it.
+
+    Registered the same way the target adapters are, and for the same reason:
+    the owner of the policy depends on this service, never the reverse. The
+    difference is the default. An unregistered adapter means an object type
+    nobody can decide, which is visible immediately; an unregistered guard
+    would mean an agent nobody supervises, which is invisible -- so its
+    absence refuses (INV-4).
+    """
+
+    async def __call__(
+        self,
+        session: AsyncSession,
+        *,
+        review: GovernanceReview,
+        decision: str,
+        context: SecurityContext,
+    ) -> AgentOversightOutcome:
+        """A blocking reason, and/or the audit sample this decision owes.
+
+        Sampling is part of the regime rather than a separate concern, and
+        this is the one place every agent decision passes through -- but the
+        two halves land at different points. See `AgentOversightOutcome`.
+        """
+
+
+_AGENT_GUARD: list[AgentDecisionGuard] = []
+
+
+def register_agent_decision_guard(guard: AgentDecisionGuard) -> None:
+    """Register the oversight regime for non-human decisions. Called once, at
+    import time, by the module that owns the policy.
+
+    Re-registering a *different* guard raises rather than replacing, so a
+    second registrar cannot quietly relax the regime -- the same rule
+    `register_target_adapters` applies for the same reason.
+    """
+    if _AGENT_GUARD and _AGENT_GUARD[0] is not guard:
+        raise RuntimeError("an agent decision guard is already registered")
+    if not _AGENT_GUARD:
+        _AGENT_GUARD.append(guard)
+
+
+async def _enforce_agent_oversight(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    context: SecurityContext,
+) -> AgentOversightOutcome:
+    """Hold a non-human decider to ADR-0027, whatever surface it arrived on.
+
+    Keyed on the *authenticated* principal type, not on a role or a name: an
+    identity the provider asserts is an `AGENT` is one, and `Reviewer` is a
+    role a human holds too. A human decision never reaches the guard.
+
+    Refuses here, before the claim; returns the audit sample for the caller to
+    write after the claim is won.
+    """
+    if context.principal_type != "AGENT":
+        return AgentOversightOutcome()
+    if not _AGENT_GUARD:
+        raise GovernanceDecisionRefused(
+            "NOT_PERMITTED",
+            "agent review oversight is not available",
+            http_status=403,
+        )
+    outcome = await _AGENT_GUARD[0](
+        session, review=review, decision=decision, context=context
+    )
+    if outcome.reason is not None:
+        raise GovernanceDecisionRefused(
+            "NOT_PERMITTED", outcome.reason, http_status=403
+        )
+    return outcome
 
 
 def registered_object_types() -> frozenset[str]:
@@ -342,6 +434,9 @@ async def decide_review(
     translate those and the reasons are target-specific.
     """
     check_decision_permitted(review, context)
+    oversight = await _enforce_agent_oversight(
+        session, review, decision=decision, context=context
+    )
     adapter = _ADAPTERS.get(review.object_type)
     if adapter is None:
         raise GovernanceDecisionRefused(
@@ -349,6 +444,11 @@ async def decide_review(
         )
     unclaimed = claimable_columns(review)
     await claim_review(session, review, decision=decision, reason=reason, context=context, now=now)
+    if oversight.sample is not None:
+        # Only now. Before the claim, every loser of a contended race inserts
+        # this row too and dies on its unique constraint -- see
+        # `AgentOversightOutcome`.
+        session.add(oversight.sample)
     try:
         return await adapter(
             session, review, decision=decision, reason=reason, context=context, now=now

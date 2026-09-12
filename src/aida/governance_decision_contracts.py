@@ -74,6 +74,32 @@ def normalize_verdict(decision: str) -> DecisionVerdict:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentOversightOutcome:
+    """What the agent oversight regime decided about one non-human decision.
+
+    Two fields because they are applied at two different points, and the
+    difference was measured rather than reasoned: the refusal must happen
+    **before** the review is claimed, and the audit sample must be written
+    **after** the claim is won.
+
+    Writing the sample before the claim looks harmless and is not. Three
+    workers racing one organization's queue all pass oversight, all insert a
+    sample for the same review, and two of them die on
+    `uq_review_audit_sample_review` -- a PostgreSQL 23505 that poisons the
+    whole transaction, so a lost claim stops being the orderly
+    `GovernanceDecisionRefused` the batch is built to shrug off. AR-04's
+    contention test is what caught it: `decisions committed per worker` went
+    from one clean winner to `['aborted:23505', 'committed', 'aborted:23505']`.
+
+    So the service asks once, refuses on `reason`, and adds `sample` only
+    after the compare-and-set has made this caller the decider.
+    """
+
+    reason: str | None = None
+    sample: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TargetEffect:
     """What one target-type adapter did, as the outbox event describing it.
 

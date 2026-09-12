@@ -78,15 +78,20 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.column_description_service import ORIGIN_MODEL_INFERRED
-from aida.config import Settings
+from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
-from aida.governance_decision_contracts import TERMINAL_STATUS
+from aida.governance_decision_contracts import (
+    TERMINAL_STATUS,
+    AgentOversightOutcome,
+    normalize_verdict,
+)
 from aida.governance_decision_service import (
     GovernanceDecisionRefused,
     decide_review,
     record_decision_audit,
     record_decision_outbox,
+    register_agent_decision_guard,
 )
 from aida.models import (
     AssetDescriptionDraft,
@@ -1169,22 +1174,16 @@ async def auto_decide_tier0_tier1(
             # did not pass). Same treatment: this item's writes are rolled
             # back with its savepoint and the batch continues.
             continue
+        # The audit sample is written by `agent_decision_oversight`, inside
+        # `decide_review`, so that an externally-supplied agent is sampled too
+        # and not only this loop. Recomputed rather than returned because
+        # `sampled_for_audit` is pure and deterministic on the review id: the
+        # two answers agree by construction, and the alternative -- a second
+        # `ReviewAuditSample` row -- collides on
+        # `uq_review_audit_sample_review`.
         is_sampled = decision == "APPROVED" and sampled_for_audit(
             review.id, settings.reviewer_agent_sampling_rate
         )
-        if is_sampled:
-            session.add(
-                ReviewAuditSample(
-                    organization_id=organization_id,
-                    governance_review_id=review.id,
-                    agent_principal_id=agent_principal,
-                    object_type=review.object_type,
-                    risk_tier=tier,
-                    decision=decision,
-                    sampled_at=moment,
-                    human_outcome="PENDING",
-                )
-            )
         record_decision_audit(
             session,
             review,
@@ -1281,3 +1280,104 @@ class ReviewerAgentUnavailable(RuntimeError):
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+
+
+async def agent_decision_oversight(
+    session: AsyncSession,
+    *,
+    review: GovernanceReview,
+    decision: str,
+    context: SecurityContext,
+) -> AgentOversightOutcome:
+    """ADR-0027 for **every** non-human decider, not only this module's loop.
+
+    `auto_decide_tier0_tier1` applies this regime before it decides anything,
+    and for a long time that was the only place it was applied. An
+    externally-supplied agent identity holding the `Reviewer` role reached the
+    decision endpoints directly and passed only the two checks
+    `check_decision_permitted` makes -- organization and maker != checker. It
+    got no tier ceiling, no audit sample, and an operator's suspension did not
+    stop it. That last one is the serious half: suspension is the control an
+    operator reaches for when something is going wrong, and it was believed to
+    have stopped automated review when it had stopped one implementation of
+    it.
+
+    Registered into `governance_decision_service` so it runs at the single
+    point every decision passes through, rather than on each surface that can
+    decide. The four holes R11-C6 found were all one surface that had been
+    missed; a control placed per-surface is a control with a list of surfaces
+    to keep up to date, and that list is what went stale.
+
+    The checks are the loop's own, in the loop's own order, minus the two that
+    are meaningless for a caller that is not a batch: the `enabled` flag,
+    because a *third-party* agent's licence does not come from the flag that
+    runs the platform's own sweep, and the isolation-level refusal, which
+    guards a read-modify-write this single decision does not perform.
+
+    On a pass it returns the audit sample, because sampling is part of the
+    regime rather than a separate concern, and this is now the one place every
+    agent decision goes through. It *returns* rather than writes it: the row
+    may only be inserted once the claim is won, or every loser of a contended
+    race inserts it too and dies on `uq_review_audit_sample_review` (see
+    `AgentOversightOutcome`). `auto_decide_tier0_tier1` therefore no longer
+    adds its own row and recomputes the same answer from `sampled_for_audit`,
+    which is pure and deterministic on the review id, so the two agree by
+    construction rather than by coordination.
+    """
+    settings = get_settings()
+    organization_id = review.organization_id
+    if settings.reviewer_agent_suspended or await organization_suspended(
+        session, organization_id
+    ):
+        return AgentOversightOutcome(reason=REASON_SUSPENDED)
+
+    backlog_limit = settings.reviewer_agent_max_unresolved_samples
+    if backlog_limit and await unresolved_audit_samples(session, organization_id) >= backlog_limit:
+        return AgentOversightOutcome(reason=REASON_AUDIT_BACKLOG)
+
+    moment = datetime.now(UTC)
+    age_limit = settings.reviewer_agent_max_sample_age_hours
+    if age_limit:
+        oldest_hours = await oldest_unresolved_sample_age_hours(
+            session, organization_id, now=moment
+        )
+        if oldest_hours is not None and oldest_hours >= age_limit:
+            return AgentOversightOutcome(reason=REASON_SAMPLE_AGE)
+
+    ceiling = effective_agent_ceiling(settings.reviewer_agent_max_tier)
+    tier = risk_tier_for(review.object_type)
+    if review.object_type not in agent_decidable_object_types(ceiling) or not tier_at_or_below(
+        tier, ceiling
+    ):
+        return AgentOversightOutcome(reason=REASON_TIER_EXCEEDED)
+
+    # Only an approval is sampled -- ADR-0027 condition (b) is about what the
+    # agent let through. An unnormalizable verdict is *not* refused here: this
+    # regime is about the decider, and `claim_review` downstream already
+    # rejects an unsupported verdict with the right reason. Answering for it
+    # would report a supervision failure for what is a malformed request.
+    try:
+        verdict = normalize_verdict(decision)
+    except ValueError:
+        return AgentOversightOutcome()
+    if verdict != "APPROVE" or not sampled_for_audit(
+        review.id, settings.reviewer_agent_sampling_rate
+    ):
+        return AgentOversightOutcome()
+    return AgentOversightOutcome(
+        sample=ReviewAuditSample(
+            organization_id=organization_id,
+            governance_review_id=review.id,
+            agent_principal_id=context.principal_id,
+            object_type=review.object_type,
+            risk_tier=tier,
+            # The sample ledger stores the terminal form, which is what its
+            # own CHECK constraint allows.
+            decision=TERMINAL_STATUS[verdict],
+            sampled_at=moment,
+            human_outcome="PENDING",
+        )
+    )
+
+
+register_agent_decision_guard(agent_decision_oversight)
