@@ -163,7 +163,7 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
     render(<WorkspaceAccessScreen />);
     await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
 
-    const form = screen.getByRole("form", { name: "Add workspace member" });
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
     fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "jordan.reyes" } });
     fireEvent.change(within(form).getByLabelText("Role"), { target: { value: "steward" } });
     fireEvent.submit(form);
@@ -224,7 +224,7 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
     render(<WorkspaceAccessScreen />);
     await waitFor(() => expect(fetchProjectBiConnections).toHaveBeenCalled());
 
-    const form = screen.getByRole("form", { name: "Register BI connection" });
+    const form = await screen.findByRole("form", { name: "Register BI connection" });
     fireEvent.change(within(form).getByLabelText("Project source"), { target: { value: "ds_snowflake_prod" } });
     fireEvent.change(within(form).getByPlaceholderText("finance-tableau-prod"), { target: { value: "retail-tableau" } });
     fireEvent.change(within(form).getByPlaceholderText("Finance Tableau (Production)"), {
@@ -262,7 +262,9 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
     await waitFor(() => expect(screen.getByText("Finance Tableau (Production)")).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Import artifact" }));
-    const importForm = screen.getByRole("form", { name: "Import BI artifact for connection bi_conn_1" });
+    const importForm = await screen.findByRole("form", {
+      name: "Import BI artifact for connection bi_conn_1",
+    });
 
     fireEvent.change(within(importForm).getByLabelText("Artifact JSON"), { target: { value: "{not json" } });
     fireEvent.submit(importForm);

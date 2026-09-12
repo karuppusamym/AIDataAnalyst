@@ -665,7 +665,7 @@ Engineering lead must assign a person when a task starts. No task is IN PROGRESS
 because it appears here. No production configuration, model approval or deletion is performed
 by this documentation reconciliation.
 
-**Reconciled queue:** 8 BLOCKED, 1 CANCELLED, 24 DEFERRED, 15 PARTIAL, 12 TODO, 19 DONE (79 rows). These are consolidated work packages, not independent feature counts.
+**Reconciled queue:** 8 BLOCKED, 1 CANCELLED, 24 DEFERRED, 15 PARTIAL, 11 TODO, 20 DONE (79 rows). These are consolidated work packages, not independent feature counts.
 
 | ID | Work | Status | Owner area | Remaining acceptance / trigger |
 |---|---|---|---|---|
@@ -688,7 +688,7 @@ by this documentation reconciliation.
 | R11-B2 | Measure live governed answer quality | TODO | Engineering | Approved route and representative corpus; execution-match and refusal results dated. Preserve independent safety and contract tests. |
 | R11-B3 | Prove workspace enforcement | TODO | Engineering | DENY suite, operator readiness and least-privilege cross-workspace refusal in one ENFORCE workspace. Required before pilot release. |
 | R11-B4 | Complete access provisioning and revocation | TODO | Engineering | Request through PROVISIONED and successful query; revoke denies query; durable retries and audit receipts. |
-| R11-B7 | Finish source rescan, schedule and retry UI | TODO | Engineering | Existing source can rescan/change scan policy/retry through UI; include resumable setup from September 5 T15. |
+| R11-B7 | Finish source rescan, schedule and retry UI | DONE | Engineering | Landed 2026-09-12: a registered source can now be tested, re-scanned, have its scan policy read and replaced (maintenance window included) and a failed run retried, all from the source detail pane. Retry uses `POST /v1/analysis-runs/{id}/resume`, found while building: it reserves a *new* run carrying `resumed_from_run_id` and gates on FAILED/CANCELLED/CANCELLATION_REQUESTED/SUBMISSION_FAILED, so the failed row is left intact rather than mutated. Every action confirms first and holds the server's own sentence on refusal, because a 409 from the resume gate and one from run admission mean different things. The editor round-trips `base_priority`, not the boosted `priority` (ADR-0017 SS8), and the upsert sends every field so an untouched window is not silently cleared. T15 resumable setup is cross-linked to the existing first-source flow rather than re-mounted. No backend change was needed: every capability already had an endpoint. |
 | R11-B8 | Schedule freshness into incident sink | TODO | Engineering | Watermark review configurable in UI; scheduled violation opens/updates the incident and recovery resolves it. |
 | R11-B9 | Finish audit export and archive evidence | TODO | Engineering | Authorized export and real destination read-back/retention evidence; retain F01 partial until destination proof exists. |
 | R11-B10 | Prove notification delivery and scheduler health | TODO | Engineering | Configured worker delivers to target collector/channel; failures and backlog visible within interval. F04 remains destination-unverified. |

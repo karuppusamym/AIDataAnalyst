@@ -8,6 +8,7 @@ import {
 } from "../lib/api";
 import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
 import { WorkbookImport } from "../components/WorkbookImport";
+import { SourceAdministration } from "./SourcesScreenAdmin";
 import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { useScopeSelection } from "../lib/scope";
 import { useSession } from "../lib/session";
@@ -58,6 +59,12 @@ import "./SourcesScreen.css";
       per row, eager on load) would be the wrong default; health appears in
       the detail pane once a source is selected, permalinkable via `?source=`
       exactly like `EvidencePane`'s `?asset=`.
+
+   3. Administration: `SourcesScreenAdmin.tsx`, mounted in the detail pane for
+      the selected source only (R11-B7). Test connection, re-scan, read and
+      replace the scan policy, retry an interrupted run — five already-merged
+      endpoints this client could not previously reach. Same rule as health:
+      per-selection, never fanned out across the fleet.
 
    Scope cuts, stated rather than silently dropped: no connector
    capability-matrix reference panel and no per-source connector-certification
@@ -115,9 +122,14 @@ function SourceRow({
 function SourceDetailsPane({
   source,
   onClose,
+  onSourceChanged,
 }: {
   source: DataSourceRead;
   onClose: () => void;
+  /** A connection test rewrites this source's status on the server, so the
+   *  fleet list is re-read rather than patched from the write's response --
+   *  the row and the pane then agree because both came from the same read. */
+  onSourceChanged: () => void;
 }) {
   const roles = useSession().me?.roles;
   const canImportWorkbook =
@@ -231,6 +243,12 @@ function SourceDetailsPane({
           </>
         )}
 
+        {/* Operating the source, not just reading it (R11-B7): test the
+            connection, re-scan, schedule, and retry an interrupted run. Its
+            own component because this is a write surface with confirmation
+            and re-read cycles, where everything above is a read model. */}
+        <SourceAdministration source={source} onSourceChanged={onSourceChanged} />
+
         <section className="src__model" aria-labelledby="src-model-heading">
           <div className="evp__sub" id="src-model-heading">Model workbook</div>
           <div className="src__modelaction">
@@ -297,6 +315,15 @@ function SourceDetailsPane({
             { screen: "quality", label: "Quality", params: { ds: source.id }, title: "Open incidents for this source" },
             { screen: "relationships", label: "Relationships", params: { ds: source.id }, title: "Key and relationship candidates" },
             { screen: "lineage", label: "Lineage", params: { ds: source.id }, title: "Narrated lineage for this source" },
+            /* The T15 resumable setup, about THIS source. `FirstSourceSetup`
+               (review 2026-09-05, T15 · folded into R11-B7 by the 2026-09-11
+               reconciliation) derives every step from the server and reads its
+               subject from `?ds=`, so the checklist a half-finished source
+               left off at is resumed here rather than only from Overview. It
+               is linked rather than re-mounted: it runs five reads of its own,
+               which is the right cost on the landing screen and the wrong one
+               on a fleet console that has already answered most of them. */
+            { screen: "home", label: "Setup checklist", params: { ds: source.id }, title: "Resume this source's setup — workspace, source, scan, catalog, first question — each step re-derived from the server" },
           ]}
         />
         </div>
@@ -520,7 +547,11 @@ export function SourcesScreen() {
           />
         )}
         {selected ? (
-          <SourceDetailsPane source={selected} onClose={() => setParams({ source: null })} />
+          <SourceDetailsPane
+            source={selected}
+            onClose={() => setParams({ source: null })}
+            onSourceChanged={load}
+          />
         ) : selectedId ? (
           <aside className="evp evp--idle" aria-label="Source details">
             <Empty

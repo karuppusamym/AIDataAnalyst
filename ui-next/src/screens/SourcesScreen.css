@@ -43,6 +43,39 @@
 .src__model .wbi{margin-top:13px}
 .src__factors{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-soft)}
 
+/* Source administration (R11-B7) — a write surface inside a read pane, so it
+   is set apart from the health/factor blocks above it rather than continuing
+   their rhythm. */
+.srcadmin{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-soft)}
+.srcadmin__block{margin-top:12px;padding:11px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk)}
+.srcadmin__blockhead{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.srcadmin__h3{margin:0;font-size:12.5px;font-weight:600;letter-spacing:-.005em;color:var(--ink)}
+.srcadmin__note{margin:7px 0 0;font-size:11px;line-height:1.5;color:var(--ink-3)}
+.srcadmin__err{margin:8px 0 0;font-size:11.5px;line-height:1.5;color:var(--bad)}
+.srcadmin__denied{font-size:11px;line-height:1.4;color:var(--ink-3);flex:1 1 160px}
+.srcadmin__actions{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;margin-top:9px}
+.srcadmin__notice{margin:11px 0 0;padding:8px 10px;border-left:2px solid var(--info);background:var(--sunk);font-size:11.5px;line-height:1.5;color:var(--ink-2)}
+
+/* The schedule as the server reports it — a definition list, because each row
+   is a fact with a name, and two of them (next run, last triggered) are the
+   ones no client can compute for itself. */
+.srcadmin__facts{display:grid;grid-template-columns:1fr;gap:5px;margin:9px 0 0}
+.srcadmin__facts>div{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.srcadmin__facts dt{font-size:11px;color:var(--ink-3);flex:none}
+.srcadmin__facts dd{margin:0;font-size:11.5px;color:var(--ink-2);text-align:right;font-variant-numeric:tabular-nums}
+
+.srcadmin__form{margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)}
+.srcadmin__grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:9px}
+.srcadmin__check{display:flex;align-items:flex-start;gap:7px;margin-top:9px;font-size:11.5px;line-height:1.45;color:var(--ink-2);cursor:pointer}
+.srcadmin__check input{margin-top:1px;flex:none}
+
+.srcadmin__runs{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:7px}
+.srcadmin__run{padding:8px 9px;border:1px solid var(--line-soft);border-radius:var(--radius-sm);background:var(--surface)}
+.srcadmin__runhead{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.srcadmin__runtime{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.srcadmin__runmeta{margin-top:6px;font-family:var(--mono);font-size:10.5px;line-height:1.5;color:var(--ink-3)}
+.srcadmin__runerr{margin-top:6px;padding:6px 7px;border-left:2px solid var(--bad);background:var(--sunk);font-size:11px;line-height:1.45;color:var(--ink-2)}
+
 /* Keep the hint on its own row in this action-heavy pane. */
 .srcscreen__main .evp__hint{margin-left:0;flex-basis:100%}
 

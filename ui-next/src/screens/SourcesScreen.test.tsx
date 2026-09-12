@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../lib/types";
+import type {
+  AnalysisRunRead,
+  ConnectorHealthScoreRead,
+  DataSourceRead,
+  ProjectRead,
+  ScanPolicyRead,
+} from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError, type DatasourceContextSnapshot, type ProjectContextSnapshot } from "../lib/api";
 import type { ScopeSelection } from "../lib/scope";
@@ -27,6 +33,15 @@ const downloadDatasourceContextSnapshot = vi.fn<
 const downloadProjectContextSnapshot = vi.fn<
   (project: ProjectRead, datasources: DataSourceRead[], format: "markdown" | "json") => Promise<ProjectContextSnapshot>
 >();
+/* The detail pane now also mounts `SourceAdministration` (R11-B7), which reads
+   the scan policy and the run history for whichever source is selected. Stubbed
+   here so these tests stay about the fleet/health/snapshot behaviour they were
+   written for; the administration panel has its own file. */
+const fetchScanPolicy = vi.fn<(id: string, signal?: AbortSignal) => Promise<ScanPolicyRead>>();
+const fetchDatasourceAnalysisRuns =
+  vi.fn<
+    (id: string, query: { limit?: number }, signal?: AbortSignal) => Promise<PageOf<AnalysisRunRead>>
+  >();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -43,6 +58,9 @@ vi.mock("../lib/api", async (importOriginal) => {
       datasources: DataSourceRead[],
       format: "markdown" | "json",
     ) => downloadProjectContextSnapshot(project, datasources, format),
+    fetchScanPolicy: (id: string, signal?: AbortSignal) => fetchScanPolicy(id, signal),
+    fetchDatasourceAnalysisRuns: (id: string, query: { limit?: number }, signal?: AbortSignal) =>
+      fetchDatasourceAnalysisRuns(id, query, signal),
   };
 });
 
@@ -112,6 +130,12 @@ beforeEach(() => {
   fetchDatasourceHealth.mockReset();
   downloadDatasourceContextSnapshot.mockReset();
   downloadProjectContextSnapshot.mockReset();
+  fetchScanPolicy.mockReset();
+  fetchDatasourceAnalysisRuns.mockReset();
+  // A source with no schedule and no scan history: the quietest honest answer
+  // for tests that are not about the administration panel.
+  fetchScanPolicy.mockRejectedValue(new ApiError(404, "scan policy not found"));
+  fetchDatasourceAnalysisRuns.mockResolvedValue({ items: [], limit: 5, offset: 0, total: 0 });
   scopeSelection = null;
   vi.resetModules();
   history.replaceState(null, "", "/");
@@ -161,6 +185,34 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     expect(panel).toHaveTextContent("Tables, columns and data types are populated by discovery scans.");
     expect(panel).toHaveTextContent("saving in Excel does not upload automatically");
     expect(screen.getByRole("button", { name: /Tables & columns/ })).toBeInTheDocument();
+  });
+
+  it("mounts source administration for the selected source only, and links its setup checklist", async () => {
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    fetchDatasourceHealth.mockResolvedValue(HEALTH);
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    // Administration is per-selection, exactly like health: nothing is read for
+    // a fleet nobody has drilled into.
+    expect(fetchScanPolicy).not.toHaveBeenCalled();
+    expect(fetchDatasourceAnalysisRuns).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
+    await screen.findByLabelText("Source details for snowflake_prod");
+
+    await waitFor(() =>
+      expect(fetchScanPolicy).toHaveBeenCalledWith("ds_snowflake_prod", expect.anything()),
+    );
+    expect(fetchDatasourceAnalysisRuns).toHaveBeenCalledWith(
+      "ds_snowflake_prod",
+      { limit: 5 },
+      expect.anything(),
+    );
+    expect(await screen.findByLabelText("Source administration")).toBeInTheDocument();
+    // T15's resumable setup, reachable for THIS source (folded into R11-B7).
+    expect(screen.getByRole("button", { name: /Setup checklist/ })).toBeInTheDocument();
   });
 
   it("shows a blocker pill when the health response reports one", async () => {
