@@ -177,6 +177,65 @@ def test_no_module_outside_connectors_opens_its_own_source_connection() -> None:
     )
 
 
+# The raw signing/tokenization secrets. Each is read by exactly one provider
+# factory; every other reader is a module holding key material the deployment's
+# KMS configuration was meant to keep out of the process.
+_RAW_KEY_SETTINGS = {
+    "audit_hmac_key": "signing.py",
+    "tokenization_key": "tokenization.py",
+}
+
+
+def _files_reading_a_raw_key_outside_its_provider() -> list[str]:
+    # Both source roots, unlike the INV-2 scans above: a key read from
+    # `src/atlas` leaks exactly as much as one read from `src/aida`, and the
+    # settings object these live on is defined over there. `config.py` is the
+    # one legitimate reader -- it validates the values it declares.
+    offenders = []
+    roots = [_SRC_ROOT, _SRC_ROOT.parent / "atlas"]
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            relative = path.relative_to(root.parent)
+            if relative.name in {"config.py"}:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute) or node.attr not in _RAW_KEY_SETTINGS:
+                    continue
+                if relative.name == _RAW_KEY_SETTINGS[node.attr]:
+                    continue
+                offenders.append(f"{relative}:{node.lineno} reads {node.attr}")
+    return offenders
+
+
+def test_raw_signing_keys_are_read_only_by_their_provider_factory() -> None:
+    """QG-5/QG-6: a KMS-backed deployment must not hold key material.
+
+    `signing.py` promises the raw key never enters the process once a KMS signer
+    is configured, and production forbids the local providers outright. Until the
+    2026-09-11 review that promise was false in four places: `agent_orchestrator`
+    (twice), `tool_api` and `intelligence_api` each passed
+    `settings.audit_hmac_key` straight to `hmac.new` for an agent run's question
+    digest, a tool execution's parameter fingerprint and a feedback comment. All
+    four now go through `signing.sign_value`.
+
+    Nothing structural stopped that, which is why it happened at four sites
+    rather than one. This is the structural part: the raw secrets may be read
+    only by the provider factory that owns each one, so the next such call is a
+    failing test rather than a quiet leak of key material into a hot path.
+
+    The production length floors in `Settings` stay as they are. They are cheap
+    insurance for exactly the regression this test now prevents, and removing
+    them because "production cannot read the key anyway" would rest on the very
+    invariant that had just been violated.
+    """
+    offenders = _files_reading_a_raw_key_outside_its_provider()
+    assert offenders == [], (
+        "raw signing/tokenization keys may only be read by their provider factory "
+        f"({', '.join(sorted(_RAW_KEY_SETTINGS.values()))}); found: {offenders}"
+    )
+
+
 def test_the_connector_handed_to_the_platform_has_no_sql_surface() -> None:
     """INV-2, structurally: the type `ConnectorRegistry.create` is annotated to
     return must not expose a SQL-accepting method, because that annotation is what
