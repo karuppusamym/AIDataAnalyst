@@ -117,11 +117,25 @@ export function SessionProvider({
         setError(null);
         return;
       }
-      // 404 and 422 are answers about a resource or a request, not about the
-      // connection. Treating them as connection failures would paint the shell
-      // red every time a screen asked for something that does not exist.
+      // A 4xx is the server *answering*, not failing, and painting the shell
+      // red for one tells the reader the platform is broken when it is in fact
+      // working exactly as designed.
+      //
+      // This listed only 404 and 422, and the omission was load-bearing: a
+      // governed refusal is a **409** -- a tool that needs a parameter, an
+      // ambiguous term, a disabled datasource -- so asking Ask a question it
+      // must refuse flipped the shell to "Requests are failing" while the
+      // refusal rendered correctly underneath. Found by walking the Ask
+      // journey in a browser against a live deployment.
+      //
+      // 401 and 403 are excluded because they have their own states below
+      // (`session-expired`, `forbidden`), which say something truer than
+      // "degraded". 408 and 429 stay treated as connection trouble, because a
+      // timeout or a throttle genuinely is about the link and not the request.
       const status = outcome.status;
-      if (status === 404 || status === 422) return;
+      const isAnswerNotAFailure =
+        status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status);
+      if (isAnswerNotAFailure) return;
       setError(outcome.error ?? new Error(`request failed with status ${status}`));
     });
   }, []);
