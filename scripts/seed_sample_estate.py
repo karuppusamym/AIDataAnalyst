@@ -28,6 +28,14 @@ approves what is found. Payments<->Risk is deliberately left ungranted, so
 Unified Lineage shows a real `withheld_cross_boundary_domain_ids` case rather
 than everything being trivially connected.
 
+Finally it publishes one parameterised governed tool (`accounts_by_branch`)
+on the Customer project, through draft -> submit -> independent approval. A
+fresh install runs with model generation off, so an approved tool is the only
+path to an answer: without one, every question Ask can be asked on this estate
+refuses. With it, the question printed at the end of the run first refuses
+naming the input it needs, then answers from the tool once that input is
+supplied.
+
 Every discovery/proposal step is decided by a *second* development identity
 from the one that triggered it: the API enforces maker != checker on
 relationship candidates, cross-source candidates, and governance reviews
@@ -415,6 +423,154 @@ def discover_and_approve_cross_source(domain_id: str, target_domain_id: str, org
         print(f"  cross-source {kind} candidates: {approved} approved")
 
 
+# ---------------------------------------------------------------------------
+# The governed tool the Ask journey answers from.
+#
+# With model generation off -- the default, and the only state a fresh install
+# has ever been in -- an approved governed tool is the *only* path to an
+# answer. Until one exists, every question this estate can be asked refuses:
+# retrieval finds no published tool, the planner falls to MODEL_GENERATION and
+# the run fails closed on the missing model route. That made the product's
+# core journey undemonstrable on a seeded estate, which is what this tool
+# fixes (tracker R11-B1).
+#
+# It is deliberately *parameterised*, and its one parameter is deliberately a
+# string: the Ask screen sends parameter values as strings and the server
+# coerces them against this schema, so a STRING parameter is the shape the
+# browser journey can actually satisfy. `branch_code` is a real TEXT column on
+# `customer.account` (infra/sample-source/init.sql), carrying values like
+# BR-101 -- so the rendered SQL is valid Postgres against the seeded data,
+# not a demo that only type-checks.
+# ---------------------------------------------------------------------------
+
+#: Slug of the seeded governed tool, on the Customer domain's project.
+GOVERNED_TOOL_SLUG = "accounts_by_branch"
+
+#: Its single required parameter. A caller who omits it gets the structured
+#: 409 (`MISSING_TOOL_PARAMETERS`) naming exactly this, which is what the Ask
+#: screen renders an input for.
+GOVERNED_TOOL_PARAMETER = "branch_code"
+
+#: A value present in the seeded `customer.account` rows, so the demonstrated
+#: answer is a non-empty result set.
+GOVERNED_TOOL_PARAMETER_EXAMPLE = "BR-101"
+
+#: The question this estate can be asked with generation off. Its content
+#: tokens ("accounts", "booked", "branch") all appear in the tool's
+#: name/slug/description, so lexical retrieval scores it above
+#: `agent_tool_match_threshold` (0.55) without the caller having to pin a tool
+#: version by hand.
+GOVERNED_TOOL_QUESTION = "Which accounts are booked at a branch?"
+
+GOVERNED_TOOL_NAME = "Accounts booked at a branch"
+
+GOVERNED_TOOL_DESCRIPTION = (
+    "Accounts booked at a given branch, with the account type, currency, "
+    "status and current balance held there. Ask for one branch at a time by "
+    "its branch code."
+)
+
+#: Schema-qualified exactly as connector discovery catalogs it; the draft
+#: endpoint refuses any table the catalog does not hold for this datasource.
+#: The placeholder is spelled out rather than interpolated from
+#: `GOVERNED_TOOL_PARAMETER` because the draft endpoint refuses (422) any
+#: template whose placeholders do not exactly match the declared parameters,
+#: so the two cannot drift apart unnoticed.
+GOVERNED_TOOL_SQL = (
+    "SELECT account_id, customer_id, account_type, currency_code, status, current_balance "
+    "FROM customer.account "
+    "WHERE branch_code = :branch_code"
+)
+
+
+def ensure_governed_tool(project_id: str, datasource_id: str, org_id: str) -> dict[str, Any]:
+    """Publish one parameterised governed tool through the real approval path.
+
+    Draft (maker) -> submit for review (maker) -> independent approval
+    (checker), the same three steps a tool a person authored goes through.
+    Nothing here writes a PUBLISHED row directly: publication happens only as
+    the effect of `POST /v1/governance/reviews/{id}/decision`, and the API
+    refuses that decision to the principal who requested it (409,
+    "maker-checker separation is required"), so the second identity this
+    script already carries for relationship and grant reviews is required
+    here too rather than decorative.
+
+    Idempotent, like everything else in this script: an already-published
+    version is returned untouched, and a draft or in-review version left
+    behind by an interrupted run is carried forward instead of stacking up a
+    second one.
+    """
+    list_path = f"/v1/projects/{project_id}/tools?limit=500"
+    _, payload = _request("GET", list_path, org_id=org_id)
+    versions = [item for item in _items(payload) if item.get("slug") == GOVERNED_TOOL_SLUG]
+    published = next((v for v in versions if v.get("status") == "PUBLISHED"), None)
+    if published:
+        print(f"  governed tool '{GOVERNED_TOOL_SLUG}' already PUBLISHED")
+        return published
+
+    version = next(
+        (v for v in versions if v.get("status") in ("DRAFT", "REVIEW_REQUIRED")),
+        None,
+    )
+    if version is None:
+        _, version = _request(
+            "POST",
+            f"/v1/projects/{project_id}/tools",
+            {
+                "slug": GOVERNED_TOOL_SLUG,
+                "name": GOVERNED_TOOL_NAME,
+                "description": GOVERNED_TOOL_DESCRIPTION,
+                "datasource_id": datasource_id,
+                "sql_template": GOVERNED_TOOL_SQL,
+                "parameters": [
+                    {
+                        "name": GOVERNED_TOOL_PARAMETER,
+                        "parameter_type": "STRING",
+                        "required": True,
+                        "max_length": 32,
+                    }
+                ],
+                "allowed_roles": ["Analyst"],
+            },
+            org_id=org_id,
+        )
+        print(f"  drafted governed tool '{GOVERNED_TOOL_SLUG}' v{version['version']}")
+
+    if version.get("status") == "DRAFT":
+        _request("POST", f"/v1/tool-versions/{version['id']}/submit", org_id=org_id)
+
+    review = _find_pending_review("GOVERNED_TOOL_VERSION", version["id"], org_id)
+    if review is None:
+        raise SeedError(
+            f"governed tool {version['id']} has no pending review to approve; "
+            "it cannot be published without one"
+        )
+    _request(
+        "POST",
+        f"/v1/governance/reviews/{review['id']}/decision",
+        {
+            "decision": "APPROVE",
+            "reason": "Seeded sample estate: parameterised tool for the governed Ask journey.",
+        },
+        org_id=org_id,
+        headers=CHECKER_HEADERS,
+    )
+
+    _, payload = _request("GET", list_path, org_id=org_id)
+    approved = next(
+        (
+            item
+            for item in _items(payload)
+            if item.get("id") == version["id"] and item.get("status") == "PUBLISHED"
+        ),
+        None,
+    )
+    if approved is None:
+        raise SeedError(f"governed tool {version['id']} did not reach PUBLISHED after approval")
+    print(f"  governed tool '{GOVERNED_TOOL_SLUG}' approved and PUBLISHED")
+    return approved
+
+
 DOMAINS = (
     {
         "code": "CUSTOMER",
@@ -485,6 +641,7 @@ def main() -> int:
         lob = ensure_line_of_business(org_id)
 
         domains: dict[str, dict[str, Any]] = {}
+        projects: dict[str, dict[str, Any]] = {}
         datasources: dict[str, dict[str, Any]] = {}
         for spec in DOMAINS:
             domain = ensure_data_domain(lob["id"], spec["name"], spec["code"], org_id)
@@ -492,6 +649,7 @@ def main() -> int:
             project = ensure_project(
                 lob["id"], domain["id"], spec["project_name"], spec["project_slug"], org_id
             )
+            projects[spec["code"]] = project
             datasource = ensure_datasource(
                 project["id"],
                 org_id,
@@ -513,6 +671,14 @@ def main() -> int:
                 domains[source_code]["id"], domains[target_code]["id"], org_id, reason=reason
             )
 
+        # After discovery, because the draft endpoint validates the tool's SQL
+        # against the tables the connector actually catalogued for this
+        # datasource -- an unknown table is a 422, not a tool.
+        print("Publishing the governed tool the Ask journey answers from...")
+        ensure_governed_tool(
+            projects["CUSTOMER"]["id"], datasources["CUSTOMER"]["id"], org_id
+        )
+
         print("Discovering cross-source relationships and object resolutions...")
         for source_code, target_code, _ in GRANT_PAIRS[
             ::2
@@ -530,6 +696,13 @@ def main() -> int:
         "Catalog, Sources, Relationships, Cross-source, Knowledge graph and Unified "
         "lineage now render a real, cross-database estate spanning two Postgres "
         "databases and SQL Server."
+    )
+    print(
+        "\nAsk, against the Customer datasource, with model generation off:\n"
+        f'    "{GOVERNED_TOOL_QUESTION}"\n'
+        f"  It refuses first, naming the input it needs ({GOVERNED_TOOL_PARAMETER}); "
+        f"answer {GOVERNED_TOOL_PARAMETER_EXAMPLE} and the same question returns a "
+        "governed result from the approved tool."
     )
     return 0
 
