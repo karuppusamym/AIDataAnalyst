@@ -179,7 +179,7 @@ It is safe to re-run.
 `AIDA_ENVIRONMENT` must be **unset** for pytest and **set** for the generator
 scripts — they disagree deliberately. Do not pass `-q`; it hides the summary.
 
-**Those four are not the whole gate set.** CI runs eight more, and a green
+**Those four are not the whole gate set.** CI runs ten more, and a green
 `pytest` says nothing about them — two of them were red on this branch while
 the suite was passing, because a doc derived from the source tree was not
 regenerated when a module landed. Run them:
