@@ -1,0 +1,6 @@
+# Playwright run artifacts. Regenerated on every run; the CI job uploads the
+# report as a build artifact on failure rather than committing it.
+test-results/
+playwright-report/
+blob-report/
+.playwright/

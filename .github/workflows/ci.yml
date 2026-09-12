@@ -146,6 +146,19 @@
 #                    stub upstream and asserts each API prefix reaches the upstream while
 #                    everything else gets the SPA. `scripts/check_proxy_contract.py` in the
 #                    `quality` job is its fast static half; this one is the live test.
+#   ui-journey    -- tracker R11-B11: `ui-proxy` proves the proxy routes; this proves the
+#                    application works across it. A real browser drives the six-step journey
+#                    (connect, scan, describe, review, Ask, evidence) through the REAL nginx
+#                    image, each step performed by an identity holding only that step's
+#                    roles -- so a step that succeeds proves authorization, not that the
+#                    caller was an administrator. It also covers the three cases the row
+#                    names as the ones that regress: reload, deep links, and a denied access
+#                    that must land on a VISIBLE refusal rather than a blank panel, an empty
+#                    state that reads as "no data", or a spinner that never resolves. The
+#                    stub upstream's role tuples are copied from the generated
+#                    surface-control matrix and `tests/test_journey_stub_contract.py` fails
+#                    if they drift, so the permission model under test stays the app's own.
+#                    Retries are zero: a browser job retried until green protects nothing.
 #   docs          -- review-2026-09-05 D06: README linked a status matrix and a competitor
 #                    planning document that did not exist. Every relative link in every
 #                    tracked Markdown file must resolve, headings included. External URLs are
@@ -846,6 +859,115 @@ jobs:
         run: |
           docker rm -f atlas-ui-next atlas-stub-api || true
           docker network rm atlas-proxy-ci || true
+
+  # The `ui-proxy` job above proves the proxy ROUTES correctly, with curl.
+  # This one drives a real browser through the same proxy and proves the
+  # application WORKS across it -- the six journey steps, each performed by an
+  # identity holding only that step's roles, plus reload, deep links and a
+  # denied access that must land on a visible refusal.
+  #
+  # Not the Vite dev server, deliberately: base paths, SPA fallback, header
+  # forwarding and API routing all differ between it and the nginx image that
+  # actually ships, and those differences are what break a deployment.
+  ui-journey:
+    name: Browser journey through the production proxy (R11-B11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The real production image, built for the topology the tracker row
+      # names: live data, and an authenticating reverse proxy in front, so the
+      # browser asserts no identity of its own (`ui-next/src/lib/appConfig.ts`)
+      # and the seat comes from the proxy -- which is what makes six
+      # least-privilege identities testable against ONE image.
+      - name: Build the ui-next image (live data, proxy auth)
+        run: |
+          docker build \
+            --build-arg VITE_USE_FIXTURES=0 \
+            --build-arg VITE_AUTH_MODE=proxy \
+            --tag ui-next-journey:${{ github.sha }} ./ui-next
+
+      - name: Create an isolated network
+        run: docker network create atlas-journey-ci
+
+      # `--network-alias api` for the same reason as the `ui-proxy` job:
+      # nginx.conf resolves the upstream by that name through Docker's
+      # embedded DNS. The repository is mounted read-only because the stub
+      # synthesises its response bodies from the committed OpenAPI baseline.
+      - name: Start the identity-aware stub upstream as `api`
+        run: |
+          docker run -d --name atlas-journey-stub \
+            --network atlas-journey-ci --network-alias api \
+            -v "$PWD:/srv:ro" \
+            python:3.13-slim python /srv/scripts/journey_stub_api.py 8000
+
+      - name: Start the ui-next image in front of it
+        run: |
+          docker run -d --name atlas-journey-ui \
+            --network atlas-journey-ci -p 8099:80 \
+            ui-next-journey:${{ github.sha }}
+
+      # Waits on the whole path the tests use, not just on nginx. `/health` is
+      # answered by nginx itself and says nothing about whether the upstream is
+      # reachable, so a run that started on it could pay a first-request stall
+      # inside the first test instead of here -- which is how a browser suite
+      # acquires a mystery timeout. The marker header is proof the request
+      # reached the stub rather than the SPA fallback.
+      - name: Wait for the proxy AND the upstream behind it
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null -H 'Cookie: atlas_journey_identity=auditor' \
+                 -D - http://localhost:8099/v1/me 2>/dev/null \
+                 | grep -qi '^x-atlas-stub-upstream: journey'; then
+              echo "the proxy reaches the upstream"; exit 0
+            fi
+            sleep 1
+          done
+          echo "the upstream was not reachable through the proxy"
+          docker logs atlas-journey-ui
+          docker logs atlas-journey-stub
+          exit 1
+
+      - name: Install the browser suite
+        working-directory: e2e
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      # `playwright.config.ts` sets `retries: 0`. A browser job that is retried
+      # until green protects nothing, so a failure here is a failure of the
+      # build and is meant to be read as one.
+      - name: Browser journey (six steps, least-privilege identities)
+        working-directory: e2e
+        env:
+          ATLAS_E2E_BASE_URL: http://localhost:8099
+        run: npm test
+
+      - name: Upload the Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-journey-report
+          path: e2e/playwright-report
+          retention-days: 7
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs atlas-journey-ui; docker logs atlas-journey-stub
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker rm -f atlas-journey-ui atlas-journey-stub || true
+          docker network rm atlas-journey-ci || true
 
   docs:
     name: Documentation links (D06)
