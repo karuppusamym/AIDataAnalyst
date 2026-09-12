@@ -11,6 +11,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp, parse_one
 
+from aida.agent_contracts import (
+    AgentContractValidationError,
+    agent_kill_blocking_reason,
+    envelope_violation,
+    load_contract_for_principal,
+)
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -966,6 +972,75 @@ async def execute_tool(
     return await execute_tool_version(version_id, body, context, session, settings)
 
 
+async def _enforce_agent_contract(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    version: GovernedToolVersion,
+    tool: GovernedTool,
+) -> None:
+    """R11-C6: hold a contracted agent to its contract on *this* path too.
+
+    The orchestrator has gated agent execution on the kill switch and the
+    capability envelope since AG-10, and this route -- the direct HTTP
+    execution of a published governed tool version -- did not. An agent
+    identity holding any of the four execution roles could therefore execute a
+    governed tool with its kill switch engaged and outside the `tool_slugs` its
+    contract names, simply by addressing the tool version by id instead of
+    asking through Ask. Same authority, same governed object, different
+    transport: the transport is not the control.
+
+    The asymmetry was already reasoned about here in the other direction. The
+    orchestrator carries a comment requiring parity with this route's quality
+    gate, because a tool version "must not answer differently depending on
+    which surface asked for it". That argument does not run one way only, and
+    the contract half of it had no such note.
+
+    Ordering is deliberate: this sits above `ensure_datasource_enabled` and the
+    quality gate, so a blocked agent learns nothing about the datasource's
+    state or which of the tool's dependencies have open incidents. A refusal
+    that discloses is still a disclosure.
+
+    A human caller has no contract and is unaffected -- `load_contract_for_principal`
+    returns `None` -- while an `AGENT`-typed identity with no contract, or with
+    an ambiguous one, is refused there rather than served as an uncontracted
+    human.
+    """
+    try:
+        contract = await load_contract_for_principal(
+            session,
+            organization_id=version.organization_id,
+            agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
+        )
+    except AgentContractValidationError as exc:
+        raise HTTPException(status_code=403, detail=exc.code) from exc
+    if contract is None:
+        return
+    reason = await agent_kill_blocking_reason(session, contract)
+    if reason is None:
+        reason = envelope_violation(contract, tool_slug=tool.slug)
+    if reason is None:
+        return
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="tool.execute",
+        resource_type="governed_tool_version",
+        resource_id=str(version.id),
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details={
+            "reason": reason,
+            "agent_principal_id": contract.agent_principal_id,
+            "kill_scope": contract.kill_scope,
+            "tool_slug": tool.slug,
+        },
+    )
+    await session.commit()
+    raise HTTPException(status_code=403, detail=reason)
+
+
 async def execute_tool_version(
     version_id: UUID,
     body: ToolExecutionRequest,
@@ -988,6 +1063,7 @@ async def execute_tool_version(
     datasource = await session.get(DataSource, version.datasource_id)
     if tool is None or datasource is None:
         raise HTTPException(status_code=409, detail="tool dependency is unavailable")
+    await _enforce_agent_contract(session, context, version=version, tool=tool)
     try:
         ensure_datasource_enabled(datasource)
     except RunAdmissionRejected as exc:
