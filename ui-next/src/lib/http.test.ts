@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError, decodeError } from "./http";
+import { ApiError, decodeError, describeLoadMoreFailure } from "./http";
 
 /* ---------------------------------------------------------------------------
    The regression these guard is F14: the per-verb decoders in `api.ts`
@@ -95,5 +95,38 @@ describe("ApiError", () => {
     expect(new ApiError(409, "x").retryable).toBe(false);
     expect(new ApiError(400, "x").retryable).toBe(false);
     expect(new ApiError(403, "x").retryable).toBe(false);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-B11 found every paged screen swallowing its next-page failure in a bare
+   `catch {}`: the list stopped growing and said nothing, so "you have reached
+   the end" and "you were refused" looked identical. On an audit ledger that
+   turns a truncated record into an apparently complete one.
+--------------------------------------------------------------------------- */
+
+describe("describeLoadMoreFailure", () => {
+  it("names a refusal as a refusal, not a failure", () => {
+    const message = describeLoadMoreFailure(new ApiError(403, "not a member of this workspace"));
+
+    expect(message).toContain("refused");
+    expect(message).toContain("not a member of this workspace");
+    expect(message).not.toContain("could not be loaded");
+  });
+
+  it("carries the server's own detail for any other status", () => {
+    expect(describeLoadMoreFailure(new ApiError(503, "upstream unavailable"))).toContain(
+      "upstream unavailable",
+    );
+  });
+
+  it("still says the page is incomplete when the failure is not an ApiError", () => {
+    // A network drop arrives as a TypeError, and the reader needs to know the
+    // list is short regardless of what threw.
+    expect(describeLoadMoreFailure(new TypeError("Failed to fetch"))).toContain("incomplete");
+  });
+
+  it("does not render an empty detail as a dangling colon", () => {
+    expect(describeLoadMoreFailure(new ApiError(403, ""))).not.toMatch(/:\s*$/);
   });
 });

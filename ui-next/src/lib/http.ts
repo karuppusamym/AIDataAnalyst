@@ -342,3 +342,31 @@ export async function requestBlob(
   notify({ ok: true, status: res.status, at: Date.now() });
   return { blob: await res.blob(), response: res };
 }
+
+/** A sentence for a page that did not load, for rendering beside the list.
+ *
+ * Every paged screen had the same bare `catch {}`: the list stopped growing
+ * and said nothing, so "you have reached the end" and "you were refused"
+ * looked identical. That is worst exactly where it matters most -- on an audit
+ * ledger a silent stop turns a truncated record into an apparently complete
+ * one -- and R11-B11's browser journey hit it on every least-privilege
+ * identity, where a refusal is the ordinary case rather than the exceptional
+ * one.
+ *
+ * A 403 is named as a refusal rather than a failure, because the reader's next
+ * action differs: ask for access, not retry. The server's own `detail` is
+ * preferred over anything invented here whenever it sent one.
+ */
+export function describeLoadMoreFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      return error.detail
+        ? `More results were refused: ${error.detail}`
+        : "More results were refused — you may not have access to the rest of this list.";
+    }
+    return error.detail
+      ? `More results could not be loaded: ${error.detail}`
+      : `More results could not be loaded (HTTP ${error.status}).`;
+  }
+  return "More results could not be loaded. What is shown above is incomplete.";
+}

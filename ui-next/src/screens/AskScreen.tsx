@@ -9,6 +9,7 @@ import type { AgentAskError, AgentAskErrorKind } from "../lib/api";
 import {
   ApiError,
   classifyAgentAskError,
+  describeLoadMoreFailure,
   fetchAgentRun,
   fetchAgentRunGroundingReceipts,
   fetchAgentRuns,
@@ -74,6 +75,7 @@ const statusTone = (status: string): Tone => {
 
 const ERROR_TITLE: Record<Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION">, string> = {
   DATASOURCE_DISABLED: "This datasource is disabled",
+  NOT_AUTHORIZED: "You do not have access to answer questions here",
   POLICY_REJECTED: "The generated query was rejected by policy",
   MODEL_UNAVAILABLE: "No model route is available right now",
   MODEL_THROTTLED: "The model provider is throttling us — try again in a moment",
@@ -604,6 +606,7 @@ export function AskScreen() {
   const [historyTotal, setHistoryTotal] = useState<number | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
+  const [historyLoadMoreError, setHistoryLoadMoreError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const historyInflight = useRef<AbortController | null>(null);
@@ -648,8 +651,11 @@ export function AskScreen() {
     try {
       const page = await fetchAgentRuns(dsId, { limit: 50, offset: historyItems.length });
       setHistoryItems((prev) => [...prev, ...page.items]);
-    } catch {
-      /* a failed next page leaves what is already loaded intact */
+      setHistoryLoadMoreError(null);
+    } catch (e) {
+      // See AuditLedgerScreen: a silent stop is indistinguishable from the end
+      // of the list, so a refusal reads as "there is nothing more".
+      setHistoryLoadMoreError(describeLoadMoreFailure(e));
     } finally {
       setHistoryLoadingMore(false);
     }
@@ -812,6 +818,7 @@ export function AskScreen() {
               totalCount={historyTotal}
               onReachEnd={() => void loadMoreHistory()}
               loadingMore={historyLoadingMore}
+              loadMoreError={historyLoadMoreError}
               emptyState={historyEmptyState}
               renderItem={(r) => (
                 <HistoryRow run={r} focused={r.id === runId} onFocus={() => setParams({ run: r.id })} />

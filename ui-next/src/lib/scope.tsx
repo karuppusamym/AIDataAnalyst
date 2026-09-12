@@ -291,13 +291,43 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
     const ac = new AbortController();
     const requestedOrg = orgId;
 
-    Promise.all([
+    /* `allSettled`, not `all`, and the difference is a real defect rather than
+     * a style preference. The three axes are authorized separately, so a
+     * least-privilege principal routinely holds one and not another -- and
+     * under `all` a single 403 rejected the whole bootstrap, emptying the two
+     * lists the caller *could* read and leaving the scope picker blank. The
+     * browser journey (R11-B11) hit it on every seat it defined, and had to
+     * widen an Analyst identity with an extra role to get past it, which is
+     * the opposite of what that suite is for.
+     *
+     * A refused axis now degrades to an empty list and the run continues.
+     * `status: "error"` is reserved for every axis failing, because that is
+     * the only case where there is no scope to pick at all. */
+    Promise.allSettled([
       listOrgWorkspaces(requestedOrg, ac.signal),
       listOrgProjects(requestedOrg, ac.signal),
       listOrgDatasources(requestedOrg, ac.signal),
     ])
-      .then(async ([workspaceList, projectList, datasourceList]) => {
+      .then(async (settled) => {
         if (ac.signal.aborted) return;
+        const firstRejection = settled.find((outcome) => outcome.status === "rejected");
+        if (firstRejection?.status === "rejected" && settled.every((o) => o.status === "rejected")) {
+          throw firstRejection.reason;
+        }
+        const [workspaceList, projectList, datasourceList] = settled.map((outcome) =>
+          outcome.status === "fulfilled"
+            ? outcome.value
+            : { items: [], total: 0, truncated: false },
+        ) as [
+          Awaited<ReturnType<typeof listOrgWorkspaces>>,
+          Awaited<ReturnType<typeof listOrgProjects>>,
+          Awaited<ReturnType<typeof listOrgDatasources>>,
+        ];
+        const refused = settled
+          .map((outcome, index) =>
+            outcome.status === "rejected" ? ["workspaces", "projects", "datasources"][index] : null,
+          )
+          .filter((axis): axis is string => axis !== null);
 
         const remembered = {
           workspaceId: stored(requestedOrg, "workspace"),
@@ -327,7 +357,13 @@ export function ScopeProvider({ children }: { children: ReactNode }) {
           const loaded: ScopeState = {
             ...previous,
             status: "ready",
-            error: null,
+            // Partly refused is still usable, and saying which axis was
+            // refused is what lets a reader tell "you have no workspaces" from
+            // "you may not list workspaces".
+            error:
+              refused.length > 0
+                ? `no access to ${refused.join(" or ")} in this organization`
+                : null,
             workspaces: workspace ? [...workspaceList.items, workspace] : workspaceList.items,
             projects: project ? [...projectList.items, project] : projectList.items,
             datasources: datasource ? [...datasourceList.items, datasource] : datasourceList.items,

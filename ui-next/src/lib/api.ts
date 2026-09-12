@@ -23,7 +23,7 @@
    not a redesign. Add an endpoint to its domain module, not here.
 --------------------------------------------------------------------------- */
 
-export { ApiError } from "./http";
+export { ApiError, describeLoadMoreFailure } from "./http";
 export type { FieldError } from "./http";
 export { USE_FIXTURES } from "./appConfig";
 export { deleteRequest, demoOr, get, patchJson, postJson, putJson } from "./api/transport";

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditEventRead } from "../lib/ui-types";
-import { ApiError, fetchAuditEvents } from "../lib/api";
+import { ApiError, describeLoadMoreFailure, fetchAuditEvents } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
@@ -211,6 +211,7 @@ export function AuditLedgerScreen() {
   const [total, setTotal] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // One in-flight request at a time -- aborting the previous one is what
@@ -273,8 +274,13 @@ export function AuditLedgerScreen() {
         offset: items.length,
       });
       setItems((prev) => [...prev, ...page.items]);
-    } catch {
-      /* a failed next page leaves what is already loaded intact */
+      setLoadMoreError(null);
+    } catch (e) {
+      // What is already loaded still stands -- but saying nothing made "you
+      // have reached the end" and "you were refused" look identical, which on
+      // an audit ledger is the difference between a complete record and a
+      // truncated one.
+      setLoadMoreError(describeLoadMoreFailure(e));
     } finally {
       setLoadingMore(false);
     }
@@ -392,6 +398,7 @@ export function AuditLedgerScreen() {
             totalCount={total}
             onReachEnd={() => void loadMore()}
             loadingMore={loadingMore}
+            loadMoreError={loadMoreError}
             emptyState={
               <Empty title="No audit events match these filters" hint="Try clearing a filter, such as the time range." />
             }

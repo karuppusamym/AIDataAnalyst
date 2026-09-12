@@ -44,6 +44,15 @@ export interface VirtualListProps<T> {
   totalCount?: number | null;
   onReachEnd?: () => void;
   loadingMore?: boolean;
+  /** Why the next page did not arrive. Rendered where `loadingMore` renders,
+   *  because that is where the reader is looking when nothing more appears.
+   *
+   *  Paging failures used to be swallowed by a bare `catch {}`: the list simply
+   *  stopped growing, and "you have reached the end" and "you were refused"
+   *  looked identical. R11-B11's browser journey found that on a least-
+   *  privilege identity, where the refusal is the normal case rather than the
+   *  exceptional one. */
+  loadMoreError?: string | null;
   ariaLabel: string;
   emptyState?: React.ReactNode;
 }
@@ -56,6 +65,7 @@ export function VirtualList<T>({
   totalCount,
   onReachEnd,
   loadingMore,
+  loadMoreError,
   ariaLabel,
   emptyState,
 }: VirtualListProps<T>) {
@@ -161,6 +171,11 @@ export function VirtualList<T>({
       {loadingMore ? (
         <div className="vlist__more" role="status">
           Loading more…
+        </div>
+      ) : null}
+      {!loadingMore && loadMoreError ? (
+        <div className="vlist__more vlist__more--error" role="alert">
+          {loadMoreError}
         </div>
       ) : null}
     </div>

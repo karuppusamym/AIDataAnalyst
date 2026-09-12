@@ -143,6 +143,16 @@ export function ScopePicker() {
       <select id="scope-org" value={org.orgId} onChange={(event) => org.setOrgId(event.target.value)} disabled={org.loading}>
         {org.organizations.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
       </select>
+      {/* `OrgSelection.error` was populated and read by nobody on this screen,
+          so a refused organization list rendered as an empty dropdown -- which
+          reads as "this tenant has no organizations", the one thing it does not
+          mean. `OrgPicker` has always shown it, but that component is not wired
+          into the shell; this one is. */}
+      {org.error ? (
+        <p className="scopepicker__count scopepicker__count--warn" role="status">
+          Organizations could not be loaded: {org.error}
+        </p>
+      ) : null}
 
       <label htmlFor="scope-filter">Filter <span>this estate</span></label>
       <input
@@ -183,7 +193,11 @@ export function ScopePicker() {
 
       <p className={`scopepicker__status${hasWorkspaceButNoSources ? " scopepicker__status--warn" : ""}`}>
         {scope.error
-          ? "Scope could not be loaded"
+          ? // The provider already carries what the server said; showing a flat
+            // "could not be loaded" threw it away, so a caller refused for a
+            // nameable reason -- no workspace membership, say -- read the same
+            // as a dead network and had nothing to act on.
+            `Scope could not be loaded: ${scope.error}`
           : !ready
             ? "Resolving scope…"
             : hasWorkspaceButNoSources

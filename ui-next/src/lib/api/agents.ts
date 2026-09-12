@@ -172,6 +172,7 @@ export function fetchAgentRunGroundingReceipts(
 export type AgentAskErrorKind =
   | "AMBIGUOUS_DEFINITION"
   | "DATASOURCE_DISABLED"
+  | "NOT_AUTHORIZED"
   | "POLICY_REJECTED"
   | "MODEL_UNAVAILABLE"
   | "MODEL_THROTTLED"
@@ -268,6 +269,13 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
         typeof error.details?.tool_version_id === "string" ? error.details.tool_version_id : null,
     };
   }
+  // A refusal is not a failure, and telling them apart is the whole point of
+  // this function. Without this branch a 403 fell through to UNKNOWN and Ask
+  // said "the question could not be answered" -- which reads as a fault in the
+  // platform to someone who simply may not read that datasource, and sends
+  // them to support rather than to whoever grants access. R11-B11's browser
+  // journey found it on the denied-access case.
+  if (status === 403) return { kind: "NOT_AUTHORIZED", status, detail, ...NO_CLARIFICATION };
   if (status === 422) return { kind: "POLICY_REJECTED", status, detail, ...NO_CLARIFICATION };
   if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, ...NO_CLARIFICATION };
   if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, ...NO_CLARIFICATION };
