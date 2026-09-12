@@ -299,10 +299,42 @@ opening a session. The shipped defaults:
 | lineage | `0` (off) | 25 | 500 | `agent:lineage` |
 | quality | `0` (off) | 25 | 50 | `agent:quality` |
 
-- [ ] Set an interval to `1` for one agent and rebuild `fleet-scheduler`.
-- [ ] Watch it work: `docker compose logs -f fleet-scheduler`.
-- [ ] Its proposals land in the review queue **as proposals**, attributed to
-      the agent's own workload identity — not to you, and not applied.
+**An interval alone does not start an agent, and this is the step that was
+missing.** `registered_organizations` starts a task agent only where its
+workload identity holds an agent contract whose AI asset version is APPROVED.
+A freshly seeded estate has no AI asset versions and no contracts, so all
+three agents are correctly and silently inert. Register one first:
+
+```bash
+AIDA_ENVIRONMENT=development ./.venv/Scripts/python.exe scripts/seed_task_agent.py   --org sample-bank --agent steward
+```
+
+That drives the real path with three identities — create the asset and its
+v1, have a steward author the evaluation-gate corpus, submit, approve as a
+**different** identity, then write the contract as the version's registered
+owner. Two flags exist to watch the controls refuse:
+
+- `--same-identity` → `REFUSED, as it must be: maker-checker separation is required`
+- `--fail-one` → the evaluation gate holds the approval back, and no contract
+  is written for an unapproved version
+
+Then:
+
+- [ ] Set `AIDA_STEWARD_AGENT_INTERVAL_MINUTES=1` in `.env` and recreate
+      `fleet-scheduler`.
+- [ ] Confirm it ran: `steward_agent.run` appears in the audit ledger with a
+      `proposed` count. `docker compose logs fleet-scheduler` shows the
+      scheduler iterating but **logs nothing per agent run**, so the ledger is
+      the evidence, not the log.
+- [ ] **Expect `proposed: 0` on the sample estate, and that is correct.** The
+      seeded estate already carries an open description draft for all 27
+      tables, and the worklist excludes a table whose description is already
+      proposed — so the steward agent has nothing to propose, and says so. To see
+      it propose, resolve some of those drafts in the review queue first, or
+      discover a datasource with undocumented tables.
+- [ ] When it does propose, the proposals land in the review queue **as
+      proposals**, attributed to the agent's own workload identity — not to
+      you, and not applied.
 - [ ] `MAX_PENDING_PROPOSALS` is a back-pressure ceiling: once that many of its
       proposals are unresolved, it stops proposing rather than burying the
       queue. Verify by setting it to `2`.
