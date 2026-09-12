@@ -5,7 +5,7 @@
 > Status: Authoritative for the current connector wave. Owner: Data Platform.
 > Concrete, code-level backlog for the framework hardening and the next adapters. Migrated and updated from the retired flat `18-oracle-bigquery-implementation-backlog.md`.
 >
-> **Note on paths.** File paths below refer to the current `src/aida/` layout. After the refactor (`40-engineering/06-refactor-plan.md`), the equivalents are under `src/atlas/modules/connectivity/` and `src/atlas/modules/query_gateway/`.
+> **Note on paths.** File paths below refer to the current `src/aida/` layout. After the refactor (`40-engineering/06-refactor-plan.md`), the equivalents move into the `connectivity` and `query_gateway` bounded contexts. Only the first of those has been created: `src/atlas/modules/connectivity/` is a scaffold today, and there is no `query_gateway` module under `src/atlas/modules/` yet — the query gateway still lives at `src/aida/query_gateway.py` with `src/aida/sql_guard.py` (checked 2026-09-11, R11-P9).
 
 ## 1. Framework changes required before the next adapters
 

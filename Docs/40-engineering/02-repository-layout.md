@@ -30,13 +30,17 @@ Three specific defects: no enforceable boundaries (any module can import any mod
 
 ## 2. Target layout
 
-> **Implementation status (2026-08-30). Target.** Built today, of the tree below:
+> **Implementation status (2026-08-30; the `src/atlas/` half re-measured 2026-09-11 under
+> R11-P9). Target.** Built today, of the tree below:
 > `src/atlas/platform/` (`config.py`, `db.py`, `context.py`, `logging.py` — the `telemetry/`,
 > `errors/`, `pagination/`, `idempotency/`, `outbox/`, `workflow/` and `http/` packages do not
-> exist), and `src/atlas/modules/identity_tenancy/` as a 69-line scaffold. `src/atlas/entrypoints/`
-> does not exist — entrypoints are `aida.main`, `aida.workflows.worker`,
-> `aida.workflows.scheduler`, `aida.projectors.outbox_publisher` and
-> `aida.projectors.graph_projector`. `tests/` is flat: 44 files, 339 test functions, no
+> exist), and six of the module trees below under `src/atlas/modules/` — `catalog`,
+> `connectivity`, `identity_tenancy`, `ingestion`, `observability_audit` and `profiling`,
+> 9,649 lines in all, ranging from still-bare scaffolds to `catalog`'s 576-line `service.py`.
+> The package `src/atlas/entrypoints/` does not exist. The entrypoints are
+> `aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+> `aida.projectors.outbox_publisher` and `aida.projectors.graph_projector`.
+> `tests/` is flat: 44 files, 339 test functions, no
 > `invariants/`, `integration/`, `contract/`, `performance/` or `fixtures/` subdirectories.
 
 ```text

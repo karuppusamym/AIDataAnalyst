@@ -55,6 +55,23 @@ Verification: `/health/live`, `/health/ready`, and `scripts/verify-local.ps1`.
 
 ## 3. Target production topology
 
+> **Implementation status (2026-09-11, R11-X10).** Nothing in this repository deploys the
+> shape below, and the diagram should be read as a requirement rather than as a description
+> of anything that runs. The only Kubernetes manifests that exist anywhere in the tree are
+> `infra/k8s/base/`, and they cover one of the four application units: a Deployment for the
+> API process plus a one-shot schema-migration Job. There is no manifest for the Temporal
+> worker (`aida.workflows.worker`), the fleet scheduler (`aida.workflows.scheduler`), the
+> outbox publisher (`aida.projectors.outbox_publisher`), the graph projector
+> (`aida.projectors.graph_projector`) or the React UI, and none for any data-zone service —
+> `compose.yaml` runs all of them locally, Kubernetes runs none of them. Those manifests
+> have never been applied to a cluster: their image digests are the literal placeholder
+> `REPLACE_ME_WITH_REAL_DIGEST` because no pipeline builds or pushes the image, and the
+> migration Job runs `alembic upgrade head` (singular) where `compose.yaml` runs `heads`,
+> which is the form that survives this repository's routine branch merges.
+> `infra/k8s/base/README.md` is the full accounting of what is and is not there.
+> Separately, `infra/airflow/` is one DAG file run by hand as an ingestion smoke test, not
+> an Airflow deployment — this repository installs no Airflow and starts none.
+
 ```mermaid
 flowchart TB
     subgraph EDGE["Edge zone"]

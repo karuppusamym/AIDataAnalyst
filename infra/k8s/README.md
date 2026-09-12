@@ -1,4 +1,11 @@
-# aida-api Kubernetes manifests
+# aida-api Kubernetes manifests — an example for one service, not a deployment
+
+> **What this is not (R11-X10, 2026-09-11).** This is a reviewable *sketch* of a single
+> process. It is not a deployable topology, it has never been applied to a cluster, its
+> image digests are placeholders for an image no pipeline builds, and `migration-job.yaml`
+> is known to abort as written. `compose.yaml` runs six application processes; this
+> directory covers two of them. `base/README.md` lists exactly what is missing and why it
+> matters — read it before treating anything here as production-ready.
 
 Tracker: **AU-9**. Audit: `Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` §4 —
 *"No production deployment artifact exists. `infra/` contains four `init.sql` seed files.
@@ -38,6 +45,7 @@ A plain, kustomize-composable set of Kubernetes manifests for the `aida-api` ser
 ```
 infra/k8s/
   base/
+    README.md                 # what these manifests are NOT — read first
     namespace.yaml            # the `aida` namespace
     serviceaccount.yaml        # dedicated SA, no API token mounted (least privilege)
     configmap.yaml              # non-secret config incl. AIDA_ENVIRONMENT / AIDA_IDENTITY_PROVIDER
@@ -108,13 +116,28 @@ which is the next real validation step once one exists (e.g. in a CI job with `k
 
 ## What's honestly still missing
 
-- **No non-`env` `SecretProvider` is implemented.** `configmap.yaml` sets
-  `AIDA_CREDENTIAL_PROVIDER=vault` because `Settings` forbids `credential_provider=="env"`
-  when `environment=="production"` — but audit remediation item #10 confirms only the
-  `Protocol` and caching exist in `src/aida/secrets.py`; no real Vault/CyberArk/AWS-SM/
-  Azure-KV/GCP-SM fetch is wired. Setting this value lets the process pass config
-  validation at startup; it does not mean connector credential resolution actually works.
-  That gap is tracked under item #10, not fixed by this manifest.
+- **Four of the six application processes have no manifest at all** — `metadata-worker`
+  (`python -m aida.workflows.worker`), `fleet-scheduler`
+  (`python -m aida.workflows.scheduler`), `outbox-publisher`
+  (`python -m aida.projectors.outbox_publisher`) and `graph-projector`
+  (`python -m aida.projectors.graph_projector`), all of which `compose.yaml` runs. So does
+  `ui-next`. Apply this directory and the API serves requests while no workflow runs, no
+  scan is scheduled, no outbox row is ever published and the Neo4j graph is never built —
+  a silent no-op, not a visible failure. `base/README.md` has the full comparison.
+- **`migration-job.yaml` uses the fragile form.** It runs `alembic upgrade head`
+  (singular) where `compose.yaml` runs `heads` (plural). The graph is 153 revisions with a
+  single head as of 2026-09-11, so the singular form resolves today — but this repository
+  merges independent Alembic branches routinely (46 of those revisions are merges), and
+  any moment with two live heads makes `head` abort with "Multiple head revisions are
+  present" while `heads` keeps working. This Job has never been run against this schema.
+- ~~**No non-`env` `SecretProvider` is implemented.**~~ **Stale as of 2026-08-31; corrected
+  2026-09-11 (R11-X10).** This entry said only the `Protocol` and caching existed in
+  `src/aida/secrets.py`. AU-10 closed the same day this README landed:
+  `VaultKvSecretProvider` reads HashiCorp Vault's KV v2 engine, and `SecretResolver` builds
+  it when `AIDA_CREDENTIAL_PROVIDER=vault` is configured. `configmap.yaml` setting that
+  value now means what it says. Still true: no CyberArk / AWS Secrets Manager / Azure Key
+  Vault / GCP Secret Manager provider exists, so a deployer whose secret store is not Vault
+  has nothing to point `vault` at.
 - **Resource requests/limits are defaults, not measurements.** No load test or profiling
   run exists for this codebase yet (audit §5). Treat the numbers in `deployment.yaml` as a
   reasonable starting point to watch in staging and revise, not a capacity-planning result.

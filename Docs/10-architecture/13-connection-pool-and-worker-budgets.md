@@ -134,6 +134,13 @@ leaving them mismatched means the visible symptom names the wrong resource.
 with `replicas: 3`. There is **no** Deployment for the worker, the scheduler,
 the outbox publisher or the graph projector.
 
+Those manifests are an example of one service, not a deployable topology: they
+have never been applied to a cluster, their image digests are placeholders, and
+the migration Job aborts as written. `infra/k8s/base/README.md` (added under
+R11-X10) states that plainly. The sizing below is therefore what an operator
+would have to work out before deploying the missing processes, not a reading of
+something already deployed.
+
 | | Per process | × replicas | Total |
 |---|---:|---:|---:|
 | api steady | 10 | 3 | 30 |
