@@ -1,9 +1,19 @@
-"""SQL-based view and procedure lineage extraction.
+"""SQL-based view lineage extraction.
 
-Parses SQL view definitions and stored procedure bodies using sqlglot to
-extract column-level lineage edges.  Definitions are NEVER executed -- this
-is parse-only analysis.  Literal values in SQL are REDACTED (replaced by
-placeholders) so no source data leaks into lineage metadata.
+Parses SQL view definitions using sqlglot to extract column-level lineage
+edges.  Definitions are NEVER executed -- this is parse-only analysis.
+Literal values in SQL are REDACTED (replaced by placeholders) so no source
+data leaks into lineage metadata.
+
+Procedure *bodies* are not parsed here.  `parse_procedure_lineage` used to
+live in this module as a second name for `parse_view_lineage` -- the same
+flat statement sweep, with no control-flow or dynamic-SQL handling (AT-D5).
+It was removed on 2026-09-11 (R11-X5) once its only caller, the
+`view_lineage_api` router, went with it; the procedure-aware parser N3
+called for is `aida.procedure_lineage.parse_procedure_lineage`.  What
+remains of the procedure story here is the `PROCEDURE_RESULT_TARGET`
+sentinel for a standalone `SELECT` with no destination table, which
+`aida.procedure_lineage` and `aida.routine_lineage_edges` still read.
 
 Supported dialects: postgres, snowflake, bigquery, tsql (SQL Server), oracle.
 Graceful degradation: if a parse fails the module returns an empty edge list
@@ -672,54 +682,6 @@ def parse_view_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
     Args:
         sql: The SQL view definition (e.g. CREATE VIEW v AS SELECT ...)
         dialect: Target SQL dialect (postgres, snowflake, bigquery, tsql, oracle)
-
-    Returns:
-        ParseResult with extracted edges and confidence level.
-    """
-    if dialect not in _SQLGLOT_DIALECT_MAP:
-        return ParseResult(
-            confidence=Confidence.LOW.value,
-            dialect=dialect,
-            sql_hash=_compute_sql_hash(sql),
-            errors=[f"unsupported dialect: {dialect}"],
-        )
-    return _parse_sql(sql, dialect)
-
-
-def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
-    """Parse SQL text as a flat sequence of DML statements -- currently
-    identical to `parse_view_lineage`, not a procedure-aware parser.
-
-    AT-D5: this is `_parse_sql` under a procedure-flavoured name, not real
-    procedure-body parsing. The procedure-aware parser N3 called for has since
-    shipped as `aida.procedure_lineage.parse_procedure_lineage` -- it peels
-    control flow, detects dynamic SQL and nested calls, and marks what it
-    cannot parse UNPARSED with a reason. Prefer that one; this function is
-    kept only for callers that genuinely want the flat statement sweep. It has
-    no
-    control-flow handling (IF/LOOP/CURSOR/branching), no
-    variable/temp-table scope resolution, and -- most importantly --
-    **no dynamic-SQL detection at all**: a `CREATE PROCEDURE ... AS $$ ...
-    EXECUTE format(...) ... $$` body's dynamic string is invisible to
-    sqlglot and silently produces no edge for that statement, with nothing
-    flagging the gap as unresolved rather than merely absent. It works
-    today only because `sqlglot.parse` on a bare (non-`CREATE PROCEDURE`)
-    sequence of statements -- e.g. a body already unwrapped by the caller
-    into `SELECT`/`INSERT`/`UPDATE`/`MERGE` statements -- happens to
-    extract the same per-statement edges `parse_view_lineage` would extract
-    from the same SQL; a real `CREATE PROCEDURE`/`CREATE FUNCTION` wrapper
-    generally fails to parse under `sqlglot` and falls back to
-    `Confidence.LOW` with a parse error, same as any unparseable input.
-    Do not read the separate name as evidence of procedure-specific
-    capability -- see N3 in `Docs/60-delivery/03-tracker.md` for the real,
-    unstarted work this would take.
-
-    The SQL is never executed.  Literal values are redacted from hashes.
-
-    Args:
-        sql: The SQL text (ideally already unwrapped to its constituent DML
-            statements; a full `CREATE PROCEDURE` wrapper is not parsed).
-        dialect: Target SQL dialect
 
     Returns:
         ParseResult with extracted edges and confidence level.

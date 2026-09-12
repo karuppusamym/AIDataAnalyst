@@ -2,8 +2,10 @@
 
 Moved out of `view_lineage_api._resolve_table_ids` on 2026-09-10, unchanged, so
 that the lineage agent (`aida.lineage_agent`, ADR-0029) resolves a parsed
-view's sources exactly the way a person's parse does, without importing a
-router. `procedure_lineage_api` still carries its own identical copy.
+view's sources exactly the way a person's parse did, without importing a
+router. That router was removed by R11-X5; this module is now the lineage
+agent's own resolution step. `procedure_lineage_api` still carries its own
+identical copy.
 """
 
 from __future__ import annotations

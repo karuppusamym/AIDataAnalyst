@@ -31,9 +31,9 @@ from atlas.platform.config import Settings, get_settings
 
 router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 
-#: Who may start a run: exactly the roles that may already parse a view or a
-#: captured routine into lineage by hand (`_LINEAGE_WRITER_ROLES` in
-#: `view_lineage_api` and `procedure_lineage_api`).
+#: Who may start a run: exactly the roles that may already parse a captured
+#: routine into lineage by hand (`_LINEAGE_WRITER_ROLES` in
+#: `procedure_lineage_api`).
 LINEAGE_AGENT_OPERATORS = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
 
 LineageCapability = Literal["VIEW_LINEAGE", "PROCEDURE_LINEAGE"]

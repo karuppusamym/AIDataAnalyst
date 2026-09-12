@@ -273,15 +273,15 @@ def _register_definition_edges(
 ) -> None:
     """Collapse column-level parser rows into one table-level edge per pair.
 
-    `view_lineage_api.py` persists one row per *column* pair
+    The parsers persist one row per *column* pair
     (source_table/source_column -> target_table/target_column, where target is
     the view or procedure output). Only rows the parser matched to a real
     catalog table on both ends are foldable into this table-level graph -- an
     unmatched free-text table name (`source_table_id is None`) cannot be
     deduplicated against a real `MetadataTable` without risking a false merge
-    across schemas that share a table name, so those rows are left for the
-    dedicated `/view-lineage` / `/procedure-lineage` endpoints rather than
-    guessed here. Multiple column-level rows between the same two tables
+    across schemas that share a table name, so those rows are left out of this
+    graph rather than guessed here; they remain visible on the row itself.
+    Multiple column-level rows between the same two tables
     collapse into one edge, exactly like dbt's COLUMN_DEPENDS_ON rows.
 
     Takes each model concretely (rather than as a `type[X | Y]` parameter) so

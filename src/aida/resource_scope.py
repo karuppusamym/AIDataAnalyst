@@ -8,7 +8,8 @@ there is no function here that only does the first.
 Six routers carried a private copy of one of these two helpers -- three of
 `_project_scope` (`context_product_api`, `document_ingestion_api`,
 `product_marketplace_api`) and three of `_load_datasource`
-(`procedure_lineage_api`, `unified_lineage_api`, `view_lineage_api`), each
+(`procedure_lineage_api`, `unified_lineage_api`, `view_lineage_api` -- the
+last of which was removed entirely by R11-X5), each
 byte-identical to its siblings. `Docs/review-2026-09-05/REVIEW.md` R07 asks
 for one authoritative implementation per invariant, and this is the invariant
 where duplication costs most: every copy contains an `enforce_organization`

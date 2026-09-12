@@ -1976,7 +1976,7 @@ export interface DbtProjectRead {
   updated_at: string;
 }
 
-/** One edge from the procedure-aware parser (N3) -- richer than */
+/** One edge from the procedure-aware parser (N3) -- richer than a flat */
 export interface DeepProcedureLineageEdgeRead {
   source_table: string;
   source_column: string;
@@ -2551,36 +2551,6 @@ export interface GraphNodeRead {
   outbound_edge_count?: number;
 }
 
-/** Opaque frontend Graph Explorer state, plus queryable metadata. */
-export interface GraphPerspectiveCreate {
-  datasource_id?: string | null;
-  name: string;
-  description?: string | null;
-  allowed_viewer_roles?: string[];
-  view_state?: Record<string, unknown>;
-}
-
-export interface GraphPerspectiveRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string | null;
-  name: string;
-  description: string | null;
-  owner_principal: string;
-  allowed_viewer_roles: string[];
-  view_state: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
-}
-
-/** All fields optional: only owner-supplied fields are applied (owner-only, see the API). */
-export interface GraphPerspectiveUpdate {
-  name?: string | null;
-  description?: string | null;
-  allowed_viewer_roles?: string[] | null;
-  view_state?: Record<string, unknown> | null;
-}
-
 export interface GraphSearchRead {
   datasource_id: string;
   query: string;
@@ -2780,17 +2750,6 @@ export interface LineageAgentRunRequest {
   limit?: number;
   datasource_id?: string | null;
   dry_run?: boolean;
-}
-
-/** One column-level lineage edge extracted from SQL. */
-export interface LineageEdgeRead {
-  source_table: string;
-  source_column: string;
-  target_table: string;
-  target_column: string;
-  transformation_type: string;
-  confidence: string;
-  dialect: string;
 }
 
 export interface LobCostRowRead {
@@ -3742,26 +3701,6 @@ export interface ProcedureCapabilityMatrixRead {
   dialects: string[];
   constructs: ProcedureCapabilityConstructRead[];
   unparsed_reasons: string[];
-}
-
-export interface ProcedureLineageEdgeRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string;
-  source_table: string;
-  source_column: string;
-  target_table: string;
-  target_column: string;
-  source_table_id: string | null;
-  source_column_id: string | null;
-  target_table_id: string | null;
-  target_column_id: string | null;
-  transformation_type: string;
-  confidence: string;
-  dialect: string;
-  sql_hash: string;
-  created_at: string;
-  updated_at: string;
 }
 
 /** N12: request a deterministically-rendered procedure-to-tool draft. */
@@ -5143,40 +5082,6 @@ export interface VectorIndexStatusRead {
   age_minutes: number | null;
   backend: string;
   max_age_minutes: number;
-}
-
-export interface ViewLineageEdgeRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string;
-  source_table: string;
-  source_column: string;
-  target_table: string;
-  target_column: string;
-  source_table_id: string | null;
-  source_column_id: string | null;
-  target_table_id: string | null;
-  target_column_id: string | null;
-  transformation_type: string;
-  confidence: string;
-  dialect: string;
-  sql_hash: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ViewLineageParseRequest {
-  sql: string;
-  dialect?: string;
-}
-
-export interface ViewLineageParseResponse {
-  edges: LineageEdgeRead[];
-  confidence: string;
-  dialect: string;
-  sql_hash: string;
-  errors?: string[];
-  persisted_edge_count?: number;
 }
 
 /** N11: request a deterministically-rendered single-view tool draft */

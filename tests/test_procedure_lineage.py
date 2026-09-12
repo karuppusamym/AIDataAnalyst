@@ -26,7 +26,7 @@ from aida.procedure_lineage import (
 
 
 def test_tsql_procedure_with_control_flow_is_not_silently_truncated() -> None:
-    # sql_lineage_parser.parse_procedure_lineage (AT-D5) hands this whole
+    # sql_lineage_parser.parse_view_lineage (AT-D5) hands this whole
     # body to a single sqlglot.parse call, which falls back to an opaque
     # Command node at the first unsupported token (the IF/BEGIN) and drops
     # everything after it -- proven directly against that module below.
@@ -100,10 +100,16 @@ def test_tsql_procedure_with_control_flow_is_not_silently_truncated() -> None:
 
 
 def test_the_generic_flat_parser_silently_truncates_the_same_body() -> None:
-    """Pins AT-D5's exact defect so a future change to the generic parser
-    that accidentally "fixes" this without anyone noticing doesn't silently
-    make this module's own docstring claims stale."""
-    from aida.sql_lineage_parser import parse_procedure_lineage as generic_parse
+    """Pins AT-D5's exact defect so a future change to the flat parser that
+    accidentally "fixes" this without anyone noticing doesn't silently make
+    this module's own docstring claims stale.
+
+    R11-X5 removed `sql_lineage_parser.parse_procedure_lineage`, which was a
+    second name for `parse_view_lineage` and is what this test used to call.
+    The defect it pins is the flat parser's, not that alias's, so the test
+    now calls the surviving function directly.
+    """
+    from aida.sql_lineage_parser import parse_view_lineage as flat_parse
 
     sql = """
     CREATE PROCEDURE dbo.usp_x AS
@@ -114,8 +120,8 @@ def test_the_generic_flat_parser_silently_truncates_the_same_body() -> None:
         END
     END
     """
-    result = generic_parse(sql, dialect="tsql")
-    assert result.edges == []  # the INSERT is invisible to the generic parser
+    result = flat_parse(sql, dialect="tsql")
+    assert result.edges == []  # the INSERT is invisible to the flat parser
 
 
 # ---------------------------------------------------------------------------

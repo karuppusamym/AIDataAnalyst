@@ -12,9 +12,9 @@ them exactly as if they had been declared in `models.py` -- while this
 module's new tables arrive as one reviewable, isolated file.
 
 **Why a new table rather than reusing `models.ProcedureLineageEdge`.** That
-table (AT-D2/AT-D5) is populated by `sql_lineage_parser.parse_procedure_lineage`
-via `view_lineage_api.py`'s raw-SQL parse endpoint -- a flat, non-procedure-
-aware parse with no identity back to a specific `MetadataRoutine` at all
+table (AT-D2/AT-D5) was populated by `view_lineage_api.py`'s raw-SQL parse
+endpoint -- a flat, non-procedure-aware parse with no identity back to a
+specific `MetadataRoutine` at all
 (AT-19 documented this as the reason `PROCEDURE_DEFINITION` unified-lineage
 edges could not carry a `transformation_reference` the way `VIEW_DEFINITION`
 edges do; since 2026-09-11 an edge one routine establishes through this
@@ -26,6 +26,12 @@ body -- the highest-collision-risk kind of edit for a module under
 concurrent edit. A new, dedicated table with a real `routine_id` foreign key
 is both safer to add and strictly more capable: `DeepProcedureLineageEdge`
 is the identity-bearing procedure lineage table AT-19 wished existed.
+
+R11-X5 (2026-09-11) removed that raw-SQL parse endpoint, so nothing in this
+repository writes `models.ProcedureLineageEdge` any more. The table is kept
+deliberately: a deployment's existing rows are still read by the unified
+lineage graph, the parsed-edge review queue and the description drafter, and
+`DeepProcedureLineageEdge` here is where new procedure lineage lands.
 """
 
 from datetime import datetime
