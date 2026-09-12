@@ -447,10 +447,23 @@ class GovernedAgentOrchestrator:
     ) -> tuple[SqlGenerationOutput, ModelCallEvidence, list[dict[str, Any]]]:
         """Try `approved_routes` in preference order; return the first
         route's `(output, evidence)` along with the full per-route attempt
-        chain. Falls back only on transient provider errors (HTTP 429/502/
-        503/504); non-transient errors (401/403/400) short-circuit -- they
-        indicate the route itself is broken, not a busy provider, so
-        switching would just move the failure.
+        chain. Falls back on transient provider errors (HTTP 429/502/503/504)
+        and on **404**; other non-transient errors (401/403/400)
+        short-circuit -- they indicate the request or the credential is
+        broken, which the next route shares, so switching would just move the
+        failure.
+
+        404 is the exception and it took a live provider to find. A retired
+        model answers 404 ("this model is no longer available"), which is a
+        statement about *this route's* model and about nothing else -- so a
+        different approved route, with a different model, is exactly the
+        remedy the fallback list exists to provide. Treating it as
+        short-circuiting meant an approved route whose model the provider had
+        retired failed every generated answer closed, without ever trying the
+        approved fallback sitting right behind it. Measured, not hypothesised:
+        `gemini-2.0-flash` was retired upstream while configured as the
+        primary route here, and generation failed while a working OpenAI
+        fallback was configured and never attempted.
 
         `attempts` records every route tried (route_key, provider_type,
         attempt_ordinal, outcome, provider_status_code on failure) so the
@@ -461,7 +474,11 @@ class GovernedAgentOrchestrator:
         non-retryable failure fires; the caller translates that into a
         rejection + refusal record.
         """
-        _RETRYABLE_PROVIDER_STATUSES = {429, 502, 503, 504}
+        # 404 sits here with the transient statuses because the *response* to it
+        # is the same -- try the next approved route -- even though the cause is
+        # permanent. See the docstring: a retired model is a broken route, and
+        # the fallback route has a different model.
+        _FALLBACK_WORTHY_PROVIDER_STATUSES = {404, 429, 502, 503, 504}
         attempts: list[dict[str, Any]] = []
         if not approved_routes:
             raise ModelGatewayError(
@@ -488,9 +505,11 @@ class GovernedAgentOrchestrator:
                         "error_class": type(exc).__name__,
                     }
                 )
-                is_retryable = exc.provider_status_code in _RETRYABLE_PROVIDER_STATUSES
+                may_fall_back = (
+                    exc.provider_status_code in _FALLBACK_WORTHY_PROVIDER_STATUSES
+                )
                 is_last_attempt = attempt_ordinal == len(approved_routes)
-                if not is_retryable or is_last_attempt:
+                if not may_fall_back or is_last_attempt:
                     # Attach the attempt chain onto the exception so the
                     # caller can record it on the agent_run's plan_evidence
                     # even on refusal. Using an attribute (not a subclass)

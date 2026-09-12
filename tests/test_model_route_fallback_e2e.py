@@ -456,3 +456,137 @@ async def test_run_both_routes_429_rejects_but_still_persists_attempt_chain(
     assert [a["outcome"] for a in attempts] == ["FAILED", "FAILED"]
     assert [a["route_key"] for a in attempts] == [PRIMARY_ROUTE_KEY, FALLBACK_ROUTE_KEY]
     assert [a["provider_status_code"] for a in attempts] == [429, 429]
+
+
+async def test_a_retired_model_falls_back_instead_of_failing_closed(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 404 from the primary route must reach the approved fallback.
+
+    This was found against a live provider, not reasoned about: the primary
+    route's model had been retired upstream, the provider answered 404 ("this
+    model is no longer available"), and 404 sat outside the fallback set -- so
+    every generated answer failed closed while a working approved fallback sat
+    behind it, untried.
+
+    404 belongs with the transient statuses even though its cause is permanent,
+    because the correct *response* is identical: a retired model is a statement
+    about this route and nothing else, and the next approved route has a
+    different model. 401/403/400 stay short-circuiting, since a bad request or
+    a bad credential is a property the next route shares.
+    """
+    fixture = await _seed(session)
+    session.add_all(
+        [
+            _route_row(
+                org_id=fixture.organization.id,
+                key=PRIMARY_ROUTE_KEY,
+                provider="GOOGLE_GEMINI",
+                model_id="gemini-2.0-flash",
+            ),
+            _route_row(
+                org_id=fixture.organization.id,
+                key=FALLBACK_ROUTE_KEY,
+                provider="OPENAI",
+                model_id="gpt-4o-mini",
+            ),
+        ]
+    )
+    await session.commit()
+
+    gateway = _QueuedGateway(
+        [
+            ModelGatewayError(
+                "models/gemini-2.0-flash is no longer available",
+                provider_status_code=404,
+            ),
+            (_fake_output(), _fake_evidence(FALLBACK_ROUTE_KEY)),
+        ]
+    )
+    orchestrator = _orchestrator(monkeypatch, gateway=gateway)
+    context = security_context(
+        organization_id=fixture.organization.id, roles=frozenset({"Analyst"})
+    )
+
+    result = await orchestrator.run(
+        session,
+        datasource=fixture.datasource,
+        context=context,
+        correlation_id="corr-retired-model",
+        question=QUESTION,
+        candidate_sql=None,
+        preferred_tool_version_id=None,
+        tool_parameters={},
+        requested_limit=None,
+    )
+
+    assert result.agent_run.status == "COMPLETED", (
+        "a 404 from the primary route failed the run closed; the approved "
+        "fallback was never tried, which is the defect this pins"
+    )
+    assert result.agent_run.model_route == FALLBACK_ROUTE_KEY
+    attempts = result.agent_run.plan_evidence["model_call_attempts"]
+    assert [a["outcome"] for a in attempts] == ["FAILED", "SUCCEEDED"]
+    assert attempts[0]["provider_status_code"] == 404
+
+
+async def test_a_bad_credential_still_short_circuits(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same decision, so widening the set stays narrow.
+
+    A 401 is a property of the request or the credential, which the next route
+    shares, so trying it again moves the failure rather than fixing it -- and
+    spends a second provider call to learn nothing. The fallback must not fire.
+    """
+    fixture = await _seed(session)
+    session.add_all(
+        [
+            _route_row(
+                org_id=fixture.organization.id,
+                key=PRIMARY_ROUTE_KEY,
+                provider="OPENAI",
+                model_id="gpt-4o-mini",
+            ),
+            _route_row(
+                org_id=fixture.organization.id,
+                key=FALLBACK_ROUTE_KEY,
+                provider="GOOGLE_GEMINI",
+                model_id="gemini-3.6-flash",
+            ),
+        ]
+    )
+    await session.commit()
+
+    gateway = _QueuedGateway(
+        [
+            ModelGatewayError("invalid api key", provider_status_code=401),
+            (_fake_output(), _fake_evidence(FALLBACK_ROUTE_KEY)),
+        ]
+    )
+    orchestrator = _orchestrator(monkeypatch, gateway=gateway)
+    context = security_context(
+        organization_id=fixture.organization.id, roles=frozenset({"Analyst"})
+    )
+
+    # `ModelRouteUnavailable`, matching the exhausted-routes test above: the
+    # orchestrator translates a gateway failure before it leaves the run.
+    with pytest.raises(ModelRouteUnavailable) as exc_info:
+        await orchestrator.run(
+            session,
+            datasource=fixture.datasource,
+            context=context,
+            correlation_id="corr-bad-credential",
+            question=QUESTION,
+            candidate_sql=None,
+            preferred_tool_version_id=None,
+            tool_parameters={},
+            requested_limit=None,
+        )
+    # 401, not the fallback's status: the primary's failure is what surfaced.
+    assert exc_info.value.provider_status_code == 401
+    # And the decisive assertion -- the gateway records every call it received,
+    # so one entry means the fallback route was never reached rather than
+    # reached and discarded. Its queued success response is still unconsumed.
+    assert [call["route_key"] for call in gateway.calls] == [PRIMARY_ROUTE_KEY]
+    assert len(gateway.responses) == 1

@@ -25,6 +25,14 @@ is the development-only form, and `aida.secrets` refuses the `env://` scheme
 outright when `AIDA_ENVIRONMENT=production`, so a route seeded here cannot
 follow the repository into a deployment.
 
+**The model is checked against the provider before anything is drafted**, and
+that check exists because its absence already cost us: the first route seeded
+here named `gemini-2.0-flash`, which the provider had retired. The route
+reached APPROVED, looked entirely healthy, and every generated answer failed
+with a 404 -- a governance artifact naming a model that does not exist. An
+approval is only as good as the thing it approves, so `--skip-model-check` has
+to be asked for explicitly.
+
 Usage:
     python scripts/seed_model_route.py --org sample-bank \\
         --route-key gemini-bank-sql --provider GOOGLE_GEMINI \\
@@ -68,6 +76,48 @@ async def _organization_id(session: object, slug: str) -> UUID:
     return organization.id
 
 
+async def _model_is_served(provider: str, model_id: str, settings: object) -> bool | None:
+    """Whether the provider will actually serve this model. `None` means unknown.
+
+    Only the two providers this repository has credentials for are checked; for
+    anything else the answer is honestly unknown rather than assumed, because a
+    silent "yes" here is what this check exists to prevent.
+    """
+    import httpx
+
+    try:
+        if provider == "GOOGLE_GEMINI":
+            key = settings.gemini_api_key  # type: ignore[attr-defined]
+            if key is None:
+                return None
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(
+                    f"{settings.gemini_base_url}/models",  # type: ignore[attr-defined]
+                    params={"key": key.get_secret_value()},
+                )
+            if response.status_code != 200:
+                return None
+            served = {m.get("name", "") for m in response.json().get("models", [])}
+            return f"models/{model_id}" in served or model_id in served
+        if provider == "OPENAI":
+            key = settings.openai_api_key  # type: ignore[attr-defined]
+            if key is None:
+                return None
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(
+                    f"{settings.openai_base_url}/models",  # type: ignore[attr-defined]
+                    headers={"Authorization": f"Bearer {key.get_secret_value()}"},
+                )
+            if response.status_code != 200:
+                # A billing-inactive account cannot list models, and that is not
+                # evidence the model is gone.
+                return None
+            return any(m.get("id") == model_id for m in response.json().get("data", []))
+    except Exception:  # noqa: BLE001 - an unreachable provider is "unknown", not "absent"
+        return None
+    return None
+
+
 async def seed(args: argparse.Namespace) -> int:
     # Imported here rather than at module scope: importing a router module
     # pulls in the FastAPI app graph, and doing that at import time makes this
@@ -76,6 +126,21 @@ async def seed(args: argparse.Namespace) -> int:
     from aida.semantic_api import decide_governance_review
 
     settings = get_settings()
+    if not args.skip_model_check:
+        available = await _model_is_served(args.provider, args.model_id, settings)
+        if available is None:
+            print(
+                f"could not check {args.model_id!r} against the provider; "
+                "continuing (pass --skip-model-check to silence this)"
+            )
+        elif not available:
+            print(
+                f"refusing to draft: the provider does not serve {args.model_id!r}. "
+                "Approving a route for a model that does not exist produces a healthy-"
+                "looking configuration whose every call fails.",
+                file=sys.stderr,
+            )
+            return 1
     async with session_factory() as session:
         organization_id = await _organization_id(session, args.org)
         existing = await session.scalar(
@@ -84,10 +149,13 @@ async def seed(args: argparse.Namespace) -> int:
                 ModelRouteConfiguration.route_key == args.route_key,
             )
         )
-        if existing is not None:
+        if existing is not None and not args.new_version:
             print(
                 f"route {args.route_key!r} already exists for {args.org} "
-                f"(version {existing.version}, status {existing.status}) -- nothing to do"
+                f"(version {existing.version}, status {existing.status}) -- nothing to do. "
+                "Pass --new-version to supersede it, which is the governed way to change "
+                "a route: a new version through the same maker-checker path, leaving the "
+                "old version and its approval in place."
             )
             return 0
 
@@ -170,6 +238,16 @@ def main() -> int:
         "--retention-policy",
         default="PROVIDER_CONTRACT",
         choices=["ZERO_RETENTION", "BANK_MANAGED", "PROVIDER_CONTRACT"],
+    )
+    parser.add_argument(
+        "--new-version",
+        action="store_true",
+        help="supersede an existing route key with a new version through maker-checker",
+    )
+    parser.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        help="draft without asking the provider whether it serves this model",
     )
     parser.add_argument(
         "--same-identity",

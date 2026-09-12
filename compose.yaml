@@ -92,6 +92,19 @@ x-app-environment: &app-environment
   AIDA_MODEL_PROVIDER_MAX_ATTEMPTS: ${AIDA_MODEL_PROVIDER_MAX_ATTEMPTS:-3}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  # Embeddings were reachable from a host process and from nothing in a
+  # container: the generation settings above were passed through and the
+  # `AIDA_EMBEDDING_*` ones were not, so `embedding_provider` read `unset`
+  # inside `api` however the host was configured, and the vector stage
+  # skipped itself with a reason nobody would connect to a missing compose
+  # entry. Defaults preserve the shipped posture exactly -- `unset` still
+  # means unset, and the stage still refuses rather than guessing.
+  AIDA_EMBEDDING_PROVIDER: ${AIDA_EMBEDDING_PROVIDER:-unset}
+  AIDA_EMBEDDING_CREDENTIAL_REFERENCE: ${AIDA_EMBEDDING_CREDENTIAL_REFERENCE:-}
+  AIDA_EMBEDDING_MODEL_ID: ${AIDA_EMBEDDING_MODEL_ID:-unset}
+  AIDA_EMBEDDING_MODEL_VERSION: ${AIDA_EMBEDDING_MODEL_VERSION:-unset}
+  AIDA_EMBEDDING_DIMENSIONS: ${AIDA_EMBEDDING_DIMENSIONS:-768}
+  AIDA_VECTOR_INDEX_REBUILD_ENABLED: ${AIDA_VECTOR_INDEX_REBUILD_ENABLED:-true}
 
 services:
   postgres:
