@@ -119,9 +119,6 @@ from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
     ArchiveStatusRead as ArchiveStatusRead,
     AuditEventRead as AuditEventRead,
     OutboxEventRead as OutboxEventRead,
-    SloBudgetRead as SloBudgetRead,
-    SloDefinitionCreate as SloDefinitionCreate,
-    SloDefinitionRead as SloDefinitionRead,
 )
 
 # Re-exported for backward compatibility -- review-2026-09-05 point R04

@@ -5629,10 +5629,15 @@ export async function makeFixtureDocumentationWorklist(
 }
 
 /* ---------------------------------------------------------------------------
-   Reliability -- SLOs, notification rules, archive/WORM posture, and runtime
+   Reliability -- notification rules, archive/WORM posture, and runtime
    data-contract evaluation. Mirrors `lib/api.ts`'s "Reliability" block
    field-for-field against the real `observability_api.py` /
-   `notification_api.py` / `runtime_contracts_api.py` response shapes. */
+   `notification_api.py` / `runtime_contracts_api.py` response shapes.
+
+   The SLO fixtures went with the feature on 2026-09-12 (R11-D10). They are
+   worth a note on the way out: they returned healthy budgets, which is why
+   the permanently-empty panel never showed up in the demo app and the gap
+   survived as long as it did. */
 
 import type {
   ArchiveStatusRead,
@@ -5640,114 +5645,14 @@ import type {
   NotificationRuleCreate,
   NotificationRuleRead,
   SlaStatusResponse,
-  SloBudgetRead,
-  SloDefinitionCreate,
-  SloDefinitionRead,
 } from "./types";
 import type { ViolationRead } from "./ui-types";
 import type {
   ContractViolationsQuery,
   NotificationRuleQuery,
-  SloDefinitionQuery,
 } from "./api";
 
 const RELIABILITY_ORG = "00000000-0000-0000-0000-000000000001";
-
-const FIXTURE_SLOS: SloDefinitionRead[] = [
-  {
-    id: "slo_agent_answer_latency", organization_id: RELIABILITY_ORG,
-    slo_key: "agent-answer-latency-p95", name: "Agent answer latency (p95)",
-    target: 99, window_days: 30, threshold: 95, status: "ACTIVE",
-    created_by: "local-ui-admin", created_at: "2026-07-01T00:00:00Z", updated_at: "2026-08-15T00:00:00Z",
-  },
-  {
-    id: "slo_ingestion_freshness", organization_id: RELIABILITY_ORG,
-    slo_key: "ingestion-freshness", name: "Metadata ingestion freshness",
-    target: 99.5, window_days: 7, threshold: 97, status: "ACTIVE",
-    created_by: "local-ui-admin", created_at: "2026-07-05T00:00:00Z", updated_at: "2026-08-20T00:00:00Z",
-  },
-  {
-    id: "slo_governed_tool_success", organization_id: RELIABILITY_ORG,
-    slo_key: "governed-tool-success-rate", name: "Governed tool execution success rate",
-    target: 99.9, window_days: 30, threshold: 99, status: "ACTIVE",
-    created_by: "local-ui-admin", created_at: "2026-06-15T00:00:00Z", updated_at: "2026-08-28T00:00:00Z",
-  },
-];
-
-/** Keyed by `SloDefinitionRead.id`. Mirrors `get_slo_budget`'s own
- *  HEALTHY/AT_RISK/BREACHED/NO_DATA derivation (current vs. target/threshold)
- *  -- one of each, so the screen's status pill/tone logic gets exercised. */
-const FIXTURE_SLO_BUDGETS: Record<string, SloBudgetRead> = {
-  slo_agent_answer_latency: {
-    slo_id: "slo_agent_answer_latency", slo_key: "agent-answer-latency-p95",
-    name: "Agent answer latency (p95)", target: 99, current_value: 99.4,
-    budget_remaining: 0.62, window_days: 30, status: "HEALTHY",
-  },
-  slo_ingestion_freshness: {
-    slo_id: "slo_ingestion_freshness", slo_key: "ingestion-freshness",
-    name: "Metadata ingestion freshness", target: 99.5, current_value: 97.8,
-    budget_remaining: 0.18, window_days: 7, status: "AT_RISK",
-  },
-  slo_governed_tool_success: {
-    slo_id: "slo_governed_tool_success", slo_key: "governed-tool-success-rate",
-    name: "Governed tool execution success rate", target: 99.9, current_value: 98.1,
-    budget_remaining: 0, window_days: 30, status: "BREACHED",
-  },
-};
-
-/** `GET /v1/observability/slo`. */
-export async function makeFixtureSloDefinitions(
-  organizationId: string,
-  query: SloDefinitionQuery,
-): Promise<PageOf<SloDefinitionRead>> {
-  await wait(70);
-  void organizationId;
-  const offset = query.offset ?? 0;
-  const limit = query.limit ?? 100;
-  return {
-    items: FIXTURE_SLOS.slice(offset, offset + limit),
-    limit, offset, total: FIXTURE_SLOS.length,
-  };
-}
-
-/** `POST /v1/observability/slo` -- mirrors `create_slo_definition`'s own
- *  409 on a duplicate `slo_key` within the organization. A freshly created
- *  SLO has no measurement yet, so its budget resolves NO_DATA (no entry is
- *  seeded into `FIXTURE_SLO_BUDGETS` for it) -- the same "no measurement
- *  landed yet" path the real endpoint takes for a brand-new definition. */
-export async function makeFixtureCreateSloDefinition(
-  organizationId: string,
-  body: SloDefinitionCreate,
-): Promise<SloDefinitionRead> {
-  await wait(90);
-  if (FIXTURE_SLOS.some((s) => s.slo_key === body.slo_key)) {
-    throw new ApiError(409, "slo_key already exists");
-  }
-  const now = new Date().toISOString();
-  const slo: SloDefinitionRead = {
-    id: `slo_${body.slo_key.replace(/[^a-z0-9]+/g, "_")}`,
-    organization_id: organizationId,
-    slo_key: body.slo_key, name: body.name, target: body.target,
-    window_days: body.window_days, threshold: body.threshold, status: "ACTIVE",
-    created_by: "local-ui-admin", created_at: now, updated_at: now,
-  };
-  FIXTURE_SLOS.unshift(slo);
-  return slo;
-}
-
-/** `GET /v1/observability/slo/{slo_id}/budget`. */
-export async function makeFixtureSloBudget(sloId: string): Promise<SloBudgetRead> {
-  await wait(60);
-  const seeded = FIXTURE_SLO_BUDGETS[sloId];
-  if (seeded) return seeded;
-  const slo = FIXTURE_SLOS.find((s) => s.id === sloId);
-  if (!slo) throw new ApiError(404, "slo definition not found");
-  return {
-    slo_id: slo.id, slo_key: slo.slo_key, name: slo.name, target: slo.target,
-    current_value: null, budget_remaining: null, window_days: slo.window_days,
-    status: "NO_DATA",
-  };
-}
 
 /** `GET /v1/observability/archive/status` -- legal hold active on one of
  *  twelve WORM archives, the same "mostly healthy, one hold to account for"
@@ -5766,9 +5671,12 @@ export async function makeFixtureArchiveStatus(): Promise<ArchiveStatusRead> {
 
 const FIXTURE_NOTIFICATION_RULES: NotificationRuleRead[] = [
   {
-    id: "ntf_slo_breach_pager", organization_id: RELIABILITY_ORG,
-    name: "SLO breach — page on-call",
-    conditions: { event_type: "slo.breached", severity: ["CRITICAL"] },
+    // Was an SLO-breach rule until R11-D10 retired SLOs (2026-09-12). Retargeted
+    // at a condition the platform actually raises, so the demo does not advertise
+    // an escalation route for an event nothing can emit.
+    id: "ntf_contract_breach_pager", organization_id: RELIABILITY_ORG,
+    name: "Contract breach — page on-call",
+    conditions: { event_type: "contract.violated", severity: ["CRITICAL"] },
     channel: "ITSM", recipients: ["oncall-data-platform@tenant.example"],
     escalation_after_minutes: 15, enabled: true,
     created_by: "local-ui-admin", created_at: "2026-07-10T00:00:00Z", updated_at: "2026-07-10T00:00:00Z",

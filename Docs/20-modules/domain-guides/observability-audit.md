@@ -20,8 +20,12 @@ tables in four families:
   gap between an upload and its verification.
 - **External delivery** — `delivery_intent` and `delivery_attempt`, the durable
   record behind SIEM and webhook routing.
-- **Service levels and compliance artefacts** — `slo_definition`,
-  `slo_measurement`, `compliance_pack`, `access_review_report`.
+- **Compliance artefacts** — `compliance_pack`, `access_review_report`.
+  Service levels used to live here too (`slo_definition`, `slo_measurement`);
+  both tables were retired on 2026-09-12 (R11-D10, migration `f3a91c27b5de`)
+  because nothing ever wrote a measurement and there was no indicator source
+  to write one from — an SLO was bound to no measurable signal, and nothing in
+  this repository scrapes the Prometheus exposition on `/metrics`.
 
 ## Invariants it must uphold
 
@@ -42,10 +46,11 @@ tables in four families:
 
 ## Entry points
 
-- **HTTP** — 5 routes, the smallest surface of the five contexts, and
-  deliberately so: `POST`/`GET /v1/observability/slo`, the SLO budget, the
-  archive status, and cost showback. Reading the ledger itself is not an HTTP
-  route here.
+- **HTTP** — 2 routes, the smallest surface of the five contexts, and
+  deliberately so: the archive status and cost showback. Reading the ledger
+  itself is not an HTTP route here. The three SLO routes
+  (`POST`/`GET /v1/observability/slo` and the budget read) were retired on
+  2026-09-12 — see R11-D10 above.
 - **Mounted through a shim.** `aida.main` imports this router as
   `aida.observability_api`; two tests import handler functions from that path
   directly. Recorded in

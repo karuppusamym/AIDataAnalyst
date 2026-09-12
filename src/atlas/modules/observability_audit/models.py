@@ -35,10 +35,19 @@ metrics, SLO state, compliance packs"):
 * `OutboxEvent` -- the transactional outbox. "Dead letters" is not a
   separate table: a dead-lettered event is `status == "DEAD_LETTER"` on
   this same row, not a distinct record.
-* `SloDefinition`, `SloMeasurement` -- SLO state. "Metrics" in the
-  register is covered by these two plus OpenTelemetry-emitted metrics
-  (`atlas.platform.telemetry`, not a database table at all), not a
-  separate metrics table.
+* SLO state -- **retired 2026-09-12 (R11-D10)**. `SloDefinition` and
+  `SloMeasurement` lived here, and nothing ever wrote a measurement.
+  Retirement rather than a writer was the decision because there was no
+  indicator to write: an SLO was bound to nothing measurable (`slo_key`
+  was a free-text slug with no registry behind it), no SLI concept
+  existed anywhere in `src/`, and the only real telemetry -- the
+  Prometheus exposition on `/metrics` -- is scraped by nothing in this
+  repository and by no Prometheus in any compose file or `infra/`
+  manifest. So "Metrics" in the register is covered by the
+  OpenTelemetry-emitted metrics (`atlas.platform.telemetry`, not a
+  database table at all) alone. Reinstating SLOs means designing the
+  indicator binding first; migration `f3a91c27b5de` drops the two tables
+  and its downgrade recreates them.
 * `CompliancePackRecord` -- WORM-archived compliance pack generated from
   runtime evidence (EE.4/OB-5).
 * `AccessReviewReportRecord` -- WORM-archived self-service entitlement
@@ -74,7 +83,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -111,48 +119,6 @@ class OutboxEvent(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class SloDefinition(Base, TimestampMixin):
-    """Service-level objective definition, org-scoped."""
-
-    __tablename__ = "slo_definition"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "slo_key"),
-        Index("ix_slo_definition_org_status", "organization_id", "status"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    slo_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    target: Mapped[float] = mapped_column(Float, nullable=False)
-    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
-    threshold: Mapped[float] = mapped_column(Float, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class SloMeasurement(Base):
-    """Point-in-time SLO measurement."""
-
-    __tablename__ = "slo_measurement"
-    __table_args__ = (Index("ix_slo_measurement_slo_time", "slo_id", "measured_at"),)
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    slo_id: Mapped[UUID] = mapped_column(
-        ForeignKey("slo_definition.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    value: Mapped[float] = mapped_column(Float, nullable=False)
-    budget_remaining: Mapped[float] = mapped_column(Float, nullable=False)
-    measured_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
 
 
 class AuditArchiveRecord(Base, TimestampMixin):

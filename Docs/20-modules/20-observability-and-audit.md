@@ -38,10 +38,16 @@ U1 (every action on this asset), U2 (prove constraints), U4 (evidence pack), P2,
 ```text
 audit_event (actor, action, resource, tenancy, correlation_id, occurred_at, detail)
 outbox_event, dead_letter
-slo_definition, slo_state, error_budget
 compliance_pack, pack_artifact
 cost_record (dimension, tenancy, quantity, period)
 ```
+
+The SLO row of this model (`slo_definition`, `slo_state`, `error_budget`) was
+retired on 2026-09-12 (R11-D10). Only two of the three were ever built, and
+nothing ever wrote a measurement into them — an SLO was bound to no measurable
+signal, and "being the metrics store" is explicitly not this module's job (see
+the table above), so the indicator would have had to come from the enterprise
+observability stack that this platform does not integrate with.
 
 ## 6. The audit contract
 

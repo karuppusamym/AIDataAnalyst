@@ -14,7 +14,7 @@
    its own, importing nothing. `org.tsx` writes it; `api/transport.ts` reads
    it. Neither imports the other.
 
-   WHY A MIRROR AT ALL. A handful of backend routes (observability/SLO,
+   WHY A MIRROR AT ALL. A handful of backend routes (observability/archive,
    notification-rules, tool-plans) take no `{organization_id}` path segment
    and resolve the tenant purely from the `X-Organization-Id` header
    (`security.py`'s `get_security_context`). Without a module-scope value

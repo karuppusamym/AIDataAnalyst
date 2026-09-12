@@ -344,7 +344,11 @@ second means access has actually stopped.
 
 | Event | Trigger | Key payload |
 |---|---|---|
-| `observability.slo.created.v1` | SLO definition created | slo_key, target |
+
+`observability.slo.created.v1` was the only event on this topic. It was retired
+on 2026-09-12 with the SLO feature that emitted it (R11-D10): nothing ever wrote
+`slo_measurement`, and no indicator source existed to write one from, so the
+error budget could only ever answer NO_DATA.
 
 ### Workspace — topic `atlas.governance.v1`
 

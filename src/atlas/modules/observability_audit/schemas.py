@@ -8,10 +8,11 @@ working unchanged.
 
 Covers the request/response DTOs for this module's owned models
 (`atlas.modules.observability_audit.models`): the audit ledger, the
-outbox, SLO definitions/budgets, and archive status. `SloBudgetRead` and
-`ArchiveStatusRead` are composed read models, but composed only from this
-module's own tables (`SloDefinition`+`SloMeasurement`,
-`AuditArchiveRecord` respectively) -- unlike `FleetSummaryRead` or
+outbox, and archive status. The SLO DTOs (`SloDefinitionCreate`,
+`SloDefinitionRead`, `SloBudgetRead`) were retired here on 2026-09-12
+with their tables and endpoints -- see R11-D10 and the models module.
+`ArchiveStatusRead` is a composed read model, but composed only from this
+module's own table (`AuditArchiveRecord`) -- unlike `FleetSummaryRead` or
 `LobCostRowRead`/`CostShowbackTotalsRead` (OB-6), which stay in
 `aida.schemas` because they genuinely compose fields sourced from other
 modules' tables (datasources, analysis runs, query executions, lines of
@@ -38,8 +39,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 from uuid import UUID
-
-from pydantic import Field
 
 from aida.schemas import ApiModel
 
@@ -71,39 +70,6 @@ class OutboxEventRead(ApiModel):
     last_error: str | None
     occurred_at: datetime
     published_at: datetime | None
-
-
-class SloDefinitionCreate(ApiModel):
-    slo_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
-    name: str = Field(min_length=3, max_length=200)
-    target: float = Field(ge=0.0, le=100.0)
-    window_days: int = Field(ge=1, le=365)
-    threshold: float = Field(ge=0.0, le=100.0)
-
-
-class SloDefinitionRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    slo_key: str
-    name: str
-    target: float
-    window_days: int
-    threshold: float
-    status: str
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class SloBudgetRead(ApiModel):
-    slo_id: UUID
-    slo_key: str
-    name: str
-    target: float
-    current_value: float | None
-    budget_remaining: float | None
-    window_days: int
-    status: str
 
 
 class ArchiveStatusRead(ApiModel):

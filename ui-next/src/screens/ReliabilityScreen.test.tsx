@@ -5,8 +5,6 @@ import type {
   EvaluationResponse,
   NotificationRuleRead,
   SlaStatusResponse,
-  SloBudgetRead,
-  SloDefinitionRead,
 } from "../lib/types";
 import type { PageOf, ViolationRead } from "../lib/ui-types";
 import { DEFAULT_ORG_ID } from "../lib/org";
@@ -19,13 +17,6 @@ import { DEFAULT_ORG_ID } from "../lib/org";
 --------------------------------------------------------------------------- */
 
 const fetchArchiveStatus = vi.fn<(signal?: AbortSignal) => Promise<ArchiveStatusRead>>();
-const fetchSloDefinitions = vi.fn<
-  (organizationId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<SloDefinitionRead>>
->();
-const createSloDefinition = vi.fn<
-  (organizationId: string, body: unknown, signal?: AbortSignal) => Promise<SloDefinitionRead>
->();
-const fetchSloBudget = vi.fn<(sloId: string, signal?: AbortSignal) => Promise<SloBudgetRead>>();
 const fetchNotificationRules = vi.fn<
   (organizationId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<NotificationRuleRead>>
 >();
@@ -45,11 +36,6 @@ vi.mock("../lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchArchiveStatus: (signal?: AbortSignal) => fetchArchiveStatus(signal),
-    fetchSloDefinitions: (organizationId: string, query: unknown, signal?: AbortSignal) =>
-      fetchSloDefinitions(organizationId, query, signal),
-    createSloDefinition: (organizationId: string, body: unknown, signal?: AbortSignal) =>
-      createSloDefinition(organizationId, body, signal),
-    fetchSloBudget: (sloId: string, signal?: AbortSignal) => fetchSloBudget(sloId, signal),
     fetchNotificationRules: (organizationId: string, query: unknown, signal?: AbortSignal) =>
       fetchNotificationRules(organizationId, query, signal),
     createNotificationRule: (organizationId: string, body: unknown, signal?: AbortSignal) =>
@@ -71,21 +57,9 @@ const ARCHIVE: ArchiveStatusRead = {
   status: "LEGAL_HOLD_ACTIVE",
 };
 
-const SLO: SloDefinitionRead = {
-  id: "slo_1", organization_id: "org1", slo_key: "agent-answer-latency-p95",
-  name: "Agent answer latency (p95)", target: 99, window_days: 30, threshold: 95,
-  status: "ACTIVE", created_by: "local-ui-admin",
-  created_at: "2026-07-01T00:00:00Z", updated_at: "2026-08-15T00:00:00Z",
-};
-
-const BUDGET: SloBudgetRead = {
-  slo_id: "slo_1", slo_key: "agent-answer-latency-p95", name: "Agent answer latency (p95)",
-  target: 99, current_value: 99.4, budget_remaining: 0.62, window_days: 30, status: "HEALTHY",
-};
-
 const RULE: NotificationRuleRead = {
-  id: "ntf_1", organization_id: "org1", name: "SLO breach — page on-call",
-  conditions: { event_type: "slo.breached" }, channel: "ITSM",
+  id: "ntf_1", organization_id: "org1", name: "Contract breach — page on-call",
+  conditions: { event_type: "contract.violated" }, channel: "ITSM",
   recipients: ["oncall@tenant.example"], escalation_after_minutes: 15, enabled: true,
   created_by: "local-ui-admin", created_at: "2026-07-10T00:00:00Z", updated_at: "2026-07-10T00:00:00Z",
 };
@@ -123,9 +97,6 @@ async function loadScreen() {
 
 beforeEach(() => {
   fetchArchiveStatus.mockReset();
-  fetchSloDefinitions.mockReset();
-  createSloDefinition.mockReset();
-  fetchSloBudget.mockReset();
   fetchNotificationRules.mockReset();
   createNotificationRule.mockReset();
   evaluateDataContract.mockReset();
@@ -133,9 +104,7 @@ beforeEach(() => {
   fetchContractSlaStatus.mockReset();
 
   fetchArchiveStatus.mockResolvedValue(ARCHIVE);
-  fetchSloDefinitions.mockResolvedValue(pageOf([SLO]));
   fetchNotificationRules.mockResolvedValue(pageOf([RULE]));
-  fetchSloBudget.mockResolvedValue(BUDGET);
   evaluateDataContract.mockResolvedValue(EVALUATION);
   fetchContractSlaStatus.mockResolvedValue(SLA_STATUS);
   fetchContractViolations.mockResolvedValue(pageOf([VIOLATION]));
@@ -149,88 +118,31 @@ afterEach(() => {
 });
 
 describe("ReliabilityScreen against the real observability/notification/runtime-contracts endpoints", () => {
-  it("loads archive tiles, the SLO list, and the notification rule list on mount", async () => {
+  it("loads archive tiles and the notification rule list on mount", async () => {
     const ReliabilityScreen = await loadScreen();
     render(<ReliabilityScreen />);
 
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
-    expect(screen.getByText("legal hold active")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("legal hold active")).toBeInTheDocument());
     expect(screen.getByText("12")).toBeInTheDocument();
     expect(screen.getByText("48,213")).toBeInTheDocument();
 
-    expect(screen.getByText("SLO breach — page on-call")).toBeInTheDocument();
+    expect(screen.getByText("Contract breach — page on-call")).toBeInTheDocument();
     expect(screen.getByText("oncall@tenant.example")).toBeInTheDocument();
   });
 
-  it("viewing an SLO's budget fetches it by id and renders its live status", async () => {
+  it("no longer offers an SLO panel or a create-SLO form", async () => {
+    /* R11-D10 retired the SLO surface: `slo_measurement` never had a writer and
+       no indicator source existed to build one from, so the budget could only
+       ever answer NO_DATA. Pinned as an assertion rather than left as an
+       absence, because the failure this row closed was a screen that looked
+       like it supervised something. */
     const ReliabilityScreen = await loadScreen();
     render(<ReliabilityScreen />);
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("legal hold active")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "View budget" }));
-
-    await waitFor(() => expect(fetchSloBudget).toHaveBeenCalledWith("slo_1", undefined));
-    await waitFor(() => expect(screen.getByText("healthy")).toBeInTheDocument());
-    expect(screen.getByText("99.40%")).toBeInTheDocument();
-  });
-
-  it("says so when an SLO has no measurements, rather than showing a bare NO_DATA", async () => {
-    // R11-D10: `slo_measurement` has no writer, so a defined SLO returns
-    // NO_DATA forever. Rendering only the status pill left an operator unable
-    // to tell "nothing is collecting this" from "collected and fine", which
-    // made a defined SLO look supervised. The demo fixtures return healthy
-    // values, so this state only ever appears against a real backend -- which
-    // is why it is pinned here rather than checked in the running app.
-    fetchSloBudget.mockResolvedValue({
-      slo_id: "slo_1",
-      slo_key: "agent-answer-latency-p95",
-      name: "Agent answer latency (p95)",
-      target: 99,
-      current_value: null,
-      budget_remaining: null,
-      window_days: 30,
-      status: "NO_DATA",
-    });
-    const ReliabilityScreen = await loadScreen();
-    render(<ReliabilityScreen />);
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: "View budget" }));
-
-    await waitFor(() =>
-      expect(
-        screen.getByText("no measurements recorded — this SLO is defined but not yet collected"),
-      ).toBeInTheDocument(),
-    );
-  });
-
-  it("creating an SLO posts the typed body and prepends the result to the list", async () => {
-    createSloDefinition.mockResolvedValue({
-      id: "slo_2", organization_id: "org1", slo_key: "ingestion-freshness",
-      name: "Metadata ingestion freshness", target: 99.5, window_days: 7, threshold: 97,
-      status: "ACTIVE", created_by: "local-ui-admin",
-      created_at: "2026-09-03T00:00:00Z", updated_at: "2026-09-03T00:00:00Z",
-    });
-    const ReliabilityScreen = await loadScreen();
-    render(<ReliabilityScreen />);
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
-
-    const form = screen.getByRole("form", { name: "Create SLO" });
-    fireEvent.change(within(form).getByPlaceholderText("agent-answer-latency-p95"), { target: { value: "ingestion-freshness" } });
-    fireEvent.change(within(form).getByPlaceholderText("Agent answer latency (p95)"), { target: { value: "Metadata ingestion freshness" } });
-    fireEvent.change(within(form).getByLabelText("Target %"), { target: { value: "99.5" } });
-    fireEvent.change(within(form).getByLabelText("Threshold %"), { target: { value: "97" } });
-    fireEvent.change(within(form).getByLabelText("Window (days)"), { target: { value: "7" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Create SLO" }));
-
-    await waitFor(() =>
-      expect(createSloDefinition).toHaveBeenCalledWith(
-        DEFAULT_ORG_ID,
-        { slo_key: "ingestion-freshness", name: "Metadata ingestion freshness", target: 99.5, window_days: 7, threshold: 97 },
-        undefined,
-      ),
-    );
-    await waitFor(() => expect(screen.getByText("Metadata ingestion freshness")).toBeInTheDocument());
+    expect(screen.queryByRole("form", { name: "Create SLO" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View budget" })).toBeNull();
+    expect(screen.queryByText("SLOs")).toBeNull();
   });
 
   it("creating a notification rule parses JSON conditions and CSV recipients before posting", async () => {
@@ -240,10 +152,10 @@ describe("ReliabilityScreen against the real observability/notification/runtime-
     });
     const ReliabilityScreen = await loadScreen();
     render(<ReliabilityScreen />);
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("legal hold active")).toBeInTheDocument());
 
     const form = screen.getByRole("form", { name: "Create notification rule" });
-    fireEvent.change(within(form).getByPlaceholderText("SLO breach — page on-call"), { target: { value: "Contract violation digest" } });
+    fireEvent.change(within(form).getByPlaceholderText("Contract breach — page on-call"), { target: { value: "Contract violation digest" } });
     fireEvent.change(within(form).getByLabelText("Channel"), { target: { value: "EMAIL" } });
     fireEvent.change(within(form).getByPlaceholderText("oncall@tenant.example, steward@tenant.example"), {
       target: { value: "a@tenant.example, b@tenant.example" },
@@ -273,10 +185,10 @@ describe("ReliabilityScreen against the real observability/notification/runtime-
   it("rejects invalid JSON conditions client-side without calling the API", async () => {
     const ReliabilityScreen = await loadScreen();
     render(<ReliabilityScreen />);
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("legal hold active")).toBeInTheDocument());
 
     const form = screen.getByRole("form", { name: "Create notification rule" });
-    fireEvent.change(within(form).getByPlaceholderText("SLO breach — page on-call"), { target: { value: "Bad conditions rule" } });
+    fireEvent.change(within(form).getByPlaceholderText("Contract breach — page on-call"), { target: { value: "Bad conditions rule" } });
     fireEvent.change(within(form).getByPlaceholderText("oncall@tenant.example, steward@tenant.example"), {
       target: { value: "a@tenant.example" },
     });
@@ -292,7 +204,7 @@ describe("ReliabilityScreen against the real observability/notification/runtime-
   it("evaluating a contract id fires evaluate/violations/sla-status together and renders the combined evidence", async () => {
     const ReliabilityScreen = await loadScreen();
     render(<ReliabilityScreen />);
-    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("legal hold active")).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText("Contract ID"), {
       target: { value: "contract-abc" },

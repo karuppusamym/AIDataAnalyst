@@ -15,160 +15,41 @@ Original module docstring follows.
 ---
 Observability API (OB-1 through OB-4, OB-6).
 
-SLO definitions CRUD, error budget consumption, audit archive status, and
-cost/showback aggregation endpoints.
+Audit archive status and cost/showback aggregation endpoints.
+
+The SLO definitions CRUD and error-budget endpoints were retired on
+2026-09-12 (R11-D10). `slo_measurement` never had a writer, and the reason it
+never got one is that there was nothing to write: an SLO was bound to no
+measurable signal (`slo_key` was a free-text slug with no registry), no SLI
+concept existed in `src/`, and nothing scrapes the Prometheus exposition on
+`/metrics` -- no compose file or `infra/` manifest deploys a Prometheus at
+all. A budget endpoint that can only ever answer NO_DATA, and a create form
+that writes an audit and an outbox event for a control nobody measures, are
+worse than no feature: they are governance evidence for supervision that does
+not exist. Removing them alters the OpenAPI surface (three routes) and
+therefore `Docs/90-reference/openapi-baseline.json` and
+`Docs/50-security/surface-control-matrix.md`, which are regenerated centrally.
 """
 
 from datetime import datetime
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.context import get_correlation_id
 from aida.cost_showback import build_cost_showback_report, totals_for
 from aida.db import get_session
-from aida.events import record_audit, record_outbox
-from aida.models import AuditArchiveRecord, SloDefinition, SloMeasurement
+from aida.models import AuditArchiveRecord
 from aida.schemas import (
     ArchiveStatusRead,
     CostShowbackRead,
     CostShowbackTotalsRead,
     LobCostRowRead,
-    Page,
-    SloBudgetRead,
-    SloDefinitionCreate,
-    SloDefinitionRead,
 )
-from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.security import SecurityContext, require_roles
 from aida.worm_archive import STATE_VERIFIED
 
 router = APIRouter(prefix="/v1", tags=["observability"])
-
-
-@router.post("/observability/slo", response_model=SloDefinitionRead, status_code=201)
-async def create_slo_definition(
-    body: SloDefinitionCreate,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin", "Operations")),
-    session: AsyncSession = Depends(get_session),
-) -> SloDefinitionRead:
-    org_id = context.require_organization()
-
-    existing = await session.scalar(
-        select(SloDefinition).where(
-            SloDefinition.organization_id == org_id,
-            SloDefinition.slo_key == body.slo_key,
-        )
-    )
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="slo_key already exists")
-
-    slo = SloDefinition(
-        organization_id=org_id,
-        slo_key=body.slo_key,
-        name=body.name,
-        target=body.target,
-        window_days=body.window_days,
-        threshold=body.threshold,
-        created_by=context.principal_id,
-    )
-    session.add(slo)
-    await session.flush()
-    record_audit(
-        session,
-        context,
-        action="observability.slo.create",
-        resource_type="slo_definition",
-        resource_id=str(slo.id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
-        details={"slo_key": body.slo_key, "target": body.target},
-    )
-    record_outbox(
-        session,
-        organization_id=org_id,
-        aggregate_type="slo_definition",
-        aggregate_id=str(slo.id),
-        event_type="observability.slo.created.v1",
-        payload={"slo_key": body.slo_key, "target": body.target},
-    )
-    await session.commit()
-    await session.refresh(slo)
-    return SloDefinitionRead.model_validate(slo)
-
-
-@router.get("/observability/slo", response_model=Page)
-async def list_slo_definitions(
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataAdmin", "Operations", "Viewer")
-    ),
-    session: AsyncSession = Depends(get_session),
-) -> Page:
-    org_id = context.require_organization()
-    filters = [SloDefinition.organization_id == org_id]
-    total = await session.scalar(select(func.count()).select_from(SloDefinition).where(*filters))
-    rows = (
-        await session.scalars(
-            select(SloDefinition)
-            .where(*filters)
-            .order_by(SloDefinition.created_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[SloDefinitionRead.model_validate(r) for r in rows],
-        limit=limit,
-        offset=offset,
-        total=total or 0,
-    )
-
-
-@router.get("/observability/slo/{slo_id}/budget", response_model=SloBudgetRead)
-async def get_slo_budget(
-    slo_id: UUID,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataAdmin", "Operations", "Viewer")
-    ),
-    session: AsyncSession = Depends(get_session),
-) -> SloBudgetRead:
-    slo = await session.get(SloDefinition, slo_id)
-    if slo is None:
-        raise HTTPException(status_code=404, detail="slo definition not found")
-    enforce_organization(context, slo.organization_id)
-
-    latest_measurement = await session.scalar(
-        select(SloMeasurement)
-        .where(SloMeasurement.slo_id == slo.id)
-        .order_by(SloMeasurement.measured_at.desc())
-        .limit(1)
-    )
-
-    current_value = latest_measurement.value if latest_measurement else None
-    budget_remaining = latest_measurement.budget_remaining if latest_measurement else None
-
-    if current_value is not None and current_value >= slo.target:
-        status = "HEALTHY"
-    elif current_value is not None and current_value >= slo.threshold:
-        status = "AT_RISK"
-    elif current_value is not None:
-        status = "BREACHED"
-    else:
-        status = "NO_DATA"
-
-    return SloBudgetRead(
-        slo_id=slo.id,
-        slo_key=slo.slo_key,
-        name=slo.name,
-        target=slo.target,
-        current_value=current_value,
-        budget_remaining=budget_remaining,
-        window_days=slo.window_days,
-        status=status,
-    )
 
 
 @router.get("/observability/archive/status", response_model=ArchiveStatusRead)

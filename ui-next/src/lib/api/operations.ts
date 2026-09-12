@@ -2,9 +2,9 @@
    Operations — the fleet's runtime posture and the schedules that act on it.
 
    Org-wide operational reads (fleet summary, analysis runs, the outbox and
-   its requeue, ingestion batches); reliability (SLO definitions and budgets,
-   notification rules, archive/WORM posture, data-contract evaluation and
-   violations); and playbooks, the saved bulk-metadata automation.
+   its requeue, ingestion batches); reliability (notification rules,
+   archive/WORM posture, data-contract evaluation and violations); and
+   playbooks, the saved bulk-metadata automation.
 
    Transport, identity headers and the demo switch come from `./transport`:
    this module never calls `fetch` and never decodes an error itself.
@@ -27,9 +27,6 @@ import type {
   PlaybookRunResultRead,
   PlaybookUpdate,
   SlaStatusResponse,
-  SloBudgetRead,
-  SloDefinitionCreate,
-  SloDefinitionRead,
 } from "../types";
 import type { PageOf, ViolationRead } from "../ui-types";
 
@@ -226,14 +223,18 @@ export function fetchIngestionBatches(
 }
 
 /* ---------------------------------------------------------------------------
-   Reliability -- SLOs, notification rules, archive/WORM evidence posture,
-   and runtime data-contract evaluation. Ports the legacy portal's
+   Reliability -- notification rules, archive/WORM evidence posture,
+   and runtime data-contract evaluation. The SLO definition/budget clients
+   were retired here on 2026-09-12 with the endpoints behind them (R11-D10):
+   nothing ever wrote `slo_measurement`, and no indicator source existed to
+   write it from, so the budget could only ever answer NO_DATA.
+   Ports the legacy portal's
    `renderReliability()` (`ui/scripts/features/control-center.js`) onto the
    real, already-merged `observability_api.py` / `notification_api.py` /
    `runtime_contracts_api.py` routes -- the legacy screen's own
    `loadControlCenter()` calls these exact paths.
 
-   Honest scope note: `organizationId` is accepted below on the SLO and
+   Honest scope note: `organizationId` is accepted below on the
    notification-rule functions for parity with every other org-scoped fetch
    in this file (and to key fixture data the same way other screens do), but
    it has nowhere to go on the wire for these particular routes.
@@ -253,62 +254,6 @@ export function fetchIngestionBatches(
    the legacy UI. Fixture mode (the default) is unaffected -- it never
    depended on the header.
 --------------------------------------------------------------------------- */
-
-export interface SloDefinitionQuery {
-  limit?: number;
-  offset?: number;
-}
-
-/** `GET /v1/observability/slo` (`observability_api.py::list_slo_definitions`,
- *  roles PlatformAdmin/DataAdmin/Operations/Viewer) -- every SLO definition
- *  for the caller's organization, newest first. */
-export function fetchSloDefinitions(
-  organizationId: string,
-  query: SloDefinitionQuery = {},
-  signal?: AbortSignal,
-): Promise<PageOf<SloDefinitionRead>> {
-  return demoOr(
-    async (fixtures) => fixtures.makeFixtureSloDefinitions(organizationId, query),
-    async () => {
-      const params = new URLSearchParams();
-      params.set("limit", String(query.limit ?? 100));
-      params.set("offset", String(query.offset ?? 0));
-      return get<PageOf<SloDefinitionRead>>(`/v1/observability/slo?${params}`, signal);
-    },
-  );
-}
-
-/** `POST /v1/observability/slo` (`observability_api.py::create_slo_definition`,
- *  roles PlatformAdmin/DataAdmin/Operations) -- 409s if `slo_key` already
- *  exists for this organization. */
-export function createSloDefinition(
-  organizationId: string,
-  body: SloDefinitionCreate,
-  signal?: AbortSignal,
-): Promise<SloDefinitionRead> {
-  return demoOr(
-    async (fixtures) => fixtures.makeFixtureCreateSloDefinition(organizationId, body),
-    async () => {
-      return postJson<SloDefinitionRead>("/v1/observability/slo", body, signal);
-    },
-  );
-}
-
-/** `GET /v1/observability/slo/{slo_id}/budget` (`observability_api.py::get_slo_budget`)
- *  -- computed live from the SLO's most recent `SloMeasurement`, never
- *  stored: `status` is HEALTHY/AT_RISK/BREACHED once a measurement exists
- *  (compared against `target`/`threshold`), NO_DATA when none ever landed. */
-export function fetchSloBudget(
-  sloId: string,
-  signal?: AbortSignal,
-): Promise<SloBudgetRead> {
-  return demoOr(
-    async (fixtures) => fixtures.makeFixtureSloBudget(sloId),
-    async () => {
-      return get<SloBudgetRead>(`/v1/observability/slo/${sloId}/budget`, signal);
-    },
-  );
-}
 
 /** `GET /v1/observability/archive/status` (`observability_api.py::get_archive_status`)
  *  -- WORM audit-archive posture: counts, latest archive id/checksum, and

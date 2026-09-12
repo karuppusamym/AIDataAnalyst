@@ -15,7 +15,7 @@ from aida.observability import (
     record_counter,
     traced,
 )
-from aida.schemas import ArchiveStatusRead, SloBudgetRead, SloDefinitionCreate
+from aida.schemas import ArchiveStatusRead
 from aida.siem_routing import (
     SecurityEvent,
     SiemConfig,
@@ -285,33 +285,6 @@ def test_retention_policy_by_classification() -> None:
 # --- OB-4: Observability API routes ---
 
 
-def test_slo_definition_create_validates() -> None:
-    slo = SloDefinitionCreate(
-        slo_key="quality-slo",
-        name="Quality SLO",
-        target=99.5,
-        window_days=30,
-        threshold=99.0,
-    )
-    assert slo.slo_key == "quality-slo"
-
-
-def test_slo_budget_read_schema() -> None:
-    from uuid import uuid4
-
-    budget = SloBudgetRead(
-        slo_id=uuid4(),
-        slo_key="quality-slo",
-        name="Quality SLO",
-        target=99.5,
-        current_value=99.2,
-        budget_remaining=0.3,
-        window_days=30,
-        status="AT_RISK",
-    )
-    assert budget.status == "AT_RISK"
-
-
 def test_archive_status_read_schema() -> None:
     status = ArchiveStatusRead(
         total_archives=10,
@@ -326,6 +299,17 @@ def test_archive_status_read_schema() -> None:
 
 def test_observability_api_routes_registered() -> None:
     paths = app.openapi()["paths"]
-    assert "/v1/observability/slo" in paths
-    assert "/v1/observability/slo/{slo_id}/budget" in paths
     assert "/v1/observability/archive/status" in paths
+
+
+def test_the_retired_slo_routes_are_gone() -> None:
+    """R11-D10: the SLO surface was retired, not merely stopped being used.
+
+    Asserted positively so the removal cannot quietly regress by someone
+    restoring the router block -- an endpoint whose budget can only ever answer
+    NO_DATA is the thing this row removed, and it should not come back without
+    the indicator source that was missing.
+    """
+    paths = app.openapi()["paths"]
+    assert "/v1/observability/slo" not in paths
+    assert "/v1/observability/slo/{slo_id}/budget" not in paths

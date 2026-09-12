@@ -101,8 +101,6 @@ from atlas.modules.observability_audit.models import (
     DeliveryAttempt as DeliveryAttempt,
     DeliveryIntent as DeliveryIntent,
     OutboxEvent as OutboxEvent,
-    SloDefinition as SloDefinition,
-    SloMeasurement as SloMeasurement,
 )
 # Re-exported for backward compatibility -- review-2026-09-05 point R04
 # ("relocate one bounded context at a time with compatibility exports") moved

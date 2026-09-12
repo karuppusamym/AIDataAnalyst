@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-383 Python modules under `src/`, 1877 intra-`src` import edges.
+384 Python modules under `src/`, 1894 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -20,7 +20,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 |---|---|---:|
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
-| aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 62 |
+| aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 63 |
 | aida domain modules | everything else flat in `aida.*` | 218 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 12 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 12 |
@@ -48,7 +48,7 @@ restates the edge next to it and nothing more.
 ```mermaid
 graph LR
   app["aida.main (composition root)<br/>1 module"]
-  routers["aida routers (*_api)<br/>62 modules"]
+  routers["aida routers (*_api)<br/>63 modules"]
   domain["aida domain modules<br/>218 modules"]
   ctx_catalog["atlas.modules.catalog<br/>12 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>12 modules"]
@@ -60,20 +60,20 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|523| domain
-  app -->|61| routers
-  domain -->|43| platform
-  workflows -->|40| domain
+  routers -->|530| domain
+  app -->|62| routers
+  domain -->|45| platform
+  workflows -->|41| domain
   ctx_catalog -->|19| domain
-  ctx_identity_tenancy -->|15| domain
+  ctx_identity_tenancy -->|18| domain
   app -->|14| domain
   domain -->|11| routers
   ctx_connectivity -->|10| domain
   projectors -->|10| domain
   routers -->|10| platform
   ctx_ingestion -->|9| domain
-  ctx_observability_audit -->|9| domain
   domain -->|9| ctx_catalog
+  ctx_observability_audit -->|7| domain
   domain -->|7| connectors
   domain -->|4| ctx_connectivity
   domain -->|4| ctx_identity_tenancy
@@ -138,13 +138,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 319 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 320 |
 | `aida.workflows.worker` | Temporal worker | 113 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 124 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 126 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 337 of 383 modules.
+Union of all five: 338 of 384 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -152,8 +152,8 @@ Per group, how much of each group each process pulls in:
 |---|---:|---:|---:|---:|---:|---:|
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
-| aida routers (*_api) | 62 | 0 | 2 | 1 | 0 | 62 |
-| aida domain modules | 204 | 68 | 88 | 33 | 6 | 218 |
+| aida routers (*_api) | 63 | 0 | 2 | 1 | 0 | 63 |
+| aida domain modules | 204 | 68 | 90 | 33 | 6 | 218 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 12 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 12 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 12 |
@@ -172,13 +172,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>319 reached"])
+  aida_main(["aida.main<br/>320 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>113 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>124 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>126 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>64 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>183 modules"]
+  only_aida_main["only this process<br/>184 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
@@ -203,9 +203,9 @@ public face is being used or a compatibility shim still stands in front of it.
 |---|---:|---:|---:|---|---|
 | [`catalog`](../20-modules/domain-guides/catalog.md) | 12 | 7 | 10 | `atlas.modules.catalog.api` (public face) | `catalog module privacy` |
 | [`connectivity`](../20-modules/domain-guides/connectivity.md) | 12 | 2 | 7 | `atlas.modules.connectivity.api` (public face) | `connectivity module privacy` |
-| [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 12 | 19 | 28 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
+| [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 12 | 19 | 29 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
 | [`ingestion`](../20-modules/domain-guides/ingestion.md) | 12 | 3 | 15 | `aida.ingestion_api` (compatibility shim) | `ingestion module privacy` |
-| [`observability_audit`](../20-modules/domain-guides/observability-audit.md) | 12 | 11 | 5 | `aida.observability_api` (compatibility shim) | `observability_audit module privacy` |
+| [`observability_audit`](../20-modules/domain-guides/observability-audit.md) | 12 | 9 | 2 | `aida.observability_api` (compatibility shim) | `observability_audit module privacy` |
 | [`profiling`](../20-modules/domain-guides/profiling.md) | 12 | 9 | 0 | not mounted from `aida.main` | `profiling module privacy` |
 
 Each context's own guide is linked from the name. Owned tables, per context:
@@ -214,7 +214,7 @@ Each context's own guide is linked from the name. Owned tables, per context:
 - **connectivity** — `datasource`, `connector_certification_run`
 - **identity_tenancy** — `organization`, `organization_integration_policy`, `line_of_business`, `data_domain`, `cross_boundary_grant`, `isolation_boundary`, `workspace`, `workspace_membership`, `workspace_access_rule`, `authorization_shadow_record`, `source_binding`, `business_node`, `business_assignment`, `business_assignment_rule`, `business_node_closure`, `business_node_rollup`, `project`, `delegation`, `revoked_token`
 - **ingestion** — `metadata_ingestion_job`, `metadata_ingestion_batch`, `metadata_ingestion_chunk`
-- **observability_audit** — `outbox_event`, `slo_definition`, `slo_measurement`, `audit_archive_record`, `audit_archive_membership`, `audit_archive_lease`, `audit_event`, `compliance_pack`, `access_review_report`, `delivery_intent`, `delivery_attempt`
+- **observability_audit** — `outbox_event`, `audit_archive_record`, `audit_archive_membership`, `audit_archive_lease`, `audit_event`, `compliance_pack`, `access_review_report`, `delivery_intent`, `delivery_attempt`
 - **profiling** — `classification_evidence`, `column_derived_classification`, `analysis_run`, `analysis_task`, `scan_policy`, `table_profile`, `column_profile`, `profiling_exception_policy`, `column_value_profile_artifact`
 
 ## Import-linter contracts actually enforced
@@ -499,16 +499,16 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 185 |
-| `aida.security` | aida domain modules | 105 |
+| `aida.models` | aida domain modules | 186 |
+| `aida.security` | aida domain modules | 106 |
+| `aida.db` | aida domain modules | 95 |
 | `aida.schemas` | aida domain modules | 94 |
-| `aida.db` | aida domain modules | 93 |
+| `aida.config` | aida domain modules | 82 |
 | `aida.events` | aida domain modules | 81 |
-| `aida.config` | aida domain modules | 80 |
 | `aida.context` | aida domain modules | 64 |
-| `atlas.platform.config` | atlas.platform | 22 |
+| `atlas.platform.config` | atlas.platform | 23 |
+| `aida.authorization_gate` | aida domain modules | 13 |
 | `aida.connectors.base` | aida.connectors | 13 |
-| `aida.authorization_gate` | aida domain modules | 12 |
 | `aida.secrets` | aida domain modules | 11 |
 | `aida.business_annotation_versions` | aida domain modules | 10 |
 | `aida.classification` | aida domain modules | 10 |
