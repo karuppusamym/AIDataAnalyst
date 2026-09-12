@@ -12,7 +12,8 @@ future reader can trace who depended on what without re-grepping:
 * `compose_catalog_rows` -- `aida.api` (the `/v1/organizations/{id}/catalog/rows`
   endpoint's read-model). Public.
 * `_business_annotations`, `_description`, `_latest_approved_documentation`,
-  `_latest_pending_drafts` -- `aida.stewardship_api`. Still `_prefixed` here
+  `_latest_pending_drafts`, `_withdrawn_documentation_table_ids`
+  -- `aida.stewardship_api`. Still `_prefixed` here
   and in the canonical location so this shim's re-export shape matches the
   original module's shape; a follow-up (not this commit) may rename them
   public (e.g. `latest_business_annotations`) and move them onto
@@ -22,7 +23,8 @@ future reader can trace who depended on what without re-grepping:
   `_earliest_active_owners`, `_glossary_terms_by_table`,
   `_latest_approved_documentation`, `_latest_certifications`,
   `_latest_observation_at`, `_latest_pending_drafts`,
-  `_open_incident_table_ids`, `_quality_state` -- `aida.asset_evidence`
+  `_open_incident_table_ids`, `_quality_state`,
+  `_withdrawn_documentation_table_ids` -- `aida.asset_evidence`
   (the AT-6 evidence pane), same reasoning.
 * `_certification_state`, `_earliest_active_owners`,
   `_latest_approved_documentation`, `_latest_certifications`,
@@ -45,6 +47,7 @@ from atlas.modules.catalog.repository import (
     _latest_observation_at,
     _latest_pending_drafts,
     _open_incident_table_ids,
+    _withdrawn_documentation_table_ids,
 )
 from atlas.modules.catalog.service import (
     _certification_state,
@@ -70,4 +73,5 @@ __all__ = [
     "_latest_pending_drafts",
     "_open_incident_table_ids",
     "_quality_state",
+    "_withdrawn_documentation_table_ids",
 ]

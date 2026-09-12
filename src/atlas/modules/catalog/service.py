@@ -35,7 +35,10 @@ Field sources
     (always review-approved -- see ``semantic_inference.py``) and finally
     the connector-sourced ``MetadataTable.source_description`` are used,
     both ``description_is_proposed=False`` since neither is a pending
-    proposal.
+    proposal. The annotation rung is skipped once this table's
+    documentation has been withdrawn through review -- see ``_description``
+    for why a retired asset must not be re-described by a lower-precedence
+    source this platform authored.
 ``owner``
     GL-2 ``OwnershipAssignment`` (status ``ACTIVE``, ``subject_type`` ``TABLE``)
     is authoritative; falls back to the approved documentation version's
@@ -114,6 +117,7 @@ from atlas.modules.catalog.repository import (
     _latest_pending_drafts,
     _latest_table_profiles,
     _open_incident_table_ids,
+    _withdrawn_documentation_table_ids,
 )
 
 
@@ -165,12 +169,38 @@ def _description(
     documentation: AssetDocumentationVersion | None,
     pending_draft: AssetDescriptionDraft | None,
     annotation: MetadataBusinessAnnotationVersion | None,
+    documentation_withdrawn: bool,
 ) -> tuple[str | None, bool]:
+    """Resolve the one ``description`` this collapsed field can carry.
+
+    ``documentation_withdrawn`` exists because a withdrawal is a decision
+    about what this platform *says*, not merely about one row. A reviewer who
+    retires a readme has decided the platform should describe the asset no
+    further (`aida.description_withdrawal`); promoting the business
+    annotation's ``business_description`` into the vacated slot would put
+    authored prose that reviewer never read in front of the same readers,
+    leaving the withdrawal with no visible effect -- and there is no
+    withdrawal path for an annotation, so nothing else can take it back
+    either. So a retired asset skips that rung.
+
+    ``source_description`` deliberately still shows. It is not this platform
+    speaking: it is the source system's own comment, re-derived by every
+    rediscovery pass, and it is what this field carried before anyone here
+    described the table. Withdrawal returns the asset to that state rather
+    than suppressing observed source metadata it has no authority over --
+    the same answer `column_documentation_api.get_table_description` already
+    gives, where a withdrawn table reports ``readme=None`` beside an
+    untouched ``source_description``.
+
+    A ``PENDING_APPROVAL`` draft still shows for the same reason: it is
+    carried as a proposal (``description_is_proposed=True``), never as
+    something the platform asserts.
+    """
     if documentation is not None:
         return documentation.readme, False
     if pending_draft is not None:
         return pending_draft.drafted_text, True
-    if annotation is not None:
+    if annotation is not None and not documentation_withdrawn:
         return annotation.business_description, False
     return table.source_description, False
 
@@ -196,6 +226,7 @@ async def compose_catalog_rows(
     certifications = await _latest_certifications(session, table_ids)
     owners = await _earliest_active_owners(session, table_ids)
     documentation = await _latest_approved_documentation(session, table_ids)
+    withdrawn_documentation = await _withdrawn_documentation_table_ids(session, table_ids)
     pending_drafts = await _latest_pending_drafts(session, table_ids)
     annotations = await _business_annotations(session, table_ids)
     glossary_terms = await _glossary_terms_by_table(session, table_ids)
@@ -209,6 +240,7 @@ async def compose_catalog_rows(
             documentation=documentation.get(table.id),
             pending_draft=pending_drafts.get(table.id),
             annotation=annotations.get(table.id),
+            documentation_withdrawn=table.id in withdrawn_documentation,
         )
         owner = owners.get(table.id)
         if owner is None:

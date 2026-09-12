@@ -19,6 +19,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from aida.asset_description_service import publish_asset_documentation_version
+from aida.catalog_read_model import compose_catalog_rows
 from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
@@ -45,6 +46,8 @@ from aida.models import (
     DataSource,
     DescriptionWithdrawal,
     LineOfBusiness,
+    MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataCatalog,
     MetadataColumn,
     MetadataSchema,
@@ -823,3 +826,153 @@ async def test_table_description_endpoint_on_an_undocumented_table(session) -> N
     )
     assert (read.readme, read.withdrawn_readme) == (None, None)
     assert read.name == "customers"
+
+
+# ---------------------------------------------------------------------------
+# What the catalog row says once a description is retired
+# ---------------------------------------------------------------------------
+#
+# UX-12's `CatalogRowRead.description` is a single collapsed field fed by a
+# four-rung precedence chain (`atlas.modules.catalog.service._description`),
+# so the withdrawal invariant -- "the asset reads as undescribed again", the
+# words `models.DescriptionWithdrawal` uses -- is only true here if retiring
+# the top rung does not silently promote a lower one.
+
+
+async def _document(session, table, readme="Customer master, loaded nightly.") -> None:
+    await publish_asset_documentation_version(
+        session,
+        organization_id=table.organization_id,
+        table_id=table.id,
+        readme=readme,
+        created_by=_MAKER,
+        approved_by=_CHECKER,
+        approved_at=datetime.now(UTC),
+    )
+
+
+async def _annotate(session, table, description: str) -> None:
+    """Give the table an approved AT-6 business annotation -- the rung the
+    catalog row falls through to when there is no GL-9 documentation."""
+    annotation = MetadataBusinessAnnotation(
+        id=uuid4(),
+        organization_id=table.organization_id,
+        datasource_id=table.datasource_id,
+        table_id=table.id,
+        domain_id=uuid4(),
+        entity_id=uuid4(),
+        source_proposal_id=uuid4(),
+    )
+    session.add(annotation)
+    await session.flush()
+    session.add(
+        MetadataBusinessAnnotationVersion(
+            id=uuid4(),
+            organization_id=table.organization_id,
+            annotation_id=annotation.id,
+            version=1,
+            status="APPROVED",
+            business_name="Customers",
+            business_description=description,
+            table_role="DIMENSION",
+            grain_statement="One row per customer.",
+            confidence=0.9,
+            approved_by=_CHECKER,
+            approved_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+
+async def _withdraw_table_description(session, table) -> None:
+    _, review = await request_description_withdrawal(
+        session,
+        organization_id=table.organization_id,
+        subject_type="TABLE",
+        subject_id=table.id,
+        reason="It describes the wrong table.",
+        requested_by=_MAKER,
+    )
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+
+async def _catalog_row(session, table):
+    rows = await compose_catalog_rows(session, [(table, "public", "wh")])
+    return rows[0]
+
+
+async def test_a_withdrawn_table_is_not_re_described_by_its_business_annotation(
+    session,
+) -> None:
+    table, _ = await _seed(session)
+    await _annotate(session, table, "Approved business-annotation description.")
+    await _document(session, table)
+
+    assert (await _catalog_row(session, table)).description == "Customer master, loaded nightly."
+
+    await _withdraw_table_description(session, table)
+
+    row = await _catalog_row(session, table)
+    assert row.description is None
+    assert row.description_is_proposed is False
+
+
+async def test_a_withdrawal_leaves_the_source_systems_own_comment_showing(session) -> None:
+    """The source comment is not this platform speaking.
+
+    Withdrawal retires what we authored and returns the row to what it said
+    before anyone here described the table; it does not suppress the source
+    system's own comment, which rediscovery re-derives anyway and which
+    `get_table_description` goes on reporting beside a retired readme.
+    """
+    table, _ = await _seed(session)
+    table.source_description = "Connector-scanned comment."
+    await session.flush()
+    await _document(session, table)
+
+    await _withdraw_table_description(session, table)
+
+    row = await _catalog_row(session, table)
+    assert row.description == "Connector-scanned comment."
+    assert row.description_is_proposed is False
+
+
+async def test_reinstating_puts_the_description_back_on_the_row(session) -> None:
+    """The suppression follows the current version, not the withdrawal record.
+
+    A reinstatement publishes a *new* APPROVED version beside the retired one,
+    so the top rung is occupied again and the row must read as described --
+    otherwise the WITHDRAWN row left behind by design would mute the asset
+    permanently.
+    """
+    table, _ = await _seed(session)
+    await _annotate(session, table, "Approved business-annotation description.")
+    await _document(session, table)
+    await _withdraw_table_description(session, table)
+
+    _, reinstate_review = await request_description_withdrawal(
+        session,
+        organization_id=table.organization_id,
+        subject_type="TABLE",
+        subject_id=table.id,
+        reason="withdrawn by mistake",
+        requested_by=_MAKER,
+        request_type="REINSTATE",
+    )
+    await session.commit()
+    await decide_governance_review(
+        reinstate_review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    row = await _catalog_row(session, table)
+    assert row.description == "Customer master, loaded nightly."
+    assert row.description_is_proposed is False

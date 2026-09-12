@@ -25,6 +25,7 @@ from aida.catalog_read_model import (
     _description,
     _latest_approved_documentation,
     _latest_pending_drafts,
+    _withdrawn_documentation_table_ids,
 )
 from aida.consumption_lineage import get_consumption_by_resource_counts
 from aida.documentation_worklist import TableQuerySignal
@@ -145,6 +146,11 @@ async def _documentation_state(
     documentation = await _latest_approved_documentation(session, table_ids)
     pending_drafts = await _latest_pending_drafts(session, table_ids)
     annotations = await _business_annotations(session, table_ids)
+    # A table whose description was withdrawn has to come back onto the
+    # worklist as undocumented -- that is the point of retiring it. Reading it
+    # as documented off the business annotation would hide the one asset a
+    # steward just said needs re-describing.
+    withdrawn = await _withdrawn_documentation_table_ids(session, table_ids)
     state: dict[UUID, tuple[bool, bool]] = {}
     for table in tables:
         description, description_is_proposed = _description(
@@ -152,6 +158,7 @@ async def _documentation_state(
             documentation=documentation.get(table.id),
             pending_draft=pending_drafts.get(table.id),
             annotation=annotations.get(table.id),
+            documentation_withdrawn=table.id in withdrawn,
         )
         is_documented = bool(description) and not description_is_proposed
         state[table.id] = (is_documented, description_is_proposed)
