@@ -219,6 +219,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `quality.incident_acknowledged` / `.resolved` | Operator action | incident_id, actor, rationale_ref |
 | `quality.incident_auto_recovered` | Signal normalized | incident_id |
 | `quality.sla_breached` | SLA missed | sla_id, table_id |
+| `data_quality.freshness.evaluated.v1` | R11-B8: a scheduled freshness sweep evaluated one datasource's watermark contracts and settled the incidents they imply | datasource_id, contracts_evaluated, incidents_opened, incidents_updated, incidents_resolved, truncated |
 | `data_quality.freshness_config.changed.v1` | Watermark freshness config created or updated for a table | datasource_id, table_id, watermark_column |
 | `data_quality.freshness_config.approved.v1` | DQ-2: a maker-checker approval activated a table's freshness watermark config (moves it out of PENDING_APPROVAL) | datasource_id, table_id |
 | `data_quality.rule_pack.created.v1` | DQ-4: a custom quality rule pack created | datasource_id, name |
@@ -315,6 +316,20 @@ and carry no actions: a notification here is never a control surface.
 | `data_product.draft_created.v1` | New data product version drafted | data_product_id, version |
 | `data_product.access_requested.v1` | Maker-checker access request created for a published product version | review_id, data_product_version_id |
 | `data_product.access_revoked.v1` | Access entitlement revoked | data_product_version_id |
+| `data_product.entitlement_pending.v1` | Fulfilment staged and not yet acknowledged — `webhook` provider only, and the grant still denies while it sits here | action, provider |
+| `data_product.entitlement_provisioned.v1` | Fulfilment succeeded; this is the transition after which the grant actually permits consumption | action, provider |
+| `data_product.entitlement_revoked.v1` | Revocation fulfilled. Distinct from `data_product.access_revoked.v1` above, which records the *decision* to revoke — this one records that the revocation took effect | action, provider |
+| `data_product.entitlement_failed.v1` | Fulfilment gave up (delivery dead-lettered or discarded). The grant does not permit consumption | action, provider |
+
+The four `data_product.entitlement_*.v1` names are built by
+`aida.entitlements.entitlement_event_type` from the fulfilment status rather
+than written as literals, so `tests/test_event_catalog_gate.py` cannot resolve
+them statically and did not force this row. They are documented here because a
+consumer keys on the name either way, and because the pair
+`data_product.access_revoked.v1` / `data_product.entitlement_revoked.v1` is
+exactly the kind of near-duplicate that is misread when only one of them is
+written down: the first is the decision, the second is its effect, and only the
+second means access has actually stopped.
 
 ### Notifications — topic `atlas.operational.v1`
 

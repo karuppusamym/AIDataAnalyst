@@ -1,6 +1,7 @@
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Final
 from uuid import UUID
@@ -15,6 +16,7 @@ from aida.config import Settings
 from aida.connectors.base import QueryEstimate
 from aida.connectors.execution_access import open_execution_session
 from aida.connectors.sql_execution import SqlExecutor
+from aida.entitlements import blocking_product_revocation
 from aida.events import record_audit, record_outbox
 from aida.lob_concurrency import LobConcurrencyDenied, resolve_lob_concurrency_controller
 from aida.models import (
@@ -528,6 +530,38 @@ class QueryExecutionGateway:
             executor=executor,
         )
 
+    async def _gate_product_entitlements(
+        self,
+        session: AsyncSession,
+        context: SecurityContext,
+        *,
+        organization_id: UUID,
+        table_ids: frozenset[UUID],
+        workspace_id: UUID | None,
+    ) -> None:
+        """Refuse a statement that reads a product this principal lost access to.
+
+        Deliberately raises the *gate's* own `AuthorizationDenied` rather than
+        a new exception type, and is called from inside the same `try` as
+        `gate` itself, so a revoked entitlement is refused, audited and
+        translated by exactly the code that already handles every other
+        authorization denial on this path. A second refusal vocabulary is a
+        second thing for an operator to know to query.
+
+        Only revocation and expiry deny here -- see
+        `blocking_product_revocation` for why an entitlement can subtract
+        access at this choke point but never add it.
+        """
+        decision = await blocking_product_revocation(
+            session,
+            context,
+            organization_id=organization_id,
+            table_ids=table_ids,
+            now=datetime.now(UTC),
+        )
+        if decision is not None:
+            raise AuthorizationDenied(decision.reason_code, workspace_id=workspace_id)
+
     async def validate(
         self,
         session: AsyncSession,
@@ -617,6 +651,13 @@ class QueryExecutionGateway:
                 certification=resource_attributes.certification,
                 quality_state=resource_attributes.quality_state,
                 freshness_state=resource_attributes.freshness_state,
+            )
+            await self._gate_product_entitlements(
+                session,
+                context,
+                organization_id=datasource.organization_id,
+                table_ids=table_ids,
+                workspace_id=workspace_id,
             )
         except AuthorizationDenied as exc:
             record_audit(
@@ -818,6 +859,13 @@ class QueryExecutionGateway:
                     certification=resource_attributes.certification,
                     quality_state=resource_attributes.quality_state,
                     freshness_state=resource_attributes.freshness_state,
+                )
+                await self._gate_product_entitlements(
+                    session,
+                    context,
+                    organization_id=datasource.organization_id,
+                    table_ids=table_ids,
+                    workspace_id=workspace_id,
                 )
             except AuthorizationDenied as exc:
                 raise AuthorizationRejected(

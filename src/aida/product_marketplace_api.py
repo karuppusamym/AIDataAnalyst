@@ -17,8 +17,10 @@ from aida.db import get_session
 from aida.entitlements import (
     EntitlementAction,
     EntitlementResult,
+    authorize_product_consumption,
     entitlement_event_type,
     plan_entitlement,
+    role_has_product_access,
 )
 from aida.events import record_audit, record_outbox
 from aida.models import (
@@ -493,21 +495,13 @@ def _is_discoverable(context: SecurityContext, version: DataProductVersion) -> b
     )
 
 
-def _role_has_product_access(context: SecurityContext, version: DataProductVersion) -> bool:
-    return (
-        "PlatformAdmin" in context.roles
-        or "*" in version.consumer_roles
-        or not context.roles.isdisjoint(version.consumer_roles)
-    )
-
-
 def _request_access_status(
     context: SecurityContext,
     version: DataProductVersion,
     request: DataProductAccessRequest | None,
     now: datetime,
 ) -> str:
-    if _role_has_product_access(context, version):
+    if role_has_product_access(context, version):
         return "ROLE_GRANTED"
     if (
         request is not None
@@ -608,130 +602,6 @@ def fulfil_entitlement(
         payload={"action": action, "provider": result.provider},
     )
     return result
-
-
-def _as_utc(value: datetime | None) -> datetime | None:
-    """Read a stored timestamp back as UTC-aware.
-
-    Columns are `DateTime(timezone=True)`, but not every driver hands the
-    offset back -- SQLite returns naive values. Comparing one of those against
-    an aware `now` raises `TypeError`, and doing that *inside an authorization
-    check* turns a routine expiry comparison into a 500. Normalising here
-    keeps the decision a decision.
-    """
-    if value is None:
-        return None
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
-@dataclass(frozen=True, slots=True)
-class ProductAccessDecision:
-    """Whether this caller may consume this product version, and on what basis.
-
-    `reason_code` is stable and machine-readable; `detail` is the sentence a
-    refused consumer is shown. Both are recorded, so a refusal can always be
-    traced back to the grant (or the revocation) that produced it.
-    """
-
-    allowed: bool
-    basis: str
-    reason_code: str = ""
-    detail: str = ""
-    access_request_id: UUID | None = None
-
-
-async def authorize_product_consumption(
-    session: AsyncSession,
-    context: SecurityContext,
-    version: DataProductVersion,
-    *,
-    now: datetime,
-) -> ProductAccessDecision:
-    """The single predicate for "may this principal use this data product".
-
-    Role-based access is checked first and unchanged -- this adds a second
-    way to be *allowed*, never a way around the first. An approved request
-    only counts once it has actually been provisioned: an approval whose
-    fulfilment is still in flight, or failed, denies, because the alternative
-    is exactly the defect R11-B4 exists to remove (a status that claims access
-    nothing ever granted).
-    """
-    if _role_has_product_access(context, version):
-        return ProductAccessDecision(allowed=True, basis="ROLE")
-
-    request = await session.scalar(
-        select(DataProductAccessRequest)
-        .where(
-            DataProductAccessRequest.data_product_version_id == version.id,
-            DataProductAccessRequest.requested_by == context.principal_id,
-            DataProductAccessRequest.organization_id == version.organization_id,
-        )
-        .order_by(DataProductAccessRequest.created_at.desc())
-        .limit(1)
-    )
-    if request is None:
-        return ProductAccessDecision(
-            allowed=False,
-            basis="NONE",
-            reason_code="no_access_request",
-            detail="No access request grants you this data product.",
-        )
-
-    request_id = request.id
-    if request.status == "REVOKED":
-        revoked_by = request.revoked_by or "a product owner"
-        revoked_at = _as_utc(request.revoked_at)
-        when = revoked_at.isoformat() if revoked_at else "an earlier time"
-        return ProductAccessDecision(
-            allowed=False,
-            basis="ENTITLEMENT",
-            reason_code="entitlement_revoked",
-            detail=f"Access was revoked by {revoked_by} at {when}.",
-            access_request_id=request_id,
-        )
-    if request.status == "REJECTED":
-        return ProductAccessDecision(
-            allowed=False,
-            basis="ENTITLEMENT",
-            reason_code="access_request_rejected",
-            detail="The access request for this data product was rejected.",
-            access_request_id=request_id,
-        )
-    if request.status == "PENDING":
-        return ProductAccessDecision(
-            allowed=False,
-            basis="ENTITLEMENT",
-            reason_code="access_request_pending",
-            detail="The access request for this data product is still awaiting a decision.",
-            access_request_id=request_id,
-        )
-    expires_at = _as_utc(request.expires_at)
-    if request.status == "EXPIRED" or (expires_at is not None and expires_at <= now):
-        return ProductAccessDecision(
-            allowed=False,
-            basis="ENTITLEMENT",
-            reason_code="entitlement_expired",
-            detail="Your access to this data product has expired.",
-            access_request_id=request_id,
-        )
-    if request.fulfillment_status != "PROVISIONED":
-        return ProductAccessDecision(
-            allowed=False,
-            basis="ENTITLEMENT",
-            reason_code="entitlement_not_provisioned",
-            detail=(
-                "Access was approved but is not provisioned yet "
-                f"(fulfilment is {request.fulfillment_status})."
-            ),
-            access_request_id=request_id,
-        )
-    return ProductAccessDecision(
-        allowed=True,
-        basis="ENTITLEMENT",
-        reason_code="",
-        detail="",
-        access_request_id=request_id,
-    )
 
 
 def _trend_bucket_ranges(
@@ -1411,7 +1281,7 @@ async def request_marketplace_access(
     _, version = await _version_scope(session, version_id, context)
     if version.status != "PUBLISHED" or not _is_discoverable(context, version):
         raise HTTPException(status_code=404, detail="marketplace product not found")
-    if _role_has_product_access(context, version):
+    if role_has_product_access(context, version):
         raise HTTPException(status_code=409, detail="caller already has role-based access")
     existing_pending_request = await session.scalar(
         select(DataProductAccessRequest.id).where(
@@ -1535,8 +1405,13 @@ async def consume_marketplace_product(
 
     Enforcement here is deliberately *additive*: role-based access is checked
     first and unchanged, and nothing in this path can grant what
-    `_role_has_product_access` and the existing organization scoping would
+    `role_has_product_access` and the existing organization scoping would
     have refused.
+
+    This is not the only place a revocation bites. `QueryExecutionGateway`
+    also refuses a statement that reads a product's output tables once the
+    caller's grant is revoked or expired, so a consumer who claimed the
+    product earlier and kept the table names does not keep the data.
     """
     _, version = await _version_scope(session, version_id, context)
     if version.status != "PUBLISHED" or not _is_discoverable(context, version):
