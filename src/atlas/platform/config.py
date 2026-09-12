@@ -470,6 +470,32 @@ class Settings(BaseSettings):
     governance_notifications_enabled: bool = False
     slack_webhook_url: str | None = None
     teams_webhook_url: str | None = None
+    #: Which payload format `teams_webhook_url` is sent. Not a style choice --
+    #: the two values target two different Microsoft mechanisms, and only one
+    #: of them still exists on a current tenant.
+    #:
+    #: `ADAPTIVE_CARD` (default) posts the `{"type": "message", "attachments":
+    #: [...]}` envelope a **Workflows / Power Automate** webhook accepts. This
+    #: is the supported mechanism: Microsoft's own retirement notice
+    #: (https://devblogs.microsoft.com/microsoft365dev/retirement-of-office-365-connectors-within-microsoft-teams/,
+    #: last updated 2026-04-14) disabled Office 365 connectors in Teams over
+    #: **2026-05-18 to 2026-05-22**, which is already past.
+    #:
+    #: `MESSAGE_CARD` is the legacy Office 365 connector body this module used
+    #: to be hardcoded to. It is kept selectable, not deleted, for two real
+    #: cases: a tenant still running a connector URL under an extension, and a
+    #: tenant whose Workflow was built with an action that happens to accept
+    #: MessageCard. Microsoft documents MessageCard on Workflows as accepted
+    #: only at the webhook endpoint, *not* by the "Post card in a chat or
+    #: channel" action the stock templates use -- which answers with
+    #: `AdaptiveSerializationException: Property 'type' must be 'AdaptiveCard'`
+    #: -- and never with working buttons. So it is a compatibility escape
+    #: hatch, not a second supported path.
+    #:
+    #: Changing this changes what a live channel renders, so it is explicit
+    #: configuration rather than sniffing the URL: a Workflows and a connector
+    #: URL are both `*.webhook.office.com` and cannot be told apart.
+    teams_card_format: Literal["ADAPTIVE_CARD", "MESSAGE_CARD"] = "ADAPTIVE_CARD"
     governance_notification_timeout_seconds: float = Field(default=5.0, gt=0.0)
     #: Which kinds to deliver. Narrowing this is how an
     #: organization stops a noisy channel without turning the feature off.

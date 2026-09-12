@@ -19,7 +19,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**249 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
+**250 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -223,6 +223,7 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `governance_notifications_enabled` | `bool` | `False` | 6 |
 | `slack_webhook_url` | `str | None` | `None` | 2 |
 | `teams_webhook_url` | `str | None` | `None` | 2 |
+| `teams_card_format` | `Literal['ADAPTIVE_CARD', 'MESSAGE_CARD']` | `'ADAPTIVE_CARD'` | 1 |
 | `governance_notification_timeout_seconds` | `float` | `5.0` | 1 |
 | `governance_notification_events` | `list[str]` | `lambda: ['REVIEW_REQUESTED', 'REVIEW_DECIDED', 'QUALITY_INCIDENT_OPENED', 'QUALITY_INCIDENT_RESOLVED', 'KILL_SWITCH_ENGAGED', 'KILL_SWITCH_RELEASED', 'CERTIFICATION_EXPIRING', 'REVIEWER_AGENT_AUDIT_BACKLOG', 'REVIEWER_AGENT_SAMPLE_DISAGREED']` | 1 |
 | `portal_base_url` | `str | None` | `None` | 1 |

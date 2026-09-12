@@ -24,6 +24,15 @@ tier and a link. Never a row, never SQL, never a description's text -- a
 governance notification that leaked a column value into a Slack channel would
 be the most public possible breach of the control plane's core property.
 
+**Teams means Workflows, not connectors.** Microsoft disabled Office 365
+connectors inside Teams between 2026-05-18 and 2026-05-22, so the legacy
+`MessageCard` body this module was once hardcoded to has no live mechanism to
+arrive through on a current tenant -- and a bank's tenant is the most likely
+to have had connectors switched off by policy well before that. The default is
+now an Adaptive Card posted to a Workflows (Power Automate) webhook;
+`teams_card_format` still selects the legacy body for a tenant that needs it.
+Neither card carries an action, for the governance reason recorded above.
+
 **Fail closed and silent.** Disabled or unconfigured means nothing is queued
 and the reason is persisted as its own status, so an operator can tell "not
 configured" from "queued" from "delivered". Delivery never raises into the
@@ -166,6 +175,129 @@ def deep_link(settings: Settings, kind: str, *, object_id: str | None) -> str | 
     return link
 
 
+#: The value-free fields a message may carry, in the order they are shown.
+#: An allowlist, not a dump of whatever the caller handed over: a governance
+#: notification that leaked a column value into a chat channel would be the
+#: most public possible breach of the control plane's core property (INV-6).
+_MESSAGE_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("Object", "object_type"),
+    ("Name", "object_name"),
+    ("Risk tier", "risk_tier"),
+    ("By", "principal_id"),
+    ("Severity", "severity"),
+    ("Expires", "expires_at"),
+)
+
+#: `settings.teams_card_format` values, named rather than spelled at each site.
+TEAMS_FORMAT_ADAPTIVE_CARD: Final = "ADAPTIVE_CARD"
+TEAMS_FORMAT_MESSAGE_CARD: Final = "MESSAGE_CARD"
+
+#: The Adaptive Card attachment media type a Teams webhook dispatches on.
+_ADAPTIVE_CARD_CONTENT_TYPE: Final = "application/vnd.microsoft.card.adaptive"
+
+#: Schema version claimed by the card. 1.4 rather than the 1.0/1.2 in
+#: Microsoft's own sample: it is comfortably within what Teams and the
+#: Workflows "post card" action render, and every element used below
+#: (TextBlock, FactSet) predates it, so the version is a floor and not a
+#: dependency. Raising it buys nothing this card needs.
+_ADAPTIVE_CARD_VERSION: Final = "1.4"
+
+
+def _facts(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    return [(label, str(payload[key])) for label, key in _MESSAGE_FIELDS if payload.get(key)]
+
+
+def _teams_adaptive_card(
+    headline: str, payload: dict[str, Any], link: str | None
+) -> dict[str, Any]:
+    """The Workflows (Power Automate) body: an Adaptive Card in a message envelope.
+
+    Office 365 connectors -- the mechanism `_teams_message_card` below was
+    written for -- were disabled in Teams between 2026-05-18 and 2026-05-22
+    (Microsoft's retirement notice, last updated 2026-04-14). The replacement
+    is a Workflows webhook, and the shape it accepts is this envelope:
+    `type: message` with one `attachments` entry whose `contentType` is the
+    Adaptive Card media type. That is not our invention -- it is the payload
+    in Microsoft's own incoming-webhook sample.
+
+    **Still not an action surface.** The original comment here said the card
+    was "deliberately not an Adaptive Card with actions, because a
+    notification here must never be an action". The format has changed; that
+    reasoning has not, and it is a governance constraint rather than a
+    rendering one. So this card has no `actions` array at all: no
+    `Action.Submit`, `Action.Execute` or `Action.Http` that could post a
+    decision back, and no `Input.*` that could collect one.
+
+    The deep link is a Markdown link inside a `TextBlock`, which is the same
+    affordance the Slack text and the legacy card already carried, rather than
+    an `Action.OpenUrl` button. `Action.OpenUrl` would be safe on its own
+    terms -- it only navigates -- but a button rendered beside the headline
+    "Approval requested" is the one thing a reviewer in a hurry could misread
+    as being the approval. Authorization happens in the portal, behind the
+    portal's own authentication, and the card should not look like it could
+    happen anywhere else.
+    """
+    body: list[dict[str, Any]] = [
+        {
+            "type": "TextBlock",
+            "text": headline,
+            "weight": "Bolder",
+            "size": "Medium",
+            "wrap": True,
+        }
+    ]
+    facts = _facts(payload)
+    if facts:
+        body.append(
+            {
+                "type": "FactSet",
+                "facts": [{"title": f"{label}:", "value": value} for label, value in facts],
+            }
+        )
+    if link:
+        body.append({"type": "TextBlock", "text": f"[Open in Atlas]({link})", "wrap": True})
+    return {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": _ADAPTIVE_CARD_CONTENT_TYPE,
+                "contentUrl": None,
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": _ADAPTIVE_CARD_VERSION,
+                    "body": body,
+                },
+            }
+        ],
+    }
+
+
+def _teams_message_card(headline: str, text: str) -> dict[str, Any]:
+    """The legacy Office 365 connector body. Kept selectable, not deleted.
+
+    Two tenants still need it: one whose connector URL is alive under an
+    extension, and one whose Workflow was built with an action that accepts a
+    MessageCard. Silently changing the format under either would break a
+    channel that works today, which is why this is a setting and not a
+    migration.
+
+    It is an escape hatch rather than a second supported path. Microsoft
+    accepts MessageCard at a Workflows webhook endpoint but *not* in the
+    "Post card in a chat or channel" action the stock templates use -- that
+    answers `AdaptiveSerializationException: Property 'type' must be
+    'AdaptiveCard'` -- and never renders its buttons. `potentialAction` is
+    absent here for the same governance reason it always was.
+    """
+    return {
+        "@type": "MessageCard",
+        "@context": "https://schema.org/extensions",
+        "summary": headline,
+        "title": headline,
+        "text": text.replace("*", ""),
+    }
+
+
 def render_message(
     settings: Settings,
     kind: str,
@@ -178,35 +310,23 @@ def render_message(
     Composed only from fields the caller passed and this module's own
     headline table -- never from free text a model produced, and never from
     anything that could carry a source value.
+
+    For TEAMS the body shape follows `settings.teams_card_format`; see that
+    field and the two builders above for why a current tenant needs the
+    Adaptive Card and why the legacy one is still reachable.
     """
     headline = _HEADLINE_BY_KIND.get(kind, kind.replace("_", " ").title())
-    parts = [f"*{headline}*"]
-    for label, key in (
-        ("Object", "object_type"),
-        ("Name", "object_name"),
-        ("Risk tier", "risk_tier"),
-        ("By", "principal_id"),
-        ("Severity", "severity"),
-        ("Expires", "expires_at"),
-    ):
-        value = payload.get(key)
-        if value:
-            parts.append(f"{label}: {value}")
     link = deep_link(settings, kind, object_id=payload.get("object_id"))
+    parts = [f"*{headline}*"]
+    parts += [f"{label}: {value}" for label, value in _facts(payload)]
     if link:
         parts.append(link)
     text = "\n".join(parts)
 
     if channel == "TEAMS":
-        # Teams' simple message-card shape; deliberately not an Adaptive Card
-        # with actions, because a notification here must never be an action.
-        return {
-            "@type": "MessageCard",
-            "@context": "https://schema.org/extensions",
-            "summary": headline,
-            "title": headline,
-            "text": text.replace("*", ""),
-        }
+        if settings.teams_card_format == TEAMS_FORMAT_MESSAGE_CARD:
+            return _teams_message_card(headline, text)
+        return _teams_adaptive_card(headline, payload, link)
     return {"text": text}
 
 
