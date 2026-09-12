@@ -12,18 +12,29 @@ than asserted.
 **The property.** `reviewer_agent.auto_decide_tier0_tier1` re-reads
 `ReviewerAgentState.suspended` before each item (Guard 0), with
 `populate_existing=True` so the read goes to the database rather than the
-identity map. The claim in that guard's own comment is:
+identity map. The bound that re-read buys is **one further item per worker**,
+and because workers share no transaction it does not degrade with the number
+of workers: N workers on one queue can decide at most N more items between
+the suspension's COMMIT and their stop.
 
-    "Bound on the stop: one item, and only under an isolation level where a
-     statement sees rows committed since the transaction began -- READ
-     COMMITTED, which is this platform's default. Under REPEATABLE READ the
-     re-read returns the snapshot and the batch runs to its limit; that is a
-     property of the isolation level, not something a check here can defeat."
+**2026-09-12 (R11-C4).** That bound holds only where a statement sees rows
+committed since its transaction began -- READ COMMITTED. Under REPEATABLE
+READ and SERIALIZABLE the re-read is served from the batch's own snapshot,
+the suspension stays invisible for the life of the transaction, and the batch
+runs to its `limit`. This file used to *assert* that weakness
+(`REPEATABLE_READ_IS_UNBOUNDED`) against a comment in Guard 0 that said the
+code should be run at READ COMMITTED. Nothing enforced it, so a deployment
+that set a stricter default -- the direction an operator reaches for when
+they want more safety -- silently bought an unbounded agent.
 
-Both halves of that are measured here, at both isolation levels, and the
-second half is the reason `REPEATABLE_READ_IS_UNBOUNDED` below is an assertion
-rather than a caveat in prose: the comment claims a *known* weakness, and a
-known weakness that nothing exercises is how a regression gets called a fix.
+`reviewer_agent.refuse_unsupported_isolation` now makes that a precondition:
+the agent refuses to start at any level but READ COMMITTED, with a named
+reason code. So the assertions below changed shape. At READ COMMITTED the
+bound is measured, both on separate queues and -- the case R11-C4 was
+raised for -- on one shared queue. At REPEATABLE READ the measurement is
+that the batch never starts. `test_ar04_snapshot_isolation_hides_a_committed_
+suspension` keeps the *reason* for that refusal under test at the SQL level,
+so a later reader cannot mistake the enforcement for paranoia and relax it.
 
 **What "stop delay" means here.** Each worker records the monotonic time at
 which each of its decisions was made. The controller records the monotonic
@@ -38,14 +49,21 @@ not have. The measurement is deliberately in *items*, not seconds: the operator-
 visible question is "how many more things can this agent decide after I hit
 suspend", and seconds are a property of the machine the test ran on.
 
-**Scope.** In the suspension experiment each worker gets its own
-organization, and the suspension is committed for every organization from one
-connection at one moment. That isolates the property under test -- a re-read
-seeing another connection's committed write -- from row contention between
-workers competing for the *same* organization's queue. Contention is measured
-separately, at the end of this file: several committing workers on one queue,
-whether every item is decided exactly once, and whether a lost race skips an
-item or aborts a batch.
+**Scope.** The first experiment gives each worker its own organization, and
+commits the suspension for every organization from one connection at one
+moment. That isolates the property -- a re-read seeing another connection's
+committed write -- from row contention between workers competing for the
+*same* organization's queue. Contention is measured separately: several
+committing workers on one queue, whether every item is decided exactly once,
+and whether a lost race skips an item or aborts a batch.
+
+Separate organizations are not enough on their own, and R11-C4 is the row
+that said so: two workers on two organizations never contend for a row, so
+that experiment proves tenant isolation and says nothing about whether a
+shared queue lets each worker independently conclude it is still fine and
+race past the limit. The last experiment in this file closes that: N workers,
+one organization, one queue, one suspension, with the number of decisions
+made past the suspension counted per worker.
 
 Pointing this at a PostgreSQL: `AIDA_REVIEWER_SUSPENSION_TEST_DATABASE_URL`,
 or let it derive a scratch database from `Settings.database_url`. It uses its
@@ -58,7 +76,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Hashable, Iterator
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
@@ -93,10 +111,14 @@ from aida.models import (
 )
 from aida.reviewer_agent import (
     REASON_SUSPENDED,
+    REASON_UNSUPPORTED_ISOLATION,
+    SUPPORTED_ISOLATION_LEVEL,
     ReviewerAgentUnavailable,
     auto_decide_tier0_tier1,
+    organization_suspended,
     pre_review_pending,
     set_suspended,
+    transaction_isolation_level,
 )
 from tests.support.doubles import security_context
 
@@ -114,13 +136,10 @@ WORKERS = 4
 #: and not an artefact of running out of work.
 ITEMS_PER_WORKER = 8
 
-#: The bound the guard claims at READ COMMITTED, in items.
+#: The bound the guard claims at READ COMMITTED: items decided by any one
+#: worker after the suspension's COMMIT returned. Per *worker*, so the fleet
+#: bound is this times the number of workers.
 MAX_STOP_DELAY_ITEMS = 1
-
-#: At REPEATABLE READ the re-read is served from the transaction's snapshot,
-#: so the suspension is invisible and the batch runs to its limit. Asserted,
-#: not excused: see the module docstring.
-REPEATABLE_READ_IS_UNBOUNDED = True
 
 
 def _settings(**overrides: object) -> Settings:
@@ -379,30 +398,47 @@ class _Recorder:
     """Decision timestamps, and the instant the suspension became visible.
 
     Keyed by the worker's own `AsyncSession`, which is the only thing the
-    patched `decide_review` is handed that identifies who is calling.
+    patched `decide_review` is handed that identifies who is calling. The
+    label a session is registered under is opaque: the separate-organization
+    experiments use the `organization_id`, and the shared-queue experiment
+    uses a worker number, because there every worker has the same
+    organization and attributing by it would collapse the fleet into one
+    series and hide the per-worker bound.
     """
 
-    def __init__(self) -> None:
-        self.decisions: list[tuple[UUID, float]] = []
+    def __init__(self, fleet_size: int = 1) -> None:
+        self.decisions: list[tuple[Hashable, float]] = []
         self.suspended_at: float | None = None
         self.first_decision = asyncio.Event()
-        self._org_of_session: dict[int, UUID] = {}
+        #: Set once every worker has returned. The suspending controller waits
+        #: on whichever of these comes first: at an isolation level the agent
+        #: refuses, no decision is ever made and waiting only on
+        #: `first_decision` would stall the experiment until its timeout.
+        self.fleet_idle = asyncio.Event()
+        self._fleet_size = fleet_size
+        self._finished = 0
+        self._label_of_session: dict[int, Hashable] = {}
 
-    def register(self, session: AsyncSession, org_id: UUID) -> None:
-        self._org_of_session[id(session)] = org_id
+    def register(self, session: AsyncSession, label: Hashable) -> None:
+        self._label_of_session[id(session)] = label
 
     def record_for(self, session: AsyncSession) -> None:
-        org_id = self._org_of_session[id(session)]
-        self.decisions.append((org_id, time.monotonic()))
+        label = self._label_of_session[id(session)]
+        self.decisions.append((label, time.monotonic()))
         self.first_decision.set()
 
-    def decided(self, org_id: UUID) -> int:
-        return sum(1 for (o, _) in self.decisions if o == org_id)
+    def worker_finished(self) -> None:
+        self._finished += 1
+        if self._finished >= self._fleet_size:
+            self.fleet_idle.set()
 
-    def stop_delay(self, org_id: UUID) -> int:
-        """Decisions this organization made after the suspension committed."""
+    def decided(self, label: Hashable) -> int:
+        return sum(1 for (own, _) in self.decisions if own == label)
+
+    def stop_delay(self, label: Hashable) -> int:
+        """Decisions this worker made after the suspension committed."""
         assert self.suspended_at is not None
-        return sum(1 for (o, t) in self.decisions if o == org_id and t > self.suspended_at)
+        return sum(1 for (own, t) in self.decisions if own == label and t > self.suspended_at)
 
 
 async def _run_worker(
@@ -410,10 +446,12 @@ async def _run_worker(
 ) -> str:
     """One reviewer-agent batch on its own connection.
 
-    Returns why it ended: `"suspended"` if the guard stopped it, `"exhausted"`
-    if it ran out of work first (which at READ COMMITTED would mean the
-    suspension never reached it -- a failure of the property, reported as a
-    distinct outcome rather than as a passing test).
+    Returns why it ended: `"suspended"` if the guard stopped it,
+    `"refused:isolation"` if the batch never started because the isolation
+    level cannot support the stop bound, `"exhausted"` if it ran out of work
+    first (which at READ COMMITTED would mean the suspension never reached it
+    -- a failure of the property, reported as a distinct outcome rather than
+    as a passing test).
 
     Attribution is by session, registered with the recorder here. An earlier
     version of this file patched `reviewer.decide_review` per worker from
@@ -429,8 +467,12 @@ async def _run_worker(
         try:
             await auto_decide_tier0_tier1(session, org_id, settings=_settings())
         except ReviewerAgentUnavailable as exc:
+            if exc.reason_code == REASON_UNSUPPORTED_ISOLATION:
+                return "refused:isolation"
             assert exc.reason_code == REASON_SUSPENDED
             return "suspended"
+        finally:
+            recorder.worker_finished()
         return "exhausted"
 
 
@@ -462,6 +504,27 @@ async def _recording(recorder: _Recorder) -> AsyncIterator[None]:
         reviewer.decide_review = original  # type: ignore[assignment]
 
 
+#: Safety valve for `_wait_for_fleet`. Never reached in a healthy run: one of
+#: the two events it waits on fires in milliseconds. It exists so a fleet that
+#: deadlocks fails the run in seconds instead of hanging the suite.
+FLEET_WAIT_SECONDS = 30
+
+
+async def _wait_for_fleet(recorder: _Recorder) -> None:
+    """Block until the fleet has decided something, or has all finished."""
+    waiters = [
+        asyncio.create_task(recorder.first_decision.wait()),
+        asyncio.create_task(recorder.fleet_idle.wait()),
+    ]
+    try:
+        await asyncio.wait(
+            waiters, return_when=asyncio.FIRST_COMPLETED, timeout=FLEET_WAIT_SECONDS
+        )
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
+
+
 async def _suspend_everything(
     engine: AsyncEngine, org_ids: list[UUID], recorder: _Recorder
 ) -> None:
@@ -469,8 +532,13 @@ async def _suspend_everything(
 
     On its own connection, which is the whole point: a worker must learn about
     a write it did not make.
+
+    "Genuinely working" is the first decision, or the whole fleet returning --
+    whichever comes first. At an isolation level the agent refuses outright no
+    decision is ever made, and waiting only on the first would hold the
+    experiment open until its timeout for a fleet that has already gone home.
     """
-    await asyncio.wait_for(recorder.first_decision.wait(), timeout=30)
+    await _wait_for_fleet(recorder)
     async with _sessions(engine)() as suspender:
         for org_id in org_ids:
             await set_suspended(
@@ -489,7 +557,7 @@ async def test_ar04_a_committed_suspension_stops_concurrent_workers_within_one_i
 ) -> None:
     """The measurement AR-04 asked for, at both isolation levels."""
     org_ids = [await _seed_worker_org(engine, ITEMS_PER_WORKER) for _ in range(WORKERS)]
-    recorder = _Recorder()
+    recorder = _Recorder(fleet_size=WORKERS)
 
     async with _recording(recorder):
         outcomes = await asyncio.gather(
@@ -522,14 +590,19 @@ async def test_ar04_a_committed_suspension_stops_concurrent_workers_within_one_i
             f"{MAX_STOP_DELAY_ITEMS}"
         )
     else:
-        # REPEATABLE READ: each worker's re-read is served from the snapshot
-        # its transaction opened with, so the suspension is invisible and the
-        # batch runs to its limit. This is the documented weakness; asserting
-        # it means a change that silently "fixed" or worsened it is visible.
-        assert REPEATABLE_READ_IS_UNBOUNDED
-        assert worker_outcomes == ["exhausted"] * WORKERS, (
-            "REPEATABLE READ is expected to hide the suspension for the life of "
-            f"the transaction, but workers reported {worker_outcomes}"
+        # REPEATABLE READ: the batch never starts. Before 2026-09-12 every
+        # worker here ran to exhaustion, deciding its whole queue with the
+        # suspension committed and invisible -- measured at 6 items past the
+        # suspension per worker, bounded only by how much work was seeded.
+        # The stop bound is now a precondition rather than a hope, so the
+        # unbounded path is unreachable instead of merely documented.
+        assert worker_outcomes == ["refused:isolation"] * WORKERS, (
+            f"{isolation_level} cannot support the stop bound and must be "
+            f"refused, but workers reported {worker_outcomes}"
+        )
+        assert recorder.decisions == [], (
+            "a refused batch must decide nothing, but "
+            f"{len(recorder.decisions)} decisions were made"
         )
 
 
@@ -589,13 +662,22 @@ async def _run_committing_worker(engine: AsyncEngine, org_id: UUID) -> tuple[str
 
     `_run_worker` above never commits, which is right for measuring when a
     worker stops; contention only exists once decisions land. Returns how the
-    batch ended -- `"committed"`, or `"aborted:<SQLSTATE>"` -- and how many
-    decisions it committed.
+    batch ended -- `"committed"`, `"aborted:<SQLSTATE>"`, or one of the
+    agent's own refusals -- and how many decisions it committed.
+
+    A `ReviewerAgentUnavailable` is rolled back rather than committed, which
+    is what `agent_contract_api.run_reviewer_agent` does with it. That is the
+    reason a suspended worker's committed count is zero and not "everything it
+    decided before the stop": the batch is one transaction, so a mid-batch
+    refusal discards the lot.
     """
     async with _sessions(engine)() as session:
         try:
             outcomes = await auto_decide_tier0_tier1(session, org_id, settings=_settings())
             await session.commit()
+        except ReviewerAgentUnavailable as exc:
+            await session.rollback()
+            return (f"refused:{exc.reason_code}", 0)
         except DBAPIError as exc:
             await session.rollback()
             return (f"aborted:{_sqlstate(exc)}", 0)
@@ -651,23 +733,232 @@ async def test_ar04_workers_racing_one_organization_decide_each_item_exactly_onc
         f"reviews approved = {approved}, reviewer-agent audit rows = {audited}"
     )
 
-    # Exactly once, at both isolation levels: every item decided, none twice,
-    # and one audit row per decision.
-    assert approved == CONTENDED_ITEMS
-    assert audited == CONTENDED_ITEMS
-    assert sum(committed) == CONTENDED_ITEMS
-
     if isolation_level == "READ COMMITTED":
+        # Exactly once: every item decided, none twice, one audit row each.
+        assert approved == CONTENDED_ITEMS
+        assert audited == CONTENDED_ITEMS
+        assert sum(committed) == CONTENDED_ITEMS
         # A lost race is a skipped item, never a lost batch: once the winner
         # commits, the loser's compare-and-set finds the row no longer PENDING
         # and the decision service refuses it inside the item's savepoint.
         assert outcomes == ["committed"] * CONTENDING_WORKERS, outcomes
     else:
-        # REPEATABLE READ: the loser's claim meets a row a concurrent
-        # transaction changed, which PostgreSQL refuses outright. Only the
-        # service's own refusal is caught, so the loser's whole batch rolls
-        # back; nothing it decided lands, and the winner's decisions stand.
-        assert "committed" in outcomes, outcomes
-        assert all(
-            outcome in ("committed", f"aborted:{SERIALIZATION_FAILURE}") for outcome in outcomes
-        ), outcomes
+        # REPEATABLE READ is refused before any row is read, so contention at
+        # this level is now unreachable through the agent rather than merely
+        # survivable. What it used to measure -- the loser's claim meeting a
+        # row a concurrent transaction had changed, PostgreSQL refusing it
+        # with 40001, and the loser's whole batch rolling back while the
+        # winner's stood -- is kept as a property of the database itself by
+        # `test_ar04_snapshot_isolation_hides_a_committed_suspension`, which
+        # is the mechanism the refusal exists for.
+        assert outcomes == [f"refused:{REASON_UNSUPPORTED_ISOLATION}"] * CONTENDING_WORKERS, (
+            outcomes
+        )
+        assert (approved, audited, sum(committed)) == (0, 0, 0)
+
+
+# --- why REPEATABLE READ is refused rather than tolerated ---------------------
+
+
+async def test_ar04_snapshot_isolation_hides_a_committed_suspension(
+    engine: AsyncEngine, isolation_level: str
+) -> None:
+    """The mechanism `refuse_unsupported_isolation` exists for, at SQL level.
+
+    The enforcement is only defensible if the thing it refuses is real, and
+    the tests that used to demonstrate it can no longer reach the agent. This
+    reproduces it underneath the agent instead, with the same re-read Guard 0
+    performs: a reader opens a transaction and reads the state row, a second
+    connection commits a suspension, and the reader repeats its read.
+
+    At READ COMMITTED the second read sees the suspension, which is exactly
+    what bounds the stop at one item. At REPEATABLE READ it does not, for the
+    life of the transaction, however many times it is repeated -- so a batch
+    running at that level would decide its whole queue with the kill switch
+    already thrown. Without this, a later reader could mistake the refusal for
+    paranoia and relax it.
+    """
+    org_id = await _seed_worker_org(engine, 0)
+
+    async with _sessions(engine)() as reader:
+        # Takes the reader's snapshot: under REPEATABLE READ the snapshot is
+        # fixed by the transaction's *first* statement, so the suspension has
+        # to be committed after this read, not before, for the test to mean
+        # anything. The already-suspended case is the control test above.
+        assert await organization_suspended(reader, org_id) is False
+
+        async with _sessions(engine)() as suspender:
+            await set_suspended(
+                suspender,
+                org_id,
+                suspended=True,
+                context=security_context(organization_id=org_id, principal_id="risk-officer"),
+                reason="mid-transaction",
+            )
+            await suspender.commit()
+
+        # The re-read Guard 0 makes, in a transaction that began before the
+        # suspension committed.
+        seen = await organization_suspended(reader, org_id)
+        level_in_force = await transaction_isolation_level(reader)
+
+    print(
+        f"\n[AR-04 snapshot] {isolation_level}: transaction_isolation reports "
+        f"{level_in_force!r}; a re-read inside a transaction older than the "
+        f"suspension's COMMIT sees suspended={seen}"
+    )
+    assert level_in_force == isolation_level
+
+    if isolation_level == SUPPORTED_ISOLATION_LEVEL:
+        assert seen is True, (
+            "at READ COMMITTED the per-item re-read must see a suspension "
+            "committed after the batch began -- that is the whole stop bound"
+        )
+    else:
+        assert seen is False, (
+            f"{isolation_level} is refused because its snapshot hides the "
+            "suspension; if this now sees it, the refusal can be revisited"
+        )
+
+
+# --- R11-C4: N workers, ONE queue, ONE agent, ONE suspension ------------------
+
+#: Workers drawing on a single organization's queue. Four is enough that the
+#: per-worker bound and the fleet bound are different numbers.
+SHARED_QUEUE_WORKERS = 4
+
+#: Items in that one shared queue. Deep enough that the fleet is still working
+#: when the suspension commits: a worker that merely ran out of items would
+#: report a stop delay of zero and prove nothing.
+SHARED_QUEUE_ITEMS = 48
+
+
+async def _run_shared_queue_worker(
+    engine: AsyncEngine, org_id: UUID, worker: int, recorder: _Recorder
+) -> tuple[str, int]:
+    """One committing worker on the shared queue, attributed by worker number.
+
+    Every worker here has the same `organization_id`, so the recorder is keyed
+    by worker instead -- attributing by organization would collapse the fleet
+    into one series and hide the per-worker bound this test is about.
+    """
+    async with _sessions(engine)() as session:
+        recorder.register(session, worker)
+        try:
+            outcomes = await auto_decide_tier0_tier1(session, org_id, settings=_settings())
+            await session.commit()
+        except ReviewerAgentUnavailable as exc:
+            await session.rollback()
+            if exc.reason_code == REASON_UNSUPPORTED_ISOLATION:
+                return ("refused:isolation", 0)
+            assert exc.reason_code == REASON_SUSPENDED
+            return ("suspended", 0)
+        except DBAPIError as exc:
+            await session.rollback()
+            return (f"aborted:{_sqlstate(exc)}", 0)
+        finally:
+            recorder.worker_finished()
+        return ("committed", len(outcomes))
+
+
+async def test_ar04_suspension_binds_on_one_shared_queue_within_one_item_per_worker(
+    engine: AsyncEngine, isolation_level: str
+) -> None:
+    """R11-C4: the stop bound under same-queue contention.
+
+    The separate-organization experiment at the top of this file proves that a
+    re-read sees another connection's committed write. It cannot prove what
+    R11-C4 asked about, because two workers on two organizations never contend
+    for a row: nothing there rules out several workers on *one* queue each
+    independently concluding it is still fine and racing past the limit.
+
+    So: one organization, one queue, one agent, one suspension, and
+    `SHARED_QUEUE_WORKERS` workers that commit. The measurement is the number
+    of decisions each worker made strictly after the suspension's COMMIT
+    returned.
+
+    The bound is **one item per worker**, and therefore `SHARED_QUEUE_WORKERS`
+    for the fleet. It is per worker because workers share no transaction: each
+    can be inside `decide_review` when the suspension commits, and none can
+    begin a second item after it. It does not grow with queue depth, and it
+    does not grow with how many workers lose the claim race for a given row --
+    a lost race is a skip, and Guard 0 runs before the skip as well.
+
+    Committed decisions past the suspension are a second, tighter number:
+    zero. `auto_decide_tier0_tier1` raises out of the batch and its caller
+    rolls back, so a worker stopped mid-batch lands nothing at all.
+    """
+    org_id = await _seed_worker_org(engine, SHARED_QUEUE_ITEMS, table_per_item=True)
+    recorder = _Recorder(fleet_size=SHARED_QUEUE_WORKERS)
+
+    started = time.monotonic()
+    async with _recording(recorder):
+        results = await asyncio.gather(
+            *[
+                _run_shared_queue_worker(engine, org_id, worker, recorder)
+                for worker in range(SHARED_QUEUE_WORKERS)
+            ],
+            _suspend_everything(engine, [org_id], recorder),
+        )
+    elapsed = time.monotonic() - started
+
+    worker_results = list(results[:SHARED_QUEUE_WORKERS])
+    outcomes = [outcome for outcome, _count in worker_results]
+    committed = [count for _outcome, count in worker_results]
+    delays = {worker: recorder.stop_delay(worker) for worker in range(SHARED_QUEUE_WORKERS)}
+    approved, audited = await _decided(engine, org_id)
+    print(
+        f"\n[AR-04 shared queue] {isolation_level}: {SHARED_QUEUE_WORKERS} workers on ONE "
+        f"organization's {SHARED_QUEUE_ITEMS}-item queue in {elapsed:.2f}s; "
+        f"{len(recorder.decisions)} decisions made "
+        f"(per worker {[recorder.decided(w) for w in range(SHARED_QUEUE_WORKERS)]}); "
+        f"per-worker stop delay = {sorted(delays.values())} "
+        f"(fleet total {sum(delays.values())}, bound {SHARED_QUEUE_WORKERS}); "
+        f"outcomes = {outcomes}; committed per worker = {committed}; "
+        f"reviews approved = {approved}, reviewer-agent audit rows = {audited}"
+    )
+
+    if isolation_level != SUPPORTED_ISOLATION_LEVEL:
+        # Refused before a row is read: the shared queue is untouched.
+        #
+        # What the refusal is worth, measured on 2026-09-12 by disabling
+        # `refuse_unsupported_isolation` and running exactly this experiment
+        # at REPEATABLE READ: 47 decisions made past the suspension against a
+        # bound of 4, and -- because these workers commit -- 48 reviews
+        # approved with 48 audit rows. Not a rolled-back near-miss: the agent
+        # approved the whole queue after the kill switch was thrown, and the
+        # approvals were durable. That is the regression this branch pins.
+        assert outcomes == ["refused:isolation"] * SHARED_QUEUE_WORKERS, outcomes
+        assert recorder.decisions == []
+        assert (approved, audited) == (0, 0)
+        return
+
+    # The suspension must actually have bitten. Every worker running out of
+    # work instead would give delays of zero and measure nothing.
+    assert "suspended" in outcomes, (
+        f"no worker was stopped by the suspension ({outcomes}); the queue was "
+        f"too shallow or the fleet too slow for the experiment to mean anything"
+    )
+    assert all(outcome in ("suspended", "committed") for outcome in outcomes), outcomes
+    assert recorder.decisions, "the fleet decided nothing; nothing was measured"
+
+    # The bound, per worker and for the fleet.
+    worst = max(delays.values())
+    assert worst <= MAX_STOP_DELAY_ITEMS, (
+        f"a worker decided {worst} items after the suspension committed "
+        f"(per worker: {sorted(delays.values())}); the bound is "
+        f"{MAX_STOP_DELAY_ITEMS} item per worker"
+    )
+    fleet_delay = sum(delays.values())
+    assert fleet_delay <= SHARED_QUEUE_WORKERS * MAX_STOP_DELAY_ITEMS, (
+        f"the fleet decided {fleet_delay} items after the suspension committed; "
+        f"the bound for {SHARED_QUEUE_WORKERS} workers is "
+        f"{SHARED_QUEUE_WORKERS * MAX_STOP_DELAY_ITEMS}"
+    )
+
+    # Nothing was decided twice, and only committed batches landed: a worker
+    # stopped mid-batch rolls back everything it had decided, so no decision
+    # made after the suspension survives at all.
+    assert approved == sum(committed), (approved, committed)
+    assert audited == approved, (audited, approved)
+    assert approved <= SHARED_QUEUE_ITEMS

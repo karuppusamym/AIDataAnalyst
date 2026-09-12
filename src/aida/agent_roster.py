@@ -139,7 +139,9 @@ _REVIEWER_AUTO_APPLY_EVIDENCE = (
     "with abstention when a proposal carries none; a re-derivation of that "
     "evidence at decision time rather than at pre-review time; maker != "
     "checker; a 5%-floor audit sample of every approval; and a per-"
-    "organization suspension re-read before each decision."
+    "organization suspension re-read before each decision, which stops each "
+    "concurrent worker within one further item and refuses to run at all at "
+    "an isolation level where that re-read could not see the suspension."
 )
 
 #: Scope of the run evidence attached to a roster entry.

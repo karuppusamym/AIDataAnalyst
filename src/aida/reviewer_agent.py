@@ -41,6 +41,9 @@ Guards, in order, on every auto-decision:
    misconfiguration fails loudly rather than at the database.
 6. Suspension, process-wide or per-organization, stops everything
    (condition (c)) -- re-read before *each* commit, not only at batch entry.
+   That re-read bounds the stop at one item per worker only at READ
+   COMMITTED, so the batch refuses to start at any other isolation level
+   rather than running without the bound (`refuse_unsupported_isolation`).
 7. The unresolved audit-sample backlog must be inside its bound. Condition
    (b)'s safety argument is that humans read a 5% sample; an unread queue is
    not oversight, so the agent stops deciding rather than adding to it.
@@ -63,7 +66,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.column_description_service import ORIGIN_MODEL_INFERRED
@@ -112,6 +115,21 @@ REASON_SELF_PROPOSED = "reviewer_agent_cannot_decide_own_proposal"
 #: AR-11: the sample backlog has outgrown what humans are resolving, so the
 #: oversight ADR-0027 condition (b) claims is not actually happening.
 REASON_AUDIT_BACKLOG = "reviewer_agent_audit_backlog_exceeded"
+#: AR-04: the batch is running at a transaction isolation level under which
+#: the per-item suspension re-read cannot see the kill switch being thrown.
+REASON_UNSUPPORTED_ISOLATION = "reviewer_agent_unsupported_isolation"
+
+#: AR-04: the only transaction isolation level at which
+#: `auto_decide_tier0_tier1`'s per-item suspension re-read can observe a
+#: suspension committed *after* the batch's transaction began, and therefore
+#: the only one at which the stop bound of one item per worker holds.
+#:
+#: PostgreSQL's REPEATABLE READ and SERIALIZABLE both serve every statement in
+#: a transaction from the snapshot taken at its first statement, so a plain
+#: re-read of `ReviewerAgentState` returns the pre-suspension row for the life
+#: of the batch however often it is repeated. That is a property of the
+#: isolation level, so it is enforced here rather than checked for.
+SUPPORTED_ISOLATION_LEVEL = "READ COMMITTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +738,66 @@ def record_audit_backlog_refusal(
     )
 
 
+async def transaction_isolation_level(session: AsyncSession) -> str | None:
+    """This transaction's isolation level, upper-cased, or `None` off PostgreSQL.
+
+    `SHOW transaction_isolation` reports the level actually in force for the
+    current transaction, which is what matters: the level can come from the
+    engine, from the connection, or from a `SET TRANSACTION` the caller issued,
+    and reading configuration back would only re-state what was asked for
+    rather than what was granted.
+
+    Returns `None` on any other dialect. The question is about PostgreSQL's
+    MVCC snapshots; SQLite, where the rest of the suite runs, has no
+    equivalent and serialises writers outright.
+    """
+    connection = await session.connection()
+    if connection.dialect.name != "postgresql":
+        return None
+    level = await session.scalar(text("SHOW transaction_isolation"))
+    return str(level).strip().upper() if level is not None else None
+
+
+async def refuse_unsupported_isolation(session: AsyncSession) -> None:
+    """AR-04: enforce the isolation level the stop bound depends on.
+
+    The per-item suspension re-read in `auto_decide_tier0_tier1` bounds the
+    stop at one item per worker *only* at READ COMMITTED, where a statement
+    sees rows committed since the transaction began. Under REPEATABLE READ or
+    SERIALIZABLE the re-read is served from the batch's own snapshot, the
+    suspension stays invisible for the life of the transaction, and the batch
+    runs to its `limit` -- the kill switch does not bind.
+
+    Until 2026-09-12 that was a comment in Guard 0 saying the code should be
+    run at READ COMMITTED. Nothing checked, so a deployment that set a
+    stricter default -- the direction an operator reaches for when they want
+    *more* safety -- silently bought an unbounded agent. The precondition is
+    now a refusal: the agent declines to run rather than run without its stop
+    bound, with a named reason code the API surfaces as a 409.
+
+    Why enforcement rather than making the bound hold at REPEATABLE READ:
+    no check *inside* the batch's transaction can defeat its snapshot. The
+    two mechanisms that could are both worse than refusing. Re-reading the
+    state on a separate connection turns one batch transaction into 1+N, and
+    the agent is handed a session rather than an engine. A locking re-read
+    (`SELECT ... FOR SHARE`/`FOR UPDATE`) makes every worker hold a lock on
+    the state row that the suspending `UPDATE` must then wait for -- the kill
+    switch would queue behind the batches it exists to stop, and with a
+    `lock_timeout` set it would fail outright. A kill switch delayed by its
+    own target is the wrong trade.
+    """
+    level = await transaction_isolation_level(session)
+    if level is None or level == SUPPORTED_ISOLATION_LEVEL:
+        return
+    _log.error(
+        "reviewer_agent_unsupported_isolation",
+        reason=REASON_UNSUPPORTED_ISOLATION,
+        isolation_level=level,
+        supported_isolation_level=SUPPORTED_ISOLATION_LEVEL,
+    )
+    raise ReviewerAgentUnavailable(REASON_UNSUPPORTED_ISOLATION)
+
+
 async def organization_suspended(session: AsyncSession, organization_id: UUID) -> bool:
     state = await session.scalar(
         select(ReviewerAgentState)
@@ -799,6 +877,12 @@ async def auto_decide_tier0_tier1(
         raise ReviewerAgentUnavailable(REASON_DISABLED)
     if settings.reviewer_agent_suspended or await organization_suspended(session, organization_id):
         raise ReviewerAgentUnavailable(REASON_SUSPENDED)
+    # AR-04: refuse to run at all at an isolation level where Guard 0 below
+    # cannot see the kill switch being thrown. Checked after the suspension
+    # checks so an agent that is *already* suspended reports that, which is
+    # the more useful answer and is correct at every isolation level -- the
+    # snapshot a transaction opens with already contains an earlier commit.
+    await refuse_unsupported_isolation(session)
     # AR-11: the agent's licence to decide is contingent on humans keeping up
     # with the sample of what it already decided. A backlog past the configured
     # bound stops new decisions rather than adding to it -- the alternative is
@@ -833,13 +917,22 @@ async def auto_decide_tier0_tier1(
     outcomes: list[AutoDecisionOutcome] = []
     for review in rows:
         # Guard 0 (AR-04): a suspension raised while this batch is running
-        # stops the batch it was raised during, not merely the next one. Bound
-        # on the stop: one item, and only under an isolation level where a
-        # statement sees rows committed since the transaction began -- READ
-        # COMMITTED, which is this platform's default. Under REPEATABLE READ
-        # the re-read returns the snapshot and the batch runs to its limit;
-        # that is a property of the isolation level, not something a check
-        # here can defeat.
+        # stops the batch it was raised during, not merely the next one.
+        #
+        # Bound on the stop: one item per worker, and therefore N items for N
+        # workers drawing on one organization's queue -- each worker can be
+        # inside `decide_review` when the suspension commits, and none can
+        # begin a second item after it. The bound is per worker because
+        # workers share no transaction; it does not degrade with queue depth
+        # or with how many of them lose the claim race for a given row.
+        #
+        # It holds because the re-read below sees rows committed since this
+        # transaction began, which is true at READ COMMITTED and false at
+        # REPEATABLE READ and SERIALIZABLE. That is a property of the
+        # isolation level rather than of this check, so it is a precondition
+        # enforced at entry (`refuse_unsupported_isolation`) rather than a
+        # hope recorded here. Measured on real PostgreSQL, at both levels, by
+        # `tests/test_reviewer_agent_postgres_suspension.py`.
         if await organization_suspended(session, organization_id):
             raise ReviewerAgentUnavailable(REASON_SUSPENDED)
         # Guard 1 (AR-04): stale evidence is not evidence. An item pre-reviewed
