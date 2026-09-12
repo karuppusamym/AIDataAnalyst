@@ -711,25 +711,13 @@ export function CopyLinkButton({
 /**
  * Warn before losing unsaved edits.
  *
- * Covers both ways the edit can be lost: closing or reloading the tab (the
- * browser's own prompt, the only thing allowed there) and navigating away
- * inside the app (our own confirmation). Screens previously did neither, so a
- * half-written description died on a stray click.
+ * R11-S10: this is now a re-export of `lib/unsavedChanges.ts`, which is where
+ * the implementation moved. The behaviour it advertised was only half real
+ * here -- it installed `beforeunload`, and it returned a confirm function for
+ * in-app navigation that no caller ever invoked and that the shell had no way
+ * to reach. The hook now also REGISTERS the dirty state, so the shell's
+ * `navigate` asks before discarding it. The signature and the returned
+ * function are unchanged, so existing callers keep working and simply start
+ * being guarded.
  */
-export function useUnsavedChanges(dirty: boolean) {
-  useEffect(() => {
-    if (!dirty) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [dirty]);
-
-  /** Call before an in-app navigation that would discard the edit. */
-  return useCallback(
-    (message = "Discard your unsaved changes?") => !dirty || window.confirm(message),
-    [dirty],
-  );
-}
+export { useUnsavedChanges } from "../lib/unsavedChanges";

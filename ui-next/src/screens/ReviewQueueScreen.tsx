@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 /* Filters and selection live in the URL so a filtered view is shareable and
    survives Back/Forward. This screen carried a verbatim copy of the old hook
    -- a `useState` seeded once from `location.search`, subscribed to nothing --
@@ -338,7 +338,12 @@ function ProposalRow({
   );
 }
 
-export function ReviewQueueScreen() {
+/* R11-S10: this is the governance queue itself -- one of the two queues the
+   exported `ReviewQueueScreen` below federates. It is unchanged by the merge:
+   its own fetch, its own filters, its own per-object-type renderers and its
+   own maker-checker decision call. What changed is that it is no longer the
+   only queue a reviewer has to find. */
+function GovernanceReviewQueue() {
   const [params, setParams] = useUrlState();
   const principalId = useSession().me?.principal_id ?? null;
   // "ALL" in the URL is this screen's own spelling for "every status" — the
@@ -704,6 +709,120 @@ export function ReviewQueueScreen() {
           />
         </section>
       ) : null}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   THE FEDERATED REVIEW SURFACE — R11-S10.
+
+   THE DEFECT this removes: a reviewer had to know that two separate queues
+   existed and visit both. `#/governance` held everything backed by the
+   `GovernanceReview` table -- twelve object types behind one type filter,
+   already federated -- and `#/parsed-lineage-review` held the parser-produced
+   lineage edges. Nothing on either screen mentioned the other. A steward
+   agent's proposals landed in one, a lineage agent's in the other, and the
+   only way to learn that was to be told.
+
+   WHY THIS IS A TAB AND NOT ONE LIST. Checked against the backend before
+   designing it: `GET /v1/governance/reviews/queue` takes an `object_type`
+   filter and is genuinely cross-type, but it reads one table. The parsed
+   lineage edges live in six separate parser tables, are decided through
+   `POST /v1/lineage/parsed-edges/{id}/decision`, and have their own bulk
+   semantics -- they never reach `GovernanceReview` and cannot be filtered
+   through `object_type`. Presenting them as rows of one list would mean
+   inventing a union the platform cannot decide over, and a reviewer would
+   learn that only when a bulk action silently applied to half a selection.
+
+   So the federation is honest about the seam: one destination, one place to
+   look, two queues named for what they decide. T18's shared
+   `ReviewDetailShell` already gives both the same detail contract, so the
+   thing a reviewer actually does is identical on either tab.
+
+   The retired `#/parsed-lineage-review` route resolves here with the parsed
+   lineage tab selected -- see `RETIRED_SCREEN_ALIASES` in `lib/routes.ts`.
+--------------------------------------------------------------------------- */
+
+/** The parsed-lineage queue stays its own lazily-loaded module: it is a
+ *  second tab, not a second screen, and a reviewer who never opens it should
+ *  not pay for its chunk. */
+const ParsedLineageReviewScreen = lazy(() =>
+  import("./ParsedLineageReviewScreen").then((module) => ({
+    default: module.ParsedLineageReviewScreen,
+  })),
+);
+
+const QUEUES = [
+  { id: "governance", label: "Governance proposals" },
+  { id: "parsed-lineage", label: "Parsed lineage edges" },
+] as const;
+
+type QueueId = (typeof QUEUES)[number]["id"];
+
+export function ReviewQueueScreen() {
+  const [params, setParams] = useUrlState();
+  const requested = params.get("queue");
+  const queue: QueueId = requested === "parsed-lineage" ? "parsed-lineage" : "governance";
+
+  return (
+    <div className="rqf">
+      {/* A tablist, not links: both queues are this one screen, and announcing
+          them as navigation would tell a screen-reader user they are leaving
+          it. Each queue still renders its own <h1>, so the heading always
+          names what is actually in front of the reviewer. */}
+      <div className="rqf__tabs" role="tablist" aria-label="Review queue">
+        {QUEUES.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            id={`review-queue-tab-${item.id}`}
+            className="rqf__tab"
+            aria-selected={item.id === queue}
+            aria-controls={`review-queue-panel-${item.id}`}
+            onClick={() =>
+              /* Switching queue drops the other queue's selection and filters.
+                 `review`, `status` and `type` are declared once for this screen
+                 because they mean the same thing in both queues -- but a
+                 focused governance review id is not an edge key, and leaving it
+                 behind would open a detail pane on an item the new queue has
+                 never heard of. */
+              setParams({
+                queue: item.id === "governance" ? null : item.id,
+                review: null,
+                status: null,
+                type: null,
+              })
+            }
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <div
+        role="tabpanel"
+        id={`review-queue-panel-${queue}`}
+        aria-labelledby={`review-queue-tab-${queue}`}
+      >
+        {queue === "governance" ? (
+          <GovernanceReviewQueue />
+        ) : (
+          /* A local boundary, so downloading the second queue's chunk replaces
+             the panel rather than the whole screen -- the shell's own Suspense
+             sits above the tabs, and falling back to it would take the tabs off
+             screen mid-switch. */
+          <Suspense
+            fallback={
+              <div className="screenloading" role="status">
+                Loading parsed lineage edges…
+              </div>
+            }
+          >
+            <ParsedLineageReviewScreen />
+          </Suspense>
+        )}
+      </div>
     </div>
   );
 }

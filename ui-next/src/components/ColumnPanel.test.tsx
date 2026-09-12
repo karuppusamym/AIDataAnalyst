@@ -439,7 +439,7 @@ it("offers the trip to the source workbook the guidance names", async () => {
   await waitFor(() => expect(screen.getByText("No description.")).toBeInTheDocument());
   const link = screen.getByRole("button", { name: /Source model workbook/ });
   fireEvent.click(link);
-  expect(location.hash).toBe("#/sources");
+  expect(location.hash).toBe("#/operator/sources");
   expect(new URLSearchParams(location.search).get("source")).toBe("ds_9");
 });
 

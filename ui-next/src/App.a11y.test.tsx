@@ -109,7 +109,13 @@ describe("the command palette really does trap focus", () => {
     const dialog = await screen.findByRole("dialog", { name: /Quick navigation/ });
 
     await expectFocusStaysWithin(user, dialog, 60);
-  });
+    /* An explicit budget, for the same reason the screen sweep has one: sixty
+       sequential `userEvent` Tab presses through a real dialog take ~4s in
+       jsdom on their own, which is inside the 5s default only until the suite
+       is busy. The assertion is unchanged -- this is the time it is allowed to
+       take, not what it checks. Found flaking here under the full run while
+       passing in isolation. */
+  }, 20000);
 
   it("returns focus to the control that opened it", async () => {
     fetchMe.mockReturnValue(new Promise(() => {}));
@@ -154,7 +160,7 @@ describe("the command palette really does trap focus", () => {
     expect(document.activeElement).toBe(match);
     await user.keyboard("{Enter}");
 
-    await waitFor(() => expect(location.hash).toBe("#/governance"));
+    await waitFor(() => expect(location.hash).toBe("#/reviewer/governance"));
     expect(screen.queryByRole("dialog", { name: /Quick navigation/ })).toBeNull();
   });
 });

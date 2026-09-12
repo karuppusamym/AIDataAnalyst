@@ -45,8 +45,16 @@ vi.mock("./lib/api", async (importOriginal) => {
   return { ...actual, fetchMe: () => fetchMe() };
 });
 
-/** `[screen id, the label the shell gives its region]`, from `App.tsx`'s NAV. */
-const SCREENS: ReadonlyArray<readonly [string, string]> = [
+/**
+ * `[screen id, the label the shell gives its region, query]`, from `App.tsx`'s NAV.
+ *
+ * R11-S10 added the third column. Two screens absorbed other screens and now
+ * select between them with a query field, so sweeping only their default view
+ * would quietly drop surfaces this suite used to cover: the parsed-lineage
+ * queue was its own route, and so were the lineage and quality agent consoles.
+ * They are rows here rather than routes, and are swept exactly as before.
+ */
+const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["home", "Overview"],
   ["inbox", "Agent inbox"],
   ["analyst", "Ask Atlas"],
@@ -62,9 +70,9 @@ const SCREENS: ReadonlyArray<readonly [string, string]> = [
   ["developer", "Agent gateway"],
   ["stewardship", "Stewardship"],
   ["worklist", "Documentation worklist"],
-  ["steward-agent", "Steward agent"],
-  ["lineage-agent", "Lineage agent"],
-  ["quality-agent", "Quality agent"],
+  ["task-agents", "Task agents"],
+  ["task-agents", "Task agents", "?agent=lineage"],
+  ["task-agents", "Task agents", "?agent=quality"],
   ["playbooks", "Playbooks"],
   ["negative-knowledge", "Negative knowledge"],
   ["meaning", "Business meaning"],
@@ -76,7 +84,7 @@ const SCREENS: ReadonlyArray<readonly [string, string]> = [
   ["quality", "Data quality"],
   ["studio", "Studio"],
   ["governance", "Review queue"],
-  ["parsed-lineage-review", "Parsed lineage review"],
+  ["governance", "Review queue", "?queue=parsed-lineage"],
   ["refusals", "Policy refusals"],
   ["reviewer-agent", "Reviewer agent"],
   ["sources", "Sources"],
@@ -99,10 +107,10 @@ beforeEach(() => {
 });
 
 describe("every navigable screen is accessible", () => {
-  it.each(SCREENS)(
+  it.each(SCREENS.map((row) => [`${row[0]}${row[2] ?? ""}`, ...row] as const))(
     "%s has no detectable WCAG A/AA violation and names every focusable control",
-    async (id, label) => {
-      history.replaceState(null, "", `/#/${id}`);
+    async (_title, id, label, query = "") => {
+      history.replaceState(null, "", `/${query}#/${id}`);
       fetchMe.mockReturnValue(new Promise(() => {}));
       const { default: App } = await import("./App");
       const { container } = render(<App />);

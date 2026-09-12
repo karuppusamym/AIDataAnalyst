@@ -467,11 +467,16 @@ export function ParsedLineageReviewScreen() {
             })
           }
           onClose={() => setParams({ review: null })}
+          /* R11-S10: this queue is a tab of the review surface now, so a
+             permalink names that screen and the queue within it. A link built
+             with the old `parsed-lineage-review` screen id would still resolve
+             -- the alias keeps it working -- but it must not be what we hand
+             someone to paste. */
           footer={
             <CopyLinkButton
               target={{
-                screen: "parsed-lineage-review",
-                params: { review: edgeKey(focused) },
+                screen: "governance",
+                params: { queue: "parsed-lineage", review: edgeKey(focused) },
               }}
               label="Copy permalink"
             />

@@ -28,7 +28,7 @@ describe("CrossLinks", () => {
 
     // The shell routes on the hash; every migrated screen reads its selection
     // through `useUrlState`, which reads `location.search`.
-    expect(location.hash).toBe("#/lineage");
+    expect(location.hash).toBe("#/analyst/lineage");
     const params = new URLSearchParams(location.search);
     expect(params.get("ds")).toBe("ds_1");
     expect(params.get("node")).toBe("t_1");

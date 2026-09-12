@@ -1,3 +1,20 @@
+/* R11-S10: the federated review surface wraps the two queues. `.rq` below is
+   the governance queue's own layout and is unchanged; `.rqf` is the shell that
+   holds the queue tabs above whichever one is selected.
+
+   The tab metrics are the house pattern (`NarratedLineageScreen.css`,
+   `BusinessMeaningScreen.css`, `UnifiedLineageScreen.css`), not a new one:
+   this row is an information-architecture change, not a visual redesign. */
+.rqf{display:flex;flex-direction:column;min-height:0;height:100%}
+.rqf > [role="tabpanel"]{flex:1;min-height:0;display:flex;flex-direction:column}
+.rqf__tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);flex:none;padding:0 24px}
+.rqf__tab{all:unset;padding:10px 12px;font-size:12.5px;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent}
+.rqf__tab:hover{color:var(--ink)}
+/* `all: unset` strips the focus ring with everything else; a keyboard user has
+   to see which of two look-alike tabs they are on. */
+.rqf__tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.rqf__tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+
 .rq{display:flex;flex-direction:column;min-height:0;height:100%;padding:22px 24px;gap:14px}
 .rq__load{color:var(--ink-3);font-size:13px;padding:20px 0}
 .rq__head{flex:none}

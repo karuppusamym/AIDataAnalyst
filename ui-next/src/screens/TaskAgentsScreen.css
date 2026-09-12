@@ -1,0 +1,57 @@
+/* R11-S10: the house tab pattern, not a new one.
+
+   These metrics and tokens are copied from `NarratedLineageScreen.css` /
+   `BusinessMeaningScreen.css` / `UnifiedLineageScreen.css`, which already
+   agree with each other. This row is an information-architecture change, so
+   the merged console has to look like the screens it sits beside rather than
+   introduce a fourth tab style.
+
+   The one deliberate difference: the active tab is selected on
+   `[aria-selected="true"]` rather than a `--active` modifier class, so the
+   state a screen reader is told and the state a sighted user sees cannot drift
+   apart -- there is only one flag. */
+
+.taskagents__tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  margin-bottom: 14px;
+}
+
+.taskagents__tab {
+  all: unset;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.taskagents__tab:hover {
+  color: var(--ink);
+}
+
+/* `all: unset` above removes the focus ring with everything else, so it has to
+   be put back explicitly -- a keyboard user needs to see which tab they are
+   on, and this control is one of three siblings that otherwise look alike. */
+.taskagents__tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.taskagents__tab[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .taskagents__tabs {
+    overflow-x: auto;
+  }
+
+  .taskagents__tab {
+    white-space: nowrap;
+  }
+}

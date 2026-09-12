@@ -27,6 +27,7 @@
    what the sidebar offers and where a fresh session lands.
 --------------------------------------------------------------------------- */
 
+import type { Journey } from "./routes";
 import type { Persona } from "./ui-types";
 
 export const WORK_AREAS = [
@@ -41,6 +42,39 @@ export const WORK_AREAS = [
 ] as const;
 
 export type WorkArea = (typeof WORK_AREAS)[number];
+
+/* R11-S10: a work area is now also a ROUTE segment.
+ *
+ * `lib/routes.ts` owns the slug (`analyst`), because the route table is what
+ * has to parse a URL; this file owns the label (`Analyst`), because the
+ * sidebar is what has to render one. The two tables below tie them together
+ * explicitly rather than by `toLowerCase()`, so adding a work area whose label
+ * is two words -- which the slug could not round-trip -- is a compile error
+ * here instead of a route that silently stops resolving.
+ *
+ * `Record<WorkArea, Journey>` and `Record<Journey, WorkArea>` are both
+ * exhaustive by type, so neither direction can quietly go missing an entry. */
+export const JOURNEY_OF_WORK_AREA: Record<WorkArea, Journey> = {
+  Inbox: "inbox",
+  Analyst: "analyst",
+  Consumer: "consumer",
+  Developer: "developer",
+  Steward: "steward",
+  Reviewer: "reviewer",
+  Operator: "operator",
+  Auditor: "auditor",
+};
+
+export const WORK_AREA_OF_JOURNEY: Record<Journey, WorkArea> = {
+  inbox: "Inbox",
+  analyst: "Analyst",
+  consumer: "Consumer",
+  developer: "Developer",
+  steward: "Steward",
+  reviewer: "Reviewer",
+  operator: "Operator",
+  auditor: "Auditor",
+};
 
 /**
  * The work areas a persona is expected to open, most relevant first.

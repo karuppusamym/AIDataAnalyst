@@ -210,7 +210,7 @@ describe("DataDictionariesScreen (N8 document ingestion)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Propose 1 row for review" }));
 
     const link = await screen.findByRole("link", { name: "Open in review queue" });
-    expect(link.getAttribute("href")).toContain("#/governance");
+    expect(link.getAttribute("href")).toContain("#/reviewer/governance");
     expect(link.getAttribute("href")).toContain("review=review-1");
     expect(api.extractDocumentClaims).toHaveBeenCalledTimes(1);
     await waitFor(() =>

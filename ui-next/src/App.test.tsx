@@ -40,7 +40,8 @@ describe("App shell persona gating", () => {
     fireEvent.click(nav.getByRole("button", { name: "Operator" }));
     expect(nav.queryByRole("button", { name: /Catalog/ })).not.toBeInTheDocument();
     fireEvent.click(nav.getByRole("button", { name: /Operations/ }));
-    expect(location.hash).toBe("#/operations");
+    // R11-S10: the journey is part of the route now, not only of the sidebar.
+    expect(location.hash).toBe("#/operator/operations");
     expect(nav.getByRole("button", { name: "Operator" })).toHaveAttribute("aria-expanded", "true");
   });
 
@@ -107,7 +108,7 @@ describe("App shell persona gating", () => {
     fireEvent.change(input, { target: { value: "context compile" } });
     fireEvent.click(within(screen.getByRole("dialog", { name: "Quick navigation" })).getByRole("button", { name: /Context products/ }));
 
-    expect(location.hash).toBe("#/context");
+    expect(location.hash).toBe("#/developer/context");
     expect(screen.queryByRole("dialog", { name: "Quick navigation" })).not.toBeInTheDocument();
   });
 
@@ -132,7 +133,7 @@ describe("App shell persona gating", () => {
     expect(within(section).getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
 
     fireEvent.click(within(section).getByRole("button", { name: "Semantic layer" }));
-    expect(location.hash).toBe("#/semantics");
+    expect(location.hash).toBe("#/analyst/semantics");
   });
 
   it("restores the correct page on browser history navigation", async () => {
@@ -210,9 +211,110 @@ describe("navigation drops the page you left behind", () => {
     fireEvent.click(nav.getByRole("button", { name: "Reviewer" }));
     fireEvent.click(nav.getByRole("button", { name: "Review queue" }));
 
-    expect(location.hash).toBe("#/governance");
+    expect(location.hash).toBe("#/reviewer/governance");
     expect(location.search).not.toContain("severity=HIGH");
     expect(location.search).not.toContain("status=OPEN");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S10 — the shell asks before discarding a half-written form.
+
+   `useUnsavedChanges` returned a confirm function for exactly this and nothing
+   ever called it, so every sidebar click threw away an unsaved edit in
+   silence. This asserts the wiring at the one choke point every in-app
+   navigation goes through, which is the whole reason the guard lives there.
+--------------------------------------------------------------------------- */
+
+describe("navigating away from unsaved work", () => {
+  /* `beforeEach` calls `vi.resetModules()`, so `App` is imported into a fresh
+     module graph every test. The registry has to come from THAT graph -- a
+     statically imported copy is a different module instance, and registering
+     into it would leave the shell looking at an empty registry while the test
+     went green on a guard that never ran. */
+  async function loadAppAndRegistry() {
+    const App = await loadApp();
+    const registry = await import("./lib/unsavedChanges");
+    registry.resetUnsavedRegistryForTests();
+    return { App, registry };
+  }
+
+  it("does not move, and does not close the drawer, when the user declines", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    history.replaceState(null, "", "/#/analyst/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const { App, registry } = await loadAppAndRegistry();
+    render(<App />);
+    registry.registerDirtyReporter(() => "Discard your unsaved changes?");
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Semantic layer" }));
+
+    expect(confirm).toHaveBeenCalled();
+    // Still on Catalog: declining must leave the user exactly where they were.
+    expect(location.hash).toBe("#/analyst/catalog");
+  });
+
+  it("moves once the user agrees to discard", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    history.replaceState(null, "", "/#/analyst/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const { App, registry } = await loadAppAndRegistry();
+    render(<App />);
+    registry.registerDirtyReporter(() => "Discard your unsaved changes?");
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Semantic layer" }));
+
+    // Asked, and then obeyed -- the pair matters: a guard that never asks
+    // would also pass the second assertion on its own.
+    expect(confirm).toHaveBeenCalled();
+    expect(location.hash).toBe("#/analyst/semantics");
+  });
+
+  it("asks nothing at all when no form is dirty", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    history.replaceState(null, "", "/#/analyst/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const { App } = await loadAppAndRegistry();
+    render(<App />);
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Semantic layer" }));
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(location.hash).toBe("#/analyst/semantics");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S10 — a saved link still opens the page it named.
+--------------------------------------------------------------------------- */
+
+describe("old routes still work", () => {
+  it("opens the flat pre-grouping form and rewrites it to the grouped one", async () => {
+    history.replaceState(null, "", "/#/operations");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("navigation", { name: "Operator pages" })).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(location.hash).toBe("#/operator/operations"));
+  });
+
+  it("opens a merged-away route on the screen that absorbed it", async () => {
+    history.replaceState(null, "", "/#/quality-agent");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    // Not Overview: a bookmark to the quality agent's console opens the merged
+    // console with that agent selected.
+    await waitFor(() => expect(location.hash).toBe("#/steward/task-agents"));
+    expect(new URLSearchParams(location.search).get("agent")).toBe("quality");
+    expect(await screen.findByRole("region", { name: "Task agents" })).toBeInTheDocument();
   });
 });
 
