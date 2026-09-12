@@ -6365,10 +6365,17 @@ export function makeFixtureReviewerAgentState(organizationId: string): ReviewerA
     sampling_rate: 0.1,
     agent_principal_id: "agent:reviewer",
     evidence_max_age_minutes: 60,
-    // AR-11: the unread audit sample, and the bound at which the agent stops.
+    // AR-11: the unread audit sample, and the two bounds at which the agent
+    // stops. The count bound and the age bound fail differently on purpose --
+    // a small queue nobody ever drains passes the count check forever -- so
+    // the demo shows a queue that is both small and recently read, not one
+    // that is merely small.
     unresolved_samples: 8,
     max_unresolved_samples: 50,
     audit_backlog_exceeded: false,
+    oldest_pending_sample_hours: 6,
+    max_sample_age_hours: 168,
+    sample_age_exceeded: false,
   };
 }
 
