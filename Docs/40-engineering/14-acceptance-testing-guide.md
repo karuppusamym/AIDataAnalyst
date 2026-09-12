@@ -35,6 +35,7 @@ live Gemini model route. Reproduce all of it with one command (section 4.3).
 | Audit ledger records query execution | `query.execute` present |
 | Enforcement readiness names its blockers | 3 unbound datasources found |
 | Vector index builds and serves | 70 entries, `PERSISTED_INDEX` |
+| **A retired provider model is detected** | planted route read UNREACHABLE, live route REACHABLE |
 | **OIDC sign-in, authorization code + PKCE** | real issuer, real JWKS |
 | Dev identity headers are **refused** under OIDC | HTTP 401 |
 | Claim → role mapping, and the persona from the verified groups claim | `atlas-steward` → 4 roles, Steward |
@@ -180,6 +181,32 @@ scripts — they disagree deliberately. Do not pass `-q`; it hides the summary.
 
 The full suite takes about 20 minutes. Expect roughly ten thousand passing
 tests and zero failures.
+
+**Run one suite at a time on this machine.** Five test files need a real
+Postgres and reset a scratch database to do it, and two of those databases are
+named after the deployment's own, so two concurrent runs resolve the same
+database and one drops the schema under the other. That produced a false
+failure twice during this pass, and the failure it produces is
+`test_migration_orm_drift` reporting drift -- the single most alarming thing
+this suite can say, and it was not true either time.
+
+`test_migration_orm_drift` is now safe: concurrent clients serialize on a
+Postgres advisory lock, so a second run waits a few seconds instead of
+colliding. The other four are not, and are listed here rather than hardened
+because none has been observed to fail and every one already takes an
+override:
+
+| File | Override |
+|---|---|
+| `test_agent_budget_postgres_concurrency.py` | `AIDA_BUDGET_CONCURRENCY_TEST_DATABASE_URL` |
+| `test_governance_decision_postgres_concurrency.py` | `AIDA_DECISION_CONCURRENCY_TEST_DATABASE_URL` |
+| `test_document_claims_postgres_concurrency.py` | `AIDA_DOCUMENT_CLAIMS_TEST_DATABASE_URL` |
+| `test_reviewer_agent_postgres_suspension.py` | `AIDA_REVIEWER_SUSPENSION_TEST_DATABASE_URL` |
+
+If you genuinely need two suites at once, point each at its own scratch
+database with those. Otherwise just don't, and if you see a drift or race
+failure, **re-run that one file alone before reporting it** — that is the
+check that separates a real finding from a collision.
 
 ### 4.2 Frontend
 
@@ -369,3 +396,12 @@ unknown:
    three unbound datasources.
 5. **The estate is nine tables.** Nothing here has been tested at the scale the
    product is aimed at.
+6. **Watch `model_routes.detail` in `/health/ready`.** It reads
+   `approved=N;unreachable=N;never_checked=N;sweep=enabled`. A provider can
+   retire a model under an approved route at any time, and until this existed
+   the only symptom was every generated answer failing with a 404 that pointed
+   at nothing. `unreachable` above zero means supersede that route — the
+   command is in section 3.3 with `--new-version`. Note that REACHABLE means
+   the model still exists and **not** that generation works: an account with a
+   billing or quota problem lists its models perfectly well, and that failure
+   is visible the first time anyone asks a question anyway.

@@ -48,6 +48,12 @@ schema in-place rather than creating a new database), or start Postgres
 locally with credentials matching `Settings.database_url`'s default
 (`postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida`) and this
 test will default to `.../aida_migration_drift_test` on the same server.
+
+Two clients resolve the same scratch database, and this gate drops its
+schema, so concurrent runs serialize on a Postgres advisory lock -- see
+`_measure_drift`. A run of this file that appears to hang for a few seconds
+is waiting for a peer, which is the intended behaviour and the alternative
+to a false drift report.
 """
 
 from __future__ import annotations
@@ -61,7 +67,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
     envelope_models,
@@ -133,21 +139,32 @@ def _compare_against_orm(sync_conn, metadata):
     return compare_metadata(ctx, metadata)
 
 
-async def _reset_schema(db_url: str) -> None:
+#: Every client of this gate takes the same Postgres advisory lock before it
+#: touches the scratch schema. The value is arbitrary but must be identical
+#: across clients, so it is a literal rather than a hash of anything.
+_DRIFT_LOCK_KEY = 8_808_197_301_055_412_001
+
+#: How long to wait for a peer to finish before giving up. The guarded region
+#: runs in about ten seconds, so a wait anywhere near this means a stuck
+#: session rather than a queue, and saying so beats hanging a test run.
+_DRIFT_LOCK_TIMEOUT_MS = 300_000
+
+
+async def _reset_schema(locked_conn: AsyncConnection) -> None:
     """Wipe `public` to a genuinely empty schema.
 
     Resetting the schema (rather than requiring `CREATEDB`) is deliberate:
     it works for any role that owns the target database -- the common case
     for a Postgres service container's default user -- without needing
     superuser or database-creation privileges.
+
+    It takes the connection **holding the advisory lock** rather than opening
+    its own, so the destruction cannot be separated from the exclusion by a
+    later edit: there is no connection here to drop a schema with until the
+    lock has been taken on it.
     """
-    engine = create_async_engine(db_url)
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("DROP SCHEMA public CASCADE"))
-            await conn.execute(text("CREATE SCHEMA public"))
-    finally:
-        await engine.dispose()
+    await locked_conn.execute(text("DROP SCHEMA public CASCADE"))
+    await locked_conn.execute(text("CREATE SCHEMA public"))
 
 
 def _upgrade_head(db_url: str) -> None:
@@ -194,6 +211,52 @@ async def _probe_reachable(db_url: str) -> None:
         await engine.dispose()
 
 
+async def _measure_drift(db_url: str) -> list:
+    """Reset, migrate and diff, with every peer client locked out.
+
+    This gate is **destructive**: it drops and recreates `public` on a scratch
+    database whose name is derived from the deployment's own, so two clients
+    resolve the same database. Before this lock existed, two concurrent runs
+    interleaved -- one dropped the schema while the other was mid-upgrade or
+    mid-diff -- and the loser reported drift that did not exist. That happened
+    here on 2026-09-12: two overlapping suite runs, and the later one failed
+    this gate alone while the tree was in fact clean. A false drift report is
+    worse than a slow one, because drift is exactly the finding a reader has no
+    independent way to check.
+
+    So peers serialize on a session-level advisory lock instead of racing. The
+    lock is taken on its own AUTOCOMMIT connection, which holds no relation
+    locks of its own -- an idle-in-transaction connection here would block the
+    `DROP SCHEMA public CASCADE` that follows -- and Postgres releases it when
+    that connection closes, including when the process dies.
+    """
+    lock_engine = create_async_engine(db_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with lock_engine.connect() as lock_conn:
+            await lock_conn.execute(text(f"SET lock_timeout = {_DRIFT_LOCK_TIMEOUT_MS}"))
+            try:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_lock(:key)"), {"key": _DRIFT_LOCK_KEY}
+                )
+            except Exception as exc:  # noqa: BLE001 -- reported, never swallowed
+                pytest.fail(
+                    "Could not take the migration-drift advisory lock on "
+                    f"{db_url!r} within {_DRIFT_LOCK_TIMEOUT_MS // 1000}s "
+                    f"({type(exc).__name__}: {exc}). This gate is destructive and "
+                    "serializes on that lock; a wait this long means a peer "
+                    "session is stuck holding it, not that the schema drifted."
+                )
+            await _reset_schema(lock_conn)
+            # Not awaited: `migrations/env.py` drives the migration run with its
+            # own top-level `asyncio.run(...)`, which raises inside a running
+            # loop -- so it goes to a worker thread, where it gets a loop of its
+            # own and this one stays alive holding the lock.
+            await asyncio.to_thread(_upgrade_head, db_url)
+            return await _diff_against_orm(db_url)
+    finally:
+        await lock_engine.dispose()
+
+
 def test_migration_orm_drift() -> None:
     """Applying every Alembic migration must produce exactly `Base.metadata`.
 
@@ -219,9 +282,7 @@ def test_migration_orm_drift() -> None:
             "container that provides one there."
         )
 
-    asyncio.run(_reset_schema(db_url))
-    _upgrade_head(db_url)  # not awaited: drives its own asyncio.run() internally
-    diffs = asyncio.run(_diff_against_orm(db_url))
+    diffs = asyncio.run(_measure_drift(db_url))
 
     if diffs:
         rendered = "\n".join(f"  {i + 1}. {diff!r}" for i, diff in enumerate(diffs))
