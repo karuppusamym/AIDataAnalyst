@@ -398,18 +398,29 @@ export function NegativeKnowledgeScreen() {
             hint={subjectId ? "Try a different subject id." : "Try clearing a filter."}
           />
         ) : (
-          <div className="nk__list" role="list" aria-label="Negative assertions">
-            {items.map((a) => (
-              <AssertionRow
-                key={a.id}
-                assertion={a}
-                onLift={(assertion) => {
-                  setLiftError(null);
-                  setLiftTarget(assertion);
-                }}
-                lifting={liftingId === a.id}
-              />
-            ))}
+          /* R11-C2: was a `<div role="list">` whose children were `<article>`
+             elements and a "Load more" div -- axe `aria-required-children`,
+             critical, because `role="list"` admits only `listitem`. A real
+             `<ul>`/`<li>` fixes it and buys something the div never gave: a
+             screen reader announces "list, N items", so a non-sighted user
+             learns how much is here without walking it. "Load more" is
+             deliberately outside the list -- it is a control that changes the
+             list, not a member of it. */
+          <>
+            <ul className="nk__list" aria-label="Negative assertions">
+              {items.map((a) => (
+                <li key={a.id}>
+                  <AssertionRow
+                    assertion={a}
+                    onLift={(assertion) => {
+                      setLiftError(null);
+                      setLiftTarget(assertion);
+                    }}
+                    lifting={liftingId === a.id}
+                  />
+                </li>
+              ))}
+            </ul>
             {total !== null && items.length < total ? (
               <div className="nk__more">
                 <Button disabled={loadingMore} onClick={() => void loadMore()}>
@@ -417,7 +428,7 @@ export function NegativeKnowledgeScreen() {
                 </Button>
               </div>
             ) : null}
-          </div>
+          </>
         )}
       </div>
 

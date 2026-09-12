@@ -7,6 +7,19 @@
    4.87 on the dark surface and 4.59 in the light theme, so it passes in every
    place these rules render. */
 .shell{display:grid;grid-template-columns:248px minmax(0,1fr);height:100%;background:var(--paper)}
+
+/* --- R11-C2: the skip link ------------------------------------------------
+   The visually-hidden recipe is `.sr-only` in tokens.css and is not repeated
+   here; the route announcer uses it directly. This rule is the same recipe
+   plus the half that makes a skip link a skip link: it UNDOES itself on
+   focus, so the control is invisible to a mouse user and unmissable to a
+   keyboard one.
+
+   It must paint above the sticky sidebar brand (`z-index:2`) and the nav rail
+   itself (`z-index:20`), or the one control that proves this app is
+   keyboard-operable renders behind the very thing it exists to skip. */
+.skiplink{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.skiplink:focus{position:fixed;top:10px;left:10px;z-index:200;width:auto;height:auto;margin:0;padding:10px 16px;overflow:visible;clip:auto;border-radius:8px;border:2px solid var(--accent);background:var(--surface);color:var(--ink);font:inherit;font-weight:600;box-shadow:0 10px 30px rgba(10,16,28,.35)}
 .snav{border-right:1px solid rgba(255,255,255,.08);background:#111827;color:#dbe4f1;overflow-y:auto;display:flex;flex-direction:column;z-index:20}
 .snav__brand{display:flex;align-items:center;gap:10px;padding:18px 16px 16px;position:sticky;top:0;background:#111827;z-index:2}
 .snav__mark{width:31px;height:31px;border-radius:9px;background:linear-gradient(145deg,#7c6ff2,#4f46e5);color:#fff;display:grid;place-items:center;font-weight:700;font-size:13px;box-shadow:0 8px 18px rgba(79,70,229,.35);flex:none}
@@ -107,8 +120,23 @@ kbd{font-family:var(--mono);font-size:9px;border:1px solid var(--line);border-bo
    of leaving mid-size laptop windows with both a sidebar and a stacked page. */
 @media(max-width:1148px){
   .shell{grid-template-columns:1fr}
-  .snav{position:fixed;inset:0 auto 0 0;width:min(280px,86vw);transform:translateX(-102%);transition:transform .2s ease;box-shadow:20px 0 60px rgba(4,8,15,.32)}
-  .shell--nav-open .snav{transform:translateX(0)}
+  /* R11-C2 -- THE DEFECT: the closed drawer was hidden with `transform`
+     alone. A transformed element is still rendered and still focusable, so
+     below this breakpoint every control in the "hidden" sidebar -- the scope
+     picker, the persona selects, eight group headers and their items -- stayed
+     in the Tab order, off-screen. Tabbing from the top of the page moved focus
+     through roughly fourteen controls with no visible focus indicator anywhere
+     on screen (WCAG 2.4.7), in an order matching nothing visible (2.4.3), and
+     Enter on any of them navigated the app. axe-core reported nothing: the
+     markup is valid, and off-screen-but-focusable is not something a static
+     rule set can see.
+
+     `visibility:hidden` is what actually removes a subtree from the Tab order
+     and from the accessibility tree, and unlike `display:none` it still
+     animates. The delayed `visibility` transition on close lets the slide-out
+     finish before the drawer goes away; on open it flips instantly. */
+  .snav{position:fixed;inset:0 auto 0 0;width:min(280px,86vw);transform:translateX(-102%);visibility:hidden;transition:transform .2s ease,visibility 0s linear .2s;box-shadow:20px 0 60px rgba(4,8,15,.32)}
+  .shell--nav-open .snav{transform:translateX(0);visibility:visible;transition:transform .2s ease,visibility 0s}
   .snav__mobile-close,.topbar__menu{display:block}
   .shell__scrim{position:fixed;inset:0;z-index:15;border:0;background:rgba(4,8,15,.45)}
   .shell--nav-open .shell__scrim{display:block}

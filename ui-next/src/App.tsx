@@ -408,6 +408,29 @@ function AppShell() {
   const paletteInputRef = useRef<HTMLInputElement>(null);
   const [navOpen, setNavOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const mainRef = useRef<HTMLElement>(null);
+  const viewRef = useRef<HTMLDivElement>(null);
+  const navCloseRef = useRef<HTMLButtonElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  /* R11-C2: closing the drawer is a focus move, not just a state change.
+   *
+   * Every non-navigating way out of it -- the ×, the scrim, Escape -- returns
+   * focus to the control that opened it. Navigation deliberately does NOT go
+   * through here: it closes the drawer too, but the route effect further down
+   * owns where focus lands in that case, and two effects fighting over focus
+   * in a single commit is how a fix becomes a flicker. */
+  const closeNav = useCallback(() => {
+    setNavOpen(false);
+    menuButtonRef.current?.focus();
+  }, []);
+
+  /* The window-level Escape listener below is bound once, so it reads the
+   * drawer's state through a ref rather than a stale closure. The guard is
+   * load-bearing: without it, Escape pressed anywhere in the app -- dismissing
+   * a screen's own popover, say -- would drag focus up to the menu button. */
+  const navOpenRef = useRef(false);
+  navOpenRef.current = navOpen;
   const [expandedGroup, setExpandedGroup] = useState<WorkArea | null>(
     () => NAV_BY_ID.get(view)?.group ?? GROUPS[0]!,
   );
@@ -441,12 +464,17 @@ function AppShell() {
       }
       if (event.key === "Escape") {
         setPaletteOpen(false);
-        setNavOpen(false);
+        // R11-C2: Escape out of the drawer returns focus to the control that
+        // opened it, exactly as the × does. Closing it and leaving focus on a
+        // control that has just become invisible is where a keyboard user
+        // loses their place entirely. Read through a ref, not from the
+        // closure: this listener is bound once.
+        if (navOpenRef.current) closeNav();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [closeNav]);
 
   // UX-20: with no explicit route, land in the persona's own work area rather
   // than always on Overview. Runs once, and only when the URL names no screen
@@ -465,6 +493,43 @@ function AppShell() {
 
   const current = NAV_BY_ID.get(view) ?? NAV[0]!;
   const sectionItems = NAV.filter((item) => item.group === current.group);
+
+  /* Opening it is the other half: without this the drawer appears and focus
+   * stays behind it on the menu button, so the next Tab walks the topbar
+   * underneath the open drawer instead of its contents. */
+  const navWasOpen = useRef(false);
+  useEffect(() => {
+    if (navOpen && !navWasOpen.current) navCloseRef.current?.focus();
+    navWasOpen.current = navOpen;
+  }, [navOpen]);
+
+  /* R11-C2: a route change has to be perceivable without sight.
+   *
+   * Choosing a nav item replaces the entire content pane and leaves focus on
+   * the button that was clicked, inside the navigation. A screen-reader user
+   * is told nothing -- the page they asked for arrived silently -- and a
+   * keyboard user's next Tab carries on through the remaining nav items
+   * rather than entering the screen they just opened. axe sees none of this:
+   * the markup is equally valid before and after.
+   *
+   * So two things happen. The new screen's region takes focus, which both
+   * announces it (the region's accessible name is read out) and puts the Tab
+   * position where the user expects; and the polite live region states the
+   * screen by name, which is what covers a user who has moved focus elsewhere
+   * while the lazy chunk downloads.
+   *
+   * Deliberately not on first render: taking focus off the document on load
+   * is its own defect, and there is no navigation yet to report. */
+  const [announcement, setAnnouncement] = useState("");
+  const firstView = useRef(true);
+  useEffect(() => {
+    if (firstView.current) {
+      firstView.current = false;
+      return;
+    }
+    setAnnouncement(`${current.label}, ${current.group}`);
+    viewRef.current?.focus();
+  }, [view, current.label, current.group]);
 
   /* F09: navigation goes through the one location store, which writes the
    * screen hash and keeps only the fields the TARGET screen declares.
@@ -493,6 +558,20 @@ function AppShell() {
 
   return (
     <div className={`shell${navOpen ? " shell--nav-open" : ""}`}>
+      {/* R11-C2: the first thing the keyboard reaches, so the ~30 navigation
+          controls are one keystroke to bypass rather than thirty to sit
+          through. A button and not the usual `<a href="#main-content">`: the
+          fragment is this app's router (`#/catalog`), so an anchor that wrote
+          `#main-content` into it would navigate the app to a screen that does
+          not exist. */}
+      <button
+        type="button"
+        className="skiplink"
+        onClick={() => mainRef.current?.focus()}
+      >
+        Skip to main content
+      </button>
+
       <nav className="snav" aria-label="Main">
         <div className="snav__brand">
           <span className="snav__mark" aria-hidden="true">A</span>
@@ -500,7 +579,7 @@ function AppShell() {
             <span className="snav__name">Atlas</span>
             <span className="snav__edition">Data intelligence</span>
           </span>
-          <button className="snav__mobile-close" onClick={() => setNavOpen(false)} aria-label="Close navigation">×</button>
+          <button ref={navCloseRef} className="snav__mobile-close" onClick={closeNav} aria-label="Close navigation">×</button>
         </div>
 
         <div className="snav__context">
@@ -533,12 +612,17 @@ function AppShell() {
         </div>
       </nav>
 
-      <button className="shell__scrim" onClick={() => setNavOpen(false)} aria-label="Close navigation" />
+      {/* A pointer affordance only, and now labelled as one: it duplicates the
+          × inside the drawer, so exposing it as a second "Close navigation"
+          button gave a screen-reader user two controls for one action and put
+          an extra stop in the Tab order *outside* the drawer it closes.
+          Escape and the × are the keyboard's two ways out. */}
+      <button className="shell__scrim" onClick={closeNav} aria-hidden="true" tabIndex={-1} />
 
-      <main className="smain">
+      <main className="smain" id="main-content" ref={mainRef} tabIndex={-1}>
         <header className="topbar">
           <div className="topbar__trail">
-            <button className="topbar__menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button>
+            <button ref={menuButtonRef} className="topbar__menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button>
             <span className="topbar__workspace">Workspace</span>
             <span className="topbar__slash" aria-hidden="true">/</span>
             <strong>{current.label}</strong>
@@ -589,13 +673,34 @@ function AppShell() {
             fails to download costs this screen and not the whole app. The
             boundary resets on the screen id, which is what lets the user
             navigate away from a broken route without reloading. */}
-        <div className="sview" key={view} data-screen={view}>
+        {/* R11-C2: the destination of the route-change focus move above, and
+            a landmark in its own right so "the page" is something a screen
+            reader can jump to. `tabIndex={-1}` makes it programmatically
+            focusable without adding a Tab stop. */}
+        <div
+          className="sview"
+          key={view}
+          data-screen={view}
+          ref={viewRef}
+          tabIndex={-1}
+          role="region"
+          aria-label={current.label}
+        >
           <RouteErrorBoundary resetKey={view} label={current.label}>
             <Suspense fallback={<div className="screenloading" role="status">Loading {current.label}…</div>}>
               {view === "home" ? <HomeScreen persona={persona} onNavigate={navigate} /> : <Screen view={view} personaKey={personaKey} onNavigate={navigate} />}
             </Suspense>
           </RouteErrorBoundary>
         </div>
+
+        {/* R11-C2: rendered always and empty to start, because a live region
+            only announces text that CHANGES while it is already in the
+            document -- one mounted at the same moment as its message says
+            nothing at all. This is the announcement channel for the shell
+            itself (which screen you are now on); screens own their own. */}
+        <p className="sr-only" role="status" aria-live="polite" data-testid="route-announcer">
+          {announcement}
+        </p>
       </main>
 
       {/* F21: this palette was the review's own example of ARIA standing in for

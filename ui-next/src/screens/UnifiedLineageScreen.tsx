@@ -708,7 +708,16 @@ export function UnifiedLineageScreen() {
                               tabIndex={0}
                               aria-label={`Select ${n.qualified_name}`}
                               onClick={() => selectNode(n.id)}
-                              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && selectNode(n.id)}
+                              /* R11-C2: `preventDefault` so Space activates
+                                 the node instead of scrolling the page out
+                                 from under it -- the default action for Space
+                                 on anything that is not really a button. */
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  selectNode(n.id);
+                                }
+                              }}
                             >
                               <rect x={-COL_WIDTH / 2 + 10} y={-13} width={COL_WIDTH - 20} height={26} rx={5} />
                               <text x={0} y={4} textAnchor="middle">

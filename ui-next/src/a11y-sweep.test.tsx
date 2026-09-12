@@ -1,0 +1,135 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import type { MeRead } from "./lib/types";
+import { axeViolations, unnamedFocusableElements } from "./test/a11y";
+
+/* ---------------------------------------------------------------------------
+   R11-C2 — every navigable screen, swept (carrying F21 · UX-5 · TS-9).
+
+   WHY A SWEEP AND NOT 44 HAND-WRITTEN CASES. UX-5's remediation was done
+   against `ui/`, the previous UI, which no longer exists in this tree. The
+   work was real and is recorded in the capability register; none of it
+   survives into `ui-next`, and nothing was checking whether the replacement
+   had inherited any of it. A per-screen suite that has to be remembered is a
+   suite that a 45th screen is added without — so this one derives its subject
+   list from the shell's own navigation, and a new screen is swept the day it
+   is reachable.
+
+   WHAT IT PROVES. Each screen is opened the way a user opens it (by URL,
+   through the real shell, with its real providers and its lazy chunk) and
+   then held to two checks:
+
+     * no WCAG 2.1 A/AA violation that axe-core can detect, and
+     * no focusable control without an accessible name -- which axe does not
+       fully cover, because `button-name` and `link-name` say nothing about a
+       focusable `role="button"` on an SVG `<g>`, and this app draws both of
+       its lineage diagrams that way.
+
+   WHAT IT DOES NOT PROVE, and must not be read as proving:
+
+     * **Populated states.** These run against the bundled demo estate, so a
+       screen that needs a datasource chosen is swept in its empty or prompt
+       state. The markup behind a filled table is covered only where that
+       screen's own test file renders it.
+     * **Anything requiring rendering.** No CSS is loaded in jsdom, so
+       contrast, focus visibility, reflow at 400% zoom and the off-screen
+       drawer fix are all outside these assertions, by construction.
+     * **That a screen reader makes sense of it.** A correct accessibility
+       tree is necessary and not sufficient; see
+       `Docs/60-delivery/24-accessibility-acceptance-2026-09-12.md`.
+--------------------------------------------------------------------------- */
+
+const fetchMe = vi.fn<() => Promise<MeRead>>();
+vi.mock("./lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/api")>();
+  return { ...actual, fetchMe: () => fetchMe() };
+});
+
+/** `[screen id, the label the shell gives its region]`, from `App.tsx`'s NAV. */
+const SCREENS: ReadonlyArray<readonly [string, string]> = [
+  ["home", "Overview"],
+  ["inbox", "Agent inbox"],
+  ["analyst", "Ask Atlas"],
+  ["catalog", "Catalog"],
+  ["semantics", "Semantic layer"],
+  ["tools", "Tool registry"],
+  ["tool-plans", "Tool plans"],
+  ["lineage", "Lineage"],
+  ["unified-lineage", "Unified lineage"],
+  ["marketplace", "Marketplace"],
+  ["portfolio-analytics", "Portfolio analytics"],
+  ["context", "Context products"],
+  ["developer", "Agent gateway"],
+  ["stewardship", "Stewardship"],
+  ["worklist", "Documentation worklist"],
+  ["steward-agent", "Steward agent"],
+  ["lineage-agent", "Lineage agent"],
+  ["quality-agent", "Quality agent"],
+  ["playbooks", "Playbooks"],
+  ["negative-knowledge", "Negative knowledge"],
+  ["meaning", "Business meaning"],
+  ["description-drafts", "Description drafts"],
+  ["data-dictionaries", "Data dictionaries"],
+  ["relationships", "Relationships"],
+  ["cross-source", "Cross-source"],
+  ["transformations", "Transformations"],
+  ["quality", "Data quality"],
+  ["studio", "Studio"],
+  ["governance", "Review queue"],
+  ["parsed-lineage-review", "Parsed lineage review"],
+  ["refusals", "Policy refusals"],
+  ["reviewer-agent", "Reviewer agent"],
+  ["sources", "Sources"],
+  ["operations", "Operations"],
+  ["agents", "AI governance"],
+  ["ai", "AI registry"],
+  ["agent-roster", "Agent roster"],
+  ["access-policies", "Access policies"],
+  ["workspace-access", "Workspace access"],
+  ["delegations", "Delegations"],
+  ["reliability", "Reliability"],
+  ["administration", "Administration"],
+  ["audit", "Audit ledger"],
+  ["compliance", "Compliance packs"],
+];
+
+beforeEach(() => {
+  fetchMe.mockReset();
+  vi.resetModules();
+});
+
+describe("every navigable screen is accessible", () => {
+  it.each(SCREENS)(
+    "%s has no detectable WCAG A/AA violation and names every focusable control",
+    async (id, label) => {
+      history.replaceState(null, "", `/#/${id}`);
+      fetchMe.mockReturnValue(new Promise(() => {}));
+      const { default: App } = await import("./App");
+      const { container } = render(<App />);
+
+      // `findByRole`, not `getByRole`: every screen but two arrives as a lazy
+      // chunk, so on the tick `render` returns, the region is a Suspense
+      // fallback. This is the race the brief for this row warns about, and
+      // asserting here without awaiting is how it becomes intermittent.
+      const region = await screen.findByRole("region", { name: label }, { timeout: 5000 });
+      await waitFor(() => {
+        expect(within(region).queryByText(/^Loading /)).toBeNull();
+      });
+
+      const violations = await axeViolations(container);
+      expect(
+        violations.map(
+          (violation) =>
+            `${violation.id}: ${violation.nodes.map((node) => node.target.join(" ")).join(", ")}`,
+        ),
+      ).toEqual([]);
+
+      expect(
+        unnamedFocusableElements(container).map(
+          (element) => `${element.tagName.toLowerCase()}.${(element as HTMLElement).className}`,
+        ),
+      ).toEqual([]);
+    },
+    20000,
+  );
+});

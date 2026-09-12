@@ -262,8 +262,27 @@ export function LineageGraph({ graph, focusNodeId, onSelectNode }: {
                 transform={`translate(${node.x} ${node.y})`}
                 role="button"
                 tabIndex={0}
+                /* R11-C2: an explicit name, matching `UnifiedLineageScreen`'s
+                   equivalent node. Leaving it to the `<title>` and the three
+                   `<text>` children made the announced name the whole card
+                   read out as one run-on string -- kind, truncated label and
+                   an ellipsised path -- which is not what a person needs to
+                   hear to decide whether to open it. Neither axe's
+                   `button-name` nor its `link-name` covers a focusable
+                   `role="button"` on an SVG `<g>`, so nothing was reporting
+                   this. */
+                aria-label={`Select ${node.qualified_name}`}
                 onClick={() => onSelectNode(node.id)}
-                onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectNode(node.id); }}
+                /* Space must be swallowed as well as handled: on a non-button
+                   element the browser's default for Space is to scroll the
+                   page, so activating a node from the keyboard also jumped
+                   the diagram out from under the user. */
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelectNode(node.id);
+                  }
+                }}
               >
                 <rect width="180" height="68" rx="9" />
                 <text className="lgraph__kind" x="13" y="19">{node.node_kind.replace(/_/g, " ")}</text>

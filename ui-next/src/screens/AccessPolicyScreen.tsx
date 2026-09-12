@@ -230,17 +230,25 @@ function PolicyList({ policies }: { policies: AccessPolicyRead[] }) {
     return <Empty title="No access policies" hint="Create one with the form to define who can see, mask, or export what." />;
   }
   return (
-    <div className="aptable" role="table" aria-label="Access policies">
-      <table>
+    /* R11-C2: the wrapper is a scroll container, not a table.
+       `role="table"` on it put a second, empty table in the accessibility
+       tree wrapping the real one -- axe `aria-required-children`, critical --
+       because the only child of that outer "table" was a `<table>`, and never
+       the `row`/`rowgroup` the role requires. The name belongs to the real
+       table, and the div gets the house idiom for a horizontally scrollable
+       region (`QueryResultTable`): focusable, so a keyboard user can actually
+       scroll it, and named so they know what they have landed in. */
+    <div className="aptable" tabIndex={0} role="group" aria-label="Access policies, scrollable">
+      <table aria-label="Access policies">
         <thead>
           <tr>
-            <th>Code</th>
-            <th>Ver.</th>
-            <th>Name</th>
-            <th>Effect</th>
-            <th>Priority</th>
-            <th>Actions</th>
-            <th>Status</th>
+            <th scope="col">Code</th>
+            <th scope="col">Ver.</th>
+            <th scope="col">Name</th>
+            <th scope="col">Effect</th>
+            <th scope="col">Priority</th>
+            <th scope="col">Actions</th>
+            <th scope="col">Status</th>
           </tr>
         </thead>
         <tbody>
@@ -296,17 +304,18 @@ function DecisionTable({ decisions }: { decisions: SimulatedDecision[] }) {
     return <Empty title="No decisions returned" />;
   }
   return (
-    <div className="aptable" role="table" aria-label="Simulation decisions">
-      <table>
+    /* Same fix as `PolicyList` above, same reason. */
+    <div className="aptable" tabIndex={0} role="group" aria-label="Simulation decisions, scrollable">
+      <table aria-label="Simulation decisions">
         <thead>
           <tr>
-            <th>Principal kind</th>
-            <th>Roles</th>
-            <th>Allowed</th>
-            <th>Reason</th>
-            <th>Matched policy</th>
-            <th>Masked classifications</th>
-            <th>Row filters</th>
+            <th scope="col">Principal kind</th>
+            <th scope="col">Roles</th>
+            <th scope="col">Allowed</th>
+            <th scope="col">Reason</th>
+            <th scope="col">Matched policy</th>
+            <th scope="col">Masked classifications</th>
+            <th scope="col">Row filters</th>
           </tr>
         </thead>
         <tbody>

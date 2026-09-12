@@ -19,7 +19,9 @@
 .nk__main{flex:1;min-height:220px;display:flex;flex-direction:column}
 .nk__skeleton{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
 
-.nk__list{display:flex;flex-direction:column;gap:10px}
+/* A real `<ul>` since R11-C2 (see the note at its call site), so the browser's
+   default list bullets and padding are reset here rather than inherited. */
+.nk__list{display:flex;flex-direction:column;gap:10px;list-style:none;margin:0;padding:0}
 .nk__more{display:flex;justify-content:center;padding:8px 0}
 
 .nka{border:1px solid var(--line);border-left:3px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:12px 15px;box-shadow:var(--shadow-1)}

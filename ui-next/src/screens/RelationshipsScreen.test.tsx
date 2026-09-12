@@ -29,6 +29,16 @@ const bulkDecideRelationshipCandidates = vi.fn<
 const fetchRelationshipCandidateCalibration = vi.fn<
   (datasourceId: string | null, signal?: AbortSignal) => Promise<unknown>
 >();
+/* R11-C2: the decision-history section's own read. It was NOT mocked, so it
+ * fell through `...actual` to the real client and answered from the bundled
+ * demo estate. The screen's "lazy-loads decided candidates on expand" test
+ * then raced that unmocked round trip against a 1000ms `waitFor` and failed
+ * intermittently -- in a full parallel run, never on its own. Mocking it
+ * makes the section's empty state a fact of the test rather than a fact of
+ * how loaded the machine is. */
+const fetchRelationshipCandidates = vi.fn<
+  (datasourceId: string, opts?: { status?: string }, signal?: AbortSignal) => Promise<PageOf<RelationshipCandidateRead>>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -44,6 +54,8 @@ vi.mock("../lib/api", async (importOriginal) => {
       bulkDecideRelationshipCandidates(body, signal),
     fetchRelationshipCandidateCalibration: (datasourceId: string | null, signal?: AbortSignal) =>
       fetchRelationshipCandidateCalibration(datasourceId, signal),
+    fetchRelationshipCandidates: (datasourceId: string, opts?: { status?: string }, signal?: AbortSignal) =>
+      fetchRelationshipCandidates(datasourceId, opts, signal),
   };
 });
 
@@ -168,8 +180,10 @@ beforeEach(() => {
   decideRelationshipCandidate.mockReset();
   bulkDecideRelationshipCandidates.mockReset();
   fetchRelationshipCandidateCalibration.mockReset();
+  fetchRelationshipCandidates.mockReset();
   listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchRelationshipCandidateReviewQueue.mockResolvedValue(queueOf([]));
+  fetchRelationshipCandidates.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   fetchRelationshipCandidateCalibration.mockResolvedValue({
     datasource_id: null,
     bucket_width: 0.1,
@@ -210,10 +224,15 @@ describe("RelationshipsScreen", () => {
     const summary = await screen.findByText("Decision history");
     fireEvent.click(summary);
 
-    // ds_1 has no decided candidates in the fixture path, so the section
-    // resolves to its empty state rather than staying blank.
-    await waitFor(() =>
-      expect(screen.getByText("No decisions yet")).toBeInTheDocument(),
+    // ds_1 has no decided candidates, so the section resolves to its empty
+    // state rather than staying blank. `findByText` and not
+    // `waitFor(getByText)`: the element appears only after the expand's own
+    // fetch resolves, and the awaited finder is the form that says so.
+    expect(await screen.findByText("No decisions yet")).toBeInTheDocument();
+    expect(fetchRelationshipCandidates).toHaveBeenCalledWith(
+      "ds_1",
+      { status: "APPROVED" },
+      undefined,
     );
   });
 
