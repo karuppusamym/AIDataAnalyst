@@ -633,6 +633,31 @@ async def _handle_tools_list(
     eligible.sort(key=lambda pair: (-usage_counts.get(pair[1].id, 0), pair[1].slug))
 
     tools = []
+    # R11-C7: the tool catalog is an egress channel, and the last one this
+    # module left unscreened. A tool version's `description` and each
+    # parameter's `description` are free text an operator typed into the tool
+    # authoring API, and this handler hands them to an **external** agent,
+    # where a description is read as guidance on when to call the tool. A
+    # hostile description is therefore the cheapest injection in the protocol:
+    # it needs no tool call at all, and it lands in the client's context on
+    # the handshake.
+    #
+    # Screened live, for the reason `_handle_resources_read` screens the
+    # context-product prose live: there is no stored verdict to consult, and
+    # `tools/list` is a low-frequency catalog call over a handful of short
+    # strings per tool, not the bulk row projection `ingest_screening` warns
+    # against. Quarantined prose is withheld and the verdict reported -- the
+    # house pattern -- so an author can find out why their text did not reach
+    # a consumer.
+    #
+    # Two things are deliberately *not* screened. `atlas__{slug}` and each
+    # parameter's **name** are structural identifiers a caller must reproduce
+    # verbatim to invoke the tool; withholding one withholds no instruction,
+    # it breaks the tool. And the native tools' descriptions below are
+    # literals in this module rather than operator input -- screening our own
+    # constants would be theatre, pinned by a test so nobody completes it by
+    # symmetry later.
+    tool_screening: dict[str, dict[str, Any]] = {}
     for version, tool in eligible:
         # Build JSON Schema from parameter_schema
         properties: dict[str, Any] = {}
@@ -641,6 +666,17 @@ async def _handle_tools_list(
             param_name = param.get("name", "")
             param_type = param.get("type", "string").lower()
             param_desc = param.get("description", "")
+            param_verdict = screen_text(
+                param_desc,
+                content_origin=f"governed_tool_version:{version.id}:parameter:{param_name}",
+            )
+            if not is_eligible_for_model_context(param_verdict.status):
+                tool_screening.setdefault(tool.slug, {})[f"parameter:{param_name}"] = {
+                    "status": param_verdict.status,
+                    "reason_codes": param_verdict.reason_codes,
+                    "version": param_verdict.version,
+                }
+                param_desc = ""
             properties[param_name] = {
                 "type": param_type,
                 "description": param_desc,
@@ -648,11 +684,28 @@ async def _handle_tools_list(
             if not param.get("optional", False):
                 required.append(param_name)
 
+        # The governance attestation is ours and always stands; only the
+        # operator's prose is withheld, and its absence is stated rather than
+        # left blank -- a client seeing no description should know one was
+        # suppressed, not infer the tool was never documented.
+        authored = version.description or version.name
+        authored_verdict = screen_text(
+            authored,
+            content_origin=f"governed_tool_version:{version.id}:description",
+        )
+        if not is_eligible_for_model_context(authored_verdict.status):
+            tool_screening.setdefault(tool.slug, {})["description"] = {
+                "status": authored_verdict.status,
+                "reason_codes": authored_verdict.reason_codes,
+                "version": authored_verdict.version,
+            }
+            authored = "(description withheld by egress screening)"
+
         tools.append(
             {
                 "name": f"atlas__{tool.slug}",
                 "description": (
-                    f"{version.description or version.name}\n\n"
+                    f"{authored}\n\n"
                     "⚠ Governed: This tool executes through the Atlas deterministic "
                     "SQL gateway. Results are masked for PII/PHI. Execution is "
                     "immutably audited."
@@ -679,6 +732,23 @@ async def _handle_tools_list(
     # here exactly as it does above -- a caller whose roles are not bound to
     # read lineage never sees these tools offered, mirroring the governed-
     # tool role gate rather than introducing a second exposure rule.
+    if tool_screening:
+        record_audit(
+            session,
+            context,
+            action="mcp.tools_list.egress_quarantined",
+            resource_type="governed_tool_catalog",
+            resource_id=str(context.organization_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "withheld": {
+                    slug: sorted(fields) for slug, fields in sorted(tool_screening.items())
+                },
+                "screening_version": SCREENING_VERSION,
+            },
+        )
+
     if eligible_version_ids is None and context.roles & set(UNIFIED_LINEAGE_READER_ROLES):
         for native in NATIVE_LINEAGE_TOOL_DEFINITIONS:
             tools.append(

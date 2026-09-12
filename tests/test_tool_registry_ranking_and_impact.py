@@ -200,7 +200,13 @@ class _Scenario:
         return self
 
     async def tool_version(
-        self, *, slug: str, table: str, allowed_roles: list[str] | None = None
+        self,
+        *,
+        slug: str,
+        table: str,
+        allowed_roles: list[str] | None = None,
+        description: str | None = None,
+        parameter_schema: list[dict[str, object]] | None = None,
     ) -> GovernedToolVersion:
         db = self.db
         tool = GovernedTool(
@@ -216,11 +222,11 @@ class _Scenario:
             version=1,
             status="PUBLISHED",
             name=slug.replace("-", " ").title(),
-            description=f"Reads {table}.",
+            description=description if description is not None else f"Reads {table}.",
             datasource_id=self.datasource.id,
             sql_template=f"SELECT 1 FROM {table}",  # noqa: S608 -- test fixture, not user input
             referenced_tables=[table],
-            parameter_schema=[],
+            parameter_schema=parameter_schema or [],
             allowed_roles=allowed_roles or ["Analyst"],
             fingerprint=f"fp-{slug}",
             created_by="tool-maker",
