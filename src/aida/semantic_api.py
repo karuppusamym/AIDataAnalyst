@@ -1874,6 +1874,11 @@ async def _decide_data_product_access_request(
             reason=reason,
             approved=decision == "APPROVE",
             now=now,
+            # R11-B4: an approval that does not fulfil is an approval that
+            # grants nothing. Passing the session stages the entitlement in
+            # this same review transaction.
+            session=session,
+            context=context,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

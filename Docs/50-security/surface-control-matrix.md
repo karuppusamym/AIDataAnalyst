@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **470**
-- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 419, SDK 1
+- Surfaces covered: **471**
+- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 420, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -402,6 +402,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/marketplace/access-requests/{request_id}/entitlement` | REST | `aida.product_marketplace_api.fulfill_marketplace_entitlement` | Operations, OrganizationAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/marketplace/access-requests/{request_id}/revoke` | REST | `aida.product_marketplace_api.revoke_marketplace_access` | DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/marketplace/products/{version_id}/access-requests` | REST | `aida.product_marketplace_api.request_marketplace_access` | Analyst, DataConsumer, DataScientist, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
+| `POST /v1/marketplace/products/{version_id}/consume` | REST | `aida.product_marketplace_api.consume_marketplace_product` | Analyst, DataConsumer, DataScientist, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/metadata-enrichment-proposals/{proposal_id}/promote-tool` | REST | `aida.semantic_intelligence_api.promote_enrichment_tool_blueprint` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | yes | writes | yes | not cancellable |
 | `POST /v1/metadata-ingestion-batches/{batch_id}/cancel` | REST | `atlas.modules.ingestion.router.cancel_metadata_ingestion_batch` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/metadata-ingestion-batches/{batch_id}/chunks` | REST | `atlas.modules.ingestion.router.upload_metadata_ingestion_chunk` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |

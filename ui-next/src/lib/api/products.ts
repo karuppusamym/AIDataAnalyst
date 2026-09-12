@@ -85,6 +85,62 @@ export function requestMarketplaceAccess(
   );
 }
 
+/** `GET /v1/marketplace/access-requests`
+ *  (`product_marketplace_api.py::list_marketplace_access_requests`).
+ *
+ *  Server-scoped, not a client filter: a plain consumer is narrowed to their
+ *  own requests by the handler, while a product owner or auditor sees the
+ *  organization's. The screen needs it because a marketplace row carries an
+ *  `access_status` but not the id of the request behind it, and revoking
+ *  addresses the request. */
+export function fetchMarketplaceAccessRequests(
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<MarketplaceAccessRequestRead>> {
+  return demoOr(
+    // No fixture estate models the access-request ledger, and inventing one
+    // here would make the demo assert access the demo cannot grant.
+    async () => ({ items: [], limit: query.limit ?? 100, offset: query.offset ?? 0, total: 0 }),
+    async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(query.limit ?? 100));
+      params.set("offset", String(query.offset ?? 0));
+      return get<PageOf<MarketplaceAccessRequestRead>>(
+        `/v1/marketplace/access-requests?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `POST /v1/marketplace/access-requests/{request_id}/revoke`
+ *  (`product_marketplace_api.py::revoke_marketplace_access`).
+ *
+ *  Authority is the server's, and it is narrower than who can see the button:
+ *  the route requires a product-author role, so a consumer looking at their
+ *  own granted access gets a 403 whose detail the screen shows verbatim
+ *  rather than guessing at eligibility client-side. Expect:
+ *    - 403 the caller may not revoke this grant
+ *    - 404 no such access request
+ *    - 409 detail === "only approved access can be revoked" */
+export function revokeMarketplaceAccess(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<MarketplaceAccessRequestRead> {
+  return demoOr(
+    async () => {
+      throw new Error("Revoking access is not available in demo mode.");
+    },
+    async () => {
+      return postJson<MarketplaceAccessRequestRead>(
+        `/v1/marketplace/access-requests/${requestId}/revoke`,
+        {},
+        signal,
+      );
+    },
+  );
+}
+
 export interface PortfolioAnalyticsSummaryQuery {
   organizationId: string;
   windowDays?: number;

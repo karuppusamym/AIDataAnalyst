@@ -15,6 +15,7 @@ from aida.config import Settings, get_settings
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
 from aida.delivery_intents import run_delivery_worker_pass
+from aida.entitlements import run_entitlement_fulfilment_pass
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.freshness import (
@@ -809,6 +810,12 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # the database, and everything queued stays queued for whenever it is
     # turned on -- the same shape as the reaper and certification passes above.
     await run_delivery_worker_pass(settings, now=now)
+    # Entitlement deliveries drain on the same tick and then settle: a
+    # `webhook`-provider grant stays PENDING -- and therefore still denies
+    # queries -- until its destination acknowledges. A no-op under the default
+    # `outbox` provider, which has nothing to deliver because this platform is
+    # itself the entitlement authority.
+    await run_entitlement_fulfilment_pass(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

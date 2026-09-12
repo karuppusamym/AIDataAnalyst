@@ -167,6 +167,24 @@ class EntitlementOperation(PlatformApiModel):
     action: Literal["PROVISION", "REVOKE"]
 
 
+class MarketplaceConsumptionRead(PlatformApiModel):
+    """R11-B4: the answer to "may I use this product, and on what basis".
+
+    Returned only when the answer is yes -- a refusal is a 403 carrying the
+    same `reason_code`, so a caller can never mistake one for the other by
+    forgetting to read a boolean.
+    """
+
+    data_product_version_id: UUID
+    principal_id: str
+    #: ROLE when `consumer_roles` already allowed this caller, ENTITLEMENT when
+    #: a provisioned access request is what allows them.
+    basis: Literal["ROLE", "ENTITLEMENT"]
+    access_request_id: UUID | None
+    expires_at: datetime | None
+    ports: list[DataProductPortDefinition]
+
+
 class MarketplaceProductRead(DataProductVersionRead):
     access_status: Literal["ROLE_GRANTED", "REQUEST_APPROVED", "REQUEST_PENDING", "NOT_REQUESTED"]
     # CX-9: why this product was ranked where it was for this requester -- the

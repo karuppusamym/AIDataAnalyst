@@ -282,7 +282,14 @@ async def test_governance_access_approval_outbox_serializes_expiry() -> None:
         session,  # type: ignore[arg-type]
     )
 
-    outbox = next(item for item in session.added if isinstance(item, OutboxEvent))
+    # R11-B4: approving now also fulfils the entitlement, so this transaction
+    # stages more than one outbox event. Select the one this test is about by
+    # name rather than taking whichever happens to be added first.
+    outbox = next(
+        item
+        for item in session.added
+        if isinstance(item, OutboxEvent) and item.event_type == "data_product.access_granted.v1"
+    )
 
     assert result.status == "APPROVED"
     assert access_request.status == "APPROVED"
@@ -528,7 +535,18 @@ def test_yaml_compilation_is_idiomatic_and_structurally_valid() -> None:
     assert "ODCS_KIND_INVALID" in invalid.findings
 
 
-async def test_outbox_entitlement_stays_pending_without_external_side_effect() -> None:
+async def test_local_entitlement_provisions_without_an_external_side_effect() -> None:
+    """R11-B4: the local provider grants, and still calls nothing outside.
+
+    This test used to assert `PENDING` -- that the default provider did
+    nothing at all -- which is precisely the defect R11-B4 removed: an
+    approved request that never became usable access. The property worth
+    keeping is the *other* half of the old assertion, that provisioning
+    locally opens no socket and needs no external system, so it is asserted
+    here explicitly rather than implied by a status that meant "unfinished".
+    The full request-to-query cycle lives in
+    `tests/test_marketplace_entitlement_lifecycle.py`.
+    """
     access_request = DataProductAccessRequest(
         id=uuid4(),
         organization_id=uuid4(),
@@ -543,8 +561,12 @@ async def test_outbox_entitlement_stays_pending_without_external_side_effect() -
         Settings(entitlement_provider="outbox", _env_file=None), access_request, "PROVISION"
     )
 
-    assert result.status == "PENDING"
+    assert result.status == "PROVISIONED"
     assert result.provider == "outbox"
+    assert result.error is None
+    # No delivery was queued and no destination was contacted: the grant is
+    # the row, so there is nothing to send.
+    assert result.reference == f"local:{access_request.id}"
 
 
 def test_agentic_platform_routes_are_published() -> None:

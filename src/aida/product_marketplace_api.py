@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
-from aida.entitlements import apply_entitlement
+from aida.entitlements import (
+    EntitlementAction,
+    EntitlementResult,
+    entitlement_event_type,
+    plan_entitlement,
+)
 from aida.events import record_audit, record_outbox
 from aida.models import (
     AgentRun,
@@ -46,6 +51,7 @@ from aida.platform_schemas import (
     EntitlementOperation,
     MarketplaceAccessRequestCreate,
     MarketplaceAccessRequestRead,
+    MarketplaceConsumptionRead,
     MarketplaceProductRead,
     PortfolioAnalyticsSummaryRead,
     PortfolioAnalyticsTrendsRead,
@@ -539,6 +545,192 @@ def _marketplace_access_request_read(
         fulfilled_at=request.fulfilled_at,
         created_at=request.created_at,
         updated_at=request.updated_at,
+    )
+
+
+# --- entitlement fulfilment and enforcement (R11-B4) -----------------------
+
+
+def fulfil_entitlement(
+    session: AsyncSession,
+    access_request: DataProductAccessRequest,
+    action: EntitlementAction,
+    *,
+    context: SecurityContext,
+    now: datetime,
+    settings: Settings | None = None,
+) -> EntitlementResult:
+    """Run one entitlement transition and write its receipt.
+
+    Every path that moves `fulfillment_status` goes through here, so "every
+    transition is audited" is a property of one function rather than a rule
+    three call sites have to remember separately. Stages only -- the caller's
+    transaction decides whether the grant and its receipt both survive.
+    """
+    active = settings or get_settings()
+    correlation_id = get_correlation_id()
+    result = plan_entitlement(
+        session,
+        active,
+        access_request,
+        action,
+        now=now,
+        correlation_id=correlation_id,
+    )
+    access_request.fulfillment_status = result.status
+    access_request.fulfillment_provider = result.provider
+    access_request.fulfillment_reference = result.reference
+    access_request.fulfillment_error = result.error
+    access_request.fulfilled_at = now if result.status in {"PROVISIONED", "REVOKED"} else None
+
+    scoped = replace(context, organization_id=access_request.organization_id)
+    record_audit(
+        session,
+        scoped,
+        action=f"marketplace.entitlement.{action.lower()}",
+        resource_type="data_product_access_request",
+        resource_id=str(access_request.id),
+        outcome="FAILURE" if result.status == "FAILED" else "SUCCESS",
+        correlation_id=correlation_id,
+        details={
+            "provider": result.provider,
+            "fulfillment_status": result.status,
+            "reference": result.reference,
+            "error": result.error,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=access_request.organization_id,
+        aggregate_type="data_product_access_request",
+        aggregate_id=str(access_request.id),
+        event_type=entitlement_event_type(result.status),
+        payload={"action": action, "provider": result.provider},
+    )
+    return result
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Read a stored timestamp back as UTC-aware.
+
+    Columns are `DateTime(timezone=True)`, but not every driver hands the
+    offset back -- SQLite returns naive values. Comparing one of those against
+    an aware `now` raises `TypeError`, and doing that *inside an authorization
+    check* turns a routine expiry comparison into a 500. Normalising here
+    keeps the decision a decision.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class ProductAccessDecision:
+    """Whether this caller may consume this product version, and on what basis.
+
+    `reason_code` is stable and machine-readable; `detail` is the sentence a
+    refused consumer is shown. Both are recorded, so a refusal can always be
+    traced back to the grant (or the revocation) that produced it.
+    """
+
+    allowed: bool
+    basis: str
+    reason_code: str = ""
+    detail: str = ""
+    access_request_id: UUID | None = None
+
+
+async def authorize_product_consumption(
+    session: AsyncSession,
+    context: SecurityContext,
+    version: DataProductVersion,
+    *,
+    now: datetime,
+) -> ProductAccessDecision:
+    """The single predicate for "may this principal use this data product".
+
+    Role-based access is checked first and unchanged -- this adds a second
+    way to be *allowed*, never a way around the first. An approved request
+    only counts once it has actually been provisioned: an approval whose
+    fulfilment is still in flight, or failed, denies, because the alternative
+    is exactly the defect R11-B4 exists to remove (a status that claims access
+    nothing ever granted).
+    """
+    if _role_has_product_access(context, version):
+        return ProductAccessDecision(allowed=True, basis="ROLE")
+
+    request = await session.scalar(
+        select(DataProductAccessRequest)
+        .where(
+            DataProductAccessRequest.data_product_version_id == version.id,
+            DataProductAccessRequest.requested_by == context.principal_id,
+            DataProductAccessRequest.organization_id == version.organization_id,
+        )
+        .order_by(DataProductAccessRequest.created_at.desc())
+        .limit(1)
+    )
+    if request is None:
+        return ProductAccessDecision(
+            allowed=False,
+            basis="NONE",
+            reason_code="no_access_request",
+            detail="No access request grants you this data product.",
+        )
+
+    request_id = request.id
+    if request.status == "REVOKED":
+        revoked_by = request.revoked_by or "a product owner"
+        revoked_at = _as_utc(request.revoked_at)
+        when = revoked_at.isoformat() if revoked_at else "an earlier time"
+        return ProductAccessDecision(
+            allowed=False,
+            basis="ENTITLEMENT",
+            reason_code="entitlement_revoked",
+            detail=f"Access was revoked by {revoked_by} at {when}.",
+            access_request_id=request_id,
+        )
+    if request.status == "REJECTED":
+        return ProductAccessDecision(
+            allowed=False,
+            basis="ENTITLEMENT",
+            reason_code="access_request_rejected",
+            detail="The access request for this data product was rejected.",
+            access_request_id=request_id,
+        )
+    if request.status == "PENDING":
+        return ProductAccessDecision(
+            allowed=False,
+            basis="ENTITLEMENT",
+            reason_code="access_request_pending",
+            detail="The access request for this data product is still awaiting a decision.",
+            access_request_id=request_id,
+        )
+    expires_at = _as_utc(request.expires_at)
+    if request.status == "EXPIRED" or (expires_at is not None and expires_at <= now):
+        return ProductAccessDecision(
+            allowed=False,
+            basis="ENTITLEMENT",
+            reason_code="entitlement_expired",
+            detail="Your access to this data product has expired.",
+            access_request_id=request_id,
+        )
+    if request.fulfillment_status != "PROVISIONED":
+        return ProductAccessDecision(
+            allowed=False,
+            basis="ENTITLEMENT",
+            reason_code="entitlement_not_provisioned",
+            detail=(
+                "Access was approved but is not provisioned yet "
+                f"(fulfilment is {request.fulfillment_status})."
+            ),
+            access_request_id=request_id,
+        )
+    return ProductAccessDecision(
+        allowed=True,
+        basis="ENTITLEMENT",
+        reason_code="",
+        detail="",
+        access_request_id=request_id,
     )
 
 
@@ -1322,6 +1514,102 @@ async def list_marketplace_access_requests(
     )
 
 
+@router.post(
+    "/marketplace/products/{version_id}/consume",
+    response_model=MarketplaceConsumptionRead,
+)
+async def consume_marketplace_product(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*MARKETPLACE_USERS)),
+    session: AsyncSession = Depends(get_session),
+) -> MarketplaceConsumptionRead:
+    """Claim use of a published data product, and be refused if you may not.
+
+    R11-B4 needed one place where an entitlement is actually *load-bearing*.
+    A revoked grant that nothing consults is not a revocation, so this is the
+    checkpoint: it resolves the caller's entitlement through
+    `authorize_product_consumption` and hands back the ports only when the
+    answer is yes. Both answers are audited, and the refusal carries the
+    reason code and the attribution (who revoked it, when) rather than a bare
+    403 -- a refused consumer can see why, and an auditor can see it too.
+
+    Enforcement here is deliberately *additive*: role-based access is checked
+    first and unchanged, and nothing in this path can grant what
+    `_role_has_product_access` and the existing organization scoping would
+    have refused.
+    """
+    _, version = await _version_scope(session, version_id, context)
+    if version.status != "PUBLISHED" or not _is_discoverable(context, version):
+        raise HTTPException(status_code=404, detail="marketplace product not found")
+
+    now = datetime.now(UTC)
+    decision = await authorize_product_consumption(session, context, version, now=now)
+    correlation_id = get_correlation_id()
+    details: dict[str, Any] = {
+        "data_product_version_id": str(version.id),
+        "basis": decision.basis,
+        "access_request_id": (
+            str(decision.access_request_id) if decision.access_request_id else None
+        ),
+    }
+    if not decision.allowed:
+        details["reason_code"] = decision.reason_code
+        # DENIED also routes this to the SIEM through `record_audit`'s single
+        # funnel, so a revoked principal still trying to consume is visible to
+        # a SOC and not only in this table.
+        record_audit(
+            session,
+            context,
+            action="marketplace.product.consume",
+            resource_type="data_product_version",
+            resource_id=str(version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details=details,
+        )
+        await session.commit()
+        raise HTTPException(status_code=403, detail=decision.detail)
+
+    record_audit(
+        session,
+        context,
+        action="marketplace.product.consume",
+        resource_type="data_product_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details=details,
+    )
+    await session.commit()
+
+    ports = (await _ports_by_version(session, [version.id])).get(version.id, [])
+    expires_at: datetime | None = None
+    if decision.access_request_id is not None:
+        expires_at = await session.scalar(
+            select(DataProductAccessRequest.expires_at).where(
+                DataProductAccessRequest.id == decision.access_request_id
+            )
+        )
+    return MarketplaceConsumptionRead(
+        data_product_version_id=version.id,
+        principal_id=context.principal_id,
+        basis=decision.basis,
+        access_request_id=decision.access_request_id,
+        expires_at=expires_at,
+        ports=[
+            DataProductPortDefinition(
+                port_key=port.port_key,
+                direction=port.direction,
+                name=port.name,
+                description=port.description,
+                asset_type=port.asset_type,
+                asset_id=port.asset_id,
+            )
+            for port in ports
+        ],
+    )
+
+
 @router.get(
     "/organizations/{organization_id}/portfolio-analytics/summary",
     response_model=PortfolioAnalyticsSummaryRead,
@@ -1463,11 +1751,18 @@ async def revoke_marketplace_access(
     enforce_organization(context, access_request.organization_id)
     if access_request.status != "APPROVED":
         raise HTTPException(status_code=409, detail="only approved access can be revoked")
+    now = datetime.now(UTC)
     access_request.status = "REVOKED"
     access_request.revoked_by = context.principal_id
-    access_request.revoked_at = datetime.now(UTC)
-    if access_request.fulfillment_status == "PROVISIONED":
-        access_request.fulfillment_status = "PENDING"
+    access_request.revoked_at = now
+    # R11-B4: the denial is `status == "REVOKED"`, which
+    # `authorize_product_consumption` reads directly, so the consumer's next
+    # query is refused the moment this transaction commits -- it does not wait
+    # on any external de-provisioning. What the entitlement transition below
+    # does is settle our side and, where an external system mirrors the grant,
+    # durably queue its removal. Previously this line reset a PROVISIONED
+    # fulfilment to "PENDING", which read as "provisioning is in progress" for
+    # a grant that was being taken away.
     record_audit(
         session,
         replace(context, organization_id=access_request.organization_id),
@@ -1482,6 +1777,7 @@ async def revoke_marketplace_access(
             "fulfillment_status": access_request.fulfillment_status,
         },
     )
+    fulfil_entitlement(session, access_request, "REVOKE", context=context, now=now)
     record_outbox(
         session,
         organization_id=access_request.organization_id,
@@ -1515,32 +1811,16 @@ async def fulfill_marketplace_entitlement(
         raise HTTPException(status_code=409, detail="only approved access can be provisioned")
     if body.action == "REVOKE" and access_request.status not in {"REVOKED", "EXPIRED"}:
         raise HTTPException(status_code=409, detail="access must be revoked or expired first")
-    result = await apply_entitlement(settings, access_request, body.action)
-    access_request.fulfillment_status = result.status
-    access_request.fulfillment_provider = result.provider
-    access_request.fulfillment_reference = result.reference
-    access_request.fulfillment_error = result.error
-    access_request.fulfilled_at = (
-        datetime.now(UTC) if result.status in {"PROVISIONED", "REVOKED"} else None
-    )
-    correlation_id = get_correlation_id()
-    record_audit(
+    # The retry surface: an operator can re-run a fulfilment that failed or is
+    # stuck, and it goes through the same audited transition as every other
+    # path rather than flipping status by hand.
+    fulfil_entitlement(
         session,
-        context,
-        action=f"marketplace.entitlement.{body.action.lower()}",
-        resource_type="data_product_access_request",
-        resource_id=str(access_request.id),
-        outcome="SUCCESS" if result.status != "FAILED" else "FAILURE",
-        correlation_id=correlation_id,
-        details={"provider": result.provider, "fulfillment_status": result.status},
-    )
-    record_outbox(
-        session,
-        organization_id=access_request.organization_id,
-        aggregate_type="data_product_access_request",
-        aggregate_id=str(access_request.id),
-        event_type=f"data_product.entitlement_{result.status.lower()}.v1",
-        payload={"action": body.action, "provider": result.provider},
+        access_request,
+        body.action,
+        context=context,
+        now=datetime.now(UTC),
+        settings=settings,
     )
     await session.commit()
     return access_request
@@ -1553,14 +1833,41 @@ def approve_access_request(
     reason: str | None,
     approved: bool,
     now: datetime,
+    session: AsyncSession | None = None,
+    context: SecurityContext | None = None,
+    settings: Settings | None = None,
 ) -> None:
-    """Shared governance transition used by the unified review endpoint."""
+    """Shared governance transition used by the unified review endpoint.
+
+    R11-B4: approval now *fulfils*. Before, this set `fulfillment_status` to
+    `PENDING` and returned, and nothing in the platform ever moved it on --
+    the consumer's access said "approved" forever and no query was ever
+    allowed by it. Fulfilment runs in this same transaction (staged, not
+    committed) so the grant and the entitlement cannot disagree: if the
+    review commits, the entitlement committed with it.
+
+    `session`/`context` are optional only so the existing unit tests that
+    exercise the pure state transition keep working. When they are absent no
+    entitlement is attempted and the request stays honestly `PENDING`, which
+    is the pre-existing behaviour rather than a silent grant.
+    """
     if access_request.status != "PENDING":
         raise ValueError("access request is no longer pending")
     access_request.status = "APPROVED" if approved else "REJECTED"
     access_request.decided_by = reviewer
     access_request.decision_reason = reason
     access_request.decided_at = now
-    if approved:
-        access_request.expires_at = now + timedelta(days=access_request.duration_days)
-        access_request.fulfillment_status = "PENDING"
+    if not approved:
+        return
+    access_request.expires_at = now + timedelta(days=access_request.duration_days)
+    access_request.fulfillment_status = "PENDING"
+    if session is None or context is None:
+        return
+    fulfil_entitlement(
+        session,
+        access_request,
+        "PROVISION",
+        context=context,
+        now=now,
+        settings=settings,
+    )

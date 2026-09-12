@@ -2795,6 +2795,16 @@ export interface MarketplaceAccessRequestRead {
   updated_at: string;
 }
 
+/** R11-B4: the answer to "may I use this product, and on what basis". */
+export interface MarketplaceConsumptionRead {
+  data_product_version_id: string;
+  principal_id: string;
+  basis: "ROLE" | "ENTITLEMENT";
+  access_request_id: string | null;
+  expires_at: string | null;
+  ports: DataProductPortDefinition[];
+}
+
 /** HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same */
 export interface MarketplaceDiscoveryResponse {
   results: Page;

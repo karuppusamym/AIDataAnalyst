@@ -16675,6 +16675,70 @@
         "title": "MarketplaceAccessRequestRead",
         "type": "object"
       },
+      "MarketplaceConsumptionRead": {
+        "additionalProperties": false,
+        "description": "R11-B4: the answer to \"may I use this product, and on what basis\".\n\nReturned only when the answer is yes -- a refusal is a 403 carrying the\nsame `reason_code`, so a caller can never mistake one for the other by\nforgetting to read a boolean.",
+        "properties": {
+          "access_request_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Request Id"
+          },
+          "basis": {
+            "enum": [
+              "ROLE",
+              "ENTITLEMENT"
+            ],
+            "title": "Basis",
+            "type": "string"
+          },
+          "data_product_version_id": {
+            "format": "uuid",
+            "title": "Data Product Version Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "ports": {
+            "items": {
+              "$ref": "#/components/schemas/DataProductPortDefinition"
+            },
+            "title": "Ports",
+            "type": "array"
+          },
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_product_version_id",
+          "principal_id",
+          "basis",
+          "access_request_id",
+          "expires_at",
+          "ports"
+        ],
+        "title": "MarketplaceConsumptionRead",
+        "type": "object"
+      },
       "MarketplaceDiscoveryResponse": {
         "additionalProperties": false,
         "description": "HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same\n``Page`` shape ``GET /v1/marketplace/products`` returns, plus the resolved\nfilters and the screening decision, so a caller can see exactly which\nstructured call the question resolved to -- transparency, not a second\nresult set.",
@@ -57967,6 +58031,135 @@
           }
         },
         "summary": "Request Marketplace Access",
+        "tags": [
+          "data-products-marketplace"
+        ]
+      }
+    },
+    "/v1/marketplace/products/{version_id}/consume": {
+      "post": {
+        "description": "Claim use of a published data product, and be refused if you may not.\n\nR11-B4 needed one place where an entitlement is actually *load-bearing*.\nA revoked grant that nothing consults is not a revocation, so this is the\ncheckpoint: it resolves the caller's entitlement through\n`authorize_product_consumption` and hands back the ports only when the\nanswer is yes. Both answers are audited, and the refusal carries the\nreason code and the attribution (who revoked it, when) rather than a bare\n403 -- a refused consumer can see why, and an auditor can see it too.\n\nEnforcement here is deliberately *additive*: role-based access is checked\nfirst and unchanged, and nothing in this path can grant what\n`_role_has_product_access` and the existing organization scoping would\nhave refused.",
+        "operationId": "consume_marketplace_product_v1_marketplace_products__version_id__consume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketplaceConsumptionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Consume Marketplace Product",
         "tags": [
           "data-products-marketplace"
         ]

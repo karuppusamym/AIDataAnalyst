@@ -7,10 +7,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
    2026-09-05, F09 - R07). The shared hook reads one location store. */
 import { useUrlState } from "../lib/useUrlState";
 import type { MarketplaceProductRead } from "../lib/ui-types";
-import { ApiError, fetchMarketplaceProducts, requestMarketplaceAccess } from "../lib/api";
+import type { MarketplaceAccessRequestRead } from "../lib/types";
+import {
+  ApiError,
+  fetchMarketplaceAccessRequests,
+  fetchMarketplaceProducts,
+  requestMarketplaceAccess,
+  revokeMarketplaceAccess,
+} from "../lib/api";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
-import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import {
+  Button,
+  ConfirmDialog,
+  CopyLinkButton,
+  Empty,
+  ErrorState,
+  Field,
+  Pill,
+} from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./MarketplaceScreen.css";
@@ -104,7 +119,69 @@ function ProductDetail({
   const [requesting, setRequesting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  /* R11-B4 — revoking a granted entitlement.
+
+     A marketplace row says *that* access is granted but not which request
+     granted it, and revocation addresses the request. So when this product
+     shows an approved grant the pane resolves it through the server-scoped
+     access-request list (a consumer is narrowed to their own rows there; an
+     owner sees the organization's) and offers Revoke against that id.
+
+     Eligibility is deliberately not decided here. `POST .../revoke` requires
+     a product-author role and refuses anything that is not currently
+     APPROVED, so the button is offered whenever a grant is visible and the
+     server's own refusal text is what the user is shown -- rather than this
+     screen guessing at a rule it would then have to keep in step. */
+  const [grant, setGrant] = useState<MarketplaceAccessRequestRead | null>(null);
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeErr, setRevokeErr] = useState<string | null>(null);
+
   const canRequest = product.access_status === "NOT_REQUESTED";
+  const isGranted = product.access_status === "REQUEST_APPROVED";
+
+  useEffect(() => {
+    if (!isGranted) {
+      setGrant(null);
+      return;
+    }
+    const ac = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const page = await fetchMarketplaceAccessRequests({ limit: 100 }, ac.signal);
+        if (cancelled) return;
+        setGrant(
+          page.items.find(
+            (r) => r.data_product_version_id === product.id && r.status === "APPROVED",
+          ) ?? null,
+        );
+      } catch {
+        /* Without the grant the action is simply not offered. The server is
+           the authority on revocation either way, so failing closed here
+           costs nothing and never shows an action that cannot work. */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      ac.abort();
+    };
+  }, [isGranted, product.id]);
+
+  const revoke = useCallback(async () => {
+    if (!grant) return;
+    setRevoking(true);
+    setRevokeErr(null);
+    try {
+      await revokeMarketplaceAccess(grant.id);
+      setConfirmingRevoke(false);
+      onRequested();
+    } catch (e) {
+      setRevokeErr(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setRevoking(false);
+    }
+  }, [grant, onRequested]);
 
   const submit = useCallback(async () => {
     if (!purpose.trim()) {
@@ -171,6 +248,30 @@ function ProductDetail({
               {requesting ? "Requesting…" : "Request access"}
             </Button>
           </div>
+        ) : null}
+        {isGranted && grant ? (
+          <div className="mkt__revoke">
+            <p className="mkt__revoke_hint">
+              Revoking denies this principal&rsquo;s next query against the product and records
+              who revoked it.
+            </p>
+            <Button onClick={() => setConfirmingRevoke(true)}>Revoke access</Button>
+          </div>
+        ) : null}
+        {confirmingRevoke && grant ? (
+          <ConfirmDialog
+            title="Revoke this access grant?"
+            description={`${grant.requested_by} will no longer be able to query ${product.name}. Re-granting means a new request and a new approval.`}
+            confirmLabel="Revoke access"
+            destructive
+            busy={revoking}
+            error={revokeErr}
+            onConfirm={() => void revoke()}
+            onCancel={() => {
+              setConfirmingRevoke(false);
+              setRevokeErr(null);
+            }}
+          />
         ) : null}
       </div>
       <div className="evp__links">
