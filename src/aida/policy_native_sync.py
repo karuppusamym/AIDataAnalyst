@@ -79,30 +79,30 @@ generated DDL, and each is handled differently:
   the parsed AST rather than passed through as raw text -- so a semicolon-separated
   second statement or a comment-smuggled tail cannot survive into the generated DDL.
 
-**Apply mode is a distinct execution surface from the query gateway, by design, not
-by oversight.** `aida.connectors.execution_access` -- the only source of a
-`SqlExecutor` -- is import-linter-restricted to `aida.query_gateway` alone (INV-2,
-`pyproject.toml`), and `query_gateway.SqlGuard` refuses every DDL/administrative
-statement outright: `CREATE POLICY` and `ALTER TABLE ... ADD MASKED` could never
-pass through that pipeline, by the same rule that makes the gateway safe for
-governed reads. This module therefore never imports `execution_access` and never
-calls `SqlExecutor.execute_read_query`/`estimate_read_query` -- `apply_native_sync_plan`
-opens its own narrowly-scoped administrative connection (`asyncpg` for Postgres,
-`pytds` for SQL Server, the same drivers the read connectors use) and executes
-*only* the exact statements this module generated, inside one transaction, nothing
-caller-supplied. `tests/test_tier0_invariants.py::test_no_connector_execution_outside_gateway`
-statically confirms this module never calls either gateway-restricted method.
+**This module generates DDL; it never executes it.** `CREATE POLICY` and
+`ALTER TABLE ... ADD MASKED` cannot pass through `query_gateway`, whose
+`SqlGuard` refuses every DDL/administrative statement by the same rule that
+makes the gateway safe for governed reads. Apply mode used to resolve that by
+opening its own `asyncpg`/`pytds` connection to the source -- a second SQL
+execution path to a customer database, which INV-2 / ADR-0004 reserve for the
+gateway, and one the invariant's own guards could not see (it imported a
+driver rather than `connectors.execution_access`, so neither the import-linter
+contract nor `test_no_connector_execution_outside_gateway`'s method scan
+caught it). It was removed in the 2026-09-11 review as defect D1.
+
+What survives is the valuable half: the planner resolves governed policies
+into the exact statements a source would need, and the preview endpoint
+renders them for a DBA to run through whatever change process owns DDL on
+that source. Reinstating in-platform execution needs an ADR.
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
-from urllib.parse import unquote, urlsplit
+from typing import Any
 from uuid import UUID
 
 from sqlglot import exp, parse_one
@@ -737,185 +737,16 @@ def build_native_sync_plan(
 
 
 # ---------------------------------------------------------------------------
-# Apply mode -- a distinct, narrowly-scoped administrative connection (see the
-# module docstring for why this is not routed through the query gateway).
+# Apply mode was removed (review 2026-09-11, defect D1).
+#
+# This module used to open its own asyncpg / pytds connection to the source and
+# execute the generated DDL. That was a second SQL execution path to a customer
+# database, which INV-2 / ADR-0004 reserve for `aida.query_gateway` -- and one
+# none of the invariant's three guards could see, because it imported a driver
+# directly instead of `connectors.execution_access`. The generated statements
+# are still the product of this module; running them is a DBA's job, through
+# whatever change process owns DDL on that source.
+#
+# `build_native_sync_plan` above returns those statements, and the preview
+# endpoint renders them. Reinstating execution here needs an ADR, not a patch.
 # ---------------------------------------------------------------------------
-
-
-class _AsyncConnection(Protocol):
-    async def execute(self, sql: str, /) -> Any: ...
-    async def close(self) -> None: ...
-
-
-class _AsyncTransaction(Protocol):
-    async def __aenter__(self) -> Any: ...
-    async def __aexit__(self, *exc_info: object) -> Any: ...
-
-
-class _AsyncpgLikeConnection(_AsyncConnection, Protocol):
-    def transaction(self) -> _AsyncTransaction: ...
-
-
-PostgresConnect = Callable[..., Awaitable[_AsyncpgLikeConnection]]
-
-
-async def _default_postgres_connect(
-    dsn: str, *, timeout_seconds: float
-) -> _AsyncpgLikeConnection:
-    import asyncpg
-
-    return await asyncpg.connect(dsn, command_timeout=timeout_seconds)  # type: ignore[no-any-return]
-
-
-async def _apply_postgres(
-    plan: NativeSyncPlan,
-    dsn: str,
-    *,
-    timeout_seconds: float,
-    connect: PostgresConnect | None,
-) -> None:
-    opener = connect or _default_postgres_connect
-    connection = await opener(dsn, timeout_seconds=timeout_seconds)
-    try:
-        async with connection.transaction():
-            for statement in plan.statements:
-                await connection.execute(statement.sql)
-    finally:
-        await connection.close()
-
-
-@dataclass(frozen=True, slots=True)
-class _MssqlConnectionParams:
-    host: str
-    port: int
-    database: str
-    user: str
-    password: str
-
-
-def _parse_mssql_dsn(dsn: str) -> _MssqlConnectionParams:
-    """Independent copy of `connectors.sqlserver._parse_dsn` (module-private there).
-
-    Kept deliberately duplicated rather than imported: this module's whole
-    argument for staying outside INV-2's protected surface is that it never
-    reaches into the read-execution connector module at all (see the module
-    docstring) -- importing a private helper from `connectors.sqlserver` would
-    quietly recreate exactly the coupling that argument depends on not existing.
-    """
-    parsed = urlsplit(dsn)
-    if parsed.scheme not in {"mssql", "sqlserver"}:
-        raise PolicyNativeSyncError(
-            "invalid SQL Server connection reference; expected "
-            "mssql://user:password@host:port/database"
-        )
-    if not parsed.hostname or not parsed.username or parsed.password is None:
-        raise PolicyNativeSyncError(
-            "SQL Server connection reference is missing host, user, or password"
-        )
-    database = parsed.path.lstrip("/")
-    if not database:
-        raise PolicyNativeSyncError("SQL Server connection reference must include a database name")
-    return _MssqlConnectionParams(
-        host=parsed.hostname,
-        port=parsed.port or 1433,
-        database=database,
-        user=unquote(parsed.username),
-        password=unquote(parsed.password),
-    )
-
-
-class _DbApiConnection(Protocol):
-    def cursor(self) -> Any: ...
-    def commit(self) -> None: ...
-    def rollback(self) -> None: ...
-    def close(self) -> None: ...
-
-
-SqlServerConnect = Callable[..., _DbApiConnection]
-
-
-def _default_sqlserver_connect(
-    params: _MssqlConnectionParams, *, timeout_seconds: float
-) -> _DbApiConnection:
-    import pytds
-
-    return pytds.connect(  # type: ignore[no-any-return]
-        server=params.host,
-        port=params.port,
-        database=params.database,
-        user=params.user,
-        password=params.password,
-        timeout=timeout_seconds,
-        login_timeout=min(timeout_seconds, 15.0),
-        autocommit=False,
-    )
-
-
-def _apply_sqlserver_sync(
-    plan: NativeSyncPlan,
-    params: _MssqlConnectionParams,
-    *,
-    timeout_seconds: float,
-    connect: SqlServerConnect,
-) -> None:
-    connection = connect(params, timeout_seconds=timeout_seconds)
-    try:
-        cursor = connection.cursor()
-        try:
-            for statement in plan.statements:
-                cursor.execute(statement.sql)
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            cursor.close()
-    finally:
-        connection.close()
-
-
-async def _apply_sqlserver(
-    plan: NativeSyncPlan,
-    dsn: str,
-    *,
-    timeout_seconds: float,
-    connect: SqlServerConnect | None,
-) -> None:
-    params = _parse_mssql_dsn(dsn)
-    opener = connect or _default_sqlserver_connect
-    await asyncio.to_thread(
-        _apply_sqlserver_sync, plan, params, timeout_seconds=timeout_seconds, connect=opener
-    )
-
-
-async def apply_native_sync_plan(
-    plan: NativeSyncPlan,
-    *,
-    dsn: str,
-    timeout_seconds: float = 30.0,
-    postgres_connect: PostgresConnect | None = None,
-    sqlserver_connect: SqlServerConnect | None = None,
-) -> None:
-    """Execute `plan.statements` against the live source, in one transaction.
-
-    Never called except from the gated apply path in `policy_native_sync_api.py`,
-    which only reaches here after the maker-checker decision on the plan has been
-    recorded `APPROVED` by a principal other than the one who requested it (see
-    that module). A no-op for an empty plan -- nothing to apply is not an error.
-    `postgres_connect`/`sqlserver_connect` exist for tests to inject a fake
-    connection; production callers never pass them.
-    """
-    if not plan.statements:
-        return
-    if plan.connector_type == "postgres":
-        await _apply_postgres(
-            plan, dsn, timeout_seconds=timeout_seconds, connect=postgres_connect
-        )
-    elif plan.connector_type == "sqlserver":
-        await _apply_sqlserver(
-            plan, dsn, timeout_seconds=timeout_seconds, connect=sqlserver_connect
-        )
-    else:  # pragma: no cover - build_native_sync_plan already refuses this
-        raise PolicyNativeSyncError(
-            f"apply is not implemented for connector type {plan.connector_type!r}"
-        )

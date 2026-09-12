@@ -254,3 +254,26 @@ def resolve_signing_provider(
             timeout_seconds=settings.hmac_signing_timeout_seconds,
         )
     raise SigningUnavailable(f"HMAC_SIGNING_PROVIDER_UNSUPPORTED:{provider}")
+
+
+async def sign_value(settings: Settings, data: str) -> str:
+    """Keyed digest of `data` under the deployment's configured signer.
+
+    The non-SQL digests in this codebase -- an agent run's question, a tool
+    execution's normalized parameters, a query-memory comment -- are keyed for
+    the same reason `audit_sql_hash` is, and for one more: they stand in for
+    text the control plane deliberately does not store. An unkeyed hash of a
+    short, guessable question (or of an account id passed as a tool parameter)
+    is reversible by dictionary attack, so the digest is only as private as
+    the key is unreachable.
+
+    Before this, those call sites read `Settings.audit_hmac_key` and called
+    `hmac.new` directly, which put the key in process memory in exactly the
+    deployment that configures a KMS signer to keep it out -- the failure mode
+    this module's docstring rules out for signatures, reached through the back
+    door by digests. Routing them here fixes that. Under the `local` provider
+    the result is byte-identical to the previous computation, so existing
+    development rows stay comparable.
+    """
+    provider = resolve_signing_provider(settings)
+    return await provider.sign(data)

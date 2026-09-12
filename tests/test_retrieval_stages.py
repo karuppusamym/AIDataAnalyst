@@ -352,3 +352,55 @@ def test_hits_keep_their_public_shape() -> None:
         "reason_codes",
         "metadata",
     }
+
+
+async def test_vector_channel_ranks_nothing_when_nothing_is_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty authorized set is the policy filter's answer, not an absent filter.
+
+    `search_persisted_index(candidates=None)` means "no candidate filter" and
+    ranks the whole organization's index. The stage used to pass
+    `candidates=refs or None`, so a caller authorized for nothing got the
+    estate's top-N semantic hits back -- policy applied before ranking, then
+    discarded by a falsy empty tuple.
+    """
+    from aida import retrieval_stages as stages
+    from aida import vector_index_service
+    from aida.vector_index_service import IndexFreshness
+
+    recorded: dict[str, object] = {}
+
+    class _Batch:
+        vectors = ([0.1, 0.2],)
+
+    class _Provider:
+        async def embed(self, texts: list[str]) -> _Batch:
+            return _Batch()
+
+    async def _fresh(session: object, organization_id: object, **kwargs: object) -> IndexFreshness:
+        return IndexFreshness(
+            usable=True,
+            reason="FRESH",
+            entries=1_000,
+            signature="sig",
+            built_at=None,
+            age_minutes=1.0,
+        )
+
+    async def _search(session: object, organization_id: object, query: object, **kwargs: object):
+        recorded["candidates"] = kwargs.get("candidates")
+        return ()
+
+    monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
+    monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
+    monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
+
+    result = await stages.run_vector_channel(
+        None,  # type: ignore[arg-type]
+        _request(),
+        CandidatePool(authorized=[], candidates={}),
+    )
+
+    assert recorded["candidates"] == ()
+    assert result.contributions == []

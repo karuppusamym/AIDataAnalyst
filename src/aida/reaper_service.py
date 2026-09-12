@@ -71,6 +71,7 @@ from aida.models import (
     GlossaryTerm,
     GlossaryTermVersion,
     MetadataEnrichmentProposal,
+    RevokedToken,
 )
 from aida.security import SecurityContext
 
@@ -263,7 +264,38 @@ def _stale_pending_description_drafts_stmt(
 # steward org can operate against safely; per-rule overrides live in
 # ``Settings.reaper_retention_overrides``.
 
+def _expired_token_revocations_stmt(
+    now: datetime, retention: timedelta
+) -> Select[tuple[UUID]]:
+    """Revocations whose token has already passed its own expiry.
+
+    Anchored on ``token_expires_at``, never ``revoked_at``: a token still
+    inside its original expiry window stays revoked however long ago it was
+    revoked. Once the token has expired the verifier rejects it on expiry
+    alone, so the revocation row can no longer change any decision -- which is
+    what makes deleting it safe rather than merely tidy.
+
+    Without this rule nothing pruned the table at all: the standalone
+    ``token_revocation.prune_expired_revocations`` helper this replaces had no
+    caller outside its own test, so ``revoked_token`` grew without bound for
+    the life of a deployment. ``retention`` stays at zero days to keep that
+    helper's exact semantics; a longer forensic tail is a policy change, and
+    belongs in this rule's ``retention`` rather than in a second sweeper.
+    """
+    cutoff = now - retention
+    return select(RevokedToken.id).where(RevokedToken.token_expires_at < cutoff)
+
+
 RULES: list[ReaperRule] = [
+    ReaperRule(
+        name="expired_token_revocations",
+        model=RevokedToken,
+        resource_type="revoked_token",
+        audit_action="REAP_EXPIRED_TOKEN_REVOCATION",
+        retention=timedelta(days=0),
+        action="DELETE",
+        candidates_stmt=_expired_token_revocations_stmt,
+    ),
     ReaperRule(
         name="rejected_enrichment_proposals",
         model=MetadataEnrichmentProposal,

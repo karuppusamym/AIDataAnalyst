@@ -35,13 +35,10 @@ from aida.config import Settings
 from aida.db import Base
 from aida.models import AuditEvent, RevokedToken
 from aida.oidc import OidcVerifier, token_identifier
+from aida.reaper_service import _expired_token_revocations_stmt
 from aida.security import get_security_context
 from aida.security_types import SecurityContext
-from aida.token_revocation import (
-    TokenRevokedError,
-    enforce_not_revoked,
-    prune_expired_revocations,
-)
+from aida.token_revocation import TokenRevokedError, enforce_not_revoked
 from aida.token_revocation_api import TokenRevocationRequest, revoke_token
 
 _NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
@@ -201,10 +198,19 @@ async def test_pruning_removes_only_records_past_their_tokens_own_expiry(
     )
     await session.flush()
 
-    removed = await prune_expired_revocations(session, now=_NOW)
+    # Pruning is a reaper rule now (`expired_token_revocations`), so the policy
+    # under test is the rule's candidate predicate. Nothing scheduled the old
+    # standalone helper, which is why this table grew without bound.
+    doomed = (
+        (await session.execute(_expired_token_revocations_stmt(_NOW, timedelta(days=0))))
+        .scalars()
+        .all()
+    )
+    for row_id in doomed:
+        await session.delete(await session.get(RevokedToken, row_id))
     await session.flush()
 
-    assert removed == 1
+    assert len(doomed) == 1
     remaining = (await session.execute(select(RevokedToken.token_identifier))).scalars().all()
     assert remaining == [token_identifier(live_claims)]
 

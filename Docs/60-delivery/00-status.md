@@ -20,7 +20,7 @@ proof remain pending. Details and prerequisites are in the queue, not implied by
 Everything below is dated evidence from earlier passes, not a current verification or execution
 plan. In particular, test counts, invariant limits, open decisions and capability tables have
 not all been rerun against the September 11 tree. Current review findings override them:
-INV-2 has the native-policy execution bypass R11-D1; agent safety remainders are R11-C3/C4/C6/C7/C8.
+INV-2's native-policy execution bypass (R11-D1) is closed in code as of 2026-09-11; agent safety remainders are R11-C3/C4/C6/C7/C8.
 
 
 > Status: **Living document — the single answer to "where are we".** Owner: Engineering lead.
@@ -122,7 +122,7 @@ named rather than rounded up to a tick.
 | # | Invariant | Test | Limit that remains |
 |:--:|---|---|---|
 | INV-1 | Single authoritative store | `test_inv1_single_authoritative_store.py` (8) | Does **not** prove Neo4j ingests correctly — no Neo4j runs in the suite. The projection-rebuild drill has never been run (E5) |
-| INV-2 | One execution choke point | Type system + import contract + AST scan | **Open, 2026-09-11: R11-D1** ? native-policy sync executes source DDL outside the gateway; the earlier no-limit statement was incorrect. |
+| INV-2 | One execution choke point | Type system + import contract + AST scan + driver-connect scan | **Closed 2026-09-11 (R11-D1).** Native-policy sync no longer opens its own source connection; its apply path was removed and preview retained. A fourth layer now fails any driver connect outside `aida.connectors`, which is what the earlier three layers could not see. |
 | INV-3 | Model output is never authority | `test_tier0_invariants.py` | None |
 | INV-4 | Fail closed | `test_tier0_invariants.py` + `test_inv4_authorization_wiring.py` (26) | The decision is now *reached* on the execution path and 5 read surfaces, but every workspace is in `SHADOW` and the unresolved-workspace posture defaults to `SHADOW` — **so nothing is denied**. See §6 decision 3 |
 | INV-5 | Tenant isolation is total | `test_inv5_tenant_isolation.py` (8) + route-table scan | The intended structural mechanism — a repository base class with no unscoped query helper — **does not exist**. Scoping is per-query by convention; the test substitutes for the guarantee (ST-05/06/07) |

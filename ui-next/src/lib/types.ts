@@ -3156,11 +3156,6 @@ export interface MultiTableToolBlueprintRequest {
   allowed_roles: string[];
 }
 
-export interface NativePolicySyncDecisionRequest {
-  decision: "APPROVE" | "REJECT";
-  reason?: string | null;
-}
-
 export interface NativePolicySyncTableRequest {
   schema_name: string;
   table_name: string;
@@ -3616,34 +3611,6 @@ export interface PlaybookUpdate {
   schedule_interval_minutes?: number | null;
   auto_apply_max_items?: number | null;
   enabled?: boolean | null;
-}
-
-export interface PolicyNativeSyncRequestCreate {
-  schema_name: string;
-  table_name: string;
-  reason: string;
-}
-
-export interface PolicyNativeSyncRequestRead {
-  id: string;
-  organization_id: string;
-  datasource_id: string;
-  connector_type: string;
-  schema_name: string;
-  table_name: string;
-  statements: Record<string, unknown>[];
-  row_policy_count: number;
-  column_policy_count: number;
-  unsupported: string[];
-  status: string;
-  requested_by: string;
-  request_reason: string;
-  decided_by: string | null;
-  decision_reason: string | null;
-  decided_at: string | null;
-  applied_at: string | null;
-  apply_error: string | null;
-  created_at: string;
 }
 
 export interface PortfolioAccessRead {

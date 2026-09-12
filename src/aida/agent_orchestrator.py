@@ -18,7 +18,6 @@ checkpoint refuses a query that genuinely ran.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -120,6 +119,7 @@ from aida.semantic_inference import (
     format_ambiguous_definition_refusal,
     resolve_scoped_glossary_term,
 )
+from aida.signing import sign_value
 from aida.tool_rendering import ToolParameterError, render_tool_sql
 from aida.trust_scoring import AssetContext, compute_trust_score
 
@@ -792,11 +792,7 @@ class GovernedAgentOrchestrator:
             organization_id=request.organization_id,
             datasource_id=request.datasource.id,
             principal_id=request.context.principal_id,
-            question_hash=hmac.new(
-                self.settings.audit_hmac_key.encode("utf-8"),
-                request.question.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest(),
+            question_hash=await sign_value(self.settings, request.question),
             generation_source="PENDING",
         )
         session.add(agent_run)
@@ -1215,13 +1211,10 @@ class GovernedAgentOrchestrator:
         except ToolParameterError as exc:
             await self._persist_rejection(session, request, ledger, "INVALID_TOOL_PARAMETERS")
             raise AgentClarificationRequired(str(exc)) from exc
-        fingerprint = hmac.new(
-            self.settings.audit_hmac_key.encode(),
-            json.dumps(
-                rendered.normalized_parameters, sort_keys=True, separators=(",", ":")
-            ).encode(),
-            hashlib.sha256,
-        ).hexdigest()
+        fingerprint = await sign_value(
+            self.settings,
+            json.dumps(rendered.normalized_parameters, sort_keys=True, separators=(",", ":")),
+        )
         tool_execution = ToolExecution(
             organization_id=request.organization_id,
             tool_version_id=version.id,

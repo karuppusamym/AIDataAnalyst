@@ -1,5 +1,6 @@
 import { useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { pushLocation } from "../lib/location";
 import type { CatalogRowRead } from "../lib/ui-types";
 import { Pill, StateDot } from "./primitives";
 import type { Tone } from "./primitives";
@@ -66,14 +67,17 @@ const MAX_INLINE_CHIPS = 3;
 function GlossaryChipRow({ terms, tableId }: { terms: readonly string[]; tableId: string }) {
   const visible = terms.slice(0, MAX_INLINE_CHIPS);
   const overflow = terms.length - visible.length;
+  /* The shell routes on the hash (`#/meaning`), so a path-only URL like
+     `/business-meaning?...` reloaded the app at the default screen and lost
+     the selection -- F08's defect class, reached through a hand-built link.
+     `pushLocation` writes the screen and the allowed query fields for us. */
   const openTerm = (term: string) => (e: React.MouseEvent) => {
     e.stopPropagation();
-    const q = encodeURIComponent(term);
-    window.location.href = `/business-meaning?view=glossary&term=${q}`;
+    pushLocation({ screen: "meaning", params: { view: "glossary", q: term } });
   };
   const openAllForTable = (e: React.MouseEvent) => {
     e.stopPropagation();
-    window.location.href = `/business-meaning?view=glossary&asset=${encodeURIComponent(tableId)}`;
+    pushLocation({ screen: "meaning", params: { view: "glossary", asset: tableId } });
   };
   return (
     <span

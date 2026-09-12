@@ -670,6 +670,7 @@ def test_rules_registry_covers_expected_names() -> None:
         "orphan_asset_term_links",
         "rejected_description_drafts",
         "stale_pending_description_drafts",
+        "expired_token_revocations",
     }
 
 

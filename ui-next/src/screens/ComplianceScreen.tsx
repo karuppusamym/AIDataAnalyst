@@ -197,7 +197,7 @@ export function ComplianceScreen() {
           period_end: periodEnd,
           name: form.name.trim() || null,
         });
-        setGenerateStatus({ text: "Compliance pack generated and archived.", kind: "success" });
+        setGenerateStatus({ text: "Compliance pack generated and stored.", kind: "success" });
         setForm((f) => ({ ...INITIAL_FORM, framework: f.framework }));
         await load();
       } catch (err) {

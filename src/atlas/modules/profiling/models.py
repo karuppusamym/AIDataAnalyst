@@ -38,11 +38,6 @@ table/column profiles, classifications, key inferences"):
 Explicitly NOT moved here despite sitting inside the same span of the old
 `aida.models`:
 
-* `PolicyNativeSyncRequest` -- sits physically between
-  `ProfilingExceptionPolicy` and `ColumnValueProfileArtifact` and copies the
-  former's maker-checker shape, but it gates source-native row/column policy
-  DDL (QG-2). That is module 16 (query-gateway) / 17 (policy-governance)
-  territory, not profiling's. Shape similarity is not ownership.
 * `CompositeKeyCandidate` and the other `*Candidate` models -- Sec.4 gives
   module 05 "key inferences" and module 06 "relationship candidates,
   evidence, decisions, negative knowledge, table families", and these live

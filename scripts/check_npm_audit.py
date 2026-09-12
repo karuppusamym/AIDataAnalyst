@@ -102,31 +102,10 @@ class BaselineEntry:
 # The gate blocks regressions from today; it does not red-line every push over
 # pre-existing, out-of-scope debt, because a gate that is red on arrival gets
 # turned off and then proves nothing.
-BASELINE_DATE = "2026-09-06"
+BASELINE_DATE = "2026-09-11"
 BASELINE: dict[str, BaselineEntry] = {
     "GHSA-67mh-4wv8-2f99": BaselineEntry(
         "esbuild", "moderate", "dev", "dev server accepts any origin's requests"
-    ),
-    "GHSA-vg6x-rcgg-rjx6": BaselineEntry(
-        "vite", "moderate", "dev", "dev server accepts any origin's requests"
-    ),
-    "GHSA-x574-m823-4x7w": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via ?raw"
-    ),
-    "GHSA-356w-63v5-8wf4": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via invalid request-target"
-    ),
-    "GHSA-859w-5945-r5v3": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via /. under project root"
-    ),
-    "GHSA-xcj6-pq6g-qj4x": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via .svg or relative paths"
-    ),
-    "GHSA-93m4-6634-74q7": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass via backslash on Windows"
-    ),
-    "GHSA-4r4m-qw57-chr8": BaselineEntry(
-        "vite", "moderate", "dev", "server.fs.deny bypass for inline/raw with ?import"
     ),
     "GHSA-4w7w-66w2-5vf9": BaselineEntry(
         "vite", "moderate", "dev", "path traversal in optimized-deps .map handling"
@@ -137,11 +116,8 @@ BASELINE: dict[str, BaselineEntry] = {
     "GHSA-v6wh-96g9-6wx3": BaselineEntry(
         "vite", "moderate", "dev", "launch-editor NTLMv2 hash disclosure via UNC paths"
     ),
-    "GHSA-g4jq-h2w9-997c": BaselineEntry(
-        "vite", "low", "dev", "middleware may serve same-prefix files"
-    ),
-    "GHSA-jqfw-vq24-v9c3": BaselineEntry(
-        "vite", "low", "dev", "server.fs settings not applied to HTML files"
+    "GHSA-82fw-gwwq-j7x9": BaselineEntry(
+        "vitest", "moderate", "dev", "@vitest/mocker redirect path traversal (vitest 2.x chain)"
     ),
     "GHSA-5xrq-8626-4rwp": BaselineEntry(
         "vitest",

@@ -693,7 +693,12 @@ def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
     identical to `parse_view_lineage`, not a procedure-aware parser.
 
     AT-D5: this is `_parse_sql` under a procedure-flavoured name, not real
-    procedure-body parsing (tracker item N3, TODO, not started). It has no
+    procedure-body parsing. The procedure-aware parser N3 called for has since
+    shipped as `aida.procedure_lineage.parse_procedure_lineage` -- it peels
+    control flow, detects dynamic SQL and nested calls, and marks what it
+    cannot parse UNPARSED with a reason. Prefer that one; this function is
+    kept only for callers that genuinely want the flat statement sweep. It has
+    no
     control-flow handling (IF/LOOP/CURSOR/branching), no
     variable/temp-table scope resolution, and -- most importantly --
     **no dynamic-SQL detection at all**: a `CREATE PROCEDURE ... AS $$ ...

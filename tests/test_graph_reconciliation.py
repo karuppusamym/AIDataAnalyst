@@ -353,6 +353,17 @@ def test_drift_incident_does_not_match_a_severity_scoped_rule_below_it() -> None
 # ---------------------------------------------------------------------------
 
 
+def _every_organization_reads_neo4j(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backend selection is asserted on its own below; the due-tracking tests
+    care about the sweep, so resolve every organization to the Neo4j backend
+    without a live Postgres behind `neo4j_read_organizations`."""
+
+    async def fake_backends(organization_ids: set[UUID], settings: Settings) -> set[UUID]:
+        return set(organization_ids)
+
+    monkeypatch.setattr(graph_reconciliation, "neo4j_read_organizations", fake_backends)
+
+
 async def test_run_graph_reconciliation_pass_isolates_one_datasources_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -383,6 +394,7 @@ async def test_run_graph_reconciliation_pass_isolates_one_datasources_failure(
         )
 
     monkeypatch.setattr(graph_reconciliation, "reconcile_and_alert_datasource", fake_reconcile)
+    _every_organization_reads_neo4j(monkeypatch)
     settings = Settings(graph_reconciliation_interval_minutes=60, _env_file=None)
     now = datetime.now(UTC)
     last_run_at: dict[UUID, datetime] = {}
@@ -416,6 +428,7 @@ async def test_run_graph_reconciliation_pass_skips_datasources_not_yet_due(
         return _report_with_total_drift(0)
 
     monkeypatch.setattr(graph_reconciliation, "reconcile_and_alert_datasource", fake_reconcile)
+    _every_organization_reads_neo4j(monkeypatch)
     settings = Settings(graph_reconciliation_interval_minutes=60, _env_file=None)
     last_run_at = {ds_id: now - timedelta(minutes=10)}
 
@@ -441,6 +454,7 @@ async def test_run_graph_reconciliation_pass_runs_once_interval_has_elapsed(
         return _report_with_total_drift(0)
 
     monkeypatch.setattr(graph_reconciliation, "reconcile_and_alert_datasource", fake_reconcile)
+    _every_organization_reads_neo4j(monkeypatch)
     settings = Settings(graph_reconciliation_interval_minutes=60, _env_file=None)
     last_run_at = {ds_id: now - timedelta(minutes=61)}
 
@@ -460,4 +474,32 @@ async def test_run_graph_reconciliation_pass_returns_zero_with_no_due_datasource
     result = await run_graph_reconciliation_pass(
         settings, now=datetime.now(UTC), last_run_at={}, datasource_ids=[]
     )
+    assert result == 0
+
+
+async def test_run_graph_reconciliation_pass_skips_organizations_that_do_not_read_neo4j(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Postgres-backed deployment must not open a Neo4j driver at all.
+
+    Before this, the sweep opened one per pass whatever `graph_store_backend`
+    said, so a deployment that never reads Neo4j logged a connection failure
+    per datasource per interval.
+    """
+    ds_id, org_id = uuid4(), uuid4()
+
+    async def no_neo4j_organizations(organization_ids: set[UUID], settings: Settings) -> set[UUID]:
+        return set()
+
+    def fail_driver(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a Postgres-backed deployment must not open a Neo4j driver")
+
+    monkeypatch.setattr(graph_reconciliation, "neo4j_read_organizations", no_neo4j_organizations)
+    monkeypatch.setattr(graph_reconciliation.AsyncGraphDatabase, "driver", fail_driver)
+    settings = Settings(graph_reconciliation_interval_minutes=60, _env_file=None)
+
+    result = await run_graph_reconciliation_pass(
+        settings, now=datetime.now(UTC), last_run_at={}, datasource_ids=[(ds_id, org_id)]
+    )
+
     assert result == 0

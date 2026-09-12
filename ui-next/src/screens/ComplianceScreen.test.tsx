@@ -111,7 +111,9 @@ describe("ComplianceScreen against the real compliance_api.py", () => {
     expect(typeof call.period_end).toBe("string");
     expect(call.name).toBeNull();
     await waitFor(() => expect(fetchCompliancePacks).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("Compliance pack generated and archived.")).toBeInTheDocument();
+    // R11-D3: the pack is persisted as a checksummed row, not written to WORM
+    // storage, so the confirmation says stored rather than archived.
+    expect(await screen.findByText("Compliance pack generated and stored.")).toBeInTheDocument();
   });
 
   it("shows the real 422 (period_end not after period_start) without changing pack state", async () => {

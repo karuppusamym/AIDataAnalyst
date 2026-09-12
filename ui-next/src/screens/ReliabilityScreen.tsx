@@ -537,6 +537,16 @@ export function ReliabilityScreen() {
                             {budget.current_value !== null ? (
                               <span className="reliability__budgetval tnum">{budget.current_value.toFixed(2)}%</span>
                             ) : null}
+                            {/* NO_DATA is permanent today: SLO definitions are stored and
+                                budgets are computed from `slo_measurement`, but nothing
+                                writes that table yet. Without this an operator cannot tell
+                                "not measured" from "measured and fine", and a defined SLO
+                                reads as if something were watching it. */}
+                            {budget.status === "NO_DATA" ? (
+                              <span className="relrow__budgethint">
+                                no measurements recorded — this SLO is defined but not yet collected
+                              </span>
+                            ) : null}
                           </span>
                         ) : typeof budget === "string" && budget !== "loading" ? (
                           <span className="relrow__budgeterr">{budget}</span>

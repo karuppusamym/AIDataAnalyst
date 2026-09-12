@@ -118,6 +118,65 @@ def test_no_connector_execution_outside_gateway() -> None:
     )
 
 
+# The driver entry points a module would have to call to reach a source without
+# going through a `SqlExecutor` at all. `policy_native_sync` did exactly this
+# (review 2026-09-11, defect D1): it imported `asyncpg`/`pytds` directly and
+# executed DDL on a customer database, so it called neither method above, imported
+# nothing the import-linter contract protects, and passed `mypy --strict` -- all
+# three INV-2 layers, clean, while holding an open connection to a source.
+_DRIVER_CONNECT_CALLS = frozenset(
+    {
+        "connect",  # asyncpg.connect / pytds.connect / snowflake.connector.connect
+        "connect_async",  # oracledb.connect_async
+    }
+)
+_DRIVER_MODULES = frozenset(
+    {"asyncpg", "pytds", "oracledb", "snowflake", "databricks", "databricks_sql", "dbsql"}
+)
+
+
+def _files_opening_a_driver_connection_outside_connectors() -> list[str]:
+    offenders = []
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        relative = path.relative_to(_SRC_ROOT)
+        if relative.parts[0] == "connectors":
+            # The connectors package is where a source connection is supposed to
+            # be opened; the gateway is what decides whether a statement may use one.
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in _DRIVER_CONNECT_CALLS:
+                continue
+            root = node.func.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in _DRIVER_MODULES:
+                offenders.append(f"{relative}:{node.lineno}")
+    return offenders
+
+
+def test_no_module_outside_connectors_opens_its_own_source_connection() -> None:
+    """INV-2's fourth layer: a module cannot reach a source by importing a driver.
+
+    The three existing layers all watch the `SqlExecutor` surface. None of them
+    can see a module that skips that surface entirely and dials the database
+    itself, which is how a second execution path lived in `policy_native_sync`
+    until the 2026-09-11 review found it. Opening the connection is the step
+    worth forbidding: everything after it is unreviewable by construction.
+
+    A module that genuinely needs to talk to a source belongs in
+    `aida.connectors`, behind the registry, and its statements belong to the
+    gateway. Adding a name here is a change to the platform's central
+    invariant; it needs an ADR, not a pull request.
+    """
+    offenders = _files_opening_a_driver_connection_outside_connectors()
+    assert offenders == [], (
+        "only aida.connectors may open a connection to a data source, found: " f"{offenders}"
+    )
+
+
 def test_the_connector_handed_to_the_platform_has_no_sql_surface() -> None:
     """INV-2, structurally: the type `ConnectorRegistry.create` is annotated to
     return must not expose a SQL-accepting method, because that annotation is what

@@ -1347,11 +1347,14 @@ async def _handle_get_asset_context(
             "distinct_classifications": list(signals.classification.distinct_classifications),
             "has_sensitive_classification": signals.classification.has_sensitive_classification,
             "gap": (
-                "No table-level classification is stored anywhere on this platform -- "
-                "AT-11 (classification propagation along lineage) is still TODO. This "
-                "rolls up the existing per-column metadata_column.classification values "
-                "(the same ABAC input query_gateway.py masks reads against), it is not "
-                "a new classification decision."
+                "No table-level classification field exists on this platform. AT-11's "
+                "propagation stores COLUMN-level derived classifications "
+                "(column_derived_classification, kept separate from asserted ones), but "
+                "nothing triggers propagation in a running deployment yet, so most "
+                "estates have none. This rolls up the asserted per-column "
+                "metadata_column.classification values (the same ABAC input "
+                "query_gateway.py masks reads against); it is not a new classification "
+                "decision."
             ),
         },
         "lineage": lineage_summary,

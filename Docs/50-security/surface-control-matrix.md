@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **483**
-- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 432, SDK 1
+- Surfaces covered: **480**
+- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 429, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -169,7 +169,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/metadata-ingestion-batches` | REST | `atlas.modules.ingestion.router.list_metadata_ingestion_batches` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.list_metadata_ingestions` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/model-imports` | REST | `aida.model_import_api.list_model_imports` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | yes | read | no | not cancellable |
-| `GET /v1/datasources/{datasource_id}/native-policy-sync/requests` | REST | `aida.policy_native_sync_api.list_native_policy_sync_requests` | DataAdmin, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/openlineage-events` | REST | `aida.openlineage_api.list_openlineage_run_events` | Auditor, DataAdmin, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/procedure-lineage` | REST | `aida.view_lineage_api.list_procedure_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage` | REST | `aida.procedure_lineage_api.list_deep_procedure_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -383,7 +382,6 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.ingest_metadata_envelope` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/model/import` | REST | `aida.model_import_api.upload_model_workbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/native-policy-sync/preview` | REST | `aida.policy_native_sync_api.preview_native_policy_sync` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/datasources/{datasource_id}/native-policy-sync/requests` | REST | `aida.policy_native_sync_api.request_native_policy_sync` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/procedure-lineage/parse` | REST | `aida.view_lineage_api.parse_procedure_lineage_endpoint` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage/parse` | REST | `aida.procedure_lineage_api.parse_deep_procedure_lineage_endpoint` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/profiling-exception-policies` | REST | `aida.api.request_profiling_exception_policy` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -426,7 +424,6 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/model-imports/{batch_id}/changes/exclusion` | REST | `aida.model_import_api.set_model_import_exclusion` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/model-imports/{batch_id}/submit` | REST | `aida.model_import_api.submit_model_import` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/model-routes/{route_id}/submit` | REST | `aida.ai_governance_api.submit_model_route` | AgentDeveloper, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/native-policy-sync/requests/{request_id}/decision` | REST | `aida.policy_native_sync_api.decide_native_policy_sync_request` | DataSteward, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/negative-knowledge/{assertion_id}/lift-suppression` | REST | `aida.negative_knowledge_api.lift_assertion_suppression` | DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/notification-rules` | REST | `aida.notification_api.create_notification_rule` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/notifications/{notification_id}/acknowledge` | REST | `aida.notification_api.acknowledge_notification` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |

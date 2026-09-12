@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import math
 from collections import Counter
 from dataclasses import replace
@@ -102,6 +100,7 @@ from aida.schemas import (
     TableRef,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.signing import sign_value
 
 router = APIRouter(prefix="/v1", tags=["intelligence-governance"])
 
@@ -548,15 +547,7 @@ async def upsert_query_feedback(
             memory.positive_feedback_count = max(0, memory.positive_feedback_count - 1)
         else:
             memory.negative_feedback_count = max(0, memory.negative_feedback_count - 1)
-    comment_hash = (
-        hmac.new(
-            settings.audit_hmac_key.encode(),
-            body.comment.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        if body.comment
-        else None
-    )
+    comment_hash = await sign_value(settings, body.comment) if body.comment else None
     if feedback is None:
         feedback = QueryFeedback(
             organization_id=agent_run.organization_id,

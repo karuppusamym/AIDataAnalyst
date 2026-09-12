@@ -446,7 +446,13 @@ async def run_vector_channel(
                     request.organization_id,
                     query_emb,
                     settings=request.settings,
-                    candidates=refs or None,
+                    # `refs`, never `refs or None`: an empty authorized set is
+                    # the policy filter's answer, and `None` means "no candidate
+                    # filter" to `search_persisted_index`, which then ranks the
+                    # whole organization's index. Passing the empty tuple hits
+                    # its `if not candidates: return ()` guard instead, so a
+                    # caller authorized for nothing retrieves nothing.
+                    candidates=refs,
                     limit=request.result_limit,
                 )
             )

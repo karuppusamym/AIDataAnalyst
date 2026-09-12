@@ -1,5 +1,4 @@
 import hashlib
-import hmac
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -60,6 +59,7 @@ from aida.schemas import (
     ToolParameterDefinition,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.signing import sign_value
 from aida.sql_guard import SqlGuard
 from aida.tool_certification import (
     CERTIFICATION_SUITE_VERSION,
@@ -1038,15 +1038,10 @@ async def execute_tool_version(
         )
     except ToolParameterError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    parameter_fingerprint = hmac.new(
-        settings.audit_hmac_key.encode("utf-8"),
-        json.dumps(
-            rendered.normalized_parameters,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode(),
-        hashlib.sha256,
-    ).hexdigest()
+    parameter_fingerprint = await sign_value(
+        settings,
+        json.dumps(rendered.normalized_parameters, sort_keys=True, separators=(",", ":")),
+    )
     tool_execution = ToolExecution(
         organization_id=version.organization_id,
         tool_version_id=version.id,
