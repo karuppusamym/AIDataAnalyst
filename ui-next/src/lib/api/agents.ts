@@ -192,6 +192,14 @@ export interface AgentAskError {
   detail: string;
   /** Only populated for `AMBIGUOUS_DEFINITION`. */
   alternatives: AgentAskErrorAlternative[];
+  /** Only populated for `CLARIFICATION_NEEDED`: the inputs the matched tool
+   *  needs before it can answer, read from the server's structured `detail`
+   *  rather than parsed out of its sentence. Empty when the server sent prose
+   *  only, in which case the caller shows the message and nothing more. */
+  requiredParameters: string[];
+  /** The tool version those parameters belong to, so a retry can pin the same
+   *  tool instead of re-racing retrieval and possibly selecting another. */
+  toolVersionId: string | null;
 }
 
 const AMBIGUOUS_DEFINITION_RE =
@@ -221,10 +229,23 @@ function parseAmbiguousAlternatives(detail: string): AgentAskErrorAlternative[] 
   return alternatives;
 }
 
+const NO_CLARIFICATION = {
+  alternatives: [] as AgentAskErrorAlternative[],
+  requiredParameters: [] as string[],
+  toolVersionId: null,
+};
+
+/** Narrow the wire body's `unknown` to the string list this field is specified
+ *  to be; anything else is treated as absent rather than half-trusted. */
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
 export function classifyAgentAskError(error: ApiError): AgentAskError {
   const { status, detail } = error;
   if (status === 409 && detail === "datasource is disabled") {
-    return { kind: "DATASOURCE_DISABLED", status, detail, alternatives: [] };
+    return { kind: "DATASOURCE_DISABLED", status, detail, ...NO_CLARIFICATION };
   }
   if (status === 409 && AMBIGUOUS_DEFINITION_RE.test(detail)) {
     return {
@@ -232,14 +253,26 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
       status,
       detail,
       alternatives: parseAmbiguousAlternatives(detail),
+      requiredParameters: [],
+      toolVersionId: null,
     };
   }
-  if (status === 409) return { kind: "CLARIFICATION_NEEDED", status, detail, alternatives: [] };
-  if (status === 422) return { kind: "POLICY_REJECTED", status, detail, alternatives: [] };
-  if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, alternatives: [] };
-  if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, alternatives: [] };
-  if (status === 502) return { kind: "SERVER_ERROR", status, detail, alternatives: [] };
-  return { kind: "UNKNOWN", status, detail, alternatives: [] };
+  if (status === 409) {
+    return {
+      kind: "CLARIFICATION_NEEDED",
+      status,
+      detail,
+      alternatives: [],
+      requiredParameters: stringList(error.details?.required_parameters),
+      toolVersionId:
+        typeof error.details?.tool_version_id === "string" ? error.details.tool_version_id : null,
+    };
+  }
+  if (status === 422) return { kind: "POLICY_REJECTED", status, detail, ...NO_CLARIFICATION };
+  if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, ...NO_CLARIFICATION };
+  if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, ...NO_CLARIFICATION };
+  if (status === 502) return { kind: "SERVER_ERROR", status, detail, ...NO_CLARIFICATION };
+  return { kind: "UNKNOWN", status, detail, ...NO_CLARIFICATION };
 }
 
 /* ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, NoReturn
@@ -139,7 +140,25 @@ class ModelRouteUnavailable(RuntimeError):
 
 
 class AgentClarificationRequired(RuntimeError):
-    pass
+    """An approved tool matched the question but needs inputs the caller did not send.
+
+    Carries the inputs *and* the tool they belong to, not just prose. A
+    clarification is a contract -- "supply these and ask again" -- and a caller
+    that has to regex the message to honour it will get it wrong the first time
+    the wording changes. The message stays exactly as it was for anything that
+    logs or displays it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required_parameters: Sequence[str] = (),
+        tool_version_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.required_parameters: tuple[str, ...] = tuple(required_parameters)
+        self.tool_version_id = tool_version_id
 
 
 class AgentPolicyRejected(RuntimeError):
@@ -1076,7 +1095,9 @@ class GovernedAgentOrchestrator:
             reason = f"MISSING_TOOL_PARAMETERS:{','.join(plan.required_parameters)}"
             await self._persist_rejection(session, request, ledger, reason)
             raise AgentClarificationRequired(
-                f"approved tool requires parameters: {', '.join(plan.required_parameters)}"
+                f"approved tool requires parameters: {', '.join(plan.required_parameters)}",
+                required_parameters=plan.required_parameters,
+                tool_version_id=plan.selected_tool_version_id,
             )
         return PlanOutcome(plan=plan)
 

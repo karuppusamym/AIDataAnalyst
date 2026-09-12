@@ -286,6 +286,39 @@ def stub_embedding_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("aida.embedding_provider.httpx.AsyncClient", factory)
 
 
+async def test_clarification_names_the_inputs_and_the_tool_they_belong_to(
+    scenario: _Scenario, stub_embedding_transport: None
+) -> None:
+    """R11-B1: the refusal is a contract a client can act on, not a sentence.
+
+    With model generation off, an approved tool is the only path to an answer,
+    and it refuses until its inputs arrive. A caller that has to regex
+    "approved tool requires parameters: customer_id" out of the message will
+    break the first time the wording changes -- and cannot know *which* tool
+    to pin on the retry, so re-running retrieval could answer from a different
+    one than the person supplied inputs for.
+    """
+    orchestrator = GovernedAgentOrchestrator(_settings())
+
+    with pytest.raises(AgentClarificationRequired) as refused:
+        await orchestrator.run(
+            scenario.db,
+            datasource=scenario.datasource,
+            context=scenario.steward(),
+            correlation_id="corr-rt-clarify",
+            question="orders",
+            candidate_sql=None,
+            preferred_tool_version_id=scenario.tool_version.id,
+            tool_parameters={},
+            requested_limit=None,
+        )
+
+    assert refused.value.required_parameters == ("customer_id",)
+    assert refused.value.tool_version_id == str(scenario.tool_version.id)
+    # The human-readable message is unchanged for anything that only displays it.
+    assert "approved tool requires parameters: customer_id" in str(refused.value)
+
+
 async def test_orchestrator_run_surfaces_graph_and_vector_evidence_from_real_retrieval(
     scenario: _Scenario, stub_embedding_transport: None
 ) -> None:

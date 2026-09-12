@@ -1630,7 +1630,19 @@ async def run_agent_analysis(
             ),
         )
     except AgentClarificationRequired as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # Structured, because the caller has to *act* on this one: it names the
+        # inputs to collect and the tool version they belong to, so a client can
+        # render a form and ask again instead of parsing the sentence. The
+        # message is unchanged for anything that only displays it.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MISSING_TOOL_PARAMETERS",
+                "message": str(exc),
+                "required_parameters": list(exc.required_parameters),
+                "tool_version_id": exc.tool_version_id,
+            },
+        ) from exc
     except AgentPolicyRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ModelRouteUnavailable as exc:

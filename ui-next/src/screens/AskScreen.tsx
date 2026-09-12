@@ -86,7 +86,61 @@ const ERROR_TITLE: Record<Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION">, st
  *  definitions (and their owners) when the detail carries them, never a
  *  generic error banner. Every other mapped failure still goes through
  *  `ErrorState`, titled by what actually happened. */
-function AskRefusal({ error, onRetry }: { error: AgentAskError; onRetry: () => void }) {
+/** The clarification a governed tool asks for: it matched the question but
+ *  needs inputs nobody supplied. Rendering the inputs here is what makes Ask
+ *  usable with model generation switched off -- the deterministic tool path is
+ *  the only one open then, and it refuses until these arrive. The names come
+ *  from the server's structured refusal, so this form is never guessing.
+ *
+ *  Values are sent as strings and the server coerces and validates them
+ *  against the tool's typed parameter schema; a bad value comes back as its
+ *  own refusal rather than being second-guessed here. */
+function ClarificationForm({
+  error,
+  onSubmit,
+  busy,
+}: {
+  error: AgentAskError;
+  onSubmit: (values: Record<string, string>) => void;
+  busy: boolean;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(error.requiredParameters.map((name) => [name, ""])),
+  );
+  const complete = error.requiredParameters.every((name) => (values[name] ?? "").trim().length > 0);
+
+  return (
+    <form
+      className="askrefusal__params"
+      aria-label="Supply the inputs this tool needs"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (complete && !busy) onSubmit(values);
+      }}
+    >
+      {error.requiredParameters.map((name) => (
+        <Field key={name} label={name}>
+          <input
+            type="text"
+            value={values[name] ?? ""}
+            disabled={busy}
+            onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
+          />
+        </Field>
+      ))}
+      <Button type="submit" disabled={!complete || busy}>
+        {busy ? "Asking…" : "Ask with these values"}
+      </Button>
+    </form>
+  );
+}
+
+function AskRefusal({ error, onRetry, onClarify, busy }: {
+  error: AgentAskError;
+  onRetry: () => void;
+  onClarify: (values: Record<string, string>) => void;
+  busy: boolean;
+}) {
   if (error.kind === "AMBIGUOUS_DEFINITION") {
     return (
       <div className="askrefusal" role="alert" aria-label="Ambiguous term refusal">
@@ -110,6 +164,15 @@ function AskRefusal({ error, onRetry }: { error: AgentAskError; onRetry: () => v
           <p className="askrefusal__lede">{error.detail}</p>
         )}
         <Button onClick={onRetry}>Rephrase and ask again</Button>
+      </div>
+    );
+  }
+  if (error.kind === "CLARIFICATION_NEEDED" && error.requiredParameters.length > 0) {
+    return (
+      <div className="askrefusal" role="alert" aria-label="Tool needs more input">
+        <div className="askrefusal__t">This tool needs a little more to answer</div>
+        <p className="askrefusal__lede">{error.detail}</p>
+        <ClarificationForm error={error} onSubmit={onClarify} busy={busy} />
       </div>
     );
   }
@@ -472,7 +535,8 @@ export function AskScreen() {
   const askInflight = useRef<AbortController | null>(null);
   const askSeq = useRef(0);
 
-  const submitQuestion = useCallback(async () => {
+  const submitQuestion = useCallback(
+    async (clarification?: { toolParameters: Record<string, string>; toolVersionId: string | null }) => {
     const trimmed = question.trim();
     if (!dsId || trimmed.length < MIN_QUESTION_LEN || trimmed.length > MAX_QUESTION_LEN) return;
 
@@ -484,7 +548,22 @@ export function AskScreen() {
     setAsking(true);
     setAskError(null);
     try {
-      const response = await runAgentAnalysis(dsId, { question: trimmed }, ac.signal);
+      // A retry after a clarification pins the tool the server already chose:
+      // re-running retrieval could select a different one, and the answer would
+      // then come from a tool the person never supplied inputs for.
+      const response = await runAgentAnalysis(
+        dsId,
+        clarification
+          ? {
+              question: trimmed,
+              tool_parameters: clarification.toolParameters,
+              ...(clarification.toolVersionId
+                ? { preferred_tool_version_id: clarification.toolVersionId }
+                : {}),
+            }
+          : { question: trimmed },
+        ac.signal,
+      );
       if (seq !== askSeq.current) return;
       setAskResult(response);
       setAskedAt(new Date());
@@ -495,12 +574,21 @@ export function AskScreen() {
       if (e instanceof ApiError) {
         setAskError(classifyAgentAskError(e));
       } else {
-        setAskError({ kind: "UNKNOWN", status: 0, detail: (e as Error).message, alternatives: [] });
+        setAskError({
+          kind: "UNKNOWN",
+          status: 0,
+          detail: (e as Error).message,
+          alternatives: [],
+          requiredParameters: [],
+          toolVersionId: null,
+        });
       }
     } finally {
       if (seq === askSeq.current) setAsking(false);
     }
-  }, [dsId, question, setParams]);
+  },
+    [dsId, question, setParams],
+  );
 
   // Switching datasources leaves any open answer behind -- it belonged to
   // the previous datasource's runs, and `run` is cleared by the picker's own
@@ -684,7 +772,16 @@ export function AskScreen() {
         </div>
       </form>
 
-      {askError ? <AskRefusal error={askError} onRetry={() => void submitQuestion()} /> : null}
+      {askError ? (
+        <AskRefusal
+          error={askError}
+          onRetry={() => void submitQuestion()}
+          onClarify={(values) =>
+            void submitQuestion({ toolParameters: values, toolVersionId: askError.toolVersionId })
+          }
+          busy={asking}
+        />
+      ) : null}
 
       <div className="askscreen__main">
         <div className="askscreen__history">

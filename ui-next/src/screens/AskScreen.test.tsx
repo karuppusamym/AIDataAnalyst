@@ -285,6 +285,46 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.queryByText("The question could not be answered")).not.toBeInTheDocument();
   });
 
+  it("collects the inputs a governed tool asked for and asks again, pinning that tool (R11-B1)", async () => {
+    // With model generation off, an approved tool is the only path to an
+    // answer and it refuses until its inputs arrive. Before this, Ask showed
+    // the refusal and stopped there, so a fresh install could not answer a
+    // parameterised question at all.
+    const { ApiError } = await import("../lib/api");
+    runAgentAnalysis.mockRejectedValueOnce(
+      new ApiError(409, "approved tool requires parameters: customer_id", {
+        details: {
+          code: "MISSING_TOOL_PARAMETERS",
+          message: "approved tool requires parameters: customer_id",
+          required_parameters: ["customer_id"],
+          tool_version_id: "tv_orders_lookup_1",
+        },
+      }),
+    );
+    runAgentAnalysis.mockResolvedValueOnce(ANALYSIS_RESPONSE);
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "orders for a customer" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const refusal = await screen.findByRole("alert", { name: "Tool needs more input" });
+    const input = within(refusal).getByLabelText("customer_id");
+    fireEvent.change(input, { target: { value: "C-42" } });
+    fireEvent.click(within(refusal).getByRole("button", { name: "Ask with these values" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toEqual({
+      question: "orders for a customer",
+      tool_parameters: { customer_id: "C-42" },
+      preferred_tool_version_id: "tv_orders_lookup_1",
+    });
+    // The retry's answer replaces the refusal rather than sitting beside it.
+    expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+  });
+
   it("distinguishes a disabled-datasource 409 from the AT-9 ambiguity 409", async () => {
     runAgentAnalysis.mockRejectedValue(
       new (await import("../lib/api")).ApiError(409, "datasource is disabled"),
