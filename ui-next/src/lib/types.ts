@@ -4322,39 +4322,6 @@ export interface SlaStatusResponse {
   period_end: string;
 }
 
-export interface SloBudgetRead {
-  slo_id: string;
-  slo_key: string;
-  name: string;
-  target: number;
-  current_value: number | null;
-  budget_remaining: number | null;
-  window_days: number;
-  status: string;
-}
-
-export interface SloDefinitionCreate {
-  slo_key: string;
-  name: string;
-  target: number;
-  window_days: number;
-  threshold: number;
-}
-
-export interface SloDefinitionRead {
-  id: string;
-  organization_id: string;
-  slo_key: string;
-  name: string;
-  target: number;
-  window_days: number;
-  threshold: number;
-  status: string;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface SourceBindingCreate {
   datasource_id: string;
   purpose: string;

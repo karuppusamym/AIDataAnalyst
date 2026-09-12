@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **473**
-- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 421, SDK 1
+- Surfaces covered: **470**
+- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 418, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -224,8 +224,6 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/notifications` | REST | `aida.notification_api.list_notifications` | DataAdmin, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/observability/archive/status` | REST | `atlas.modules.observability_audit.router.get_archive_status` | DataAdmin, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/observability/cost/showback` | REST | `atlas.modules.observability_audit.router.get_cost_showback` | ComplianceOfficer, DataAdmin, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/observability/slo/{slo_id}/budget` | REST | `atlas.modules.observability_audit.router.get_slo_budget` | DataAdmin, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/observability/slo` | REST | `atlas.modules.observability_audit.router.list_slo_definitions` | DataAdmin, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/openlineage-events/{event_id}` | REST | `aida.openlineage_api.get_openlineage_run_event` | Auditor, DataAdmin, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/access-policies` | REST | `atlas.modules.identity_tenancy.router.list_access_policies` | DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/agent-contract-requests` | REST | `aida.agent_contract_request_api.list_agent_contract_requests` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
@@ -421,7 +419,6 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/negative-knowledge/{assertion_id}/lift-suppression` | REST | `aida.negative_knowledge_api.lift_assertion_suppression` | DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/notification-rules` | REST | `aida.notification_api.create_notification_rule` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/notifications/{notification_id}/acknowledge` | REST | `aida.notification_api.acknowledge_notification` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/observability/slo` | REST | `atlas.modules.observability_audit.router.create_slo_definition` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/ontology-versions/{version_id}/submit` | REST | `aida.ontology_api.submit_ontology_version` | DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/access-policies` | REST | `atlas.modules.identity_tenancy.router.create_access_policy` | OrganizationAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/agent-contract-requests` | REST | `aida.agent_contract_request_api.submit_agent_contract_request` | AgentDeveloper, ModelRiskManager, PlatformAdmin | yes | no | writes | yes | not cancellable |

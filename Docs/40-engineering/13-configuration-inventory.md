@@ -19,7 +19,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**243 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
+**246 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -177,6 +177,9 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `usage_boost_max` | `int` | `30` | 1 |
 | `owner_routing_interval_minutes` | `int` | `1440` | 1 |
 | `graph_reconciliation_interval_minutes` | `int` | `360` | 1 |
+| `business_rollup_rebuild_enabled` | `bool` | `True` | 1 |
+| `business_rollup_rebuild_interval_seconds` | `int` | `86400` | 1 |
+| `business_rollup_rebuild_batch_size` | `int` | `25` | 1 |
 | `reaper_enabled` | `bool` | `True` | 1 |
 | `reaper_sweep_interval_seconds` | `int` | `86400` | 1 |
 | `reaper_retention_overrides` | `str | None` | `None` | 1 |

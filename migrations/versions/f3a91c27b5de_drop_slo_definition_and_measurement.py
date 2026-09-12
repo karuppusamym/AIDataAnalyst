@@ -34,7 +34,12 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "f3a91c27b5de"
-down_revision: str | Sequence[str] | None = "d41a7b8e6c02"
+# Re-chained on integration 2026-09-12: this revision was authored against
+# `d41a7b8e6c02`, and R11-C8's `a7c31f0b95e4` claimed that slot first. Two
+# parallel sessions branching from one head is how a migration graph grows a
+# second head; the two changes touch disjoint tables, so ordering them is the
+# whole fix.
+down_revision: str | Sequence[str] | None = "a7c31f0b95e4"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
