@@ -10,7 +10,7 @@ import type { PageOf } from "../lib/ui-types";
    (`unified_lineage_api.py::get_unified_lineage_graph`/`get_unified_lineage_impact`).
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchUnifiedLineageGraph = vi.fn<
   (datasourceId: string, query: unknown, signal?: AbortSignal) => Promise<UnifiedLineageGraphRead>
 >();
@@ -22,7 +22,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchUnifiedLineageGraph: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
       fetchUnifiedLineageGraph(datasourceId, query, signal),
     fetchLineageImpact: (datasourceId: string, nodeId: string, query: unknown, signal?: AbortSignal) =>
@@ -96,10 +96,10 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchUnifiedLineageGraph.mockReset();
   fetchLineageImpact.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchUnifiedLineageGraph.mockResolvedValue(GRAPH);
   fetchLineageImpact.mockResolvedValue(IMPACT);
   fetchDomainLineageGraph.mockReset();

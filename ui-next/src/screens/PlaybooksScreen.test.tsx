@@ -9,7 +9,7 @@ const createPlaybook = vi.fn();
 const updatePlaybook = vi.fn();
 const deletePlaybook = vi.fn();
 const runPlaybookNow = vi.fn();
-const fetchOrgDatasources = vi.fn();
+const listOrgDatasources = vi.fn();
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -20,7 +20,7 @@ vi.mock("../lib/api", async () => {
     updatePlaybook: (...args: unknown[]) => updatePlaybook(...args),
     deletePlaybook: (...args: unknown[]) => deletePlaybook(...args),
     runPlaybookNow: (...args: unknown[]) => runPlaybookNow(...args),
-    fetchOrgDatasources: (...args: unknown[]) => fetchOrgDatasources(...args),
+    listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
   };
 });
 
@@ -85,7 +85,7 @@ describe("PlaybooksScreen (AT-1)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fetchPlaybooks.mockResolvedValue({ items: [PLAYBOOK_TAG, PLAYBOOK_OWN_DISABLED], limit: 100, offset: 0, total: 2 });
-    fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+    listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   });
 
   it("lists existing playbooks with action, schedule and enabled state", async () => {
@@ -123,7 +123,7 @@ describe("PlaybooksScreen (AT-1)", () => {
     await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Create playbook", { selector: "summary" }));
-    await waitFor(() => expect(fetchOrgDatasources).toHaveBeenCalled());
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
 
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New rule" } });
     fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: DATASOURCE.id } });

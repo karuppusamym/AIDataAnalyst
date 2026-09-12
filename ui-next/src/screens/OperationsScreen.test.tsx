@@ -8,7 +8,7 @@ import { ApiError } from "../lib/api";
    (fleet-summary, analysis-runs, outbox-events + requeue) and
    `ingestion_api.py` (metadata-ingestion-batches) -- mocks the API boundary
    the same way every other UX-15/UX-16 screen test does.
-   `fetchOrgDatasources` is left un-mocked (the datasource-name lookup and
+   `listOrgDatasources` is left un-mocked (the datasource-name lookup and
    the drill-down picker's own fixture-mode datasource list), matching
    `NarratedLineageScreen`'s real datasource fixture (`ds_snowflake_prod`).
 --------------------------------------------------------------------------- */

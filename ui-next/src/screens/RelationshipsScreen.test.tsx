@@ -15,7 +15,7 @@ import type { PageOf } from "../lib/ui-types";
    than a superficial snapshot.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources =
+const listOrgDatasources =
   vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchRelationshipCandidateReviewQueue = vi.fn<
   (datasourceId: string, query: unknown, signal?: AbortSignal) => Promise<RelationshipCandidateReviewQueueRead>
@@ -34,8 +34,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     fetchRelationshipCandidateReviewQueue: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
       fetchRelationshipCandidateReviewQueue(datasourceId, query, signal),
     decideRelationshipCandidate: (candidateId: string, body: unknown, signal?: AbortSignal) =>
@@ -163,12 +163,12 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchRelationshipCandidateReviewQueue.mockReset();
   decideRelationshipCandidate.mockReset();
   bulkDecideRelationshipCandidates.mockReset();
   fetchRelationshipCandidateCalibration.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchRelationshipCandidateReviewQueue.mockResolvedValue(queueOf([]));
   fetchRelationshipCandidateCalibration.mockResolvedValue({
     datasource_id: null,

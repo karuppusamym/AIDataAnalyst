@@ -13,7 +13,7 @@ import { ApiError } from "../lib/api";
    asserting the exact endpoint/args called, not superficial snapshots.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources =
+const listOrgDatasources =
   vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchBusinessAnnotations = vi.fn<
   (query: unknown, signal?: AbortSignal) => Promise<PageOf<MetadataBusinessAnnotationRead>>
@@ -28,8 +28,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     fetchBusinessAnnotations: (query: unknown, signal?: AbortSignal) =>
       fetchBusinessAnnotations(query, signal),
     fetchTableBusinessAnnotation: (tableId: string, signal?: AbortSignal) =>
@@ -95,7 +95,7 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchBusinessAnnotations.mockReset();
   fetchTableBusinessAnnotation.mockReset();
   fetchBusinessMap.mockReset();
@@ -105,7 +105,7 @@ beforeEach(() => {
   submitGlossaryTermVersion.mockReset();
   linkTermToTable.mockReset();
   listGlossaryTerms.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchBusinessAnnotations.mockResolvedValue({ items: [], limit: 100, offset: 0, total: 0 });
   vi.resetModules();
   history.replaceState(null, "", "/");
@@ -120,7 +120,7 @@ describe("BusinessMeaningScreen against the real UX-16 endpoints", () => {
     const BusinessMeaningScreen = await loadScreen();
     render(<BusinessMeaningScreen />);
 
-    await waitFor(() => expect(fetchOrgDatasources).toHaveBeenCalled());
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
     expect(
       screen.getByText("Pick a datasource to see its business annotations"),
     ).toBeInTheDocument();

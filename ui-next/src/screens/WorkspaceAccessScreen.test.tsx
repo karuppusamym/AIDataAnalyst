@@ -22,7 +22,7 @@ import { ApiError } from "../lib/api";
    `POST /v1/bi-connections/{id}/artifact-imports` (`bi_api.py`). API boundary
    mocked, matching `AdministrationScreen.test.tsx`'s established pattern --
    real payload shapes, asserting exact endpoint args, not superficial
-   snapshots. `fetchOrgWorkspaces`/`fetchOrgProjects`/`fetchOrgDatasources`/
+   snapshots. `fetchOrgWorkspaces`/`fetchOrgProjects`/`listOrgDatasources`/
    `fetchWorkspaceSourceBindings` are reused, already-merged reads; only the
    six functions this screen adds are asserted against call args below.
 --------------------------------------------------------------------------- */
@@ -31,7 +31,7 @@ const ORG = "00000000-0000-0000-0000-000000000001";
 
 const fetchOrgWorkspaces = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<WorkspaceRead>>>();
 const fetchOrgProjects = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<ProjectRead>>>();
-const fetchOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
+const listOrgDatasources = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const fetchWorkspaceSourceBindings = vi.fn<(workspaceId: string, signal?: AbortSignal) => Promise<PageOf<SourceBindingRead>>>();
 const fetchWorkspaceMembers = vi.fn<(workspaceId: string, signal?: AbortSignal) => Promise<PageOf<WorkspaceMembershipRead>>>();
 const addWorkspaceMember =
@@ -51,7 +51,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     ...actual,
     fetchOrgWorkspaces: (organizationId: string, signal?: AbortSignal) => fetchOrgWorkspaces(organizationId, signal),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) => fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) => listOrgDatasources(organizationId, signal),
     fetchWorkspaceSourceBindings: (workspaceId: string, signal?: AbortSignal) =>
       fetchWorkspaceSourceBindings(workspaceId, signal),
     fetchWorkspaceMembers: (workspaceId: string, signal?: AbortSignal) => fetchWorkspaceMembers(workspaceId, signal),
@@ -112,7 +112,7 @@ const BI_CONNECTION: BiConnectionRead = {
 function mockBaseSummary() {
   fetchOrgWorkspaces.mockResolvedValue({ items: [WORKSPACE], limit: 200, offset: 0, total: 1 });
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchWorkspaceMembers.mockResolvedValue({ items: [MEMBER], limit: 1, offset: 0, total: 1 });
   fetchWorkspaceSourceBindings.mockResolvedValue({ items: [PENDING_BINDING], limit: 1, offset: 0, total: 1 });
   fetchProjectBiConnections.mockResolvedValue({ items: [BI_CONNECTION], limit: 100, offset: 0, total: 1 });
@@ -126,7 +126,7 @@ async function loadScreen() {
 beforeEach(() => {
   fetchOrgWorkspaces.mockReset();
   fetchOrgProjects.mockReset();
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchWorkspaceSourceBindings.mockReset();
   fetchWorkspaceMembers.mockReset();
   addWorkspaceMember.mockReset();

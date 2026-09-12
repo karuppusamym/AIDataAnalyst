@@ -41,7 +41,7 @@ import "./SemanticsScreen.css";
    semantic models, each expandable to its metrics. This is honestly a
    project-scoped browse behind a project picker, not a flattened org-wide
    semantic model/metric search — the same shape this file's own
-   `fetchOrgDatasources`-style composition already uses elsewhere in this
+   `listOrgDatasources`-style composition already uses elsewhere in this
    app (see `NarratedLineageScreen`'s datasource-name-to-id bridge). A true
    org-wide browse would need either a new aggregate endpoint (out of scope —
    `src/aida/` is not touched by this change) or an N+1 fan-out across every

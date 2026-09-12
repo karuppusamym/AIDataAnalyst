@@ -17,7 +17,7 @@ import type { PageOf } from "../lib/ui-types";
    `QualityScreen.test.tsx`'s established pattern.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources = vi.fn<
+const listOrgDatasources = vi.fn<
   (organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>
 >();
 const bulkTagCatalogTables = vi.fn<
@@ -43,8 +43,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     bulkTagCatalogTables: (organizationId: string, body: unknown, signal?: AbortSignal) =>
       bulkTagCatalogTables(organizationId, body, signal),
     bulkClassifyCatalogColumns: (organizationId: string, body: unknown, signal?: AbortSignal) =>
@@ -98,7 +98,7 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   bulkTagCatalogTables.mockReset();
   bulkClassifyCatalogColumns.mockReset();
   bulkAssignCatalogOwnership.mockReset();
@@ -106,7 +106,7 @@ beforeEach(() => {
   fetchUnownedAssetBacklog.mockReset();
   routeUnownedAssetBacklog.mockReset();
 
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchUnownedAssetBacklog.mockResolvedValue(backlogPage([ESCALATION]));
   bulkTagCatalogTables.mockResolvedValue(bulkRun());
 

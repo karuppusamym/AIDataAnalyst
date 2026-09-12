@@ -19,7 +19,7 @@ import { ApiError } from "../lib/api";
    /v1/organizations/{id}/lines-of-business` (`api.py:463`/`677`),
    `POST /v1/lines-of-business/{lob_id}/projects` (`api.py:901`), and
    `POST /v1/projects/{project_id}/datasources` (`api.py:1021`) -- reusing
-   `fetchOrgProjects`/`fetchOrgDatasources` already exercised by
+   `fetchOrgProjects`/`listOrgDatasources` already exercised by
    `SourcesScreen.test.tsx`. API boundary mocked, matching that file's
    established pattern -- real payload shapes, asserting the exact endpoint
    args, not superficial snapshots.
@@ -33,7 +33,7 @@ const fetchOrgLinesOfBusiness = vi.fn<
 const fetchOrgProjects = vi.fn<
   (organizationId: string, signal?: AbortSignal) => Promise<PageOf<ProjectRead>>
 >();
-const fetchOrgDatasources = vi.fn<
+const listOrgDatasources = vi.fn<
   (organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>
 >();
 const createOrganization = vi.fn<
@@ -57,8 +57,8 @@ vi.mock("../lib/api", async (importOriginal) => {
       fetchOrgLinesOfBusiness(organizationId, signal),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) =>
       fetchOrgProjects(organizationId, signal),
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     createOrganization: (body: OrganizationCreate, signal?: AbortSignal) =>
       createOrganization(body, signal),
     createLineOfBusiness: (organizationId: string, body: LineOfBusinessCreate, signal?: AbortSignal) =>
@@ -96,19 +96,19 @@ async function loadScreen() {
 function mockEmptySummary() {
   fetchOrgLinesOfBusiness.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
   fetchOrgProjects.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
-  fetchOrgDatasources.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
+  listOrgDatasources.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
 }
 
 function mockSeededSummary() {
   fetchOrgLinesOfBusiness.mockResolvedValue({ items: [LOB_FINANCE], limit: 500, offset: 0, total: 1 });
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT_CORE], limit: 500, offset: 0, total: 1 });
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE_SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE_SNOWFLAKE], limit: 500, offset: 0, total: 1 });
 }
 
 beforeEach(() => {
   fetchOrgLinesOfBusiness.mockReset();
   fetchOrgProjects.mockReset();
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   createOrganization.mockReset();
   createLineOfBusiness.mockReset();
   createProject.mockReset();
@@ -118,7 +118,7 @@ beforeEach(() => {
 });
 
 describe("AdministrationScreen against the real tenant-onboarding endpoints", () => {
-  it("loads the scope summary via fetchOrgLinesOfBusiness/fetchOrgProjects/fetchOrgDatasources, scoped to the current org", async () => {
+  it("loads the scope summary via fetchOrgLinesOfBusiness/fetchOrgProjects/listOrgDatasources, scoped to the current org", async () => {
     mockSeededSummary();
     const AdministrationScreen = await loadScreen();
 
@@ -127,7 +127,7 @@ describe("AdministrationScreen against the real tenant-onboarding endpoints", ()
     await waitFor(() => expect(screen.getAllByText(/Consumer Finance/).length).toBeGreaterThan(0));
     expect(fetchOrgLinesOfBusiness).toHaveBeenCalledWith(ORG, expect.anything());
     expect(fetchOrgProjects).toHaveBeenCalledWith(ORG, expect.anything());
-    expect(fetchOrgDatasources).toHaveBeenCalledWith(ORG, expect.anything());
+    expect(listOrgDatasources).toHaveBeenCalledWith(ORG, expect.anything());
     // one project / one source under lob_fin, per ScopeSummary's per-LOB counts
     expect(screen.getByText("1 project · 1 source")).toBeInTheDocument();
   });
@@ -283,7 +283,7 @@ describe("AdministrationScreen against the real tenant-onboarding endpoints", ()
   it("surfaces a scope-summary fetch error with a retry action", async () => {
     fetchOrgLinesOfBusiness.mockRejectedValue(new ApiError(403, "policy_denied"));
     fetchOrgProjects.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
-    fetchOrgDatasources.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
+    listOrgDatasources.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
     const AdministrationScreen = await loadScreen();
 
     render(<AdministrationScreen />);

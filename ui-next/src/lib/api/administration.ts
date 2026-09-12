@@ -50,7 +50,7 @@ import type { PageOf } from "../ui-types";
    portal itself posts to -- the deliberate four-step hierarchy the backend
    enforces (organization -> line of business -> project -> datasource), not
    an invented "setup" API. `fetchOrganizations`, `fetchOrgProjects` and
-   `fetchOrgDatasources` in `./identity.ts` already cover this screen's
+   `listOrgDatasources` in `./identity.ts` already cover this screen's
    organization, project and datasource reads; `fetchOrgLinesOfBusiness`
    below is the one read nothing existing exposed yet.
 --------------------------------------------------------------------------- */
@@ -109,7 +109,7 @@ export function requestSourceBinding(
 
 /** `GET /v1/organizations/{organization_id}/lines-of-business`
  *  (`list_lines_of_business`, `api.py:463`) -- the one hierarchy read
- *  `fetchOrgProjects`/`fetchOrgDatasources` (`./identity.ts`) don't already
+ *  `fetchOrgProjects`/`listOrgDatasources` (`./identity.ts`) don't already
  *  cover; feeds
  *  both the "Add project" line-of-business picker and the scope-summary
  *  tree in `AdministrationScreen`. */
@@ -170,7 +170,7 @@ export function createProject(
 
 /** `POST /v1/projects/{project_id}/datasources` (`create_datasource`,
  *  `api.py:1021`) -- the same registration path `SourcesScreen`'s fleet is
- *  read back from (via `fetchOrgDatasources`), scoped to one project.
+ *  read back from (via `listOrgDatasources`), scoped to one project.
  *  `credential_reference` must reference the configured secret provider
  *  (`_validate_datasource_create`, `api.py:960`); a raw connection string
  *  comes back as a 422, same as the legacy portal. Requires `PlatformAdmin`

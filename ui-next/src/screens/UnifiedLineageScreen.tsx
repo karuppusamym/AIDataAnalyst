@@ -9,7 +9,7 @@ import type {
   UnifiedLineageImpactRead,
   UnifiedLineageNodeRead,
 } from "../lib/types";
-import { ApiError, fetchLineageImpact, fetchOrgDatasources, fetchUnifiedLineageGraph } from "../lib/api";
+import { ApiError, fetchLineageImpact, fetchUnifiedLineageGraph, listOrgDatasources } from "../lib/api";
 import {
   domainsWithDatasources,
   fetchDomainLineageGraph,
@@ -268,7 +268,7 @@ export function UnifiedLineageScreen() {
       try {
         const [allDomains, sources] = await Promise.all([
           fetchOrgDataDomains(ORG, ac.signal),
-          fetchOrgDatasources(ORG, ac.signal),
+          listOrgDatasources(ORG, ac.signal),
         ]);
         if (cancelled) return;
         setDomains(domainsWithDatasources(allDomains, sources.items ?? []));

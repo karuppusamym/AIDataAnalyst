@@ -21,7 +21,7 @@ vi.mock("../lib/api/columnDocumentation", () => ({
 }));
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
-  return { ...actual, fetchOrgDatasources: (...args: unknown[]) => datasources(...args) };
+  return { ...actual, listOrgDatasources: (...args: unknown[]) => datasources(...args) };
 });
 vi.mock("../lib/api/transport", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/transport")>();

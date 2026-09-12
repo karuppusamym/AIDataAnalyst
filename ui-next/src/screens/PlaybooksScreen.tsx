@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
-  DataSourceRead,
   PlaybookCreate,
   PlaybookRead,
   PlaybookRunResultRead,
@@ -9,12 +8,12 @@ import {
   ApiError,
   createPlaybook,
   deletePlaybook,
-  fetchOrgDatasources,
   fetchPlaybooks,
   runPlaybookNow,
   updatePlaybook,
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/workflow-author.css";
@@ -140,10 +139,20 @@ function CreatePlaybookForm({
   organizationId: string;
   onCreated: (playbook: PlaybookRead) => void;
 }) {
-  const [datasources, setDatasources] = useState<DataSourceRead[]>([]);
   const [name, setName] = useState("");
   const [action, setAction] = useState<PlaybookAction>("TAG");
   const [datasourceId, setDatasourceId] = useState("");
+  /* The form is collapsed until someone opens it, so the source list is not
+     fetched for everyone who merely visits the screen -- the behaviour the
+     `onToggle` fetch this replaced was there for. A playbook may target any
+     source in the tenant, not only one the current workspace binds, so this
+     is organization reach rather than the shell's scope. */
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const { datasources, error: datasourcesError } = useDatasourcePicker(organizationId, {
+    reach: "organization",
+    enabled: pickerOpen,
+    selectedId: datasourceId,
+  });
   const [matchField, setMatchField] = useState<PlaybookMatchField>("TABLE_NAME");
   const [matchPattern, setMatchPattern] = useState("");
   const [columnNamePattern, setColumnNamePattern] = useState("");
@@ -205,9 +214,7 @@ function CreatePlaybookForm({
     <details
       className="workflow-author"
       onToggle={(event) => {
-        if (event.currentTarget.open && datasources.length === 0) {
-          void run(async () => setDatasources((await fetchOrgDatasources(organizationId)).items));
-        }
+        if (event.currentTarget.open) setPickerOpen(true);
       }}
     >
       <summary>Create playbook</summary>
@@ -343,7 +350,7 @@ function CreatePlaybookForm({
       >
         Create playbook
       </Button>
-      {message ? <p role="status">{message}</p> : null}
+      {message || datasourcesError ? <p role="status">{message || datasourcesError}</p> : null}
     </details>
   );
 }

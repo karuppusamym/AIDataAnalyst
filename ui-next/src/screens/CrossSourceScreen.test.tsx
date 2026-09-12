@@ -28,7 +28,7 @@ vi.mock("../lib/_cross_source_api", async () => {
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../lib/api");
-  return { ...actual, fetchOrgDatasources: (...a: unknown[]) => fetchDatasources(...a) };
+  return { ...actual, listOrgDatasources: (...a: unknown[]) => fetchDatasources(...a) };
 });
 
 vi.mock("../lib/org", () => ({ useOrgId: () => "org-1", getCurrentOrgId: () => "org-1" }));

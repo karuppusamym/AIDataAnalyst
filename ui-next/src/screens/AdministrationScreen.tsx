@@ -6,7 +6,7 @@ import type {
   WorkspaceRead,
 } from "../lib/types";
 import {
-  fetchOrgDatasources,
+  listOrgDatasources,
   fetchOrgLinesOfBusiness,
   fetchOrgProjects,
   fetchOrgWorkspaces,
@@ -50,7 +50,7 @@ import "./AdministrationScreen.css";
    the rail counts from, so a created object appears in the summary without a
    round trip and the next `reload` reconciles it with the server.
 
-   Reads: `fetchOrgProjects` and `fetchOrgDatasources` (already used by
+   Reads: `fetchOrgProjects` and `listOrgDatasources` (already used by
    `SemanticsScreen`/`SourcesScreen`) cover this screen's project and
    datasource lists; `fetchOrgLinesOfBusiness` (new, `api.py:463`) is the one
    read nothing existing exposed. All are scoped to `useOrgId()`, the same
@@ -111,7 +111,7 @@ export function AdministrationScreen() {
       const [lobPage, projectPage, dsPage, workspacePage] = await Promise.all([
         fetchOrgLinesOfBusiness(ORG, signal),
         fetchOrgProjects(ORG, signal),
-        fetchOrgDatasources(ORG, signal),
+        listOrgDatasources(ORG, signal),
         fetchOrgWorkspaces(ORG, signal),
       ]);
       const bindingPages = await Promise.all(

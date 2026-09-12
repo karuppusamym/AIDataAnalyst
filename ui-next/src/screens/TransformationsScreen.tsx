@@ -13,7 +13,7 @@ import {
   fetchDbtLineage,
   fetchDbtProjects,
   fetchDbtResources,
-  fetchOrgDatasources,
+  listOrgDatasources,
   fetchOrgProjects,
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
@@ -94,7 +94,7 @@ import "./TransformationsScreen.css";
    scoping `SemanticsScreen`/`ContextProductsScreen` already use, since dbt
    projects are registered per delivery project, not per organization
    (`create_dbt_project`'s own `_project_scope`). The datasource picker in
-   "Register dbt project" reuses `fetchOrgDatasources` and filters to
+   "Register dbt project" reuses `listOrgDatasources` and filters to
    `project_id === projectId` client-side, the exact rule legacy's own
    `populateProjectSources` applies (`ui/scripts/core.js:50`).
 
@@ -199,7 +199,7 @@ export function TransformationsScreen() {
     async (signal) => {
       const [projectPage, datasourcePage] = await Promise.all([
         fetchOrgProjects(ORG, signal),
-        fetchOrgDatasources(ORG, signal),
+        listOrgDatasources(ORG, signal),
       ]);
       return { projects: projectPage.items, datasources: datasourcePage.items };
     },

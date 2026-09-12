@@ -20,7 +20,7 @@ import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../t
 
 /* ---------------------------------------------------------------------------
    Sources — UX-15/UX-16 follow-on (nav id `sources`). Reuses
-   `fetchOrgDatasources` (`./identity.ts`) for the fleet list (see that function's own
+   `listOrgDatasources` (`./identity.ts`) for the fleet list (see that function's own
    comment for the `DataSourceRead`/`DataSourceSummaryRead` shape note this
    screen also relies on -- `credential_reference` is typed but not actually
    present on this endpoint's wire response; this screen never reads it). The
