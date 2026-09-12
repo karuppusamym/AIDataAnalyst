@@ -1,26 +1,44 @@
 # Delivery Status
 
-## Current delivery decision ? 2026-09-11
+## Current delivery confirmation ? 2026-09-12
 
-The [tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) is the
-only authority for current work status. The [reconciliation](23-review-reconciliation-2026-09-11.md)
-records what continues, what is deferred and why prior tickets closed. The
-[capability register](20-capability-register.md) records dated implementation/configuration/verification evidence.
+[Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current
+work status. The [September 12 confirmation](23-review-reconciliation-2026-09-11.md#september-12-completion-confirmation)
+records the checks and remaining acceptance; the [capability register](20-capability-register.md)
+keeps implementation separate from configuration and real-environment verification.
 
-All 79 previously open/partial tracker items now have dispositions: 78 merged into explicit
-successors, legacy UI retirement closed. The new queue also covers September 11 findings and
-missing safety/deployment evidence. X7's proposed agent-budget deletion is cancelled because
-REST/MCP callers now exist. Unattended reviewer approvals stay off: the recorded adversarial
-benchmark remains unsafe. Prioritize execution/signing/archive defects, contract and workspace
-controls, then the governed Ask/access/source journey. Live-provider, accessibility and recovery
-proof remain pending. Details and prerequisites are in the queue, not implied by historical DONEs.
+Most scheduled implementation has landed: **36 DONE, 16 PARTIAL, 7 BLOCKED, 23 DEFERRED,
+1 CANCELLED** across 83 unique packages. Of 59 non-deferred/non-cancelled packages, 36 are
+complete; 23 still need implementation, verification or prerequisites. **14 of 15 defects
+are DONE**; D6 retains OIDC-session transition verification. No TODO row is not the same as
+no pending work.
+
+Completed: native-policy bypass removal, signing correction, compliance-claim correction,
+withdrawal/navigation/picker defects, operator enforcement readiness, housekeeping, local
+access provisioning/revocation, governed Ask/tool reuse, source controls, browser harness,
+classification producer, scoped navigation consolidation and capability refresh. Existing
+live evidence records a real model answer and task-agent registration/runs. X7 deletion
+remains cancelled because contract and budget controls have live callers.
+
+Remaining priorities: B2 execution-match scoring; B8 freshness observation production;
+C3 unsafe reviewer evidence; C6/C8 authority and correction remainders; D6/C2 human/session
+acceptance; C1 live ontology publication; real archive/collector/Slack/Teams evidence;
+and customer connector/IdP/secrets/security/calibration/model-governance/scale/masking
+prerequisites. Unattended reviewer approvals stay off: the latest recorded benchmark
+approves 9 of 14 false twins and distinguishes no pairs. Deferred expansion is not a
+release requirement unless its recorded trigger is met.
+
+Fresh checks: **195 backend + 44 UI tests passed**. Configured PostgreSQL and repository
+are both at `090b3be72b67 (head)` and ontology tables exist; the old migration blocker is
+resolved. No live model call, migration application or production configuration change
+was performed in this confirmation. Earlier full-suite/live runs retain their original dates.
 
 ## Historical status snapshots
 
 Everything below is dated evidence from earlier passes, not a current verification or execution
 plan. In particular, test counts, invariant limits, open decisions and capability tables have
 not all been rerun against the September 11 tree. Current review findings override them:
-INV-2's native-policy execution bypass (R11-D1) is closed in code as of 2026-09-11; agent safety remainders are R11-C3/C4/C6/C7/C8.
+INV-2's native-policy execution bypass (R11-D1) is closed in code as of 2026-09-11; agent safety remainders are R11-C3/C6/C7/C8; C4 now has recorded PostgreSQL concurrency/isolation proof.
 
 
 > Status: **Living document — the single answer to "where are we".** Owner: Engineering lead.

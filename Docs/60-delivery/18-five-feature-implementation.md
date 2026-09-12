@@ -70,6 +70,15 @@ certify live browser layout, provider semantics, production throughput or recove
 
 ## Database deployment checkpoint
 
+> **September 12 read-only confirmation:** configured PostgreSQL and repository both report
+> `090b3be72b67 (head)`; `ontology_head` and `ontology_version` exist. The unapplied-migration
+> blocker described below is historical and resolved. R11-C1 is PARTIAL pending live
+> create/review/publication evidence; do not act on the old lock/session IDs. See the
+> [completion confirmation](23-review-reconciliation-2026-09-11.md#september-12-completion-confirmation).
+
+The following records the earlier checkpoint:
+
+
 Concurrent work created migration `7c2d94e1b8a3` for the same ontology tables while
 this pass was preparing its migration. The duplicate `f2a6b9c1d4e8` attempt was
 cancelled before commit and its local migration file removed. Read-only checks

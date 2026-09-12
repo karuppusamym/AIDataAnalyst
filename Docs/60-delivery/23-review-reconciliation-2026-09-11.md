@@ -1,4 +1,77 @@
-# Review reconciliation ? 11 September 2026
+# Review reconciliation and completion confirmation
+
+## September 12 completion confirmation
+
+Baseline: clean tree at `0bfb1e2` before this documentation update. The
+[current tracker](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) remains the
+only work-status authority. This confirmation inspected every current row and its remaining
+acceptance, recent implementation commits, selected source paths, targeted tests and the
+configured database's migration state. It does not rerun every historical acceptance test.
+
+**Most of the scheduled implementation is done.** All 15 D-series defects now have a
+recorded implementation or retirement; 14 are DONE and D6 needs session-transition proof.
+The full queue contains **83 unique packages: 36 DONE, 16 PARTIAL, 7 BLOCKED, 23 DEFERRED,
+1 CANCELLED**. The 59 non-deferred/non-cancelled packages comprise 36 done and 23 unfinished.
+No TODO row remains, but PARTIAL and BLOCKED are still real pending work. The full product
+and its external integrations are not certified complete by these counts.
+
+### Status corrections made
+
+| Item | Confirmed disposition |
+|---|---|
+| D3 misleading WORM claim | DONE: the review allowed changing the claim/label, and that is implemented. B9 separately retains real destination archival. |
+| B4 access provisioning/revocation | DONE for the local authority/provider lifecycle and query enforcement; 16 lifecycle/gateway tests are included in the passing focused run. Remote fulfilment certification is not implied. |
+| P7 history/authority reconciliation | DONE for reconciliation. Physical archival is deferred under P12; it does not keep this completed task open. |
+| C1 ontology deployment | PARTIAL, no longer blocked on unapplied migrations: configured DB and repository both report head `090b3be72b67`; both ontology tables exist. Still obtain live draft/review/publication evidence. |
+| Duplicate B16 | Original connector-incremental B16 retained; model-health task renamed B18. Source comments/commit titles using B16 for model health are historical aliases. |
+| S10 navigation completion | DONE for adopted grouping and 41 destinations, not the original 19-screen target. Remaining scope-axis/relationship-review consolidation preserved as DEFERRED S13. |
+| B12 producer decisions | DONE at inventory scope; B17 implements classification, exemplar promotion already has callers, warehouse/IAM producer inputs retain explicit prerequisite-based deferral. |
+| B10 malformed Markdown | Unescaped vertical bar in its evidence split the row into an extra cell; repaired so the entire destination-verification remainder is visible. |
+
+### What still needs work
+
+| Remaining package | Continue only this remainder |
+|---|---|
+| B2 answer quality | A real model answer is already recorded; execution-match corpus scoring remains. A successful call is not answer-quality certification. Retrieval discovery choices remain S3. |
+| B8 freshness | UI, scheduling and incident lifecycle are implemented; source observations still have no production writer. Do not treat observation absence as measured source staleness. |
+| C3 reviewer correctness | Latest recorded truth-labelled benchmark: 9 of 14 false twins approved, zero pairs distinguished; labels still lack human stewardship sign-off. Keep unattended approvals off. |
+| C6 agent authority | Named boundary fixes are implemented; retain native-tool per-agent permissions, project product-list filtering and first-contract authority decisions. |
+| C8 correction coverage | Enrichment withdrawal, non-additive before-images, old-row handling, broader sample/correction linkage and downstream harm evidence remain. |
+| D6 / C2 / C1 | Real OIDC lifecycle transitions; human keyboard/screen-reader/visual acceptance; live ontology publication respectively. Automated tests do not substitute. |
+| B9 / B10 / I1 | Real archive IAM/retention receipts, collector delivery and Slack/Teams tenant verification. Local doubles and webhook acknowledgements do not prove these. |
+| X2 / X4 / X5 / S9 | Remaining table/endpoint/default-off feature decisions and deferred structural-gate work. Do not rerun completed removals or indiscriminately enable dormant features. |
+| C7 | Context/prompts/catalog egress and version policy are implemented. Result-row screening remains explicitly deferred with its stated tradeoff; it is not fully closed. |
+| B5 / B6 / B15 / C9 / C10 / C11 / C13 | Customer connector, corporate identity/secrets, scale/recovery, release security, labelled calibration, model governance and masking prerequisites remain BLOCKED. |
+
+Broad S/P simplifications and optional integrations remain deferred on their existing triggers;
+there is no instruction here to restart them just because the initial defect pass is nearly
+finished. B3's local enforcement proof does not certify every workspace in the deployment.
+
+### Evidence rerun in this confirmation
+
+- 195 backend tests passed across native-policy preview/boundary, signing/Tier-0,
+  description withdrawal, workspace enforcement, rollup scheduling, access lifecycle and
+  gateway entitlement enforcement, freshness incidents, external-reviewer supervision,
+  REST tool contracts, MCP catalog screening, model-health monitoring and task-agent seeding.
+- 44 UI tests passed in `SaveAnalysisTool`, `CatalogTable`, `AskScreen` and route contracts.
+- Read-only `alembic current` and `alembic heads`: `090b3be72b67 (head)` in both.
+  `to_regclass` confirms `ontology_head` and `ontology_version` in the configured PostgreSQL.
+- Existing live-stack evidence was read from the
+  [acceptance guide](../40-engineering/14-acceptance-testing-guide.md) and B1/A1 completion
+  commits. Its earlier full-suite/provider/browser runs were not repeated or re-dated here.
+- No model call, production configuration change, migration application or feature deletion
+  was performed by this confirmation pass. Database verification was read-only.
+
+Documentation validation after the updates: all relative links in 235 Markdown files resolve;
+`test_doc_claims.py` passed (4,914 checks, 86 existing skips); tracker consistency confirms
+83 unique five-column rows, all 64 original findings and 78 valid legacy successor links.
+`git diff --check -- Docs README.md` passed. These documentation checks do not replace
+application or live-environment verification.
+
+## September 11 reconciliation history
+
+The remainder is the dated original reconciliation. Its counts, concurrent-edit observations
+and partial statuses are history; the September 12 confirmation and current tracker supersede them.
 
 Decision baseline: repository `06b0b56`, the new September 11 review, September 5 remediation
 tracker/roadmap, August delivery tracker, September 9 agent review with September 11 updates,

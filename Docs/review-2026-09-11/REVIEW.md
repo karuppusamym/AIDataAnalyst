@@ -1,24 +1,57 @@
 # Atlas application review — build, remove, simplify
 
-> **Reconciled 2026-09-11 against `06b0b56`.** Use the [current execution queue](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) for status and the [reconciliation](../60-delivery/23-review-reconciliation-2026-09-11.md) for earlier-review dispositions. Measurements below retain the original baseline. X7 removal is cancelled: current REST/MCP callers exist. Agent safety partials and deployment/accessibility gaps are explicitly carried forward. This review is evidence and rationale, not a separate work queue.
+> **Completion confirmed 2026-09-12 against `0bfb1e2`.** Most scheduled implementation has landed. Use the [current queue](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) for task status and the [September 12 confirmation](../60-delivery/23-review-reconciliation-2026-09-11.md#september-12-completion-confirmation) for closure evidence and remaining work. The original measurements and findings below are a dated baseline, not a claim that each defect still exists. X7 removal remains cancelled. The connector-incremental B16 retains its ID; the later model-health finding is B18.
+
+## Completion update ? 12 September 2026
+
+The current queue has **36 DONE, 16 PARTIAL, 7 BLOCKED, 23 DEFERRED and 1 CANCELLED**
+(83 unique work packages). Of the 59 non-deferred/non-cancelled packages, 36 are done.
+All D-series defects have implementation or retirement evidence; **14 of 15 are DONE**,
+with D6 awaiting real OIDC session-transition verification. This is substantial implementation
+completion, not full release certification.
+
+| Original headline | Confirmed update |
+|---|---|
+| Ask lacks parameter handling and a reusable-tool action | B1 DONE: parameter clarification/retry, seeded governed tool and tested propose-as-tool flow. The acceptance guide records the live refusal/retry path. |
+| No real model has been called | Superseded: the acceptance guide records a real Gemini-generated answer. B2 remains PARTIAL because execution-match corpus scoring is not complete. |
+| Approved product access stays pending forever | B4 DONE for the implemented local authority: provision/consume/revoke plus real gateway enforcement are covered by the focused passing tests. Remote destination certification remains separate. |
+| No source rescan/schedule UI | B7 DONE. B8 has freshness UI/scheduler/incidents, but no production observation writer; freshness is not complete. |
+| Native policy execution bypass and raw-key signing | D1/D2 DONE: apply removed, preview retained, provider-backed digests and guards implemented. Focused boundary/signing tests passed. |
+| Compliance packs falsely claim WORM storage | D3 DONE as the permitted label/docstring correction. B9 retains actual archive destination verification. |
+| New agents have never been made reachable | A1 records real registration/approval and steward runs on the seeded deployment. Zero proposals is expected on the already-covered estate; this does not establish autonomous-review safety. |
+| Navigation should become 19 screens | Adopted S10 scope shipped journey groups and 41 destinations with aliases. S13 retains additional consolidation as deferred work; do not reopen the shipped change against an obsolete target. |
+| The capability register is entirely stale | B14 refresh landed; the contradictory September 11 correction table is updated by this pass. Each live-evidence date retains its own meaning. |
+| Ontology tables/migration are blocked | Current configured PostgreSQL and repository both report head `090b3be72b67`, and both ontology tables exist. C1 is PARTIAL pending live publication proof, not blocked by the old migration incident. |
+
+Still open: answer-quality scoring (B2), freshness observations (B8), reviewer correctness
+(C3: latest recorded benchmark approves 9 of 14 false twins), remaining authority/correction
+coverage (C6/C8), human accessibility and OIDC lifecycle checks, real destination evidence,
+and customer security/identity/connector/scale prerequisites. Keep unattended approvals off.
+Completed code is retained; partial items continue only their named remainder.
+
+Fresh checks in this confirmation: **195 backend tests and 44 UI tests passed**; migration
+head and ontology-table presence checked read-only. Earlier full-suite/live-provider/browser
+results are cited as dated evidence, not claimed as newly rerun.
+
+## Original review baseline ? 11 September 2026
 
 Review date: 11 September 2026. Code measured between `d716694` and `ab7ac42` on `feature/agent-os-v2` (other sessions committed during the review; line numbers can drift by a few lines).
 Scope: `src/aida`, `src/atlas`, `sdk/`, `scripts/`, `ui-next/`, `tests/`, `migrations/`, `Docs/`, `compose*.yaml`, `infra/`, `.github/workflows/ci.yml`.
 Method: seven independent reviews (backend dead code, UI, agents/AI, governance and infrastructure, core metadata, tests/docs/hygiene, product journey), each finding tied to `file:line` or a measurement. The findings that lead each section were re-checked in source for this document.
 Predecessor: [review-2026-09-05](../review-2026-09-05/REVIEW.md). Its status is in §7.
 
-**Confidence labels.** *Confirmed* — verified in source or by a command. *Likely* — strong signal, one check missing. *Candidate* — needs a product decision or usage data. Nothing here has been deleted or changed; this document is a plan.
+**Confidence labels.** *Confirmed* — verified in source or by a command. *Likely* — strong signal, one check missing. *Candidate* — needs a product decision or usage data. At the original measurement this document was a plan; subsequent implementation and current status are recorded in the completion update above.
 
 ---
 
-## 1. The short version
+## 1. The original assessment
 
 Atlas has a genuinely strong core: one SQL execution choke point, models that only propose, maker-checker review through one decision service, a value-free control plane, fail-closed model activation, and honest readiness reporting. Every finding from the 5 September review now has code behind it.
 
 The problem is proportion. In two weeks the repository reached ~415K lines — 141K of backend product code, 117K of tests, 60K of UI, 52K of docs — with **44 screens, 471 endpoints, ~200 tables, 243 settings and 19 compose services**. Against that:
 
 - **The core journey still breaks at the payoff.** On a fresh install, Ask refuses any question that no parameter-free governed tool covers (model generation is off by default and the UI never sends tool parameters). Approved data-product access stays `PENDING` forever. There is no UI to re-scan a source or configure freshness.
-- **Almost nothing outward-facing has met a real counterpart.** No live model has ever been called. Of 33 implemented capabilities in the register, 16 are unverified and 12 are verified only locally; the 5 fully verified rows are plumbing.
+- **Almost nothing outward-facing has met a real counterpart.** At this original baseline no live model had been called; this is superseded by September 12 live-provider evidence. Of 33 implemented capabilities in the register, 16 are unverified and 12 are verified only locally; the 5 fully verified rows are plumbing.
 - **New surface keeps outrunning use.** 43% of the last five days' commits were agent work: three task agents, a scheduler, a roster, budgets — none of which is established here as verified against a real estate. **Reconciliation:** Ask as a registered agent now has REST and MCP callers; X7 removal is cancelled.
 - **One central invariant has a hole.** Native policy sync opens its own driver connection to a source and runs DDL outside the query gateway (§2, D1).
 
@@ -45,7 +78,7 @@ The problem is proportion. In two weeks the repository reached ~415K lines — 1
 
 ## 2. Defects found in this review — fix first
 
-These findings describe the original review baseline. During reconciliation, concurrent working-tree fixes appeared for D2/D3/D5/D6/D8; their current status is PARTIAL with remaining verification in tracker section P. Do not repeat those implementations. The other source findings have not all been reverified against ongoing edits.
+These findings describe the original review baseline; current dispositions are in the completion update and tracker section P. Do not repeat a completed fix.
 
 | ID | Defect | Evidence | Severity | Fix |
 |---|---|---|---|---|
@@ -121,7 +154,7 @@ Ordered. P0 items make the core journey pay off; P1 items close operational loop
 | X4 | **23 empty `src/atlas` scaffolds** (events/repository/service/workers ×5, the unmounted `profiling/router.py`) and 10 modules reached only by tests under `src/atlas/modules/*/tests`, which pytest never collects (`testpaths=["tests"]`). Extend the reachability gate to `src/atlas` (`tests/test_reachability_gate.py:48` scans `src/aida` only). | Import graph. | 33 files, 268 lines | Low (`scripts/generate_module.py` regenerates scaffolds) |
 | X5 | **Endpoints nobody calls** — 101 of 471 routes (~4.9K handler lines) have no client; 65 more (~3.5K) are called only by tests. Start with whole routers the UI never touches: `graph_perspectives_api` (5), `policy_native_sync_api` (4, plus the 921-line engine — see D1), `retrieval_ops_api` (4), `composite_key_api` (3), `search_api` (2) with `semantic_api`'s test-only global search, and the test-only routers `table_family_api`, `view_lineage_api`, `access_review_api`. For each cluster: delete, or build the UI if it belongs to the journey. | Route table cross-referenced with `ui-next/src`, `sdk/`, `scripts/`, `tests/` (conservative: a GET caller marks a same-path POST as called). **Keep** the machine-to-machine ones: OpenLineage ingest, `/mcp`, health and metrics, ingestion chunk upload, classification feed, detokenize/revoke, capability matrix. | Up to ~8.4K handler lines plus backing modules | Medium; decide per cluster |
 | X6 | **Settings nothing reads** — `profiling_exception_default_retention_days` (`config.py:232`), `cross_source_candidate_max_datasource_pairs` (`:242`), `usage_boost_enabled_default` (`:249`), `vector_index_credential_reference` (`:618`), plus one at `:551`. | Zero references, tests included; no deploy file sets them. | 5 fields | Low |
-| X7 | **CANCELLED 2026-09-11: retain the registered-agent branch and token budgets.** | No caller passes `agent_asset_version_id` — the only occurrence is the orchestrator forwarding its own argument (`agent_orchestrator.py:719`). Dead: `:792-826`, `:1770-1795`, the `AgentRun.ai_asset_version_id` fill-in, and the `agent_budget_window` table. Four commits went into budgets, the latest (`94babdf`) today. Keep the wall-clock cap task agents use (`task_agent.py:68`). | No removal | Active security controls |
+| X7 | **CANCELLED: retain the registered-agent branch and token budgets.** | The original no-caller finding is superseded: REST `src/aida/api.py` and MCP `src/aida/mcp_server.py` resolve the caller contract and pass `agent_asset_version_id` into the orchestrator. Contract enforcement has since expanded under R11-C6. Preserve active controls and AR-05 budget evidence. | No removal | Active security controls |
 | X8 | **Duplicates** — the flat procedure parser exposed as a second `/procedure-lineage/parse` route (`view_lineage_api.py:273-289`; `sql_lineage_parser.py:693-697` calls itself "the flat parser under another name"); two UI clients for one relationship-decision endpoint (`api/crossSource.ts:565`, `api/governance.ts:185`); `_optional_text` ×5, `_EnvelopeRows.reason` ×3, `_response_field` ×2; three copies of graph BFS (`knowledge_graph.py:25-123`, `unified_lineage.py:52-145`, `graph_retrieval.py:116`); UI dead code (`Swimlanes` in `NarratedLineageScreen.tsx:108-148`, `OrgPicker.tsx`, `revokeAssetCertification`, `getGlossaryTerm`, `fetchContextProductScope`, `fieldErrorMap`). | Each confirmed by reference search. | ~500 lines | Low |
 | X9 | **Infrastructure the default product doesn't use.** Step 1: compose profiles so the default stack is postgres, temporal, migrate, api, ui-next, metadata-worker, fleet-scheduler and the sample sources. Step 2: delete Redis (move the MCP budget counter to a Postgres row). Step 3: once Neo4j is parked, let the description drafter poll the outbox table and drop Kafka. | **Redis**: backs `lineage_cache.py` (51 lines, off by default, `config.py:284`) and `mcp_budget.py:91` (off by default) — yet the API waits on it (`compose.yaml:248`). **Neo4j + graph-projector**: default backend is Postgres (`config.py:460`) and the Neo4j adapter is marked uncertified (`graph_store.py:22`). **Redpanda + console + outbox-publisher**: 118 event types produced, 8 consumed by 2 consumers (`graph_projector.py:78-83`, `newly_created_table_drafter.py:729-731`). **MinIO**: archive backend is `none` unless configured (`config.py:880`); image pinned to `:latest` (`compose.yaml:156`). **temporal-ui**: make opt-in. | 5–7 services; ~2.3K lines (Neo4j path + Redis) out of the default path; the `aiokafka` and `redis` dependencies | Low for profiles; medium for the drafter rewrite |
 | X10 | **Deployment sketches presented as deployment.** `infra/k8s/base` deploys only the API and a migration job, with placeholder digests (`deployment.yaml:51`) and a stale README; `infra/airflow` is one smoke DAG run by hand. | File inspection. | 10+ files | Low — label as sketch/example, or remove |
@@ -277,7 +310,7 @@ All 22 findings now have code behind them. The table records what is still missi
 
 ---
 
-## 9. Suggested order of work
+## 9. Original suggested order ? superseded by current queue
 
 The order matters: deletions and small fixes first make every later step cheaper, and the journey work proves which of the remaining surface is actually needed.
 
