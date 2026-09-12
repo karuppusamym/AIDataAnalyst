@@ -12,29 +12,6 @@
 --------------------------------------------------------------------------- */
 
 import { deleteRequest, demoOr, get, patchJson, postJson } from "./transport";
-import {
-  makeFixtureAnalysisRuns,
-  makeFixtureArchiveStatus,
-  makeFixtureCreateAnalysisRun,
-  makeFixtureDatasourceAnalysisRuns,
-  makeFixtureContractSlaStatus,
-  makeFixtureContractViolations,
-  makeFixtureCreateNotificationRule,
-  makeFixtureCreatePlaybook,
-  makeFixtureCreateSloDefinition,
-  makeFixtureDeletePlaybook,
-  makeFixtureEvaluateDataContract,
-  makeFixtureFleetSummary,
-  makeFixtureIngestionBatches,
-  makeFixtureNotificationRules,
-  makeFixtureOutboxEvents,
-  makeFixturePlaybooks,
-  makeFixtureRequeueOutboxEvent,
-  makeFixtureRunPlaybook,
-  makeFixtureSloBudget,
-  makeFixtureSloDefinitions,
-  makeFixtureUpdatePlaybook,
-} from "../fixtures";
 import type {
   AnalysisRunCreate,
   AnalysisRunRead,
@@ -74,7 +51,7 @@ export function fetchFleetSummary(
   signal?: AbortSignal,
 ): Promise<FleetSummaryRead> {
   return demoOr(
-    async () => makeFixtureFleetSummary(organizationId),
+    async (fixtures) => fixtures.makeFixtureFleetSummary(organizationId),
     async () => {
       return get<FleetSummaryRead>(`/v1/organizations/${organizationId}/fleet-summary`, signal);
     },
@@ -97,7 +74,7 @@ export function fetchAnalysisRuns(
   signal?: AbortSignal,
 ): Promise<PageOf<AnalysisRunRead>> {
   return demoOr(
-    async () => makeFixtureAnalysisRuns(query),
+    async (fixtures) => fixtures.makeFixtureAnalysisRuns(query),
     async () => {
       const params = new URLSearchParams();
       if (query.runStatus) params.set("run_status", query.runStatus);
@@ -134,7 +111,7 @@ export function fetchDatasourceAnalysisRuns(
   signal?: AbortSignal,
 ): Promise<PageOf<AnalysisRunRead>> {
   return demoOr(
-    async () => makeFixtureDatasourceAnalysisRuns(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureDatasourceAnalysisRuns(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 20));
@@ -160,7 +137,7 @@ export function createAnalysisRun(
   signal?: AbortSignal,
 ): Promise<AnalysisRunRead> {
   return demoOr(
-    async () => makeFixtureCreateAnalysisRun(datasourceId, body),
+    async (fixtures) => fixtures.makeFixtureCreateAnalysisRun(datasourceId, body),
     async () => {
       return postJson<AnalysisRunRead>(
         `/v1/datasources/${datasourceId}/analysis-runs`,
@@ -187,7 +164,7 @@ export function fetchOutboxEvents(
   signal?: AbortSignal,
 ): Promise<PageOf<OutboxEventRead>> {
   return demoOr(
-    async () => makeFixtureOutboxEvents(query),
+    async (fixtures) => fixtures.makeFixtureOutboxEvents(query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -212,7 +189,7 @@ export function requeueOutboxEvent(
   signal?: AbortSignal,
 ): Promise<OutboxEventRead> {
   return demoOr(
-    async () => makeFixtureRequeueOutboxEvent(eventId),
+    async (fixtures) => fixtures.makeFixtureRequeueOutboxEvent(eventId),
     async () => {
       return postJson<OutboxEventRead>(`/v1/outbox-events/${eventId}/requeue`, {}, signal);
     },
@@ -235,7 +212,7 @@ export function fetchIngestionBatches(
   signal?: AbortSignal,
 ): Promise<PageOf<MetadataIngestionBatchRead>> {
   return demoOr(
-    async () => makeFixtureIngestionBatches(datasourceId, opts),
+    async (fixtures) => fixtures.makeFixtureIngestionBatches(datasourceId, opts),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(opts.limit ?? 100));
@@ -291,7 +268,7 @@ export function fetchSloDefinitions(
   signal?: AbortSignal,
 ): Promise<PageOf<SloDefinitionRead>> {
   return demoOr(
-    async () => makeFixtureSloDefinitions(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureSloDefinitions(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -310,7 +287,7 @@ export function createSloDefinition(
   signal?: AbortSignal,
 ): Promise<SloDefinitionRead> {
   return demoOr(
-    async () => makeFixtureCreateSloDefinition(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateSloDefinition(organizationId, body),
     async () => {
       return postJson<SloDefinitionRead>("/v1/observability/slo", body, signal);
     },
@@ -326,7 +303,7 @@ export function fetchSloBudget(
   signal?: AbortSignal,
 ): Promise<SloBudgetRead> {
   return demoOr(
-    async () => makeFixtureSloBudget(sloId),
+    async (fixtures) => fixtures.makeFixtureSloBudget(sloId),
     async () => {
       return get<SloBudgetRead>(`/v1/observability/slo/${sloId}/budget`, signal);
     },
@@ -340,7 +317,7 @@ export function fetchSloBudget(
  *  banner comment -- no `organizationId` parameter to thread through. */
 export function fetchArchiveStatus(signal?: AbortSignal): Promise<ArchiveStatusRead> {
   return demoOr(
-    async () => makeFixtureArchiveStatus(),
+    async (fixtures) => fixtures.makeFixtureArchiveStatus(),
     async () => {
       return get<ArchiveStatusRead>("/v1/observability/archive/status", signal);
     },
@@ -360,7 +337,7 @@ export function fetchNotificationRules(
   signal?: AbortSignal,
 ): Promise<PageOf<NotificationRuleRead>> {
   return demoOr(
-    async () => makeFixtureNotificationRules(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureNotificationRules(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -380,7 +357,7 @@ export function createNotificationRule(
   signal?: AbortSignal,
 ): Promise<NotificationRuleRead> {
   return demoOr(
-    async () => makeFixtureCreateNotificationRule(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateNotificationRule(organizationId, body),
     async () => {
       return postJson<NotificationRuleRead>("/v1/notification-rules", body, signal);
     },
@@ -398,7 +375,7 @@ export function evaluateDataContract(
   signal?: AbortSignal,
 ): Promise<EvaluationResponse> {
   return demoOr(
-    async () => makeFixtureEvaluateDataContract(contractId),
+    async (fixtures) => fixtures.makeFixtureEvaluateDataContract(contractId),
     async () => {
       return postJson<EvaluationResponse>(`/v1/data-contracts/${contractId}/evaluate`, {}, signal);
     },
@@ -420,7 +397,7 @@ export function fetchContractViolations(
   signal?: AbortSignal,
 ): Promise<PageOf<ViolationRead>> {
   return demoOr(
-    async () => makeFixtureContractViolations(contractId, query),
+    async (fixtures) => fixtures.makeFixtureContractViolations(contractId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -440,7 +417,7 @@ export function fetchContractSlaStatus(
   signal?: AbortSignal,
 ): Promise<SlaStatusResponse> {
   return demoOr(
-    async () => makeFixtureContractSlaStatus(contractId, periodDays),
+    async (fixtures) => fixtures.makeFixtureContractSlaStatus(contractId, periodDays),
     async () => {
       const params = new URLSearchParams();
       params.set("period_days", String(periodDays));
@@ -468,7 +445,7 @@ export function fetchPlaybooks(
   signal?: AbortSignal,
 ): Promise<PageOf<PlaybookRead>> {
   return demoOr(
-    async () => makeFixturePlaybooks(organizationId, query),
+    async (fixtures) => fixtures.makeFixturePlaybooks(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -489,7 +466,7 @@ export function createPlaybook(
   signal?: AbortSignal,
 ): Promise<PlaybookRead> {
   return demoOr(
-    async () => makeFixtureCreatePlaybook(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreatePlaybook(organizationId, body),
     async () => {
       return postJson<PlaybookRead>(`/v1/organizations/${organizationId}/playbooks`, body, signal);
     },
@@ -504,7 +481,7 @@ export function updatePlaybook(
   signal?: AbortSignal,
 ): Promise<PlaybookRead> {
   return demoOr(
-    async () => makeFixtureUpdatePlaybook(playbookId, body),
+    async (fixtures) => fixtures.makeFixtureUpdatePlaybook(playbookId, body),
     async () => {
       return patchJson<PlaybookRead>(`/v1/playbooks/${playbookId}`, body, signal);
     },
@@ -514,7 +491,7 @@ export function updatePlaybook(
 /** `DELETE /v1/playbooks/{playbook_id}` — 204, no response body. */
 export function deletePlaybook(playbookId: string, signal?: AbortSignal): Promise<void> {
   return demoOr(
-    async () => makeFixtureDeletePlaybook(playbookId),
+    async (fixtures) => fixtures.makeFixtureDeletePlaybook(playbookId),
     async () => {
       return deleteRequest(`/v1/playbooks/${playbookId}`, signal);
     },
@@ -530,7 +507,7 @@ export function runPlaybookNow(
   signal?: AbortSignal,
 ): Promise<PlaybookRunResultRead> {
   return demoOr(
-    async () => makeFixtureRunPlaybook(playbookId),
+    async (fixtures) => fixtures.makeFixtureRunPlaybook(playbookId),
     async () => {
       return postJson<PlaybookRunResultRead>(`/v1/playbooks/${playbookId}/run`, {}, signal);
     },

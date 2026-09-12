@@ -14,22 +14,6 @@
 
 import { deleteRequest, demoOr, get, postJson, putJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureCompileContextProductVersion,
-  makeFixtureConsumptionRecords,
-  makeFixtureContextProductBindings,
-  makeFixtureContextProductVersions,
-  makeFixtureContextProducts,
-  makeFixtureCreateContextProduct,
-  makeFixtureDeprecateContextProductVersion,
-  makeFixtureMarketplaceAccessRequest,
-  makeFixtureMarketplaceProducts,
-  makeFixturePortfolioAnalyticsSummary,
-  makeFixturePortfolioAnalyticsTrends,
-  makeFixtureRemoveContextProductBinding,
-  makeFixtureSetContextProductBinding,
-  makeFixtureSubmitContextProductVersion,
-} from "../fixtures";
 import { requestBlob } from "../http";
 import type {
   ConsumptionRecordPage,
@@ -67,7 +51,7 @@ export function fetchMarketplaceProducts(
   signal?: AbortSignal,
 ): Promise<PageOf<MarketplaceProductRead>> {
   return demoOr(
-    async () => makeFixtureMarketplaceProducts(query),
+    async (fixtures) => fixtures.makeFixtureMarketplaceProducts(query),
     async () => {
       const params = new URLSearchParams();
       if (query.q) params.set("q", query.q);
@@ -90,7 +74,7 @@ export function requestMarketplaceAccess(
   signal?: AbortSignal,
 ): Promise<MarketplaceAccessRequestRead> {
   return demoOr(
-    async () => makeFixtureMarketplaceAccessRequest(versionId, body),
+    async (fixtures) => fixtures.makeFixtureMarketplaceAccessRequest(versionId, body),
     async () => {
       return postJson<MarketplaceAccessRequestRead>(
         `/v1/marketplace/products/${versionId}/access-requests`,
@@ -118,7 +102,7 @@ export function fetchPortfolioAnalyticsSummary(
   signal?: AbortSignal,
 ): Promise<PortfolioAnalyticsSummaryRead> {
   return demoOr(
-    async () => makeFixturePortfolioAnalyticsSummary(query),
+    async (fixtures) => fixtures.makeFixturePortfolioAnalyticsSummary(query),
     async () => {
       const params = new URLSearchParams();
       params.set("window_days", String(query.windowDays ?? 30));
@@ -148,7 +132,7 @@ export function fetchPortfolioAnalyticsTrends(
   signal?: AbortSignal,
 ): Promise<PortfolioAnalyticsTrendsRead> {
   return demoOr(
-    async () => makeFixturePortfolioAnalyticsTrends(query),
+    async (fixtures) => fixtures.makeFixturePortfolioAnalyticsTrends(query),
     async () => {
       const params = new URLSearchParams();
       params.set("window_days", String(query.windowDays ?? 30));
@@ -200,7 +184,7 @@ export function fetchContextProducts(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductRead>> {
   return demoOr(
-    async () => makeFixtureContextProducts(projectId, query),
+    async (fixtures) => fixtures.makeFixtureContextProducts(projectId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 200));
@@ -226,7 +210,7 @@ export function createContextProduct(
   signal?: AbortSignal,
 ): Promise<ContextProductRead> {
   return demoOr(
-    async () => makeFixtureCreateContextProduct(projectId, body),
+    async (fixtures) => fixtures.makeFixtureCreateContextProduct(projectId, body),
     async () => {
       return postJson<ContextProductRead>(`/v1/projects/${projectId}/context-products`, body, signal);
     },
@@ -242,7 +226,7 @@ export function submitContextProductVersion(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureSubmitContextProductVersion(versionId),
+    async (fixtures) => fixtures.makeFixtureSubmitContextProductVersion(versionId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/context-product-versions/${versionId}/submit`, {}, signal);
     },
@@ -258,7 +242,7 @@ export function requestContextProductDeprecation(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureDeprecateContextProductVersion(versionId),
+    async (fixtures) => fixtures.makeFixtureDeprecateContextProductVersion(versionId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/context-product-versions/${versionId}/deprecate`, {}, signal);
     },
@@ -276,7 +260,7 @@ export function compileContextProductVersion(
   signal?: AbortSignal,
 ): Promise<ContextCompilationRead> {
   return demoOr(
-    async () => makeFixtureCompileContextProductVersion(versionId, target),
+    async (fixtures) => fixtures.makeFixtureCompileContextProductVersion(versionId, target),
     async () => {
       const params = new URLSearchParams({ target });
       return get<ContextCompilationRead>(
@@ -323,7 +307,7 @@ export function fetchContextProductVersions(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductVersionRead>> {
   return demoOr(
-    async () => makeFixtureContextProductVersions(productId),
+    async (fixtures) => fixtures.makeFixtureContextProductVersions(productId),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -345,7 +329,7 @@ export function fetchContextProductBindings(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductConsumerBindingRead>> {
   return demoOr(
-    async () => makeFixtureContextProductBindings(productId),
+    async (fixtures) => fixtures.makeFixtureContextProductBindings(productId),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -369,7 +353,7 @@ export function setContextProductBinding(
   signal?: AbortSignal,
 ): Promise<ContextProductConsumerBindingRead> {
   return demoOr(
-    async () => makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId),
+    async (fixtures) => fixtures.makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId),
     async () =>
       putJson<ContextProductConsumerBindingRead>(
         `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
@@ -388,7 +372,7 @@ export function removeContextProductBinding(
   signal?: AbortSignal,
 ): Promise<void> {
   return demoOr(
-    async () => makeFixtureRemoveContextProductBinding(productId, consumerPrincipalId),
+    async (fixtures) => fixtures.makeFixtureRemoveContextProductBinding(productId, consumerPrincipalId),
     async () => {
       return deleteRequest(
         `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
@@ -470,8 +454,8 @@ export function fetchConsumptionRecords(
   signal?: AbortSignal,
 ): Promise<ConsumptionRecordPage> {
   return demoOr(
-    async () =>
-      makeFixtureConsumptionRecords(
+    async (fixtures) =>
+      fixtures.makeFixtureConsumptionRecords(
         { consumerId: query.consumerId, resourceType: query.resourceType, resourceId: query.resourceId },
         query,
       ),

@@ -14,34 +14,6 @@
 
 import { demoOr, get, postJson, putJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
-import {
-  makeFixtureAgentAnalysis,
-  makeFixtureAgentContractRequests,
-  makeFixtureAgentEvaluations,
-  makeFixtureAgentInbox,
-  makeFixtureAgentRoster,
-  makeFixtureAgentRun,
-  makeFixtureAgentRunGroundingReceipts,
-  makeFixtureAgentRuns,
-  makeFixtureAiAssessmentTemplates,
-  makeFixtureAiAssets,
-  makeFixtureAiRemediations,
-  makeFixtureAiRuntimeStatus,
-  makeFixtureAiTrust,
-  makeFixtureCreateModelRoute,
-  makeFixtureDisagreementRates,
-  makeFixtureModelRoutes,
-  makeFixtureReviewerAgentPreReview,
-  makeFixtureReviewerAgentRun,
-  makeFixtureReviewerAgentSamples,
-  makeFixtureReviewerAgentState,
-  makeFixtureRunAgentEvaluation,
-  makeFixtureTaskAgentRun,
-  makeFixtureTaskAgentState,
-  makeFixtureSubmitAgentContractRequest,
-  makeFixtureSubmitModelRoute,
-  makeFixtureUpdateAiRemediation,
-} from "../fixtures";
 import { ApiError } from "../http";
 import type {
   AgentAnalysisRequest,
@@ -107,7 +79,7 @@ export function runAgentAnalysis(
   signal?: AbortSignal,
 ): Promise<AgentAnalysisResponse> {
   return demoOr(
-    async () => makeFixtureAgentAnalysis(datasourceId, body),
+    async (fixtures) => fixtures.makeFixtureAgentAnalysis(datasourceId, body),
     async () => {
       return postJson<AgentAnalysisResponse>(
         `/v1/datasources/${datasourceId}/agent-analyses`,
@@ -139,7 +111,7 @@ export function fetchAgentRuns(
   signal?: AbortSignal,
 ): Promise<PageOf<AgentRunRead>> {
   return demoOr(
-    async () => makeFixtureAgentRuns(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureAgentRuns(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 50));
@@ -157,7 +129,7 @@ export function fetchAgentRun(
   signal?: AbortSignal,
 ): Promise<AgentRunRead> {
   return demoOr(
-    async () => makeFixtureAgentRun(agentRunId),
+    async (fixtures) => fixtures.makeFixtureAgentRun(agentRunId),
     async () => {
       return get<AgentRunRead>(`/v1/agent-runs/${agentRunId}`, signal);
     },
@@ -176,7 +148,7 @@ export function fetchAgentRunGroundingReceipts(
   signal?: AbortSignal,
 ): Promise<AgentRunGroundingReceiptsRead> {
   return demoOr(
-    async () => makeFixtureAgentRunGroundingReceipts(agentRunId),
+    async (fixtures) => fixtures.makeFixtureAgentRunGroundingReceipts(agentRunId),
     async () => {
       return get<AgentRunGroundingReceiptsRead>(
         `/v1/agent-runs/${agentRunId}/grounding-receipts`,
@@ -286,7 +258,7 @@ export function fetchAiAssets(
   signal?: AbortSignal,
 ): Promise<PageOf<AiAssetVersionRead>> {
   return demoOr(
-    async () => makeFixtureAiAssets(organizationId),
+    async (fixtures) => fixtures.makeFixtureAiAssets(organizationId),
     async () => {
       return get<PageOf<AiAssetVersionRead>>(
         `/v1/organizations/${organizationId}/ai-assets?limit=200`,
@@ -303,7 +275,7 @@ export function fetchAiAssetTrust(
   signal?: AbortSignal,
 ): Promise<AiTrustScoreRead> {
   return demoOr(
-    async () => makeFixtureAiTrust(versionId),
+    async (fixtures) => fixtures.makeFixtureAiTrust(versionId),
     async () => {
       return get<AiTrustScoreRead>(`/v1/ai-asset-versions/${versionId}/trust`, signal);
     },
@@ -317,7 +289,7 @@ export function fetchAiRemediations(
   signal?: AbortSignal,
 ): Promise<PageOf<AiRemediationRead>> {
   return demoOr(
-    async () => makeFixtureAiRemediations(versionId),
+    async (fixtures) => fixtures.makeFixtureAiRemediations(versionId),
     async () => {
       return get<PageOf<AiRemediationRead>>(
         `/v1/ai-asset-versions/${versionId}/remediations?limit=200`,
@@ -335,7 +307,7 @@ export function updateAiRemediation(
   signal?: AbortSignal,
 ): Promise<AiRemediationRead> {
   return demoOr(
-    async () => makeFixtureUpdateAiRemediation(remediationId, body),
+    async (fixtures) => fixtures.makeFixtureUpdateAiRemediation(remediationId, body),
     async () => {
       return putJson<AiRemediationRead>(`/v1/ai-remediations/${remediationId}`, body, signal);
     },
@@ -348,7 +320,7 @@ export function fetchAiAssessmentTemplates(
   signal?: AbortSignal,
 ): Promise<AiAssessmentTemplateRead[]> {
   return demoOr(
-    async () => makeFixtureAiAssessmentTemplates(),
+    async (fixtures) => fixtures.makeFixtureAiAssessmentTemplates(),
     async () => {
       return get<AiAssessmentTemplateRead[]>("/v1/ai-assessment-templates", signal);
     },
@@ -381,7 +353,7 @@ export function fetchModelRoutes(
   signal?: AbortSignal,
 ): Promise<PageOf<ModelRouteConfigurationRead>> {
   return demoOr(
-    async () => makeFixtureModelRoutes(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureModelRoutes(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -404,7 +376,7 @@ export function createModelRoute(
   signal?: AbortSignal,
 ): Promise<ModelRouteConfigurationRead> {
   return demoOr(
-    async () => makeFixtureCreateModelRoute(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateModelRoute(organizationId, body),
     async () => {
       return postJson<ModelRouteConfigurationRead>(
         `/v1/organizations/${organizationId}/model-routes`,
@@ -424,7 +396,7 @@ export function submitModelRoute(
   signal?: AbortSignal,
 ): Promise<GovernanceReviewRead> {
   return demoOr(
-    async () => makeFixtureSubmitModelRoute(routeId),
+    async (fixtures) => fixtures.makeFixtureSubmitModelRoute(routeId),
     async () => {
       return postJson<GovernanceReviewRead>(`/v1/model-routes/${routeId}/submit`, {}, signal);
     },
@@ -438,7 +410,7 @@ export function submitModelRoute(
  *  not a tenant's data). */
 export function fetchAiRuntimeStatus(signal?: AbortSignal): Promise<AiRuntimeStatusRead> {
   return demoOr(
-    async () => makeFixtureAiRuntimeStatus(),
+    async (fixtures) => fixtures.makeFixtureAiRuntimeStatus(),
     async () => {
       return get<AiRuntimeStatusRead>("/v1/ai/runtime-status", signal);
     },
@@ -459,7 +431,7 @@ export function fetchAgentEvaluations(
   signal?: AbortSignal,
 ): Promise<PageOf<AgentEvaluationRunRead>> {
   return demoOr(
-    async () => makeFixtureAgentEvaluations(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureAgentEvaluations(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 100));
@@ -482,7 +454,7 @@ export function runAgentEvaluation(
   signal?: AbortSignal,
 ): Promise<AgentEvaluationRunRead> {
   return demoOr(
-    async () => makeFixtureRunAgentEvaluation(organizationId),
+    async (fixtures) => fixtures.makeFixtureRunAgentEvaluation(organizationId),
     async () => {
       return postJson<AgentEvaluationRunRead>(
         `/v1/organizations/${organizationId}/agent-evaluations`,
@@ -520,7 +492,7 @@ export function fetchAgentContractRequests(
   signal?: AbortSignal,
 ): Promise<PageOf<AgentContractRequestRead>> {
   return demoOr(
-    async () => makeFixtureAgentContractRequests(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureAgentContractRequests(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -545,7 +517,7 @@ export function submitAgentContractRequest(
   signal?: AbortSignal,
 ): Promise<AgentContractRequestRead> {
   return demoOr(
-    async () => makeFixtureSubmitAgentContractRequest(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureSubmitAgentContractRequest(organizationId, body),
     async () => {
       return postJson<AgentContractRequestRead>(
         `/v1/organizations/${organizationId}/agent-contract-requests`,
@@ -568,7 +540,7 @@ export function fetchAgentInbox(
   signal?: AbortSignal,
 ): Promise<AgentInboxRead> {
   return demoOr(
-    async () => makeFixtureAgentInbox(organizationId, persona),
+    async (fixtures) => fixtures.makeFixtureAgentInbox(organizationId, persona),
     async () => {
       return get<AgentInboxRead>(
         `/v1/organizations/${organizationId}/agent-inbox?persona=${encodeURIComponent(persona)}`,
@@ -612,7 +584,7 @@ export function fetchAgentRoster(
   signal?: AbortSignal,
 ): Promise<AgentRosterRead> {
   return demoOr(
-    async () => makeFixtureAgentRoster(organizationId, query.windowDays ?? 30),
+    async (fixtures) => fixtures.makeFixtureAgentRoster(organizationId, query.windowDays ?? 30),
     async () => {
       const params = new URLSearchParams();
       if (query.windowDays) params.set("window_days", String(query.windowDays));
@@ -642,7 +614,7 @@ export function fetchReviewerAgentState(
   signal?: AbortSignal,
 ): Promise<ReviewerAgentStateRead> {
   return demoOr(
-    async () => makeFixtureReviewerAgentState(organizationId),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentState(organizationId),
     async () => {
       return get<ReviewerAgentStateRead>(`/v1/organizations/${organizationId}/reviewer-agent`, signal);
     },
@@ -659,7 +631,7 @@ export function runReviewerAgentPreReview(
   signal?: AbortSignal,
 ): Promise<ReviewerAgentRunResult> {
   return demoOr(
-    async () => makeFixtureReviewerAgentPreReview(),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentPreReview(),
     async () => {
       return postJson<ReviewerAgentRunResult>(
         `/v1/organizations/${organizationId}/reviewer-agent/pre-review?limit=${limit}`,
@@ -679,7 +651,7 @@ export function runReviewerAgent(
   signal?: AbortSignal,
 ): Promise<ReviewerAgentRunResult> {
   return demoOr(
-    async () => makeFixtureReviewerAgentRun(),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentRun(),
     async () => {
       return postJson<ReviewerAgentRunResult>(
         `/v1/organizations/${organizationId}/reviewer-agent/run?limit=${limit}`,
@@ -728,7 +700,7 @@ export function fetchDisagreementRates(
   signal?: AbortSignal,
 ): Promise<DisagreementReportRead> {
   return demoOr(
-    async () => makeFixtureDisagreementRates(windowDays),
+    async (fixtures) => fixtures.makeFixtureDisagreementRates(windowDays),
     async () => {
       return get<DisagreementReportRead>(
         `/v1/organizations/${organizationId}/reviewer-agent/disagreement-rates?window_days=${windowDays}`,
@@ -752,7 +724,7 @@ export function fetchReviewerAgentSamples(
   signal?: AbortSignal,
 ): Promise<PageOf<ReviewAuditSampleRead>> {
   return demoOr(
-    async () => makeFixtureReviewerAgentSamples(query),
+    async (fixtures) => fixtures.makeFixtureReviewerAgentSamples(query),
     async () => {
       const params = new URLSearchParams();
       params.set("outcome", query.outcome ?? "PENDING");
@@ -796,7 +768,7 @@ export function fetchTaskAgentState(
   signal?: AbortSignal,
 ): Promise<TaskAgentStateRead> {
   return demoOr(
-    async () => makeFixtureTaskAgentState(organizationId, kind),
+    async (fixtures) => fixtures.makeFixtureTaskAgentState(organizationId, kind),
     async () => {
       return get<TaskAgentStateRead>(`/v1/organizations/${organizationId}/${kind}-agent`, signal);
     },
@@ -813,7 +785,7 @@ export function runTaskAgent(
   signal?: AbortSignal,
 ): Promise<TaskAgentRunRead> {
   return demoOr(
-    async () => makeFixtureTaskAgentRun(organizationId, kind, body),
+    async (fixtures) => fixtures.makeFixtureTaskAgentRun(organizationId, kind, body),
     async () => {
       return postJson<TaskAgentRunRead>(
         `/v1/organizations/${organizationId}/${kind}-agent/run`,

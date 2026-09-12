@@ -47,8 +47,22 @@ Two independent build-time axes, neither inferred from the other:
 
 | Variable | Values | Meaning |
 | --- | --- | --- |
-| `VITE_USE_FIXTURES` | `0` / anything else | live backend, or bundled demo data |
+| `VITE_USE_FIXTURES` | `0` / anything else | live backend, or bundled demo data. **Unset, the build mode decides**: `npm run dev` and `vite build --mode demo` carry demo data, every other build (`npm run build` included) does not |
 | `VITE_AUTH_MODE` | `development` (default) / `oidc` / `proxy` | how a request proves who is making it |
+
+Demo data is excluded from a production build rather than merely switched off
+in it (R11-X1). `src/lib/fixtures.ts` is ~189 kB minified — it used to be about
+a fifth of the shipped JavaScript, downloaded by every production user to serve
+a code path they could never take, because the demo/live test was read at
+runtime and no bundler can drop a branch it only learns about in the browser.
+`vite.config.ts` now settles the question while configuring the build (see
+`src/lib/demoDataMode.ts`) and hands the client a literal, so Rollup folds the
+guard in `src/lib/api/transport.ts` and drops the fixtures with it. A demo
+build keeps them as their own lazily fetched chunk rather than preloading them
+with the shell.
+
+The consequence to know about: flipping between demo and live now means
+rebuilding. A production build has no fixtures in it to fall back to.
 
 `development` sends `X-Principal-Id`/`X-Roles`. `proxy` sends nothing — an
 authenticating reverse proxy is the authority. `oidc` sends only

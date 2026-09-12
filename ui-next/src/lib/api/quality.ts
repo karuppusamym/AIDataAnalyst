@@ -8,12 +8,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
-import {
-  makeFixtureQualityIncidentTriage,
-  makeFixtureQualityIncidents,
-  makeFixtureQualitySummary,
-  makeFixtureTransitionQualityIncident,
-} from "../fixtures";
 import type {
   DataQualityIncidentRead,
   DataQualityIncidentTransition,
@@ -53,7 +47,7 @@ export function fetchQualitySummary(
   signal?: AbortSignal,
 ): Promise<DataQualitySummaryRead> {
   return demoOr(
-    async () => makeFixtureQualitySummary(datasourceId),
+    async (fixtures) => fixtures.makeFixtureQualitySummary(datasourceId),
     async () => {
       return get<DataQualitySummaryRead>(
         `/v1/datasources/${datasourceId}/quality-summary`,
@@ -71,7 +65,7 @@ export function fetchQualityIncidents(
   signal?: AbortSignal,
 ): Promise<PageOf<DataQualityIncidentRead>> {
   return demoOr(
-    async () => makeFixtureQualityIncidents(datasourceId, query),
+    async (fixtures) => fixtures.makeFixtureQualityIncidents(datasourceId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
@@ -96,7 +90,7 @@ export function transitionQualityIncident(
   signal?: AbortSignal,
 ): Promise<DataQualityIncidentRead> {
   return demoOr(
-    async () => makeFixtureTransitionQualityIncident(incidentId, body),
+    async (fixtures) => fixtures.makeFixtureTransitionQualityIncident(incidentId, body),
     async () => {
       return postJson<DataQualityIncidentRead>(
         `/v1/quality-incidents/${incidentId}/transition`,
@@ -116,7 +110,7 @@ export function fetchQualityIncidentTriage(
   signal?: AbortSignal,
 ): Promise<DataQualityIncidentTriageRead> {
   return demoOr(
-    async () => makeFixtureQualityIncidentTriage(incidentId),
+    async (fixtures) => fixtures.makeFixtureQualityIncidentTriage(incidentId),
     async () => {
       return get<DataQualityIncidentTriageRead>(`/v1/quality-incidents/${incidentId}/triage`, signal);
     },

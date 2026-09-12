@@ -13,27 +13,6 @@
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
-import {
-  makeFixtureAccessPolicies,
-  makeFixtureAddWorkspaceMember,
-  makeFixtureCreateAccessPolicy,
-  makeFixtureCreateBiConnection,
-  makeFixtureCreateLineOfBusiness,
-  makeFixtureCreateOrganization,
-  makeFixtureCreateProject,
-  makeFixtureCreateWorkspace,
-  makeFixtureDecideSourceBinding,
-  makeFixtureDelegations,
-  makeFixtureGrantDelegation,
-  makeFixtureImportBiArtifact,
-  makeFixtureOrgLinesOfBusiness,
-  makeFixtureProjectBiConnections,
-  makeFixtureRegisterDatasource,
-  makeFixtureRequestSourceBinding,
-  makeFixtureRevokeDelegation,
-  makeFixtureSimulateAuthorization,
-  makeFixtureWorkspaceMembers,
-} from "../fixtures";
 import type {
   AccessPolicyCreate,
   AccessPolicyRead,
@@ -84,7 +63,7 @@ export function createOrganization(
   signal?: AbortSignal,
 ): Promise<OrganizationRead> {
   return demoOr(
-    async () => makeFixtureCreateOrganization(body),
+    async (fixtures) => fixtures.makeFixtureCreateOrganization(body),
     async () => {
       return postJson<OrganizationRead>("/v1/organizations", body, signal);
     },
@@ -99,7 +78,7 @@ export function createWorkspace(
   signal?: AbortSignal,
 ): Promise<WorkspaceRead> {
   return demoOr(
-    async () => makeFixtureCreateWorkspace(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateWorkspace(organizationId, body),
     async () => {
       return postJson<WorkspaceRead>(
         `/v1/organizations/${organizationId}/workspaces`,
@@ -117,7 +96,7 @@ export function requestSourceBinding(
   signal?: AbortSignal,
 ): Promise<SourceBindingRead> {
   return demoOr(
-    async () => makeFixtureRequestSourceBinding(workspaceId, body),
+    async (fixtures) => fixtures.makeFixtureRequestSourceBinding(workspaceId, body),
     async () => {
       return postJson<SourceBindingRead>(
         `/v1/workspaces/${workspaceId}/source-bindings`,
@@ -139,7 +118,7 @@ export function fetchOrgLinesOfBusiness(
   signal?: AbortSignal,
 ): Promise<PageOf<LineOfBusinessRead>> {
   return demoOr(
-    async () => makeFixtureOrgLinesOfBusiness(organizationId),
+    async (fixtures) => fixtures.makeFixtureOrgLinesOfBusiness(organizationId),
     async () => {
       return get<PageOf<LineOfBusinessRead>>(
         `/v1/organizations/${organizationId}/lines-of-business?limit=500`,
@@ -158,7 +137,7 @@ export function createLineOfBusiness(
   signal?: AbortSignal,
 ): Promise<LineOfBusinessRead> {
   return demoOr(
-    async () => makeFixtureCreateLineOfBusiness(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateLineOfBusiness(organizationId, body),
     async () => {
       return postJson<LineOfBusinessRead>(
         `/v1/organizations/${organizationId}/lines-of-business`,
@@ -182,7 +161,7 @@ export function createProject(
   signal?: AbortSignal,
 ): Promise<ProjectRead> {
   return demoOr(
-    async () => makeFixtureCreateProject(lobId, body),
+    async (fixtures) => fixtures.makeFixtureCreateProject(lobId, body),
     async () => {
       return postJson<ProjectRead>(`/v1/lines-of-business/${lobId}/projects`, body, signal);
     },
@@ -205,7 +184,7 @@ export function registerDatasource(
   signal?: AbortSignal,
 ): Promise<DataSourceRead> {
   return demoOr(
-    async () => makeFixtureRegisterDatasource(projectId, body),
+    async (fixtures) => fixtures.makeFixtureRegisterDatasource(projectId, body),
     async () => {
       return postJson<DataSourceRead>(`/v1/projects/${projectId}/datasources`, body, signal);
     },
@@ -244,7 +223,7 @@ export function fetchAccessPolicies(
   signal?: AbortSignal,
 ): Promise<PageOf<AccessPolicyRead>> {
   return demoOr(
-    async () => makeFixtureAccessPolicies(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureAccessPolicies(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 200));
@@ -267,7 +246,7 @@ export function createAccessPolicy(
   signal?: AbortSignal,
 ): Promise<AccessPolicyRead> {
   return demoOr(
-    async () => makeFixtureCreateAccessPolicy(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureCreateAccessPolicy(organizationId, body),
     async () => {
       return postJson<AccessPolicyRead>(`/v1/organizations/${organizationId}/access-policies`, body, signal);
     },
@@ -285,7 +264,7 @@ export function simulateAuthorization(
   signal?: AbortSignal,
 ): Promise<AuthorizationSimulationRead> {
   return demoOr(
-    async () => makeFixtureSimulateAuthorization(workspaceId, body),
+    async (fixtures) => fixtures.makeFixtureSimulateAuthorization(workspaceId, body),
     async () => {
       return postJson<AuthorizationSimulationRead>(
         `/v1/workspaces/${workspaceId}/authorization-simulations`,
@@ -317,7 +296,7 @@ export function addWorkspaceMember(
   signal?: AbortSignal,
 ): Promise<WorkspaceMembershipRead> {
   return demoOr(
-    async () => makeFixtureAddWorkspaceMember(workspaceId, body),
+    async (fixtures) => fixtures.makeFixtureAddWorkspaceMember(workspaceId, body),
     async () => {
       return postJson<WorkspaceMembershipRead>(
         `/v1/workspaces/${workspaceId}/members`,
@@ -336,7 +315,7 @@ export function fetchWorkspaceMembers(
   signal?: AbortSignal,
 ): Promise<PageOf<WorkspaceMembershipRead>> {
   return demoOr(
-    async () => makeFixtureWorkspaceMembers(workspaceId),
+    async (fixtures) => fixtures.makeFixtureWorkspaceMembers(workspaceId),
     async () => {
       return get<PageOf<WorkspaceMembershipRead>>(
         `/v1/workspaces/${workspaceId}/members`,
@@ -375,7 +354,7 @@ export function fetchDelegations(
   signal?: AbortSignal,
 ): Promise<PageOf<DelegationRead>> {
   return demoOr(
-    async () => makeFixtureDelegations(organizationId, query),
+    async (fixtures) => fixtures.makeFixtureDelegations(organizationId, query),
     async () => {
       const params = new URLSearchParams();
       if (query.delegatePrincipalId) params.set("delegate_principal_id", query.delegatePrincipalId);
@@ -401,7 +380,7 @@ export function grantDelegation(
   signal?: AbortSignal,
 ): Promise<DelegationRead> {
   return demoOr(
-    async () => makeFixtureGrantDelegation(organizationId, body),
+    async (fixtures) => fixtures.makeFixtureGrantDelegation(organizationId, body),
     async () => {
       return postJson<DelegationRead>(
         `/v1/organizations/${organizationId}/delegations`,
@@ -422,7 +401,7 @@ export function revokeDelegation(
   signal?: AbortSignal,
 ): Promise<DelegationRead> {
   return demoOr(
-    async () => makeFixtureRevokeDelegation(delegationId),
+    async (fixtures) => fixtures.makeFixtureRevokeDelegation(delegationId),
     async () => {
       return postJson<DelegationRead>(`/v1/delegations/${delegationId}/revoke`, {}, signal);
     },
@@ -440,7 +419,7 @@ export function decideSourceBinding(
   signal?: AbortSignal,
 ): Promise<SourceBindingRead> {
   return demoOr(
-    async () => makeFixtureDecideSourceBinding(bindingId, body),
+    async (fixtures) => fixtures.makeFixtureDecideSourceBinding(bindingId, body),
     async () => {
       return postJson<SourceBindingRead>(
         `/v1/source-bindings/${bindingId}/decision`,
@@ -467,7 +446,7 @@ export function fetchProjectBiConnections(
   signal?: AbortSignal,
 ): Promise<PageOf<BiConnectionRead>> {
   return demoOr(
-    async () => makeFixtureProjectBiConnections(projectId, opts),
+    async (fixtures) => fixtures.makeFixtureProjectBiConnections(projectId, opts),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(opts.limit ?? 100));
@@ -489,7 +468,7 @@ export function createBiConnection(
   signal?: AbortSignal,
 ): Promise<BiConnectionRead> {
   return demoOr(
-    async () => makeFixtureCreateBiConnection(projectId, body),
+    async (fixtures) => fixtures.makeFixtureCreateBiConnection(projectId, body),
     async () => {
       return postJson<BiConnectionRead>(
         `/v1/projects/${projectId}/bi-connections`,
@@ -510,7 +489,7 @@ export function importBiArtifact(
   signal?: AbortSignal,
 ): Promise<BiArtifactImportRead> {
   return demoOr(
-    async () => makeFixtureImportBiArtifact(connectionId, body),
+    async (fixtures) => fixtures.makeFixtureImportBiArtifact(connectionId, body),
     async () => {
       return postJson<BiArtifactImportRead>(
         `/v1/bi-connections/${connectionId}/artifact-imports`,

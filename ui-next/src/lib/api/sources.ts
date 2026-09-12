@@ -15,7 +15,6 @@
 import { demoOr, get } from "./transport";
 import { fetchBusinessAnnotations, fetchTablesLegacy } from "./catalog";
 import { fetchQualityIncidents, fetchQualitySummary } from "./quality";
-import { makeFixtureDatasourceHealth } from "../fixtures";
 import { ApiError } from "../http";
 import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../types";
 
@@ -40,7 +39,7 @@ export function fetchDatasourceHealth(
   signal?: AbortSignal,
 ): Promise<ConnectorHealthScoreRead> {
   return demoOr(
-    async () => makeFixtureDatasourceHealth(datasourceId),
+    async (fixtures) => fixtures.makeFixtureDatasourceHealth(datasourceId),
     async () => {
       return get<ConnectorHealthScoreRead>(`/v1/datasources/${datasourceId}/health`, signal);
     },
