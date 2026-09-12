@@ -1,6 +1,8 @@
 # Capability register — current state
 
-> **Reconciliation 2026-09-11:** this register owns dated capability evidence, not work status. [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns execution. Rows dated September 6 have not all been reverified; R11-B14 tracks the refresh. Do not treat old Yes cells as current end-to-end certification.
+> **Reconciliation 2026-09-11:** this register owns dated capability evidence, not work status. [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns execution.
+>
+> **Refresh 2026-09-12 (R11-B14).** Exactly six rows were re-measured against the tree on that date: the query execution gateway, Kafka/Redpanda outbox publication, Neo4j graph projection, and the three new capabilities in the section below. **Every other row still carries its 2026-09-06 measurement and has not been re-measured since** — the date column is the claim, not the row's presence here. An old date is not evidence of current behaviour, and a Yes dated 2026-09-06 means someone checked it then, not that it holds now.
 
 ## September 11 source corrections
 
@@ -12,6 +14,18 @@
 | Ontology publication in running deployment | Code/lifecycle tests reported in five-feature implementation report | Last report has unapplied migration/lock checkpoint; database not rechecked in this pass | R11-C1 BLOCKED on fresh deployment verification |
 | Legacy UI retirement | Removed; `ui/` absent in current tree | Source/filesystem confirmation 2026-09-11; no live deployment inspected | UX-16 closed; navigation consolidation is R11-S10 |
 
+
+
+## September 12 — capabilities added this cycle
+
+Same column rules as the main register: *Verified* stays strict, so a green test against
+in-memory SQLite is **No**, not Yes.
+
+| Capability / property | Implemented | Reachable | Configured | Verified | Measured | Owner | Evidence |
+|---|---|---|---|---|---|---|---|
+| Impact analysis reaches BI reports | Yes — BI joins the unified graph at table grain with provenance, report containment walked upward | Yes — `unified_lineage_builder` collectors run in the existing traversal | Yes — no setting required | **No** — bounds and tenant isolation are proven by mutation-tested unit tests, not against a live BI import in a running deployment | 2026-09-12 | Engineering | `src/aida/unified_lineage_builder.py`; `tests/test_unified_lineage.py` (R11-B13 tests) |
+| Classification propagation produces derived values | Yes — collector builds column edges from reviewed view/procedure/OpenLineage lineage and stores derived rows | Yes — a scheduler pass calls it | **No by design** — `classification_propagation_interval_minutes` defaults to 0 (never), following the task-agent convention; the pass opens no session when off | **No** — proven against in-memory SQLite only; no estate has run it, so no derived row exists anywhere yet | 2026-09-12 | Engineering | `src/aida/classification_propagation.py`; `src/aida/workflows/scheduler.py`; `tests/test_at11_classification_propagation.py` |
+| Ask collects a governed tool's parameters | Yes — structured `MISSING_TOOL_PARAMETERS` refusal carrying the parameter names and tool version; Ask renders a form and re-asks pinning that version | Yes — the live Ask endpoint and screen | Partial — works with generation off, which is the default, but the sample estate had no parameterised tool to demonstrate it until R11-B1's seeding half | **No** — not exercised against a running API; the demo fixtures answer every ask with success, so the refusal path cannot appear there | 2026-09-12 | Engineering | `src/aida/agent_orchestrator.py`; `src/aida/api.py`; `ui-next/src/screens/AskScreen.tsx` |
 
 > Status: **Current state, not history.** Owner: Engineering lead.
 > Created 2026-09-06 for finding D06 of [`../review-2026-09-05/REVIEW.md`](../review-2026-09-05/REVIEW.md).
@@ -71,8 +85,8 @@ inventing individual names would be its own truth drift.
 | Public Tool SDK shipped in the image | Yes | n/a — a client library, not a server path | Yes | Yes — `import aida_tool_sdk` from the built image, 2026-09-06 | 2026-09-06 | Platform | `sdk/aida_tool_sdk/`; `pyproject.toml` `[tool.hatch.build.targets.wheel].packages`; `Dockerfile` `COPY sdk ./sdk`; `scripts/check_image_packaging.py` |
 | Alembic migrations against real PostgreSQL | Yes | Yes | Yes | Yes — CI applies every migration to an empty Postgres 16 and diffs against `Base.metadata` | 2026-09-06 | Platform | `migrations/`; CI `migration-drift` job, `tests/test_migration_orm_drift.py` |
 | Temporal durable workflows | Yes | Yes | Yes | Partial — local Compose only; no failover or continue-as-new at scale | 2026-09-06 | Platform | `compose.yaml` `temporal`, `metadata-worker`, `fleet-scheduler`; `src/aida/workflows/` |
-| Kafka/Redpanda outbox publication | Yes | Yes | Yes | Partial — local Compose only; no database↔Kafka atomicity, per REVIEW §5 | 2026-09-06 | Platform | `compose.yaml` `outbox-publisher`; `src/aida/projectors/outbox_publisher.py` |
-| Neo4j graph projection | Yes | Yes | Yes | **No** — INV-9 records the backend as uncertified; the projection-rebuild drill (E5) has never been run | 2026-09-06 | Platform | `compose.yaml` `graph-projector`; `src/aida/graph_store.py`; `00-status.md` §3 INV-9 |
+| Kafka/Redpanda outbox publication | Yes | Yes | **No by default since 2026-09-12** — R11-X9 moved `redpanda`/`outbox-publisher` behind the `events` (and `graph`) Compose profile, because with default settings nothing consumed the topics. Producers still write `outbox_event` rows, which stay `PENDING` until a publisher runs | Partial — local Compose only, and only under a profile; no database↔Kafka atomicity, per REVIEW §5 | 2026-09-12 | Platform | `compose.yaml` profiles; `src/aida/projectors/outbox_publisher.py`; README step 2 |
+| Neo4j graph projection | Yes | Yes | **No by default since 2026-09-12** — R11-X9 moved `neo4j`/`graph-projector` behind the `graph` profile; the default graph backend is `postgres`, which is the certified one. R11-D8 also stopped reconciliation dialling Neo4j regardless of backend | **No** — INV-9 still records the Neo4j backend as uncertified; the projection-rebuild drill (E5) has never been run | 2026-09-12 | Platform | `compose.yaml` profiles; `src/aida/graph_store.py`; `src/aida/graph_reconciliation.py`; `00-status.md` §3 INV-9 |
 | Disaster recovery / restore | No | No | No | **No** — needs a deployed topology and an approved RPO/RTO | 2026-09-06 | Bank decision | REVIEW §5 "Recovery"; POINTS-TRACKER T28 |
 
 ### Frontend and public endpoints
@@ -121,7 +135,7 @@ the exact failure mode D06 describes.
 
 | Capability | Implemented | Reachable | Configured | Verified | Date | Owner | Evidence |
 |---|:--:|:--:|:--:|:--:|---|---|---|
-| Query execution gateway (single choke point) | Yes | Yes | Yes | Partial — INV-2 is enforced by the type system, an import contract and an AST scan; cancel propagation is uncertified | 2026-09-06 | Platform | ADR-0004; `tests/test_tier0_invariants.py`; CI `quality` job runs `lint-imports` |
+| Query execution gateway (single choke point) | Yes | Yes | Yes | Partial — INV-2 is enforced by four layers as of 2026-09-12: the type system, an import contract, an AST scan for the executor's methods, and a scan for driver `connect` calls outside `aida.connectors`. The fourth was added because the first three could not see `policy_native_sync` dialling a source directly (R11-D1); that apply path is removed. Cancel propagation remains uncertified, and no live execution was performed in this pass | 2026-09-12 | Platform | ADR-0004; `tests/test_tier0_invariants.py`; CI `quality` job runs `lint-imports` |
 | Deterministic prompt-risk screening and SQL guard | Yes | Yes | Yes | Partial — measured against a synthetic corpus (zero bypasses, zero false positives), not against real bank traffic | 2026-09-06 | AI governance | `Docs/90-reference/model-risk-benchmark-results.md`; CI `quality-baseline` job |
 | Model generation (OpenAI / Gemini) | Yes | Yes | **No by design** — `AIDA_MODEL_GENERATION_ENABLED` defaults to `false` and an independently approved organization model-route version is required | **No** — no live approved route exists in this environment, so generated-answer quality is unmeasured | 2026-09-06 | AI governance | `compose.yaml` `AIDA_MODEL_GENERATION_ENABLED: ${...:-false}`; README "Model generation is also fail closed" |
 | Hybrid retrieval (lexical + vector + graph fusion) | Partial | Yes | Yes | Partial — deterministic precision/recall/MRR baseline in CI; no large-catalog benchmark | 2026-09-06 | Retrieval | CI `quality-baseline` job; `Docs/90-reference/quality-benchmark-results.md` |
