@@ -28,17 +28,23 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_graph import descendant_ids
 from aida.models import (
     AuthorizationShadowRecord,
     BusinessAssignment,
+    DataSource,
+    SourceBinding,
     Workspace,
     WorkspaceAccessRule,
 )
 from aida.timeutil import is_live
+from aida.workspace_resolution import (
+    NO_BINDING_FOR_DATASOURCE,
+    WORKSPACE_AMBIGUOUS,
+)
 from atlas.platform.db import session_factory
 
 SHADOW = "SHADOW"
@@ -298,4 +304,122 @@ async def enforcement_readiness(
         distinct_principals_affected=principals,
         top_reason_codes=tuple((str(row[0]), int(row[1])) for row in rows[:5]),
         ready=(total == 0),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# R11-D9: the other half of readiness -- scope, not traffic
+# --------------------------------------------------------------------------- #
+#
+# `enforcement_readiness` above summarises what *was observed*: divergences a
+# workspace already recorded. That is only half of what a flip risks, and it is
+# the half that stays silent about the dangerous case. A datasource nobody
+# queried this week records no divergence, and a datasource no workspace binds
+# records none either -- yet flipping `unresolved_workspace_posture` to DENY
+# refuses every future query against it, because `resolve_workspace` returns
+# NO_BINDING_FOR_DATASOURCE and the gate raises rather than proceeding
+# undecided.
+#
+# So this reads the *inventory* instead of the traffic, and answers the
+# question an operator actually has before flipping: which datasources cannot
+# resolve a workspace today. It deliberately mirrors `resolve_workspace`'s own
+# rules -- ACTIVE and unexpired bindings only, one binding resolves, more than
+# one is ambiguous -- so the two can never disagree about what "resolvable"
+# means.
+
+
+@dataclass(frozen=True, slots=True)
+class UnresolvedDatasource:
+    """A datasource that cannot resolve a workspace, and why."""
+
+    datasource_id: UUID
+    name: str
+    reason_code: str
+    live_bindings: int
+
+
+@dataclass(frozen=True, slots=True)
+class UnresolvedScopeReport:
+    """What flipping unresolved scope to DENY would refuse, named.
+
+    `datasources` is capped by the caller's limit and `truncated` says so, so a
+    large estate degrades into "the first N blockers" rather than an unbounded
+    response -- but `unbound`/`ambiguous` are full counts either way, because
+    an operator deciding whether to flip needs the true size even when the list
+    is clipped.
+    """
+
+    datasources_total: int
+    resolvable: int
+    unbound: int
+    ambiguous: int
+    datasources: tuple[UnresolvedDatasource, ...]
+    truncated: bool
+
+    @property
+    def ready(self) -> bool:
+        """True when every datasource resolves a workspace on its own."""
+        return self.unbound == 0 and self.ambiguous == 0
+
+
+async def unresolved_scope(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> UnresolvedScopeReport:
+    """Every datasource in this organization that cannot resolve a workspace.
+
+    One grouped query over `(datasource, live binding)`, so the cost does not
+    grow with the number of bindings per datasource. The liveness predicate is
+    expressed in SQL rather than filtered in Python for the same reason -- an
+    estate is scanned here, not a single row as in `live_bindings_for_datasource`.
+    """
+    moment = now or datetime.now(UTC)
+    live_binding = and_(
+        SourceBinding.datasource_id == DataSource.id,
+        SourceBinding.organization_id == organization_id,
+        SourceBinding.status == "ACTIVE",
+        or_(SourceBinding.expires_at.is_(None), SourceBinding.expires_at > moment),
+    )
+    rows = (
+        await session.execute(
+            select(DataSource.id, DataSource.name, func.count(SourceBinding.id))
+            .select_from(DataSource)
+            .outerjoin(SourceBinding, live_binding)
+            .where(DataSource.organization_id == organization_id)
+            .group_by(DataSource.id, DataSource.name)
+            .order_by(DataSource.name)
+        )
+    ).all()
+
+    blockers: list[UnresolvedDatasource] = []
+    unbound = ambiguous = resolvable = 0
+    for datasource_id, name, binding_count in rows:
+        count = int(binding_count)
+        if count == 1:
+            resolvable += 1
+            continue
+        reason = NO_BINDING_FOR_DATASOURCE if count == 0 else WORKSPACE_AMBIGUOUS
+        if count == 0:
+            unbound += 1
+        else:
+            ambiguous += 1
+        if len(blockers) < limit:
+            blockers.append(
+                UnresolvedDatasource(
+                    datasource_id=datasource_id,
+                    name=str(name),
+                    reason_code=reason,
+                    live_bindings=count,
+                )
+            )
+    return UnresolvedScopeReport(
+        datasources_total=len(rows),
+        resolvable=resolvable,
+        unbound=unbound,
+        ambiguous=ambiguous,
+        datasources=tuple(blockers),
+        truncated=(unbound + ambiguous) > len(blockers),
     )

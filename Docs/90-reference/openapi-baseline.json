@@ -12747,6 +12747,105 @@
         "title": "DomainLineageGraphRead",
         "type": "object"
       },
+      "EnforcementReadinessRead": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "datasources_ambiguous": {
+            "title": "Datasources Ambiguous",
+            "type": "integer"
+          },
+          "datasources_resolvable": {
+            "title": "Datasources Resolvable",
+            "type": "integer"
+          },
+          "datasources_total": {
+            "title": "Datasources Total",
+            "type": "integer"
+          },
+          "datasources_unbound": {
+            "title": "Datasources Unbound",
+            "type": "integer"
+          },
+          "declared_posture": {
+            "title": "Declared Posture",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "unresolved_datasources": {
+            "items": {
+              "$ref": "#/components/schemas/UnresolvedDatasourceRead"
+            },
+            "title": "Unresolved Datasources",
+            "type": "array"
+          },
+          "unresolved_datasources_truncated": {
+            "title": "Unresolved Datasources Truncated",
+            "type": "boolean"
+          },
+          "unresolved_scope_outcome": {
+            "title": "Unresolved Scope Outcome",
+            "type": "string"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          },
+          "workspaces": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceReadinessRead"
+            },
+            "title": "Workspaces",
+            "type": "array"
+          },
+          "workspaces_enforcing": {
+            "title": "Workspaces Enforcing",
+            "type": "integer"
+          },
+          "workspaces_observing": {
+            "title": "Workspaces Observing",
+            "type": "integer"
+          },
+          "workspaces_total": {
+            "title": "Workspaces Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "window_days",
+          "declared_posture",
+          "unresolved_scope_outcome",
+          "workspaces_total",
+          "workspaces_enforcing",
+          "workspaces_observing",
+          "datasources_total",
+          "datasources_resolvable",
+          "datasources_unbound",
+          "datasources_ambiguous",
+          "unresolved_datasources",
+          "unresolved_datasources_truncated",
+          "workspaces",
+          "blockers",
+          "ready"
+        ],
+        "title": "EnforcementReadinessRead",
+        "type": "object"
+      },
       "EntitlementOperation": {
         "additionalProperties": false,
         "properties": {
@@ -23231,6 +23330,25 @@
         "title": "ReadinessResponse",
         "type": "object"
       },
+      "ReasonCodeCount": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason_code",
+          "count"
+        ],
+        "title": "ReasonCodeCount",
+        "type": "object"
+      },
       "RelationshipCandidateBulkDecisionItemRead": {
         "additionalProperties": false,
         "properties": {
@@ -30089,6 +30207,36 @@
         "title": "UnownedAssetEscalationRead",
         "type": "object"
       },
+      "UnresolvedDatasourceRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "live_bindings": {
+            "title": "Live Bindings",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "name",
+          "reason_code",
+          "live_bindings"
+        ],
+        "title": "UnresolvedDatasourceRead",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -30705,6 +30853,54 @@
           "updated_at"
         ],
         "title": "WorkspaceRead",
+        "type": "object"
+      },
+      "WorkspaceReadinessRead": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_mode": {
+            "title": "Authorization Mode",
+            "type": "string"
+          },
+          "distinct_principals_affected": {
+            "title": "Distinct Principals Affected",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "top_reason_codes": {
+            "items": {
+              "$ref": "#/components/schemas/ReasonCodeCount"
+            },
+            "title": "Top Reason Codes",
+            "type": "array"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          },
+          "would_be_denials": {
+            "title": "Would Be Denials",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "name",
+          "authorization_mode",
+          "would_be_denials",
+          "distinct_principals_affected",
+          "top_reason_codes",
+          "ready"
+        ],
+        "title": "WorkspaceReadinessRead",
         "type": "object"
       }
     }
@@ -69682,6 +69878,159 @@
         "summary": "Grant Delegation",
         "tags": [
           "delegation"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/enforcement-readiness": {
+      "get": {
+        "description": "R11-D9: what would break if workspace authorization were switched on.\n\n`aida.workspace_access.enforcement_readiness` has existed since the\nADR-0018 rollout and `Settings.workspace_authorization_posture` tells\noperators to run it before flipping a workspace to ENFORCE -- but nothing\ncalled it except tests, so the instruction named a function no operator\ncould reach. This is that function, reachable, joined to the half it never\nhad.\n\nThe two halves answer different questions and are deliberately not summed\ninto one score:\n\n* **Per workspace, what did traffic show?** Recorded shadow divergences --\n  requests a SHADOW workspace allowed and an ENFORCE one would have\n  refused. This is evidence of real breakage, and it is silent about\n  anything nobody exercised in the window.\n* **Across the estate, what does the inventory imply?** Which datasources\n  cannot resolve a workspace at all. These break the moment\n  `unresolved_workspace_posture` flips to DENY *whether or not* anyone has\n  queried them, so no amount of quiet traffic makes them safe. This is the\n  blocker a divergence report structurally cannot show.\n\n`ready` is the conjunction, and `blockers` says in sentences what has to\nchange. Value-free (INV-6): counts, reason codes and object names, never a\npolicy body and never anything about the data itself.",
+        "operationId": "get_enforcement_readiness_v1_organizations__organization_id__enforcement_readiness_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window_days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Window Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnforcementReadinessRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Enforcement Readiness",
+        "tags": [
+          "workspaces"
         ]
       }
     },

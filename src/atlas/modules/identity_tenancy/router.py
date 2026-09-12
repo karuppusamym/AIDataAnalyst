@@ -22,7 +22,7 @@ the change (INV-7), and every grant of source access is maker-checker separated
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -30,6 +30,7 @@ from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.api import _commit_or_conflict
+from aida.authorization_posture import describe_configured_posture
 from aida.business_graph import (
     assign,
     build_hierarchy,
@@ -41,6 +42,7 @@ from aida.business_graph import (
     rollup_freshness,
     tree,
 )
+from aida.config import get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.domain_service import ensure_default_domain, resolve_domain
@@ -81,6 +83,7 @@ from aida.schemas import (
     CrossBoundaryGrantRead,
     DataDomainCreate,
     DataDomainRead,
+    EnforcementReadinessRead,
     LineOfBusinessCreate,
     LineOfBusinessRead,
     OrganizationCreate,
@@ -88,17 +91,21 @@ from aida.schemas import (
     Page,
     ProjectCreate,
     ProjectRead,
+    ReasonCodeCount,
     SimulatedDecision,
     SourceBindingCreate,
     SourceBindingDecision,
     SourceBindingRead,
+    UnresolvedDatasourceRead,
     WorkspaceCreate,
     WorkspaceMembershipCreate,
     WorkspaceMembershipRead,
     WorkspaceRead,
+    WorkspaceReadinessRead,
 )
 from aida.scope_search import search_predicate
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.workspace_access import enforcement_readiness, unresolved_scope
 from aida.workspace_service import (
     BindingApprovalError,
     approve_binding,
@@ -768,6 +775,139 @@ async def simulate_authorization(
         ],
     )
 
+
+@router.get(
+    "/organizations/{organization_id}/enforcement-readiness",
+    response_model=EnforcementReadinessRead,
+)
+async def get_enforcement_readiness(
+    organization_id: UUID,
+    window_days: int = Query(default=7, ge=1, le=90),
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "Auditor", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> EnforcementReadinessRead:
+    """R11-D9: what would break if workspace authorization were switched on.
+
+    `aida.workspace_access.enforcement_readiness` has existed since the
+    ADR-0018 rollout and `Settings.workspace_authorization_posture` tells
+    operators to run it before flipping a workspace to ENFORCE -- but nothing
+    called it except tests, so the instruction named a function no operator
+    could reach. This is that function, reachable, joined to the half it never
+    had.
+
+    The two halves answer different questions and are deliberately not summed
+    into one score:
+
+    * **Per workspace, what did traffic show?** Recorded shadow divergences --
+      requests a SHADOW workspace allowed and an ENFORCE one would have
+      refused. This is evidence of real breakage, and it is silent about
+      anything nobody exercised in the window.
+    * **Across the estate, what does the inventory imply?** Which datasources
+      cannot resolve a workspace at all. These break the moment
+      `unresolved_workspace_posture` flips to DENY *whether or not* anyone has
+      queried them, so no amount of quiet traffic makes them safe. This is the
+      blocker a divergence report structurally cannot show.
+
+    `ready` is the conjunction, and `blockers` says in sentences what has to
+    change. Value-free (INV-6): counts, reason codes and object names, never a
+    policy body and never anything about the data itself.
+    """
+    enforce_organization(context, organization_id)
+    settings = get_settings()
+    configured = describe_configured_posture(settings)
+
+    workspaces = (
+        await session.scalars(
+            select(Workspace)
+            .where(
+                Workspace.organization_id == organization_id,
+                Workspace.status == "ACTIVE",
+            )
+            .order_by(Workspace.name)
+        )
+    ).all()
+    since = datetime.now(UTC) - timedelta(days=window_days)
+    workspace_reports = [
+        (workspace, await enforcement_readiness(session, workspace, since=since))
+        for workspace in workspaces
+    ]
+    scope = await unresolved_scope(session, organization_id=organization_id, limit=limit)
+
+    observing = [w for w in workspaces if w.authorization_mode != "ENFORCE"]
+    diverging = [(w, r) for w, r in workspace_reports if r.would_be_denials]
+
+    blockers: list[str] = []
+    if scope.unbound:
+        blockers.append(
+            f"{scope.unbound} datasource(s) have no live source binding, so a workspace "
+            "cannot be resolved for them; queries against them are refused once "
+            "unresolved scope is set to DENY"
+        )
+    if scope.ambiguous:
+        blockers.append(
+            f"{scope.ambiguous} datasource(s) have more than one live source binding, so "
+            "the workspace is ambiguous; callers must name a workspace before unresolved "
+            "scope is set to DENY"
+        )
+    if configured.unresolved_scope_outcome != "DENIED":
+        blockers.append(
+            "unresolved-workspace requests still proceed undecided "
+            "(unresolved_workspace_posture is not DENY)"
+        )
+    for workspace, report in diverging:
+        blockers.append(
+            f"workspace {workspace.name} recorded {report.would_be_denials} would-be "
+            f"denial(s) affecting {report.distinct_principals_affected} principal(s) in "
+            f"the last {window_days} day(s)"
+        )
+    if observing:
+        blockers.append(
+            f"{len(observing)} ACTIVE workspace(s) are still in SHADOW and enforce nothing"
+        )
+
+    return EnforcementReadinessRead(
+        organization_id=organization_id,
+        window_days=window_days,
+        declared_posture=configured.declared_posture,
+        unresolved_scope_outcome=configured.unresolved_scope_outcome,
+        workspaces_total=len(workspaces),
+        workspaces_enforcing=len(workspaces) - len(observing),
+        workspaces_observing=len(observing),
+        datasources_total=scope.datasources_total,
+        datasources_resolvable=scope.resolvable,
+        datasources_unbound=scope.unbound,
+        datasources_ambiguous=scope.ambiguous,
+        unresolved_datasources=[
+            UnresolvedDatasourceRead(
+                datasource_id=item.datasource_id,
+                name=item.name,
+                reason_code=item.reason_code,
+                live_bindings=item.live_bindings,
+            )
+            for item in scope.datasources
+        ],
+        unresolved_datasources_truncated=scope.truncated,
+        workspaces=[
+            WorkspaceReadinessRead(
+                workspace_id=report.workspace_id,
+                name=workspace.name,
+                authorization_mode=report.mode,
+                would_be_denials=report.would_be_denials,
+                distinct_principals_affected=report.distinct_principals_affected,
+                top_reason_codes=[
+                    ReasonCodeCount(reason_code=code, count=hits)
+                    for code, hits in report.top_reason_codes
+                ],
+                ready=report.ready,
+            )
+            for workspace, report in workspace_reports
+        ],
+        blockers=blockers,
+        ready=not blockers,
+    )
 
 # ---- Moved from aida.api ST-07 identity_tenancy Commit C (2026-09-03) ----
 # The 7 required endpoints (per session addendum's identity_tenancy TODO row) plus

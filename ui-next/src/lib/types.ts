@@ -2138,6 +2138,25 @@ export interface DomainLineageGraphRead {
   withheld_cross_boundary_domain_ids?: string[];
 }
 
+export interface EnforcementReadinessRead {
+  organization_id: string;
+  window_days: number;
+  declared_posture: string;
+  unresolved_scope_outcome: string;
+  workspaces_total: number;
+  workspaces_enforcing: number;
+  workspaces_observing: number;
+  datasources_total: number;
+  datasources_resolvable: number;
+  datasources_unbound: number;
+  datasources_ambiguous: number;
+  unresolved_datasources: UnresolvedDatasourceRead[];
+  unresolved_datasources_truncated: boolean;
+  workspaces: WorkspaceReadinessRead[];
+  blockers: string[];
+  ready: boolean;
+}
+
 export interface EntitlementOperation {
   action: "PROVISION" | "REVOKE";
 }
@@ -3895,6 +3914,11 @@ export interface ReadinessResponse {
   signals?: Record<string, string>;
 }
 
+export interface ReasonCodeCount {
+  reason_code: string;
+  count: number;
+}
+
 export interface RelationshipCandidateBulkDecisionItemRead {
   candidate_id: string;
   status: "SUCCEEDED" | "FAILED";
@@ -5054,6 +5078,13 @@ export interface UnownedAssetEscalationRead {
   updated_at: string;
 }
 
+export interface UnresolvedDatasourceRead {
+  datasource_id: string;
+  name: string;
+  reason_code: string;
+  live_bindings: number;
+}
+
 export interface ValidationError {
   loc: (string | number)[];
   msg: string;
@@ -5164,4 +5195,14 @@ export interface WorkspaceRead {
   monthly_cost_ceiling: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface WorkspaceReadinessRead {
+  workspace_id: string;
+  name: string;
+  authorization_mode: string;
+  would_be_denials: number;
+  distinct_principals_affected: number;
+  top_reason_codes: ReasonCodeCount[];
+  ready: boolean;
 }

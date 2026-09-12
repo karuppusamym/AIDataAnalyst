@@ -2945,6 +2945,62 @@ class AuthorizationSimulationRead(ApiModel):
     decisions: list[SimulatedDecision]
 
 
+# --- R11-D9: enforcement readiness -------------------------------------------
+#
+# Two different kinds of evidence, kept as separate fields rather than folded
+# into one score. `workspaces` is what traffic *showed* (recorded shadow
+# divergences); `unresolved_datasources` is what the *inventory* implies
+# regardless of traffic. A deployment can be clean on the first and unsafe on
+# the second -- that is the normal case for an estate whose datasources were
+# migrated without bindings -- so a single readiness number would hide exactly
+# the blocker an operator is looking for.
+
+
+class ReasonCodeCount(ApiModel):
+    reason_code: str
+    count: int
+
+
+class WorkspaceReadinessRead(ApiModel):
+    workspace_id: UUID
+    name: str
+    authorization_mode: str
+    would_be_denials: int
+    distinct_principals_affected: int
+    top_reason_codes: list[ReasonCodeCount]
+    #: No recorded would-be denial in the window. A prompt to look, not an
+    #: approval: a workspace nobody used this week is also "ready" by this test.
+    ready: bool
+
+
+class UnresolvedDatasourceRead(ApiModel):
+    datasource_id: UUID
+    name: str
+    reason_code: str
+    live_bindings: int
+
+
+class EnforcementReadinessRead(ApiModel):
+    organization_id: UUID
+    window_days: int
+    declared_posture: str
+    unresolved_scope_outcome: str
+    workspaces_total: int
+    workspaces_enforcing: int
+    workspaces_observing: int
+    datasources_total: int
+    datasources_resolvable: int
+    datasources_unbound: int
+    datasources_ambiguous: int
+    unresolved_datasources: list[UnresolvedDatasourceRead]
+    unresolved_datasources_truncated: bool
+    workspaces: list[WorkspaceReadinessRead]
+    #: Plain sentences, each naming one thing that must change before the
+    #: rollout step it blocks. Empty exactly when `ready` is true.
+    blockers: list[str]
+    ready: bool
+
+
 # --- DQ-1: Notification and Escalation Routing --------------------------------
 
 

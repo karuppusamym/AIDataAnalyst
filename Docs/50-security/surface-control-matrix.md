@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **471**
-- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 420, SDK 1
+- Surfaces covered: **472**
+- By family: BULK 11, EXPORT 5, JOB 25, MCP 9, REST 421, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -248,6 +248,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/data-domains` | REST | `aida.operational_api.list_organization_data_domains` | DataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/datasources` | REST | `aida.operational_api.list_organization_datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/delegations` | REST | `aida.delegation_api.list_delegations` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/enforcement-readiness` | REST | `atlas.modules.identity_tenancy.router.get_enforcement_readiness` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/fleet-health` | REST | `aida.operational_api.organization_fleet_health` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/fleet-summary` | REST | `aida.operational_api.fleet_summary` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/global-search` | REST | `aida.semantic_api.global_semantic_search` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | cooperative |
