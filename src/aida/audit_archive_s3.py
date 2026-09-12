@@ -178,6 +178,7 @@ class S3ArchiveStorage:
         retention_mode: str = "COMPLIANCE",
         session_token: str = "",
         timeout: float = _DEFAULT_TIMEOUT,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not endpoint:
             raise ArchiveStorageUnavailable("archive storage 's3' is unavailable: no endpoint")
@@ -211,6 +212,17 @@ class S3ArchiveStorage:
         self._secret_key = secret_key
         self._session_token = session_token
         self._timeout = timeout
+        # The only seam in this class, and it is deliberately below the
+        # signature: every request still gets built, signed and parsed by the
+        # code above, so a substituted transport exercises SigV4, the
+        # canonical query string, the Object Lock headers and the XML error
+        # parsing exactly as production does. Substituting the *provider*
+        # instead -- the obvious alternative -- would prove none of that, and
+        # a read-back test that proves none of that proves nothing.
+        #
+        # Production passes nothing and gets httpx's real transport. Only
+        # tests pass one, which is why there is no setting for it.
+        self._transport = transport
 
     # --- signed transport -------------------------------------------------
 
@@ -256,7 +268,7 @@ class S3ArchiveStorage:
         if canonical_query:
             url = f"{url}?{canonical_query}"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 response = client.request(
                     method,
                     url,

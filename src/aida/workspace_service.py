@@ -49,8 +49,32 @@ _ROLE_ACTIONS: dict[str, frozenset[str]] = {
     "reviewer": frozenset(
         {"READ_METADATA", "READ_DATA", "EXECUTE_TOOL", "CONSUME_CONTEXT", "APPROVE"}
     ),
+    # `EXPORT` was declared in `policy_engine.ACTIONS` from the beginning and
+    # granted by no role here, which made it unreachable: a surface gating on
+    # it was refused `ROLE_DOES_NOT_PERMIT_ACTION` in every enforcing workspace
+    # no matter what policy said, so the verb could be written into a policy
+    # and never take effect. R11-B9's audit export is the first enforcement
+    # point for it (`aida.audit_export_api`), and found the gap.
+    #
+    # Granted to `workspace_owner` alone, deliberately. Bulk extraction of a
+    # governed corpus is an elevated act, and widening it to `analyst` or
+    # `steward` would hand every member of every migrated workspace the
+    # ability to walk out with the audit ledger -- a decision nobody has made.
+    # A deployment that wants a narrower "may extract, may not read data"
+    # grant cannot express it today: see the R11-B9 handoff note, because
+    # adding an `auditor` workspace role means changing the membership
+    # `Literal` in `atlas.modules.identity_tenancy.schemas` and the generated
+    # UI types with it.
     "workspace_owner": frozenset(
-        {"READ_METADATA", "READ_DATA", "EXECUTE_TOOL", "CONSUME_CONTEXT", "PROPOSE", "APPROVE"}
+        {
+            "READ_METADATA",
+            "READ_DATA",
+            "EXECUTE_TOOL",
+            "CONSUME_CONTEXT",
+            "PROPOSE",
+            "APPROVE",
+            "EXPORT",
+        }
     ),
 }
 

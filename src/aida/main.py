@@ -24,6 +24,7 @@ from aida.api import router
 from aida.asset_description_api import router as asset_description_router
 from aida.asset_evidence_api import router as asset_evidence_router
 from aida.audit_archive_s3 import S3ArchiveStorage
+from aida.audit_export_api import router as audit_export_router
 from aida.authorization_posture import assert_startup_posture
 from aida.bi_api import router as bi_router
 from aida.column_description_api import router as column_description_router
@@ -404,6 +405,7 @@ app.include_router(workspace_router)
 app.include_router(semantic_router)
 app.include_router(tool_router)
 app.include_router(operational_router)
+app.include_router(audit_export_router)
 app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(agent_contract_router)
