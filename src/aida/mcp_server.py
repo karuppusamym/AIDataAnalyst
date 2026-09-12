@@ -143,11 +143,8 @@ MCP_SERVER_VERSION = "1.0.0"
 _ERR_PARSE = -32700
 _ERR_INVALID_REQUEST = -32600
 _ERR_METHOD_NOT_FOUND = -32601
-_ERR_INVALID_PARAMS = -32602
 _ERR_INTERNAL = -32603
 _ERR_ACCESS_DENIED = -32001
-_ERR_NOT_FOUND = -32002
-
 # ---------------------------------------------------------------------------
 # FastAPI router
 # ---------------------------------------------------------------------------

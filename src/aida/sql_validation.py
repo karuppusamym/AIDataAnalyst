@@ -108,15 +108,6 @@ _CATALOG_CODES: Final[frozenset[str]] = frozenset(
     {FINDING_UNKNOWN_OR_UNAUTHORIZED_TABLE, FINDING_UNKNOWN_COLUMN}
 )
 
-_ESTIMATE_CODES: Final[frozenset[str]] = frozenset(
-    {
-        FINDING_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR,
-        FINDING_COST_CEILING_EXCEEDED,
-        FINDING_BYTE_BUDGET_EXCEEDED,
-    }
-)
-
-
 @dataclass(frozen=True, slots=True)
 class SqlFinding:
     """One machine-actionable validation finding.

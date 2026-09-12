@@ -18,7 +18,7 @@ an unknown enum value is a validation error, never a silent default.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -35,11 +35,6 @@ from aida.models import (
     AiAsset,
     AiAssetVersion,
 )
-
-AutonomyTier = Literal["T0", "T1", "T2", "T3"]
-SupervisorPersona = Literal["ANALYST", "CONSUMER", "STEWARD", "REVIEWER", "OPERATOR", "AUDITOR"]
-KillScope = Literal["AGENT", "TIER", "ALL"]
-WriteLane = Literal["MEASURED_FACT", "PLATFORM_OBSERVATION", "MODEL_JUDGEMENT_PROPOSAL"]
 
 #: Reason codes carried by `AgentPolicyRejected.reason_code` and written
 #: verbatim into the DENIED audit row's `details.reason`.

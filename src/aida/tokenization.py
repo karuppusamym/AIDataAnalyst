@@ -79,7 +79,7 @@ from typing import Protocol
 
 import httpx
 
-from aida.secrets import SecretResolutionError, SecretResolver
+from aida.secrets import SecretResolutionError, SecretResolver, vault_data_field
 from atlas.platform.config import Settings
 
 # Rounds in the local Feistel-style construction. Even, so the two halves are
@@ -255,14 +255,14 @@ class VaultTransformTokenizationProvider:
 
     async def tokenize(self, value: str) -> str:
         body = await self._call(f"/v1/transform/encode/{self._role_name}", {"value": value})
-        encoded = _response_field(body, "encoded_value")
+        encoded = vault_data_field(body, "encoded_value")
         if not isinstance(encoded, str) or not encoded:
             raise TokenizationError("KMS tokenization response was malformed")
         return encoded
 
     async def detokenize(self, token: str) -> str:
         body = await self._call(f"/v1/transform/decode/{self._role_name}", {"value": token})
-        decoded = _response_field(body, "decoded_value")
+        decoded = vault_data_field(body, "decoded_value")
         if not isinstance(decoded, str):
             raise TokenizationError("KMS detokenization response was malformed")
         return decoded
@@ -291,14 +291,6 @@ class VaultTransformTokenizationProvider:
         return decoded
 
 
-def _response_field(body: dict[str, object], field: str) -> object:
-    """`body["data"][field]`, tolerating a malformed shape rather than raising
-    a `KeyError`/`TypeError` the caller would have to distinguish from a
-    genuinely bad value -- both collapse to the same `TokenizationError`."""
-    data = body.get("data")
-    if not isinstance(data, dict):
-        return None
-    return data.get(field)
 
 
 def resolve_tokenization_provider(

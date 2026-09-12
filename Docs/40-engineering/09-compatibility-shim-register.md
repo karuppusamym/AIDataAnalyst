@@ -130,7 +130,7 @@ caller today.
 
 ### aida.models
 
-- **File** — `src/aida/models.py` (5439 lines)
+- **File** — `src/aida/models.py` (5310 lines)
 - **Replacement path** *(hand-written)* — Each re-exported class has moved to the `models` module of the bounded context that owns it; import it from there. The rest of the file — the large majority of it -- has not moved and has no replacement path yet.
 - **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md
@@ -144,7 +144,7 @@ caller today.
 
 ### aida.schemas
 
-- **File** — `src/aida/schemas.py` (3885 lines)
+- **File** — `src/aida/schemas.py` (3871 lines)
 - **Replacement path** *(hand-written)* — Each re-exported DTO has moved to the `schemas` module of the bounded context that owns it. The rest of the file has not moved.
 - **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md

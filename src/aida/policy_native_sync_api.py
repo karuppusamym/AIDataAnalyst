@@ -54,15 +54,6 @@ router = APIRouter(prefix="/v1", tags=["policy-native-sync"])
 #: A preview costs nothing but a read and generates no obligation, so the same
 #: steward-tier roles that may request a profiling exception may preview freely.
 NATIVE_POLICY_SYNC_PREVIEW_ROLES = ("PlatformAdmin", "DataAdmin", "DataSteward")
-NATIVE_POLICY_SYNC_READ_ROLES = (
-    "PlatformAdmin",
-    "DataAdmin",
-    "DataSteward",
-    "Reviewer",
-    "Viewer",
-)
-
-
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")

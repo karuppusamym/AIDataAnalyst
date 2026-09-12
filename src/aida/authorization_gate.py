@@ -43,8 +43,6 @@ from atlas.platform.config import Settings
 
 _log = structlog.get_logger(__name__)
 
-# Postures for a request whose workspace could not be resolved.
-SHADOW_UNRESOLVED = "SHADOW"
 DENY_UNRESOLVED = "DENY"
 
 # `SecurityContext.principal_type` is the platform's word; `principal_kind` is the

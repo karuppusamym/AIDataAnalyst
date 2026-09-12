@@ -88,7 +88,7 @@ silently dropped from the queue.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -778,16 +778,3 @@ async def compose_review_queue(
     return composed
 
 
-def confidence_bearing_object_types() -> Iterable[str]:
-    """Object types this module composes a real `confidence` for -- exposed
-    for tests that want to assert coverage without hard-coding the list
-    twice.
-    """
-    return (
-        "METADATA_ENRICHMENT_PROPOSAL",
-        "GLOSSARY_LINK_PROPOSAL",
-        "SEMANTIC_METRIC_PROPOSAL",
-        "ASSET_DESCRIPTION_DRAFT",
-        "COLUMN_DESCRIPTION_DRAFT",
-        "QUALITY_RULE_PROPOSAL",
-    )

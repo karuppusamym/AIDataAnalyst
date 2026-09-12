@@ -73,19 +73,19 @@ read the deployment's secret store for the values.
 
 ## Coverage
 
-- Settings inventoried: **41** (24 destinations, 17 credential references)
-- Rows with at least one `unknown` cell: **41**
-- `unknown` cells in total: **41** (of which 41 are the `Verified` column, by construction)
+- Settings inventoried: **40** (24 destinations, 16 credential references)
+- Rows with at least one `unknown` cell: **40**
+- `unknown` cells in total: **40** (of which 40 are the `Verified` column, by construction)
 
 ### Gap list -- cells the analysis could not determine
 
 | Cell | Rows | Which |
 |---|---|---|
-| verified | 41 | every row |
+| verified | 40 | every row |
 
 ### Findings
 
-- **Settings no code in `src/` reads (1):** `vector_index_credential_reference`. A destination or credential that nothing consumes is either dead configuration or a consumer that reads it some way this analysis cannot see; either way it should not sit in `Settings` unexplained.
+- **Settings no code in `src/` reads (0):** none. A destination or credential that nothing consumes is either dead configuration or a consumer that reads it some way this analysis cannot see; either way it should not sit in `Settings` unexplained.
 - **Destinations with no readiness probe (22 of 24):** `audit_archive_bucket_name`, `audit_archive_filesystem_root`, `dq_itsm_webhook_url`, `entitlement_webhook_url`, `gemini_base_url`, `hmac_signing_vault_url`, `kafka_bootstrap_servers`, `model_endpoint_urls`, `neo4j_uri`, `object_store_endpoint`, `oidc_issuer`, `oidc_jwks_url`, `openai_base_url`, `otel_endpoint`, `portal_base_url`, `redis_url`, `secrets_vault_url`, `siem_endpoint`, `slack_webhook_url`, `teams_webhook_url`, `tokenization_vault_url`, `vector_index_url`. `/health/ready` gates on PostgreSQL only and reports Temporal, the archive task, the reconnect task and the outbox backlog (F18); nothing else below is observed at all.
 - **Destinations that ship pointing somewhere real (2):** `gemini_base_url`, `openai_base_url`. Every other destination is inert on arrival, which is the posture the review's F01/F04 notes describe: a deployment that has named nothing talks to nothing, rather than to a default somebody forgot about.
 
@@ -132,5 +132,4 @@ read the deployment's secret store for the values.
 | `tokenization_key` | credential | a credential held in process configuration | placeholder literal | yes -- development placeholder | `aida.tokenization` | no -- the shipped default is a placeholder | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `tokenization_vault_token_reference` | credential | a secret-store reference resolved by `aida.secrets.SecretResolver` | empty string | yes -- names nothing | `aida.tokenization` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `tokenization_vault_url` | destination | whatever the deployment supplies -- unset by default | unset (None) | yes -- names nothing | `aida.tokenization` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
-| `vector_index_credential_reference` | credential | a secret-store reference resolved by `aida.secrets.SecretResolver` | unset (None) | yes -- names nothing | no reader found in `src/` | no -- the shipped default names nothing | n/a -- nothing reads this setting | n/a -- nothing reads this setting | n/a -- nothing reads this setting | unknown |
 | `vector_index_url` | destination | whatever the deployment supplies -- unset by default | unset (None) | yes -- names nothing | `aida.vector_store` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |

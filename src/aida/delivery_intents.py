@@ -77,14 +77,6 @@ STATE_DUPLICATE: Final = "DUPLICATE"
 #: reclaimed by expiry (`claim_expires_at`), never by another worker deciding
 #: the first one looked slow.
 CLAIMABLE_STATES: Final = (STATE_PENDING, STATE_RETRYING)
-TERMINAL_STATES: Final = (
-    STATE_DELIVERED,
-    STATE_DEAD_LETTER,
-    STATE_DISCARDED,
-    STATE_DUPLICATE,
-)
-
-
 class DeliveryOutcome(StrEnum):
     """What a caller and an operator are entitled to be told.
 

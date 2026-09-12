@@ -37,24 +37,6 @@ from aida.models import (
 from aida.policy_engine import PolicyRecord
 from aida.timeutil import as_utc
 
-NODE_KINDS = ("LOB", "SUB_LOB", "DOMAIN", "SUB_DOMAIN", "CONCEPT")
-
-# Target types an assignment may attach to. Polymorphic by necessity: assignments
-# reach objects in different module schemas, and ADR-0015 forbids cross-schema
-# foreign keys, so referential integrity here is eventual and reconciled.
-TARGET_TYPES = (
-    "PROJECT",
-    "WORKSPACE",
-    "DATASOURCE",
-    "TABLE",
-    "COLUMN",
-    "VIEW",
-    "METRIC",
-    "GLOSSARY_TERM",
-    "DATA_PRODUCT",
-    "KNOWLEDGE_PAGE",
-)
-
 
 def _as_utc(value: datetime | None) -> datetime | None:
     """Coerce a timestamp to UTC-aware before comparing it to another.

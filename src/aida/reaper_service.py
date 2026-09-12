@@ -702,10 +702,3 @@ async def run_reaper_scheduler_pass(
     return report
 
 
-def _reset_reaper_due_state_for_tests() -> None:
-    """Test-only helper -- clears the in-process due tracker so each test's
-    ``run_reaper_scheduler_pass`` call runs regardless of a prior test's
-    run time. Nothing in production calls this.
-    """
-    global _reaper_last_run_at
-    _reaper_last_run_at = None

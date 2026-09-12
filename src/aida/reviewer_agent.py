@@ -56,12 +56,12 @@ raised mid-batch did not stop the batch it was raised during.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import structlog
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,6 +99,8 @@ from aida.review_risk_tiers import (
     tier_at_or_below,
 )
 from aida.security import SecurityContext
+
+_log = structlog.get_logger(__name__)
 
 _SAMPLING_FLOOR = 0.05
 _FINGERPRINT_BUCKETS = float(2**32)
@@ -157,24 +159,6 @@ def sampled_for_audit(review_id: UUID, sampling_rate: float) -> bool:
     effective = max(float(sampling_rate), _SAMPLING_FLOOR)
     bucket = int(hashlib.sha256(str(review_id).encode()).hexdigest()[:8], 16)
     return (bucket / _FINGERPRINT_BUCKETS) < effective
-
-
-def _payload_fingerprint(review: GovernanceReview) -> str:
-    """Identity of *what is being proposed*, not of the proposal row.
-
-    Two proposals of the same change to the same object share a
-    fingerprint, which is what makes "we rejected this before" answerable.
-    """
-    canonical = json.dumps(
-        {
-            "object_type": review.object_type,
-            "object_id": review.object_id,
-            "requested_action": review.requested_action,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 async def _negative_knowledge_hits(session: AsyncSession, review: GovernanceReview) -> int:
@@ -885,11 +869,28 @@ async def auto_decide_tier0_tier1(
         # clamped ceiling, so an object type classified T2/T3 is refused
         # whatever configuration claimed.
         if review.object_type not in allowlist or not tier_at_or_below(tier, ceiling):
+            # Named, not silent: an operator asking why the agent passed over an
+            # item gets the same vocabulary the refusal paths above raise, rather
+            # than an absence they have to reconstruct from the tier table.
+            _log.info(
+                "reviewer_agent_item_skipped",
+                reason=REASON_TIER_EXCEEDED,
+                review_id=str(review.id),
+                object_type=review.object_type,
+                risk_tier=tier,
+                ceiling=ceiling,
+            )
             continue
         # Guard 4: never decide our own proposal. The shared decision path
         # enforces this too; re-checking here means a misconfigured
         # principal fails as a skip rather than as a 409 mid-batch.
         if review.requested_by == agent_principal:
+            _log.info(
+                "reviewer_agent_item_skipped",
+                reason=REASON_SELF_PROPOSED,
+                review_id=str(review.id),
+                object_type=review.object_type,
+            )
             continue
 
         # The *verdict* ("APPROVE"/"REJECT") is what the decision service

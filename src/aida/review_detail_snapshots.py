@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import ContextProductVersion, GovernanceReview, ModelImportBatch, ModelImportChange
 
-DETAIL_TYPES = frozenset({"CONTEXT_PRODUCT_VERSION", "MODEL_IMPORT_BATCH"})
 CONTEXT_FIELDS = (
     "name",
     "description",

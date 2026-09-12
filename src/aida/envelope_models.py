@@ -68,8 +68,6 @@ AVAILABLE = "AVAILABLE"
 #: `definition_sql_redacted` / `body_sql_redacted` is NULL and `unavailable_reason` says why.
 UNAVAILABLE = "UNAVAILABLE"
 
-AVAILABILITY_STATES = (AVAILABLE, UNAVAILABLE)
-
 #: Object types `MetadataObjectDescription` accepts. `TABLE` and `COLUMN` are
 #: deliberately absent: `metadata_table.source_description` (the 1.0 path) and,
 #: since IN-5e, `metadata_column.source_description` each own their comments

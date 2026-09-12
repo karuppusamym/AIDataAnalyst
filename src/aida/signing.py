@@ -57,7 +57,7 @@ from typing import Protocol
 
 import httpx
 
-from aida.secrets import SecretResolutionError, SecretResolver
+from aida.secrets import SecretResolutionError, SecretResolver, vault_data_field
 from atlas.platform.config import Settings
 
 
@@ -172,7 +172,7 @@ class VaultTransitSigningProvider:
 
     async def sign(self, data: str) -> str:
         body = await self._call(f"/v1/transit/hmac/{self._key_name}", {"input": _b64(data)})
-        signature = _response_field(body, "hmac")
+        signature = vault_data_field(body, "hmac")
         if not isinstance(signature, str) or not signature:
             raise SigningError("KMS signing response was malformed")
         return signature
@@ -182,7 +182,7 @@ class VaultTransitSigningProvider:
             f"/v1/transit/verify/{self._key_name}",
             {"input": _b64(data), "hmac": signature},
         )
-        valid = _response_field(body, "valid")
+        valid = vault_data_field(body, "valid")
         if not isinstance(valid, bool):
             raise SigningError("KMS verification response was malformed")
         return valid
@@ -215,14 +215,6 @@ def _b64(data: str) -> str:
     return base64.b64encode(data.encode("utf-8")).decode("ascii")
 
 
-def _response_field(body: dict[str, object], field: str) -> object:
-    """`body["data"][field]`, tolerating a malformed shape rather than raising
-    a `KeyError`/`TypeError` the caller would have to distinguish from a
-    genuinely bad value -- both collapse to the same `SigningError`."""
-    data = body.get("data")
-    if not isinstance(data, dict):
-        return None
-    return data.get(field)
 
 
 def resolve_signing_provider(

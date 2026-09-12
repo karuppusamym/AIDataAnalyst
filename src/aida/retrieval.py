@@ -715,13 +715,6 @@ class RetrievalEvidence:
     metadata: dict[str, Any]
 
 
-# RT-6: the number of recorded executions against a table beyond which its
-# usage_popularity raw_score saturates at 1.0. 10 real executions is a small,
-# deliberately conservative bar -- enough to separate "never queried" from
-# "actually used" without requiring warehouse-scale traffic to move at all.
-_USAGE_POPULARITY_SATURATION = 10
-
-
 async def _table_execution_counts(
     session: AsyncSession,
     *,

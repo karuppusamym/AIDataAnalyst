@@ -36,7 +36,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Final, Literal
+from typing import Final
 
 try:
     import sqlglot
@@ -68,8 +68,6 @@ class Confidence(str, Enum):
     PARTIAL = "PARTIAL"
     LOW = "LOW"
 
-
-DialectName = Literal["postgres", "snowflake", "bigquery", "tsql", "oracle"]
 
 _SQLGLOT_DIALECT_MAP: dict[str, str] = {
     "postgres": "postgres",

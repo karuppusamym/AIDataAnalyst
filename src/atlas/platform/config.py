@@ -225,11 +225,6 @@ class Settings(BaseSettings):
     # PR-2: how many (value, count) pairs `profile_column_values` captures per
     # gated column -- the "top values" half of the policy-approved exception.
     profile_value_top_n: int = Field(default=10, ge=1, le=100)
-    # PR-2: default retention window pinned onto a `ColumnValueProfileArtifact`
-    # at capture time from the policy that authorized it -- changing this
-    # setting later never retroactively extends or shortens an
-    # already-captured artifact's `expires_at`.
-    profiling_exception_default_retention_days: int = Field(default=30, ge=1, le=3650)
     # PR-2: how many expired value-bearing artifacts the background purge
     # sweep deletes per scheduler iteration, mirroring `scheduler_batch_size`.
     profiling_exception_purge_batch_size: int = Field(default=500, ge=1, le=5_000)
@@ -239,14 +234,12 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = Field(default=10, ge=1, le=100)
     outbox_max_backoff_seconds: int = Field(default=300, ge=1, le=3600)
     relationship_candidate_scan_max_columns: int = Field(default=100_000, ge=1_000, le=1_000_000)
-    cross_source_candidate_max_datasource_pairs: int = Field(default=50, ge=1, le=2_000)
     rename_candidate_scan_max_tables: int = Field(default=200, ge=10, le=5_000)
     rename_candidate_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     object_resolution_scan_max_tables_per_datasource: int = Field(default=300, ge=10, le=5_000)
     object_resolution_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     relationship_candidate_composite_max_columns: int = Field(default=4, ge=2, le=8)
     relationship_candidate_composite_max_per_table: int = Field(default=25, ge=1, le=500)
-    usage_boost_enabled_default: bool = False
     usage_boost_refresh_minutes: int = Field(default=60, ge=5, le=1440)
     usage_boost_window_days: int = Field(default=7, ge=1, le=90)
     usage_boost_batch_size: int = Field(default=200, ge=1, le=5_000)
@@ -540,17 +533,6 @@ class Settings(BaseSettings):
     certification_expiry_warn_days: int = Field(default=7, ge=1, le=90)
     certification_expiry_warn_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     certification_revoke_enforce_maker_checker: bool = True
-    # P3-09: OFF by default. `backfill_certification_evidence_v1` is a best-
-    # effort backfill of the new `AssetCertification.evidence` blob for
-    # pre-P3-09 ACTIVE rows; it snapshots today's description version /
-    # ownership / quality / glossary state (the true state at certify time
-    # is gone) and tags the resulting row with `backfilled=True` so future
-    # readers do not conflate a reconstructed snapshot with an as-of-certify
-    # one. Left OFF at startup because a large estate should backfill via
-    # the `scripts/backfill_certification_evidence.py` CLI on the operator's
-    # own schedule, not lengthen every app boot; a single-tenant / small-
-    # estate dev deployment can flip this true.
-    certification_evidence_backfill_on_startup: bool = False
     # P2-07: OwnershipAssignment re-affirmation cadence + expiry-warning sweep +
     # identity-merge/delete leaver flip.
     #
@@ -617,7 +599,6 @@ class Settings(BaseSettings):
         "postgres_bruteforce"
     )
     vector_index_url: str | None = None
-    vector_index_credential_reference: str | None = Field(default=None, max_length=500)
     vector_index_collection: str = Field(default="atlas-metadata", max_length=200)
     vector_index_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     # Exact cosine is linear in candidates. Measured end to end on PostgreSQL 16 with

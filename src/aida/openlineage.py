@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from aida.artifact_parsing import optional_text
+
 MAX_OPENLINEAGE_EVENT_BYTES = 1 * 1024 * 1024
 MAX_OPENLINEAGE_DATASETS = 2_000
 MAX_OPENLINEAGE_TABLE_EDGES = 25_000
@@ -73,15 +75,10 @@ class ParsedOpenLineageEvent:
     column_edges: list[ParsedOpenLineageColumnEdge]
 
 
-def _optional_text(value: Any, limit: int) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text[:limit] if text else None
 
 
 def _required_text(value: Any, field: str, limit: int) -> str:
-    text = _optional_text(value, limit)
+    text = optional_text(value, limit)
     if not text:
         raise OpenLineageError(f"openlineage {field} is required")
     return text
@@ -130,7 +127,7 @@ def _dataset_schema_fields(facets: dict[str, Any]) -> list[str]:
     for raw_field in fields[:2000]:
         if not isinstance(raw_field, dict):
             continue
-        name = _optional_text(raw_field.get("name"), 255)
+        name = optional_text(raw_field.get("name"), 255)
         if name:
             result.append(name)
     return result
@@ -169,7 +166,7 @@ def _column_edges_for_outputs(
         if not isinstance(fields, dict):
             continue
         for raw_output_column, lineage in list(fields.items())[:5000]:
-            output_column_name = _optional_text(raw_output_column, 255)
+            output_column_name = optional_text(raw_output_column, 255)
             if not output_column_name or not isinstance(lineage, dict):
                 continue
             input_fields = lineage.get("inputFields")
@@ -178,9 +175,9 @@ def _column_edges_for_outputs(
             for raw_input in input_fields[:5000]:
                 if not isinstance(raw_input, dict):
                     continue
-                input_namespace = _optional_text(raw_input.get("namespace"), 500)
-                input_name = _optional_text(raw_input.get("name"), 1000)
-                input_column_name = _optional_text(raw_input.get("field"), 255)
+                input_namespace = optional_text(raw_input.get("namespace"), 500)
+                input_name = optional_text(raw_input.get("name"), 1000)
+                input_column_name = optional_text(raw_input.get("field"), 255)
                 if not input_namespace or not input_name or not input_column_name:
                     continue
                 raw_transformations = raw_input.get("transformations")
@@ -200,8 +197,8 @@ def _column_edges_for_outputs(
                         output_dataset_namespace=output.namespace,
                         output_dataset_name=output.name,
                         output_column_name=output_column_name,
-                        transformation_type=_optional_text(first_transformation.get("type"), 100),
-                        transformation_subtype=_optional_text(
+                        transformation_type=optional_text(first_transformation.get("type"), 100),
+                        transformation_subtype=optional_text(
                             first_transformation.get("subtype"), 100
                         ),
                     )
@@ -261,7 +258,7 @@ def parse_openlineage_run_event(event: dict[str, Any]) -> ParsedOpenLineageEvent
         event_type=_required_text(event.get("eventType"), "eventType", 30).upper(),
         event_time=_parse_event_time(event.get("eventTime")),
         producer=_required_text(event.get("producer"), "producer", 1000),
-        schema_url=_optional_text(event.get("schemaURL"), 1000),
+        schema_url=optional_text(event.get("schemaURL"), 1000),
         job_namespace=_required_text(raw_job.get("namespace"), "job.namespace", 500),
         job_name=_required_text(raw_job.get("name"), "job.name", 500),
         run_id=_required_text(raw_run.get("runId"), "run.runId", 255),

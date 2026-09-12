@@ -38,11 +38,6 @@ from aida.workspace_access import (
     rule_derived_roles,
 )
 
-# Workspace roles, weakest first. Roles are additive across memberships; a DENY from
-# policy always wins over a grant from a role, and maker != checker (INV-8) holds
-# regardless of role -- a workspace_owner who proposes still cannot approve.
-WORKSPACE_ROLES = ("viewer", "analyst", "steward", "reviewer", "workspace_owner")
-
 _ROLE_ACTIONS: dict[str, frozenset[str]] = {
     "viewer": frozenset({"READ_METADATA"}),
     "analyst": frozenset(

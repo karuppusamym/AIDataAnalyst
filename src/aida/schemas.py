@@ -2758,12 +2758,6 @@ class StudioConflict(ApiModel):
     current_value: Any
 
 
-class StudioDiffEntry(ApiModel):
-    field: str
-    before: Any
-    after: Any
-
-
 class StudioDiffRead(ApiModel):
     change_set_id: UUID
     items: list[dict[str, Any]]
@@ -3797,14 +3791,6 @@ class StudioContextProductMaterializationRead(ApiModel):
 # ---------------------------------------------------------------------------
 
 
-PARSED_LINEAGE_EDGE_TYPES = (
-    "VIEW",
-    "PROCEDURE",
-    "ROUTINE",
-    "DBT",
-    "OPENLINEAGE_TABLE",
-    "OPENLINEAGE_COLUMN",
-)
 #: `ROUTINE` is the routine-aware procedure table (`DeepProcedureLineageEdge`),
 #: under review since 2026-09-11; `PROCEDURE` is the raw-SQL one.
 ParsedLineageEdgeType = Literal[

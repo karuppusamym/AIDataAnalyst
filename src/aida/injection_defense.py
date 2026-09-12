@@ -451,11 +451,6 @@ _SPACED_RUN = re.compile(r"(?<!\w)(?:\w[ .\-*\u00b7]){2,}\w(?!\w)")
 _LEET = str.maketrans("013457@$", "oieastas")
 
 
-def _strip_zero_width(text: str) -> str:
-    """Remove zero-width characters used for steganographic evasion."""
-    return "".join(ch for ch in text if ch not in _ZERO_WIDTH_CHARS)
-
-
 def _is_variation_selector(ch: str) -> bool:
     code = ord(ch)
     return 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF

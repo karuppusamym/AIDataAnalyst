@@ -53,7 +53,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final, Literal
+from typing import Any, Final
 from uuid import UUID
 
 import structlog
@@ -77,18 +77,6 @@ from aida.models import DeliveryIntent, NotificationEventRecord
 from aida.security import SecurityContext
 
 logger = structlog.get_logger(__name__)
-
-GovernanceEventKind = Literal[
-    "REVIEW_REQUESTED",
-    "REVIEW_DECIDED",
-    "QUALITY_INCIDENT_OPENED",
-    "QUALITY_INCIDENT_RESOLVED",
-    "KILL_SWITCH_ENGAGED",
-    "KILL_SWITCH_RELEASED",
-    "CERTIFICATION_EXPIRING",
-    "REVIEWER_AGENT_AUDIT_BACKLOG",
-    "REVIEWER_AGENT_SAMPLE_DISAGREED",
-]
 
 #: Every event kind this module knows how to render. A kind not listed here is
 #: refused rather than sent as a bare dict, so a caller cannot invent an

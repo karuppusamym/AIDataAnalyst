@@ -483,10 +483,6 @@ _NO_LINEAGE_KEYWORDS_RE = re.compile(
 )
 
 
-def _is_temp_name(name: str) -> bool:
-    return name.startswith("#") or name.startswith("@")
-
-
 def _table_is_temp(table: object) -> bool:
     if not _SQLGLOT_AVAILABLE or not isinstance(table, exp.Table):
         return False

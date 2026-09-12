@@ -60,7 +60,12 @@ packages = ["src/aida", "src/atlas", "sdk/aida_tool_sdk"]
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# `src/atlas` too: each bounded context carries a `tests/test_module_scaffold.py`
+# asserting its own privacy invariant (the public face does not import the
+# private modules), which complements the import-linter contracts. They were
+# collected only when someone pointed pytest at that path by hand, so CI never
+# ran them and a context could violate its own contract unnoticed.
+testpaths = ["tests", "src/atlas"]
 # The Tier-0 invariant harnesses live in `tests/support/` and are imported as
 # `tests.support.*`, so the repository root has to be importable. Without this,
 # `pytest` collects them only when invoked as `python -m pytest` (which puts the

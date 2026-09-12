@@ -70,11 +70,6 @@ FREEFORM_SOURCES = frozenset(
     {"MODEL_GATEWAY", "QUERY_MEMORY_ADAPTATION", "DEVELOPMENT_OVERRIDE"}
 )
 
-#: `generation_source` values that never appear on a `COMPLETED` `AgentRun`
-#: (see module docstring) and so are excluded from both the numerator and
-#: the denominator even if a caller's count map happens to include them.
-EXCLUDED_SOURCES = frozenset({"PENDING", "POLICY_BLOCK"})
-
 #: Every value this module knows how to attribute to either bucket.
 COUNTED_SOURCES = FREEFORM_SOURCES | {TOOL_FIRST_SOURCE}
 

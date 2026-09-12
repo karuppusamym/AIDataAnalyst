@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -180,6 +180,18 @@ async def rebuild_vector_index(
     signature = index_signature(settings)
 
     objects = await _indexable_objects(session, organization_id, datasource_id)
+    # `INDEXED_OWNER_TYPES` described a closed list that nothing enforced, so a
+    # collector gaining a fourth owner type would have reached the index -- and,
+    # if it carried business values, breached INV-6 -- with only a comment
+    # standing against it. Checked here rather than inside the collector so the
+    # guard survives a second collector being added beside it.
+    seen_types = {owner_type for owner_type, _id, _text in objects}
+    unexpected = sorted(seen_types - set(INDEXED_OWNER_TYPES))
+    if unexpected:
+        raise EmbeddingUnavailable(
+            f"VECTOR_INDEX_OWNER_TYPE_NOT_INDEXABLE: {', '.join(unexpected)}; "
+            f"indexable types are {', '.join(INDEXED_OWNER_TYPES)}"
+        )
     if len(objects) > max_objects:
         raise EmbeddingUnavailable(
             f"VECTOR_INDEX_REBUILD_TOO_LARGE: {len(objects)} objects exceeds "
@@ -342,5 +354,3 @@ async def search_persisted_index(
     )
 
 
-def stale_after(settings: Settings) -> timedelta:
-    return timedelta(minutes=settings.vector_index_max_age_minutes)
