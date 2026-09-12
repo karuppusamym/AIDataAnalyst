@@ -62,6 +62,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import (
+    REASON_CONTEXT_PRODUCT_VIOLATION,
     AgentContractValidationError,
     context_product_violation,
     load_contract_for_principal,
@@ -91,7 +92,12 @@ from aida.context_product_policy import (
 from aida.db import get_session
 from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit, record_outbox
-from aida.ingest_screening import is_eligible_for_model_context, screen_text
+from aida.ingest_screening import (
+    SCREENING_VERSION,
+    is_eligible_for_model_context,
+    is_verdict_current,
+    screen_text,
+)
 from aida.mcp_budget import (
     McpBudgetDecision,
     budget_headers,
@@ -506,6 +512,7 @@ async def _resolve_context_product_scope(
             session,
             organization_id=product_version.organization_id,
             agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
         )
     except AgentContractValidationError:
         return None
@@ -1131,6 +1138,11 @@ async def _view_definition_transformation_detail(
         "redaction_status": view_definition.redaction_status,
         "screening_status": view_definition.screening_status,
         "screening_reason_codes": view_definition.screening_reason_codes,
+        # AR-10: a status alone cannot say whether today's classifier produced
+        # it. `screening_stale` is what makes an old verdict legible as old --
+        # honoured either way, but never silently passed off as current.
+        "screening_version": view_definition.screening_version,
+        "screening_stale": not is_verdict_current(view_definition.screening_version),
         "is_materialized": view_definition.is_materialized,
         "is_updatable": view_definition.is_updatable,
         "truncated": view_definition.truncated,
@@ -1184,6 +1196,9 @@ async def _routine_transformation_detail(
         "redaction_status": routine.redaction_status,
         "screening_status": routine.screening_status,
         "screening_reason_codes": routine.screening_reason_codes,
+        # See the note in `_view_definition_transformation_detail`.
+        "screening_version": routine.screening_version,
+        "screening_stale": not is_verdict_current(routine.screening_version),
         "truncated": routine.truncated,
         "availability": routine.availability,
         "unavailable_reason": routine.unavailable_reason,
@@ -1727,6 +1742,7 @@ async def _handle_tools_call(
             session,
             organization_id=datasource.organization_id,
             agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
         )
     except AgentContractValidationError as exc:
         record_audit(
@@ -2155,6 +2171,61 @@ async def _read_context_product_resource(
         await session.commit()
         return inaccessible
 
+    # AR-06: the capability envelope, on *this* door too. `tools/list` and
+    # `tools/call` resolve the caller's contract through
+    # `_resolve_context_product_scope` and refuse a product the envelope does
+    # not name; this function -- the whole of `resources/read` for a
+    # `atlas://context-products/` URI, and every `prompts/get` (which delegates
+    # here) -- did the role check and then served the product. So a contracted
+    # agent whose envelope named product A could read product B by asking for
+    # it as a resource or a prompt instead of scoping a tool call to it: the
+    # same product, two doors, one of them locked. The check belongs before any
+    # lifecycle disclosure, so an agent outside its envelope cannot use the
+    # retirement branch below to learn that a version it may not touch exists.
+    try:
+        caller_contract = await load_contract_for_principal(
+            session,
+            organization_id=product_version.organization_id,
+            agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
+        )
+    except AgentContractValidationError as exc:
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.agent_contract_denied",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "reason": exc.code,
+            },
+        )
+        await session.commit()
+        return inaccessible
+    if caller_contract is not None and context_product_violation(
+        caller_contract, product_key=product.product_key, product_id=str(product.id)
+    ):
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.envelope_denied",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "reason": REASON_CONTEXT_PRODUCT_VIOLATION,
+            },
+        )
+        await session.commit()
+        return inaccessible
+
     if not can_serve_pinned_version(product_version):
         # AT-7(a)/AT-D1: retired -- SUPERSEDED/DEPRECATED, or a SUPPORTED
         # version whose support window has elapsed. Only a caller who was
@@ -2267,12 +2338,68 @@ async def _read_context_product_resource(
         await session.commit()
         return inaccessible
 
+    # AR-10: screen what goes *out*, not only what came in. Every ingress into
+    # our own model context is screened, and this egress was not: `name`,
+    # `description` and `purpose` are free text a human author typed into the
+    # context-product authoring API, they are stored with no
+    # `screening_status` column (unlike `MetadataViewDefinition`/
+    # `MetadataRoutine`), and this function hands them to an *external* agent's
+    # context -- directly as a resource, and as the body of the prompt
+    # `_handle_prompts_get` builds from this very payload. Screening inbound
+    # and not outbound is a half-control: it protects our planner from a
+    # hostile source comment while letting Atlas itself be the delivery
+    # mechanism for an injection aimed at someone else's agent.
+    #
+    # Screened live rather than at write time, for the reason
+    # `_transformation_detail` screens the dbt description live: there is no
+    # stored verdict to consult, and this is a single low-volume read of three
+    # short strings, not the bulk projection `ingest_screening` warns against.
+    # Quarantined text is withheld and the verdict is reported, the house
+    # pattern -- never dropped silently, so an author can see why their prose
+    # did not reach a consumer.
+    screened_text: dict[str, str | None] = {}
+    screening_evidence: dict[str, Any] = {}
+    for field_name, field_value in (
+        ("name", product_version.name),
+        ("description", product_version.description),
+        ("purpose", product_version.purpose),
+    ):
+        verdict = screen_text(
+            field_value,
+            content_origin=f"context_product_version:{product_version.id}:{field_name}",
+        )
+        if is_eligible_for_model_context(verdict.status):
+            screened_text[field_name] = field_value
+            continue
+        screened_text[field_name] = None
+        screening_evidence[field_name] = {
+            "status": verdict.status,
+            "reason_codes": verdict.reason_codes,
+            "version": verdict.version,
+        }
+    if screening_evidence:
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.egress_quarantined",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="SUCCESS",
+            correlation_id=correlation_id,
+            details={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "withheld_fields": sorted(screening_evidence),
+                "screening_version": SCREENING_VERSION,
+            },
+        )
+
     payload = {
         "product_key": product.product_key,
         "version": product_version.version,
-        "name": product_version.name,
-        "description": product_version.description,
-        "purpose": product_version.purpose,
+        "name": screened_text["name"],
+        "description": screened_text["description"],
+        "purpose": screened_text["purpose"],
         "owner_principal": product_version.owner_principal,
         "fingerprint": product_version.fingerprint,
         "governed_references": {
@@ -2293,6 +2420,8 @@ async def _read_context_product_resource(
                 "This immutable resource contains governed metadata references only. "
                 "Source values are available only through eligible governed tools."
             ),
+            "egress_screening_version": SCREENING_VERSION,
+            "egress_withheld": screening_evidence,
         },
     }
     record_audit(

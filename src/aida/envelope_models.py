@@ -127,6 +127,14 @@ class MetadataViewDefinition(Base, TimestampMixin):
     # cheaper and more complete than screening on every read.
     screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
     screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # AR-10: which classifier produced the verdict beside it. Nullable on
+    # purpose -- NULL means "screened before this column existed", which is
+    # exactly what a row written by the old code is, and
+    # `ingest_screening.is_verdict_current` reads NULL as stale. Defaulting it
+    # to the current version instead would stamp today's version onto a verdict
+    # today's classifier never saw, which is the defect this column exists to
+    # remove rather than relocate.
+    screening_version: Mapped[str | None] = mapped_column(String(100))
     is_materialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_updatable: Mapped[bool | None] = mapped_column(Boolean)
     check_option: Mapped[str | None] = mapped_column(String(30))
@@ -185,6 +193,8 @@ class MetadataRoutine(Base, TimestampMixin):
     redaction_status: Mapped[str] = mapped_column(String(20), default="PARSED", nullable=False)
     screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
     screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # See the note on `MetadataViewDefinition.screening_version`.
+    screening_version: Mapped[str | None] = mapped_column(String(100))
     return_type: Mapped[str | None] = mapped_column(String(255))
     is_deterministic: Mapped[bool | None] = mapped_column(Boolean)
     security_mode: Mapped[str | None] = mapped_column(String(30))

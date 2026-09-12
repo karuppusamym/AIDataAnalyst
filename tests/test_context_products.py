@@ -440,6 +440,21 @@ class _ContextProductRetiredReadSession:
     async def scalar(self, _statement: object) -> object:
         return self._scalar_queue.pop(0)
 
+    async def scalars(self, _statement: object) -> object:
+        """No agent contract for this caller. AR-06 resolves the caller's
+        contract on this path now (`load_contract_for_principal`), and these
+        retirement-signal cases are all human/service consumers, which have
+        none -- the empty result is what `None` (uncontracted, unrestricted by
+        an envelope) is built from. Kept separate from the `scalar` queue so
+        the "never even attempted" assertions above still mean what they say.
+        """
+
+        class _Scalars:
+            def all(self_inner) -> list[object]:
+                return []
+
+        return _Scalars()
+
     def add(self, value: object) -> None:
         self.added.append(value)
 

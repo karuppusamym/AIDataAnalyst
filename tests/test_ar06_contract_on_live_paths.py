@@ -74,7 +74,11 @@ def runs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 def _contract_lookup(monkeypatch: pytest.MonkeyPatch, outcome: object) -> None:
     async def lookup(
-        _session: object, *, organization_id: UUID, agent_principal_id: str
+        _session: object,
+        *,
+        organization_id: UUID,
+        agent_principal_id: str,
+        principal_type: str | None = None,
     ) -> object:
         if isinstance(outcome, Exception):
             raise outcome

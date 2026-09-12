@@ -45,7 +45,7 @@ from aida.envelope_models import (
     MetadataSourceGrant,
     MetadataViewDefinition,
 )
-from aida.ingest_screening import CLEAN, screen_text
+from aida.ingest_screening import CLEAN, SCREENING_VERSION, screen_text
 from aida.models import (
     DataSource,
     MetadataCatalog,
@@ -528,10 +528,17 @@ async def _upsert_description(
 
 def _store_source_sql(
     raw: str | None, *, dialect: str
-) -> tuple[str | None, str | None, str, str, list[str]]:
+) -> tuple[str | None, str | None, str, str, list[str], str]:
     """Prepare source-supplied SQL for persistence: redact, fingerprint, screen.
 
-    Returns `(redacted_text, fingerprint, redaction_status, screening_status, reasons)`.
+    Returns `(redacted_text, fingerprint, redaction_status, screening_status, reasons,
+    screening_version)`.
+
+    The trailing `screening_version` is AR-10's: a stored status with no classifier
+    version beside it cannot be told apart from one today's rules produced, so an
+    upgrade's stale rows become invisible. It is written on every path, including the
+    "nothing to store" early return, whose `CLEAN` is a verdict this version's rules
+    stand behind (empty text is clean by definition) rather than an absence.
 
     Both steps happen here, at the single write point, rather than at each of the several
     places that later read this text. Redaction keeps source values out of the control
@@ -542,7 +549,7 @@ def _store_source_sql(
     """
     prepared = redact_for_storage(raw, dialect=dialect)
     if prepared is None:
-        return None, None, "PARSED", CLEAN, []
+        return None, None, "PARSED", CLEAN, [], SCREENING_VERSION
     verdict = screen_text(raw)
     return (
         prepared.redacted,
@@ -550,6 +557,7 @@ def _store_source_sql(
         prepared.status,
         verdict.status,
         verdict.reason_codes,
+        verdict.version,
     )
 
 
@@ -592,6 +600,7 @@ async def _upsert_view_definition(
         existing.redaction_status,
         existing.screening_status,
         existing.screening_reason_codes,
+        existing.screening_version,
     ) = _store_source_sql(discovered.definition_sql, dialect=datasource.dialect)
     existing.is_materialized = discovered.is_materialized
     existing.is_updatable = discovered.is_updatable
@@ -648,6 +657,7 @@ async def _upsert_routine(
         existing.redaction_status,
         existing.screening_status,
         existing.screening_reason_codes,
+        existing.screening_version,
     ) = _store_source_sql(discovered.body_sql, dialect=datasource.dialect)
     existing.return_type = discovered.return_type
     existing.is_deterministic = discovered.is_deterministic

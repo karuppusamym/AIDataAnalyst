@@ -881,3 +881,54 @@ async def test_a_multilingual_indirect_injection_in_a_routine_body_is_quarantine
     # Quarantined, not deleted -- a human looking at the object still sees the body.
     assert routine.body_sql_redacted is not None
     assert is_eligible_for_model_context(routine.screening_status) is False
+
+
+async def test_a_stored_verdict_records_the_classifier_version_that_produced_it(
+    session: AsyncSession,
+) -> None:
+    """AR-10 (R11-C7): a verdict with no version attached is indistinguishable
+    from a current one.
+
+    Screening happens once at write and an upgrade only reaches a stored
+    verdict at the source's next metadata scan. That policy is defensible; not
+    being able to tell which rows are still waiting for that scan is not, and
+    a status plus reason codes is all the row used to carry. Driven through
+    `_ingest`, the real pipeline entry point, because the point is that the
+    *write path* stamps the version -- asserting `SCREENING_VERSION` equals
+    itself would prove nothing.
+    """
+    from aida.ingest_screening import SCREENING_VERSION, is_verdict_current
+
+    datasource = await _datasource(session)
+    await _ingest(
+        session,
+        datasource,
+        _envelope(
+            tables=[_view(definition_sql="SELECT account_id FROM customer.account")],
+            routines=[_routine(body_sql="BEGIN UPDATE customer.account SET x = 1; END;")],
+        ),
+    )
+
+    view = await session.scalar(select(MetadataViewDefinition))
+    routine = await session.scalar(select(MetadataRoutine))
+    assert view is not None and routine is not None
+    assert view.screening_version == SCREENING_VERSION
+    assert routine.screening_version == SCREENING_VERSION
+    assert is_verdict_current(view.screening_version) is True
+    assert is_verdict_current(routine.screening_version) is True
+
+
+def test_a_verdict_from_an_older_or_unknown_classifier_reads_as_stale() -> None:
+    """The other half of the policy: staleness is *visible*.
+
+    `None` is what every row written before `screening_version` existed
+    carries. It must read as stale rather than current -- backfilling those
+    rows with today's version, or defaulting the column to it, would stamp
+    this classifier onto verdicts it never produced, relocating the defect
+    instead of removing it.
+    """
+    from aida.ingest_screening import SCREENING_VERSION, is_verdict_current
+
+    assert is_verdict_current(SCREENING_VERSION) is True
+    assert is_verdict_current(None) is False
+    assert is_verdict_current("deterministic-prompt-risk-v1+injection-defense-v1") is False

@@ -12,14 +12,30 @@ are both designed to read.
 repeatedly, on the latency-sensitive path, and getting it wrong everywhere a new consumer
 is added. Screening once at ingestion is cheaper, complete by construction, and leaves a
 durable verdict a steward can review. The cost is that a classifier upgrade does not
-reach a verdict already stored. What is stored is a status and its reason codes, not the
-classifier version that produced them (an earlier version of this note said otherwise);
-every metadata scan screens view and routine text again with the rules in force, so an
-upgrade reaches a source's stored verdicts at its next scan and not before. Not every
-consumer has a stored verdict to read, though (a dbt resource's free-text `description`
-has none -- see `mcp_server.py`'s `_transformation_detail`), so `screen_text` is also
-cheap enough to run directly on a single, low-volume read path; what it must never do is
-run again over the same text on every row of a bulk projection.
+reach a verdict already stored; every metadata scan screens view and routine text again
+with the rules in force, so an upgrade reaches a source's stored verdicts at its next
+scan and not before. Not every consumer has a stored verdict to read, though (a dbt
+resource's free-text `description` has none -- see `mcp_server.py`'s
+`_transformation_detail`), so `screen_text` is also cheap enough to run directly on a
+single, low-volume read path; what it must never do is run again over the same text on
+every row of a bulk projection.
+
+**The stored verdict carries its classifier version (AR-10).** Until this was added, a
+verdict was a status and its reason codes and nothing else, which made the paragraph
+above unfalsifiable at the row level: `CLEAN` under v1 and `CLEAN` under today's rules are
+the same two columns, so a verdict left behind by an upgrade was *indistinguishable from a
+current one*. Waiting for the next scan is a defensible policy; being unable to tell which
+rows are still waiting is not. `MetadataViewDefinition`/`MetadataRoutine` therefore store
+`screening_version` beside the status, `is_verdict_current` answers whether a given row was
+judged by the rules in force, and a stale verdict can be found -- and a re-screen targeted
+-- with a query instead of a guess.
+
+The deliberate choice is that **staleness is surfaced, not acted on**: a stale verdict is
+still honoured (`is_eligible_for_model_context` reads the status, as it always did) rather
+than being treated as quarantined. A classifier bump must not silently withdraw every
+view definition in the estate from model context, which is what failing closed on version
+drift would do on the first deploy after any upgrade. Rows written before the column
+existed carry NULL and read as stale, which is precisely what they are.
 
 **Quarantine, not deletion.** Text that fails is stored and marked, never dropped. A
 procedure whose body trips the classifier is far more likely to be an awkward comment than
@@ -110,3 +126,15 @@ def is_eligible_for_model_context(screening_status: str) -> bool:
     likely to be a new quarantine state than a new safe state.
     """
     return screening_status == CLEAN
+
+
+def is_verdict_current(screening_version: str | None) -> bool:
+    """Was this stored verdict produced by the rules in force right now?
+
+    `False` for a row from an older classifier and for `None` -- a verdict written before
+    `screening_version` existed, whose classifier is genuinely unknown and must not be
+    read as current. The module docstring covers why this is reported rather than
+    enforced: a stale verdict is still honoured, so a classifier bump surfaces work to do
+    instead of withdrawing the estate's view definitions from model context on deploy.
+    """
+    return screening_version == SCREENING_VERSION

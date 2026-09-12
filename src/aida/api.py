@@ -1610,6 +1610,7 @@ async def run_agent_analysis(
             session,
             organization_id=datasource.organization_id,
             agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
         )
     except AgentContractValidationError as exc:
         raise HTTPException(status_code=403, detail=exc.code) from exc

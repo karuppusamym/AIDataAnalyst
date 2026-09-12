@@ -341,7 +341,11 @@ def context_product_violation(
 
 
 async def load_contract_for_principal(
-    session: AsyncSession, *, organization_id: UUID, agent_principal_id: str
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    agent_principal_id: str,
+    principal_type: str | None = None,
 ) -> AgentContract | None:
     """The contract for a workload identity, or `None` for a human principal.
 
@@ -353,6 +357,27 @@ async def load_contract_for_principal(
     Humans without a contract return None. A workload identity with no
     contract, or any identity with multiple matching contracts, is refused.
     Ambiguity must never disable the caller's capability restriction.
+
+    `principal_type` is the *authenticated* kind of the caller -- the value
+    `aida.oidc.context_from_claims` takes from a verified token claim against a
+    closed enum, not anything the caller spells for itself. Passing it closes a
+    boundary confusion this function had while it keyed the decision on the
+    name alone: the `agent:` prefix is required of every contract's
+    `agent_principal_id` (`validate_contract_definition`) but of nothing at the
+    door, so an identity the identity provider asserts *is* an `AGENT`, issued
+    with a subject that simply lacks the prefix, found no contract, fell
+    through this function's `return None` and was served as an uncontracted
+    human -- no kill switch, no `tool_slugs` envelope, no token caps, because
+    the boundary passed `agent_asset_version_id=None` to the orchestrator. An
+    agent identity could therefore shed its entire contract by being named
+    without a prefix, which is one boundary's identity acting as another's.
+    The authenticated type now decides, and the prefix is kept only as the
+    additional signal it always was.
+
+    `SERVICE_ACCOUNT` and `WORKER` are deliberately *not* held to this rule:
+    they name the platform's own internal callers, which legitimately have no
+    agent contract. `AGENT` is the type that means "a contracted agent", and it
+    is the one that must resolve exactly one contract.
     """
     if not agent_principal_id:
         return None
@@ -367,7 +392,7 @@ async def load_contract_for_principal(
         )
     ).all()
     if len(rows) != 1:
-        if rows or agent_principal_id.startswith("agent:"):
+        if rows or agent_principal_id.startswith("agent:") or principal_type == "AGENT":
             raise AgentContractValidationError(
                 "agent_contract_unresolved",
                 "agent identity requires exactly one unambiguous contract",
