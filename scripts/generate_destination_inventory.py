@@ -86,6 +86,27 @@ DEFAULT_OUTPUT = REPO_ROOT / "Docs" / "50-security" / "destination-and-credentia
 CONFIG_MODULE = SRC_ROOT / "atlas" / "platform" / "config.py"
 READINESS_MODULE = SRC_ROOT / "aida" / "readiness.py"
 
+#: Modules `aida.readiness` imports that must NOT make their settings count as
+#: health-probed, by the leaf-name rule in `ReadinessScope`.
+#:
+#: * `atlas.platform.config` is imported by everything, `readiness` included, and
+#:   its own validators reference most of the settings in this table. Counting
+#:   those as "a readiness probe reads this" reported `oidc_issuer` and
+#:   `openai_base_url` as health-probed, which is nonsense; the module that
+#:   DEFINES the settings is excluded.
+#: * `aida.delivery_intents` arrived with R11-B10's delivery-backlog probe. That
+#:   probe observes the **ledger** -- queue depth, dead letters, the age of the
+#:   oldest undelivered row -- and observes no destination at all. Without this
+#:   exclusion the inventory reported `slack_webhook_url` and `teams_webhook_url`
+#:   as probed by `/health/ready`, contradicting B10's own finding that delivery
+#:   to a real Slack or Teams endpoint remains unverified. A queue being
+#:   watched is not its destinations being watched.
+NOT_EVIDENCE_OF_A_PROBE = {
+    CONFIG_MODULE,
+    SRC_ROOT / "aida" / "config.py",
+    SRC_ROOT / "aida" / "delivery_intents.py",
+}
+
 UNKNOWN = "unknown"
 
 # --- Which fields are in scope ---------------------------------------------
@@ -425,12 +446,7 @@ def readiness_scope() -> ReadinessScope:
             if not base.startswith(("aida", "atlas")):
                 continue
             candidate = SRC_ROOT / Path(*base.split(".")).with_suffix(".py")
-            # `atlas.platform.config` is imported by everything, `readiness`
-            # included, and its own validators reference most of the settings in
-            # this table. Counting those references as "a readiness probe reads
-            # this" reported `oidc_issuer` and `openai_base_url` as health-probed,
-            # which is nonsense; the module that DEFINES the settings is excluded.
-            if candidate in {CONFIG_MODULE, SRC_ROOT / "aida" / "config.py"}:
+            if candidate in NOT_EVIDENCE_OF_A_PROBE:
                 continue
             leaves.add(base.rsplit(".", 1)[-1])
             if candidate.is_file():

@@ -20,6 +20,8 @@ from sqlalchemy.sql.expression import UpdateBase
 from aida.connectors.base import ConnectorCapabilities, QueryEstimate, QueryResult
 from aida.models import (
     AssetCertification,
+    DataProductPort,
+    DataProductVersion,
     DataQualityIncident,
     DataQualityObservation,
     FreshnessObservation,
@@ -361,6 +363,7 @@ class CatalogSession(RecordingSession):
         quality_observations: list[tuple[UUID, str]] | None = None,
         freshness_configs: list[FreshnessWatermarkConfig] | None = None,
         freshness_observations: list[tuple[UUID, Any]] | None = None,
+        product_port_version_ids: list[UUID] | None = None,
     ) -> None:
         super().__init__()
         self._tables = tables
@@ -371,6 +374,12 @@ class CatalogSession(RecordingSession):
         # the honest default for a double: these tests are about the gateway, and a
         # binding invented here would quietly assert an access grant they never made.
         self._bindings = bindings or []
+        # R11-B4: no referenced table is a data product's output port by default,
+        # so the gateway's entitlement check finds nothing to consult and the
+        # statement proceeds. Same honest-empty rule as the rest of this double:
+        # inventing a port here would make every gateway test depend on an
+        # entitlement none of them set up.
+        self._product_port_version_ids = product_port_version_ids or []
         # No tokenization policy by default -- every column stays fully redacted
         # (today's behaviour) unless a test opts a column in explicitly.
         # (value_shape, column_name) pairs, matching `_tokenized_output_names`'
@@ -436,6 +445,10 @@ class CatalogSession(RecordingSession):
             return ScriptedResult(list(self._sensitive))
         if entity is DataQualityIncident and name == "severity":
             return ScriptedResult(list(self._quality_incident_severities))
+        if entity is DataProductPort and name == "data_product_version_id":
+            return ScriptedResult(list(self._product_port_version_ids))
+        if entity is DataProductVersion:
+            return ScriptedResult([])
         raise AssertionError(
             f"CatalogSession received an unrecognised scalars() statement "
             f"(entity={entity!r}, name={name!r}); the gateway grew a catalog "
