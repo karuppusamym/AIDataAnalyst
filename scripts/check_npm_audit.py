@@ -56,6 +56,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_ROOT = REPO_ROOT / "ui-next"
 LOCKFILE = UI_ROOT / "package-lock.json"
 
+#: R11-B11's browser-journey suite committed a second lockfile, and this gate
+#: scanned only `ui-next` -- so a dependency set that installs and runs in CI was
+#: covered by nothing. It is held to a **stricter** rule than `ui-next`: no
+#: baseline at all. `ui-next` has one because it inherited advisories predating
+#: the gate; `e2e` starts clean, and the moment to refuse a first exception is
+#: before there is one.
+E2E_ROOT = REPO_ROOT / "e2e"
+E2E_LOCKFILE = E2E_ROOT / "package-lock.json"
+
 
 @dataclass(frozen=True, slots=True)
 class BaselineEntry:
@@ -129,12 +138,13 @@ BASELINE: dict[str, BaselineEntry] = {
 }
 
 
-def _run_npm_audit(omit_dev: bool) -> dict[str, Any]:
+def _run_npm_audit(omit_dev: bool, root: Path = UI_ROOT) -> dict[str, Any]:
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if npm is None:
         raise SystemExit(
             "npm was not found on PATH. This gate needs npm to read "
-            f"{LOCKFILE.relative_to(REPO_ROOT)}; install Node or run with --input."
+            f"{(root / 'package-lock.json').relative_to(REPO_ROOT)}; "
+            "install Node or run with --input."
         )
     command = [npm, "audit", "--json", "--package-lock-only"]
     if omit_dev:
@@ -146,7 +156,7 @@ def _run_npm_audit(omit_dev: bool) -> dict[str, Any]:
     # plus `shutil.which("npm")`; no caller input reaches it, and `shell=False`
     # (the default) means nothing here is interpreted by a shell.
     completed = subprocess.run(  # noqa: S603
-        command, cwd=UI_ROOT, capture_output=True, text=True, encoding="utf-8", check=False
+        command, cwd=root, capture_output=True, text=True, encoding="utf-8", check=False
     )
     try:
         return json.loads(completed.stdout)  # type: ignore[no-any-return]
@@ -223,6 +233,37 @@ def _summary(report: dict[str, Any], label: str) -> str:
     )
 
 
+def _check_e2e_lockfile(*, offline: bool) -> bool:
+    """Audit the browser-journey lockfile, with no baseline. True when it fails.
+
+    Skipped under `--input`, which exists so this gate can run from a saved
+    report with no network: auditing a second project would need a second
+    report and the flag takes one. Saying it was skipped beats reporting a pass
+    for a scan that did not happen.
+    """
+    if not E2E_LOCKFILE.is_file():
+        return False
+    relative = E2E_LOCKFILE.relative_to(REPO_ROOT)
+    if offline:
+        print(f"\nskipped {relative}: --input supplies one report only")
+        return False
+    report = _run_npm_audit(omit_dev=False, root=E2E_ROOT)
+    found = advisories(report)
+    print("\n" + _summary(report, "e2e, full lockfile (dev included)"))
+    if not found:
+        return False
+    for identifier in sorted(found):
+        package, severity, title = found[identifier]
+        print(f"  {identifier}  {package}  {severity}  [NOT BASELINED]  {title[:80]}")
+    print(
+        f"\nERROR: advisories in {relative}. This project has no baseline by design -- it "
+        "started clean, so the fix is to upgrade the package rather than to open an "
+        "exception list here.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -268,7 +309,8 @@ def main() -> int:
         state = "baselined" if identifier in BASELINE else "NOT BASELINED"
         print(f"  {identifier}  {package}  {severity}  [{state}]  {title[:80]}")
 
-    failed = False
+    failed = _check_e2e_lockfile(offline=bool(args.input))
+
     if unbaselined:
         print(
             "\nERROR: unbaselined advisories in ui-next/package-lock.json:\n"
