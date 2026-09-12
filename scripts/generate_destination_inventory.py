@@ -101,10 +101,21 @@ READINESS_MODULE = SRC_ROOT / "aida" / "readiness.py"
 #:   as probed by `/health/ready`, contradicting B10's own finding that delivery
 #:   to a real Slack or Teams endpoint remains unverified. A queue being
 #:   watched is not its destinations being watched.
+#: * `aida.model_route_health` arrived with R11-B16 and is the subtler case,
+#:   because it really does contact the provider -- just never from this
+#:   endpoint. `/health/ready` calls `unreachable_route_summary`, which reads
+#:   the verdict already **recorded** in the database and deliberately makes no
+#:   provider call, precisely so a readiness scrape cannot be made slow or
+#:   expensive by a third party. The listing lives in the scheduled sweep.
+#:   Without this exclusion the inventory reported `gemini_base_url`,
+#:   `openai_base_url` and both provider keys as probed by `/health/ready`,
+#:   which would credit the endpoint with a check it does not perform.
+#:   Reporting a stored verdict is not taking a measurement.
 NOT_EVIDENCE_OF_A_PROBE = {
     CONFIG_MODULE,
     SRC_ROOT / "aida" / "config.py",
     SRC_ROOT / "aida" / "delivery_intents.py",
+    SRC_ROOT / "aida" / "model_route_health.py",
 }
 
 UNKNOWN = "unknown"
@@ -632,6 +643,13 @@ def render(rows: list[Row]) -> str:
         "- `Healthy` says a probe observes the destination. It does NOT say the probe",
         "  gates: per F18, PostgreSQL is the only required probe; Temporal is",
         "  reported and never gating.",
+        "- `Healthy` is about what the endpoint observes **when it is scraped**. A",
+        "  destination checked on a cadence by a background pass, whose verdict",
+        "  `/health/ready` then reports from storage, reads as `no readiness probe`",
+        "  here -- correctly for this column, and not the same as unwatched. Reading",
+        "  a recorded verdict is not taking a measurement, and conflating the two",
+        "  would let a sweep that stopped running months ago still look like a live",
+        "  probe.",
         "- A destination reached through a dynamically-built string, or configured",
         "  per-organization in a database row rather than in `Settings`, is not a",
         "  field on this model and is therefore not in this table.",

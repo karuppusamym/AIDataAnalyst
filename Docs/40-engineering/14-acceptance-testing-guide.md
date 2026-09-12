@@ -236,13 +236,17 @@ that directory is shared and has been destroyed that way.
 ### 4.3 The deployment itself
 
 ```bash
-./.venv/Scripts/python.exe scripts/verify_end_to_end.py --json e2e.json
+mkdir -p scratch && ./.venv/Scripts/python.exe scripts/verify_end_to_end.py --json scratch/e2e.json
 ```
 
 Seventeen checks over HTTP against the running API, with a live provider. It
 verifies and never fixes, so a failure is a finding about the deployment. A
 SKIP is not a PASS and is counted separately. Add `--skip-model` to avoid the
 one check that costs money.
+
+The report goes under `scratch/`, which is gitignored. Several sessions work
+this branch and an untracked file in the repository root is what somebody's
+`git add -A` picks up by accident.
 
 ---
 
