@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button, Field } from "../components/primitives";
-import { ApiError, fetchOrgDatasources } from "../lib/api";
+import { ApiError } from "../lib/api";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import {
   submitModelImport,
   uploadModelWorkbook,
@@ -10,7 +11,6 @@ import { requestBlob } from "../lib/api/transport";
 import { APP_CONFIG } from "../lib/appConfig";
 import { adoptAccessToken, hasAccessToken } from "../lib/authSession";
 import { getCurrentOrgId, setCurrentOrgId } from "../lib/org-context";
-import type { DataSourceRead } from "../lib/types";
 import { ADDIN_AUTH_PATH, parseDialogMessage } from "./authMessage";
 import type { WorkbookHost } from "./officeHost";
 import { README_SHEET, readWorkbookIdentity, type WorkbookIdentity } from "./workbookIdentity";
@@ -50,7 +50,7 @@ function atlasSourceLink(datasourceId: string): string {
   return `${window.location.origin}/?source=${encodeURIComponent(datasourceId)}#/sources`;
 }
 
-type Busy = "identity" | "sign-in" | "save" | "submit" | "sources" | "open" | null;
+type Busy = "identity" | "sign-in" | "save" | "submit" | "open" | null;
 
 export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
   const [identity, setIdentity] = useState<WorkbookIdentity | null>(null);
@@ -61,8 +61,29 @@ export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
   const [batch, setBatch] = useState<ModelImportBatchRead | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [sources, setSources] = useState<DataSourceRead[] | null>(null);
   const [chosenSource, setChosenSource] = useState("");
+  /* The task pane runs outside the shell, so there is no `ScopeProvider` to
+     read and no workspace binding to narrow by -- organization reach is the
+     only honest answer here, and the hook falls back to it anyway. Held until
+     "Choose a source" is pressed so opening the pane still costs one request
+     (identity), not two. */
+  const [sourcesRequested, setSourcesRequested] = useState(false);
+  const {
+    datasources: sources,
+    loading: sourcesLoading,
+    error: sourcesError,
+  } = useDatasourcePicker(getCurrentOrgId(), {
+    reach: "organization",
+    enabled: sourcesRequested,
+    selectedId: chosenSource,
+  });
+  const sourcesReady = sourcesRequested && !sourcesLoading && !sourcesError;
+  /* The first source stands in until someone picks another -- derived, not
+     written into state by an effect. A default written by an effect is absent
+     for the render in which the list arrives, so the control would show a
+     source while reporting none chosen, and "Open in Excel" would sit
+     disabled over the source the user can see selected. */
+  const activeSource = chosenSource || sources[0]?.id || "";
 
   const readIdentity = useCallback(async () => {
     setBusy("identity");
@@ -79,6 +100,12 @@ export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
   useEffect(() => {
     if (host.inExcel) void readIdentity();
   }, [host, readIdentity]);
+
+  /* The picker reports its own failure; this pane has one error line, so it
+     is surfaced there rather than left only inside the hook. */
+  useEffect(() => {
+    if (sourcesError) setError(sourcesError);
+  }, [sourcesError]);
 
   if (!host.inExcel) {
     return (
@@ -147,29 +174,14 @@ export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
     }
   };
 
-  const loadSources = async () => {
-    setBusy("sources");
-    setError(null);
-    try {
-      const page = await fetchOrgDatasources(getCurrentOrgId());
-      const items = page.items ?? [];
-      setSources(items);
-      setChosenSource((current) => current || items[0]?.id || "");
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const openModel = async () => {
-    if (!chosenSource) return;
+    if (!activeSource) return;
     setBusy("open");
     setError(null);
     setNotice(null);
     try {
       const { blob } = await requestBlob(
-        `/v1/datasources/${encodeURIComponent(chosenSource)}/model/export.xlsx`,
+        `/v1/datasources/${encodeURIComponent(activeSource)}/model/export.xlsx`,
       );
       await host.openWorkbook(new Uint8Array(await blob.arrayBuffer()));
       setNotice(
@@ -272,9 +284,12 @@ export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
 
       <section className="xl__card" aria-label="Open a model from Atlas">
         <h2 className="xl__h2">Open a model from Atlas</h2>
-        {sources === null ? (
-          <Button disabled={busy !== null || !signedIn} onClick={() => void loadSources()}>
-            {busy === "sources" ? "Loading sources…" : "Choose a source"}
+        {!sourcesReady ? (
+          <Button
+            disabled={busy !== null || sourcesLoading || !signedIn}
+            onClick={() => setSourcesRequested(true)}
+          >
+            {sourcesLoading ? "Loading sources…" : "Choose a source"}
           </Button>
         ) : sources.length === 0 ? (
           <p className="xl__meta">No sources are available to you in this organization.</p>
@@ -282,7 +297,7 @@ export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
           <>
             <Field label="Source">
               <select
-                value={chosenSource}
+                value={activeSource}
                 onChange={(event) => setChosenSource(event.target.value)}
               >
                 {sources.map((source) => (
@@ -292,7 +307,7 @@ export function ExcelAddinPane({ host }: { host: WorkbookHost }) {
                 ))}
               </select>
             </Field>
-            <Button disabled={busy !== null || !chosenSource} onClick={() => void openModel()}>
+            <Button disabled={busy !== null || !activeSource} onClick={() => void openModel()}>
               {busy === "open" ? "Opening…" : "Open in Excel"}
             </Button>
           </>

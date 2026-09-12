@@ -8,7 +8,7 @@ import type {
   WorkspaceRead,
 } from "../lib/types";
 import {
-  fetchOrgDatasources,
+  listOrgDatasources,
   fetchOrgProjects,
   fetchOrgWorkspaces,
   fetchProjectBiConnections,
@@ -80,7 +80,7 @@ export function WorkspaceAccessScreen() {
       const [workspacePage, projectPage, dsPage] = await Promise.all([
         fetchOrgWorkspaces(orgId, signal),
         fetchOrgProjects(orgId, signal),
-        fetchOrgDatasources(orgId, signal),
+        listOrgDatasources(orgId, signal),
       ]);
       // Default each picker to its first entry, and keep a selection that is
       // still valid: an org switch must not leave a workspace id from the

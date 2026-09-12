@@ -78,24 +78,12 @@ export function fetchOrgProjects(
   );
 }
 
-/** `GET /v1/organizations/{id}/datasources` — resolves a datasource's display
- *  name to the id UX-20's lineage-impact call needs (`CatalogRowRead` only
- *  carries `datasource_name`, per this file's own catalog-rows note; the
- *  unified-lineage routes are scoped by `datasource_id`, so this bridges the
- *  two without a backend change). */
-export function fetchOrgDatasources(
-  organizationId: string,
-  signal?: AbortSignal,
-): Promise<PageOf<DataSourceRead>> {
-  return demoOr(
-    (fixtures) => fixtures.makeFixtureOrgDatasources(),
-    () =>
-      get<PageOf<DataSourceRead>>(
-        `/v1/organizations/${organizationId}/datasources?limit=500`,
-        signal,
-      ),
-  );
-}
+/* `fetchOrgDatasources` — one `limit=500` page of an organization's sources —
+ * used to live here, and eleven screens called it instead of the picker
+ * section below. It is deleted rather than deprecated (R11-D7): a capped
+ * fetch that is still exported is a capped fetch that gets called again, and
+ * the whole point of F15 is that no screen may render a prefix as a fleet.
+ * `listOrgDatasources` is the replacement for every one of those callers. */
 
 /** Access-axis workspaces for an organization (ADR-0018). A workspace does
  * not own projects; it reaches project-owned sources through bindings. */
@@ -147,28 +135,30 @@ export function fetchWorkspaceSourceBindings(
 
      - `limit`/`offset` paging with a real `total` on all four. Paging is
        therefore implementable client-side today, and `total` is trustworthy.
-     - NO `q=`/search parameter on any of them. Server-side search does not
-       exist to call.
-     - NO fetch-by-id route for an organization, workspace, project or
-       datasource. Only sub-resources of a datasource are addressable
-       (`/tables`, `/health`, `/scan-policy`), never the record itself.
+     - `q=` search on all four, and a fetch-by-id route for each. Both landed
+       on the server after this section was first written (the two gaps its
+       original banner reported; `tests/test_scope_picker_search.py` is the
+       suite that carries them, and it is the tenant-isolation half of that
+       change that makes them safe to call).
 
-   SO WHAT THIS DOES, HONESTLY:
+   SO WHAT THIS DOES:
 
      - pages through the estate up to an explicit budget and reports `total`
        and `truncated`, so a picker can say "1,000 of 4,812 loaded" rather
        than implying 1,000 is all there is;
-     - resolves one id by a bounded paged scan (`findOrg*ById`) so a
-       deep-linked or remembered selection past the first page still resolves
-       to a name instead of disappearing from its own picker;
-     - leaves text filtering to the caller, over the pages actually held --
-       which is why `truncated` has to be rendered next to the filter box.
+     - resolves one id in ONE request, so a deep-linked or remembered
+       selection past the loaded prefix still resolves to a name instead of
+       disappearing from its own picker;
+     - pushes a search term to the server for the source list, so a name
+       typed into a picker is matched against the whole fleet rather than
+       against the prefix the client happens to hold.
 
-   THE TWO SERVER GAPS ARE REPORTED, NOT PAPERED OVER. A `q=` parameter on
-   these four routes, and a fetch-by-id for each, would turn `findOrg*ById`
-   into one request and make search correct rather than best-effort over a
-   prefix. Until they exist the client half is complete and the truncation is
-   visible.
+   R11-D7 finished the datasource half: `fetchOrgDatasourcePage` takes `q`,
+   `findOrgDatasourceById` is one GET rather than a 25-page scan, and
+   `listOrgDatasources` is the single entry point every screen now uses.
+   Workspaces, projects and organizations still search client-side over their
+   loaded prefix -- the server supports better, and `ScopePicker`'s note says
+   so rather than implying the filter is a search.
 --------------------------------------------------------------------------- */
 
 /** A collected list, plus what it is a list *of*. */
@@ -275,20 +265,63 @@ export function fetchOrgProjectPage(
   );
 }
 
-/** One page of `GET /v1/organizations/{id}/datasources` (server cap: 500). */
+/**
+ * One page of `GET /v1/organizations/{id}/datasources` (server cap: 500).
+ *
+ * `search` is the route's own `q=` (`operational_api.list_organization_
+ * datasources`), which matches on name -- a datasource has no slug or key, so
+ * name is the only thing a person types. It is the parameter that makes the
+ * difference between a picker searching the fleet and a picker searching the
+ * page it already has; the fixture path filters by the same rule so a
+ * fixtures build exercises the search, not a stubbed-out no-op.
+ */
 export function fetchOrgDatasourcePage(
   organizationId: string,
   limit: number,
   offset: number,
   signal?: AbortSignal,
+  search?: string,
 ): Promise<PageOf<DataSourceRead>> {
+  const term = search?.trim() ?? "";
   return demoOr(
-    (fixtures) => fixtures.makeFixtureOrgDatasources(),
+    async (fixtures) => {
+      const page = await fixtures.makeFixtureOrgDatasources();
+      if (!term) return page;
+      const needle = term.toLowerCase();
+      const items = page.items.filter((item) => item.name.toLowerCase().includes(needle));
+      return { ...page, items, total: items.length };
+    },
     () =>
       get<PageOf<DataSourceRead>>(
-        `/v1/organizations/${organizationId}/datasources?limit=${limit}&offset=${offset}`,
+        `/v1/organizations/${organizationId}/datasources?limit=${limit}&offset=${offset}` +
+          (term ? `&q=${encodeURIComponent(term)}` : ""),
         signal,
       ),
+  );
+}
+
+/**
+ * `GET /v1/datasources/{id}` -- one source, by id.
+ *
+ * The route a picker needs when the id it must display is not in the pages it
+ * loaded: a link someone was sent, or a selection remembered from a session
+ * when the fleet was smaller. Answers `DataSourceSummaryRead`, the same
+ * projection the list route returns, so a resolved-by-id row and a listed row
+ * render identically.
+ */
+export function fetchDatasourceById(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<DataSourceRead> {
+  return demoOr(
+    async (fixtures) => {
+      const page = await fixtures.makeFixtureOrgDatasources();
+      const match = page.items.find((item) => item.id === datasourceId);
+      if (!match) throw new Error(`No fixture datasource ${datasourceId}`);
+      return match;
+    },
+    () =>
+      get<DataSourceRead>(`/v1/datasources/${encodeURIComponent(datasourceId)}`, signal),
   );
 }
 
@@ -330,15 +363,44 @@ export function listOrgProjects(
   );
 }
 
-export function listOrgDatasources(
+/** What a source list is being asked for, beyond the organization. */
+export interface DatasourceListOptions {
+  /** Server-side `q=`, matched against the whole fleet rather than the
+   *  loaded prefix. */
+  readonly search?: string;
+  /** An id the answer must contain even when the search excludes it or the
+   *  page budget stops short of it -- a `<select>` that drops its own
+   *  selected value silently reports the wrong scope. */
+  readonly selectedId?: string | null;
+}
+
+/**
+ * THE source list. Every screen reads its datasources through this (R11-D7);
+ * there is no per-screen fetch to drift out of step with the picker.
+ *
+ * The selected-id splice is here rather than in each caller because it is the
+ * half that is easy to forget and impossible to notice: without it a picker
+ * looks right until the one user whose source sits on page six opens it.
+ */
+export async function listOrgDatasources(
   organizationId: string,
   signal?: AbortSignal,
+  options?: DatasourceListOptions,
 ): Promise<ScopeList<DataSourceRead>> {
-  return collectPages(
-    (limit, offset) => fetchOrgDatasourcePage(organizationId, limit, offset, signal),
+  const list = await collectPages(
+    (limit, offset) =>
+      fetchOrgDatasourcePage(organizationId, limit, offset, signal, options?.search),
     500,
     SCOPE_PAGE_BUDGET,
   );
+
+  const selectedId = options?.selectedId;
+  if (!selectedId || list.items.some((item) => item.id === selectedId)) return list;
+
+  const selected = await findOrgDatasourceById(organizationId, selectedId, signal);
+  // `total` and `truncated` describe the collection, not what is on screen, so
+  // a spliced row must not make a truncated list look complete.
+  return selected ? { ...list, items: [selected, ...list.items] } : list;
 }
 
 export function listOrganizations(signal?: AbortSignal): Promise<ScopeList<OrganizationRead>> {
@@ -349,11 +411,12 @@ export function listOrganizations(signal?: AbortSignal): Promise<ScopeList<Organ
   );
 }
 
-/* The by-id resolvers. Each is a bounded paged scan, because the backend has
- * no fetch-by-id route for these four resources -- see this section's banner.
- * They exist so a link naming a source, or a selection remembered from a
- * previous session, still resolves when it sits past the pages the picker
- * preloaded. */
+/* The by-id resolvers. They exist so a link naming a source, or a selection
+ * remembered from a previous session, still resolves when it sits past the
+ * pages the picker preloaded. Workspace and project are still a bounded paged
+ * scan; the datasource one is a single GET, and reads as `null` on any
+ * failure so a picker falls back to a valid selection rather than breaking on
+ * an id that has since been deleted. */
 
 export function findOrgWorkspaceById(
   organizationId: string,
@@ -379,14 +442,19 @@ export function findOrgProjectById(
   );
 }
 
-export function findOrgDatasourceById(
+export async function findOrgDatasourceById(
   organizationId: string,
   datasourceId: string,
   signal?: AbortSignal,
 ): Promise<DataSourceRead | null> {
-  return scanForId(
-    (limit, offset) => fetchOrgDatasourcePage(organizationId, limit, offset, signal),
-    500,
-    datasourceId,
-  );
+  // `organizationId` is unused: the route enforces the tenant boundary itself
+  // (`load_datasource_in_scope`), so passing it would only let a caller
+  // believe the client was doing the checking. Kept in the signature because
+  // the three resolvers are called interchangeably by `lib/scope.tsx`.
+  void organizationId;
+  try {
+    return await fetchDatasourceById(datasourceId, signal);
+  } catch {
+    return null;
+  }
 }

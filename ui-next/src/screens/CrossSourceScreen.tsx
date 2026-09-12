@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, fetchOrgDatasources } from "../lib/api";
+import { ApiError, listOrgDatasources } from "../lib/api";
 import {
   decideCrossSourceResolutionCandidate,
   decideRelationshipCandidate,
@@ -245,7 +245,7 @@ export function CrossSourceScreen() {
       try {
         const [allDomains, sources] = await Promise.all([
           fetchOrgDataDomains(ORG, ac.signal),
-          fetchOrgDatasources(ORG, ac.signal),
+          listOrgDatasources(ORG, ac.signal),
         ]);
         if (cancelled) return;
         setDatasources(sources.items ?? []);

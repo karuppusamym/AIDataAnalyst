@@ -15,7 +15,7 @@ import type { PageOf } from "../lib/ui-types";
    established pattern.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources = vi.fn<
+const listOrgDatasources = vi.fn<
   (organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>
 >();
 const fetchQualitySummary = vi.fn<
@@ -35,8 +35,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     fetchQualitySummary: (datasourceId: string, signal?: AbortSignal) =>
       fetchQualitySummary(datasourceId, signal),
     fetchQualityIncidents: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
@@ -90,12 +90,12 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchQualitySummary.mockReset();
   fetchQualityIncidents.mockReset();
   transitionQualityIncident.mockReset();
   fetchQualityIncidentTriage.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchQualitySummary.mockResolvedValue(SUMMARY);
   fetchQualityIncidents.mockResolvedValue(incidentsPage([INCIDENT]));
   vi.resetModules();

@@ -7,7 +7,7 @@ import type { ScopeSelection } from "../lib/scope";
 
 /* ---------------------------------------------------------------------------
    Sources — nav id `sources`, against the real
-   `GET /v1/organizations/{org}/datasources` (reused from `fetchOrgDatasources`,
+   `GET /v1/organizations/{org}/datasources` (reused from `listOrgDatasources`,
    already exercised by `NarratedLineageScreen`) and the new
    `GET /v1/datasources/{id}/health` (`operational_api.py::get_datasource_health`).
    API boundary mocked, matching `EvidencePane.test.tsx`/`MarketplaceScreen.test.tsx`'s
@@ -15,7 +15,7 @@ import type { ScopeSelection } from "../lib/scope";
    args, not superficial snapshots.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources = vi.fn<
+const listOrgDatasources = vi.fn<
   (organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>
 >();
 const fetchDatasourceHealth = vi.fn<
@@ -32,8 +32,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     fetchDatasourceHealth: (datasourceId: string, signal?: AbortSignal) =>
       fetchDatasourceHealth(datasourceId, signal),
     downloadDatasourceContextSnapshot: (datasource: DataSourceRead, format: "markdown" | "json") =>
@@ -108,7 +108,7 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   fetchDatasourceHealth.mockReset();
   downloadDatasourceContextSnapshot.mockReset();
   downloadProjectContextSnapshot.mockReset();
@@ -122,15 +122,15 @@ afterEach(() => {
 });
 
 describe("SourcesScreen against the real datasource fleet + health endpoints", () => {
-  it("loads and renders the org's datasources via fetchOrgDatasources", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+  it("loads and renders the org's datasources via listOrgDatasources", async () => {
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
     const SourcesScreen = await loadScreen();
 
     render(<SourcesScreen />);
 
     await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
     expect(screen.getByText("oracle_core")).toBeInTheDocument();
-    expect(fetchOrgDatasources).toHaveBeenCalledWith(
+    expect(listOrgDatasources).toHaveBeenCalledWith(
       "00000000-0000-0000-0000-000000000001",
       expect.anything(),
     );
@@ -139,7 +139,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   });
 
   it("selecting a datasource fetches and renders its health/factor breakdown", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
     fetchDatasourceHealth.mockResolvedValue(HEALTH);
     const SourcesScreen = await loadScreen();
     render(<SourcesScreen />);
@@ -164,7 +164,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   });
 
   it("shows a blocker pill when the health response reports one", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [ORACLE], limit: 500, offset: 0, total: 1 });
+    listOrgDatasources.mockResolvedValue({ items: [ORACLE], limit: 500, offset: 0, total: 1 });
     fetchDatasourceHealth.mockResolvedValue({
       ...HEALTH,
       datasource_id: "ds_oracle_core",
@@ -183,7 +183,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
 
   it("shows the loading state before data arrives, then the empty state for a fleet with no sources", async () => {
     let resolve!: (v: PageOf<DataSourceRead>) => void;
-    fetchOrgDatasources.mockReturnValue(new Promise((r) => { resolve = r; }));
+    listOrgDatasources.mockReturnValue(new Promise((r) => { resolve = r; }));
     const SourcesScreen = await loadScreen();
     render(<SourcesScreen />);
 
@@ -195,7 +195,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   });
 
   it("surfaces a fetch error with a retry action", async () => {
-    fetchOrgDatasources.mockRejectedValue(new ApiError(403, "policy_denied"));
+    listOrgDatasources.mockRejectedValue(new ApiError(403, "policy_denied"));
     const SourcesScreen = await loadScreen();
 
     render(<SourcesScreen />);
@@ -204,7 +204,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   });
 
   it("filters the fleet by status, client-side, without a second fetch", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
     const SourcesScreen = await loadScreen();
     render(<SourcesScreen />);
     await waitFor(() => expect(screen.getByText("oracle_core")).toBeInTheDocument());
@@ -213,11 +213,11 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
 
     await waitFor(() => expect(screen.queryByText("snowflake_prod")).not.toBeInTheDocument());
     expect(screen.getByText("oracle_core")).toBeInTheDocument();
-    expect(fetchOrgDatasources).toHaveBeenCalledTimes(1); // filtering never re-fetches the fleet
+    expect(listOrgDatasources).toHaveBeenCalledTimes(1); // filtering never re-fetches the fleet
   });
 
   it("generates and downloads a Markdown context snapshot for the selected source", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
     fetchDatasourceHealth.mockResolvedValue(HEALTH);
     downloadDatasourceContextSnapshot.mockResolvedValue({
       generated_at: "2026-09-05T00:00:00Z",
@@ -253,7 +253,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   });
 
   it("surfaces a warning count instead of hiding a partially-failed snapshot", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
     fetchDatasourceHealth.mockResolvedValue(HEALTH);
     downloadDatasourceContextSnapshot.mockResolvedValue({
       generated_at: "2026-09-05T00:00:00Z",
@@ -289,7 +289,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   });
 
   it("offers no project rollup when the scope has no project selected", async () => {
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
     const SourcesScreen = await loadScreen();
     render(<SourcesScreen />);
     await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
@@ -299,7 +299,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
 
   it("rolls up every datasource in the scoped project into one download", async () => {
     scopeSelection = scopeWithProject("proj1");
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
     downloadProjectContextSnapshot.mockResolvedValue({
       generated_at: "2026-09-05T00:00:00Z",
       project: { id: "proj1", name: "Core Finance", slug: "core-finance" },
@@ -335,7 +335,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
   it("shows zero in scope, with the generate buttons disabled, for a project with no matching datasources", async () => {
     const emptyProject: ProjectRead = { ...PROJECT_ONE, id: "proj-empty", name: "Empty Project" };
     scopeSelection = { ...scopeWithProject("proj-empty"), projects: [emptyProject], visibleProjects: [emptyProject] };
-    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
     const SourcesScreen = await loadScreen();
     render(<SourcesScreen />);
     await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());

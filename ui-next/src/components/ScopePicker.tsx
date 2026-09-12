@@ -15,10 +15,14 @@ import type { ScopeTruncation } from "../lib/scope";
    difference instead of hiding it, and to give the user a filter so a long
    list is navigable at all.
 
-   The filter is CLIENT-SIDE, over the rows actually loaded, because the four
-   backend list endpoints accept no `q=` parameter today (see the banner in
-   `lib/api.ts`'s picker section). That is exactly why the truncation line has
-   to sit next to it: filtering a prefix and calling it a search is how a
+   The filter here is still CLIENT-SIDE, over the rows actually loaded. The
+   routes do accept `q=` now, and R11-D7 spent it where the truncation
+   actually bit -- the source lists eleven screens were fetching for
+   themselves, through `useDatasourcePicker`. This control filters three lists
+   at once from one box, so making it server-side means three searches and
+   three loading states; that is a redesign of this component, not part of
+   removing the per-screen fetches. Until then the truncation line has to sit
+   next to it, because filtering a prefix and calling it a search is how a
    picker convinces someone a record does not exist.
 
    F10/T12: every control is disabled until scope is `ready`. Selecting into a
@@ -152,7 +156,7 @@ export function ScopePicker() {
         aria-describedby="scope-filter-note"
       />
       <p id="scope-filter-note" className="scopepicker__count">
-        Filters the rows loaded below. Server-side search is not available on these lists.
+        Filters the rows loaded below, not the whole estate. To search every source, use Sources.
       </p>
 
       <label htmlFor="scope-workspace">Workspace <span>access</span></label>

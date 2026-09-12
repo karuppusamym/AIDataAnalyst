@@ -7,7 +7,7 @@ import { OnboardingWizard } from "../components/OnboardingWizard";
    checklist -- the previous ordering put Administration after Sources and
    Operations, which is the order in which they cannot be done. */
 import { FirstSourceSetup } from "../components/FirstSourceSetup";
-import { fetchCatalogRows, fetchOrgDatasources, fetchReviewQueue, get, USE_FIXTURES } from "../lib/api";
+import { fetchCatalogRows, fetchReviewQueue, get, listOrgDatasources, USE_FIXTURES } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import type { DataSourceRead, ReviewQueueSummaryRead } from "../lib/types";
 import type { CatalogRowRead, Persona } from "../lib/ui-types";
@@ -86,7 +86,7 @@ export function HomeScreen({
 
     Promise.allSettled([
       fetchCatalogRows({ organizationId, limit: 12 }, controller.signal),
-      fetchOrgDatasources(organizationId, controller.signal),
+      listOrgDatasources(organizationId, controller.signal),
       fetchPendingReviewCount(controller.signal),
     ]).then(([catalog, sources, reviews]) => {
       if (controller.signal.aborted) return;

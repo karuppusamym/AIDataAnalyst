@@ -185,11 +185,7 @@ function emptyState(orgId: string): ScopeState {
 /** Sources a workspace's ACTIVE bindings reach. Without a workspace the user
  *  is browsing technically, so every source in the tenant is offered. */
 function reachableDatasources(state: ScopeState): DataSourceRead[] {
-  if (!state.workspaceId) return state.datasources;
-  const active = new Set(
-    state.bindings.filter((item) => item.status === "ACTIVE").map((item) => item.datasource_id),
-  );
-  return state.datasources.filter((item) => active.has(item.id));
+  return datasourcesInScope({ ...state, projectId: "" }, state.datasources);
 }
 
 function visibleProjectsOf(state: ScopeState): ProjectRead[] {
@@ -198,11 +194,33 @@ function visibleProjectsOf(state: ScopeState): ProjectRead[] {
   return state.projects.filter((item) => owning.has(item.id));
 }
 
-function visibleDatasourcesOf(state: ScopeState): DataSourceRead[] {
-  const reachable = reachableDatasources(state);
-  return state.projectId
-    ? reachable.filter((item) => item.project_id === state.projectId)
+/**
+ * The rule for "which of these sources is the active scope actually about".
+ *
+ * Exported because `useDatasourcePicker` has to apply it to rows the SERVER
+ * selected -- a `q=` search answers from the whole fleet, and those results
+ * still have to be cut down to what this workspace's bindings reach and this
+ * project owns. Two copies of that rule would mean a searched picker offering
+ * sources an unsearched one does not.
+ */
+export function datasourcesInScope(
+  scope: Pick<ScopeSelection, "workspaceId" | "projectId" | "bindings">,
+  items: readonly DataSourceRead[],
+): DataSourceRead[] {
+  let reachable = [...items];
+  if (scope.workspaceId) {
+    const active = new Set(
+      scope.bindings.filter((item) => item.status === "ACTIVE").map((item) => item.datasource_id),
+    );
+    reachable = reachable.filter((item) => active.has(item.id));
+  }
+  return scope.projectId
+    ? reachable.filter((item) => item.project_id === scope.projectId)
     : reachable;
+}
+
+function visibleDatasourcesOf(state: ScopeState): DataSourceRead[] {
+  return datasourcesInScope(state, state.datasources);
 }
 
 /**

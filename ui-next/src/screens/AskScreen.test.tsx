@@ -17,7 +17,7 @@ import type { PageOf } from "../lib/ui-types";
    exact endpoint/args called, not a superficial snapshot.
 --------------------------------------------------------------------------- */
 
-const fetchOrgDatasources =
+const listOrgDatasources =
   vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<DataSourceRead>>>();
 const runAgentAnalysis =
   vi.fn<(datasourceId: string, body: unknown, signal?: AbortSignal) => Promise<AgentAnalysisResponse>>();
@@ -31,8 +31,8 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    fetchOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
-      fetchOrgDatasources(organizationId, signal),
+    listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
+      listOrgDatasources(organizationId, signal),
     runAgentAnalysis: (datasourceId: string, body: unknown, signal?: AbortSignal) =>
       runAgentAnalysis(datasourceId, body, signal),
     fetchAgentRuns: (datasourceId: string, query: unknown, signal?: AbortSignal) =>
@@ -134,12 +134,12 @@ async function pickDatasource() {
 }
 
 beforeEach(() => {
-  fetchOrgDatasources.mockReset();
+  listOrgDatasources.mockReset();
   runAgentAnalysis.mockReset();
   fetchAgentRuns.mockReset();
   fetchAgentRun.mockReset();
   fetchAgentRunGroundingReceipts.mockReset();
-  fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+  listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
   vi.resetModules();
   history.replaceState(null, "", "/");
