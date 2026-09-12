@@ -16,7 +16,7 @@ Scope — what this checks (mechanically resolvable, named-artefact citations on
    `def`/`async def` somewhere in the file (or anywhere under `tests/` for a bare
    mention), verified with `ast` — no pytest collection needed.
 2. Module/path citations, for **both** shipped packages — `src/aida/` (the flat
-   package) and `src/atlas/` (the bounded-context packages, 85 files):
+   package) and `src/atlas/` (the bounded-context packages):
    - a backtick-quoted `` `src/aida/...` `` / `` `src/atlas/...` `` path (file or
      directory);
    - the src-relative spelling the delivery docs also use, `` `aida/...` `` /
@@ -48,14 +48,14 @@ present-tense claim:
 - A citation immediately preceded by an imperative build verb ("Add `x`", "Create
   `x`") is a backlog/blueprint action item, not a claim that `x` exists now.
 - Import-linter contract names are checked against pyproject.toml only once
-  pyproject.toml defines at least one contract. Today it defines zero — the whole
-  import-linter mechanism is tracker item ST-02/ST-09, still TODO, and every doc that
-  mentions a contract name says so explicitly (each opens by describing the *current*
-  code as a flat, undivided package). Flagging every one of those forward-looking
-  mentions as "broken" would not be a regression (nothing that used to work stopped
-  working) and would fight the structural-foundation work already tracked elsewhere.
-  The moment a real contract is added, this gate starts checking citations against it
-  for real, and a rename or removal of a real contract is caught from then on.
+  pyproject.toml defines at least one contract. It defines twelve as of 2026-09-12, so
+  per-citation checking is live: a citation naming no real contract fails unless it is
+  listed in KNOWN_UNRESOLVED_CONTRACT_CITATIONS below, and a rename or removal of a real
+  contract is caught from then on. (When this gate was written pyproject.toml defined
+  none, and the checks turned themselves off rather than flagging every forward-looking
+  mention of the then-unbuilt ST-02/ST-09 mechanism. That fallback is still wired — see
+  `test_import_linter_contract_check_status` — so a revert to zero contracts disables the
+  per-citation checks instead of failing all of them.)
 - A citation on a line that itself says the artefact is planned / not (yet) written
   (the "Implementation status" callout convention already used across Docs/, e.g.
   `10-architecture/01-principles-and-invariants.md`'s

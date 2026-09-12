@@ -87,6 +87,22 @@ The lesson: differentiators that live *inside* one execution plane are being abs
 | Connectors | PostgreSQL implemented; SQL Server beta with real fixture; Oracle, BigQuery, Snowflake, Databricks beta unverified live; Teradata and Db2 planned | The entry-ticket gap, unchanged |
 | Operational evidence | None at bank scale; no drill has been run (projection rebuild, PITR, Temporal failover, credential rotation, kill switch) | The honest blocker to "production-grade" |
 
+> **Re-measured 2026-09-12 (R11-P8).** The table above is the 2026-09-04 snapshot and is kept
+> as the baseline the rest of this document argues from. These rows have since moved, so do
+> not quote the figures above as current:
+>
+> | Row | 2026-09-04 | 2026-09-12 | Command |
+> |---|---|---|---|
+> | Python source | 302 files, ~111k lines | 383 files, ~142k lines (`src/aida/` 304 files/~131k; `src/atlas/` 79 files/~11k) | `find src -name '*.py' \| wc -l`; `find src -name '*.py' -exec cat {} + \| wc -l` |
+> | ORM | 132 classes, `models.py` 5,123 lines, `schemas.py` 3,929 | 129 classes, `models.py` 5,249 lines, `schemas.py` 3,736 | `grep -cE '^class ' src/aida/models.py`; `wc -l` |
+> | Module extraction | 5 of 21, 4 contracts | 6 of 21, 12 import-linter contracts | `pyproject.toml` `[[tool.importlinter.contracts]]` |
+> | Tests | 226 files, ~2,700 functions | 288 files, 3,547 functions, 9,944 collected | `pytest tests --collect-only` |
+> | Commit cadence | 543 commits | 690 on `feature/agent-os-v2` | `git rev-list --count HEAD` |
+> | UI | legacy portal at :3000 plus the React shell | legacy portal removed; the React shell is the only UI | — |
+>
+> The authorization row is unchanged: every workspace is still `SHADOW` and enforcement is
+> still unproven — see `60-delivery/00-status.md` and section P row R11-B3.
+
 **The one-sentence diagnosis.** Atlas has more governed-execution capability than any vendor in the matrix and less proof, less shape, and less distribution than all of them.
 
 ---

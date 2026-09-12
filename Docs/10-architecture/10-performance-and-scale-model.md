@@ -150,7 +150,7 @@ Honest position as of the baseline date. This table is the gap between the archi
 
 | Area | Status |
 |---|---|
-| Unit / contract suite | Passing (121 tests) |
+| Unit / contract suite | Runs in CI. 9,944 tests collected, measured 2026-09-12 with `pytest tests --collect-only`; the pass/fail result of a given run is reported by that run, not asserted here. |
 | Static quality (ruff, strict mypy) | Clean |
 | Migration drift | Single head, applied |
 | Local end-to-end fixture | Passing, including batch replay and cross-chunk FK resolution |

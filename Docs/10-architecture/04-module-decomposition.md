@@ -3,9 +3,11 @@
 > Status: Authoritative **as a target**. Owner: Architecture.
 > This is the anti-monolith document. It defines the bounded contexts, their ownership of data, their allowed dependencies, and the mechanism that stops the boundaries eroding.
 
-> **Implementation status (2026-08-30). This document describes a structure that does not
+> **Implementation status. This document describes a structure that does not
 > exist yet.** Everything from §3 onward — the 21 modules, the per-module schemas in §6, the
-> module anatomy in §7 — is the target. Built today:
+> module anatomy in §7 — is the target. Built today (`src/atlas/` figures re-measured
+> 2026-09-11 under R11-P9; `src/aida/` figures re-measured 2026-09-12 under R11-P8 with
+> `find src/aida -maxdepth 1 -name '*.py' | wc -l` and `find src/aida -name '*.py' -exec cat {} + | wc -l`):
 >
 > * **6 of 21 modules** exist under `src/atlas/modules/` as of 2026-09-11 (R11-P9 re-measure;
 >   it was 1 when this note was first written): `catalog`, `connectivity`, `identity_tenancy`,
@@ -14,9 +16,11 @@
 >   `schemas.py` / `events.py` file set. How much is behind those names varies: `catalog`'s
 >   `service.py` is 576 lines, while `identity_tenancy`'s is still the 7-line stub labelled
 >   *"Status: scaffold only"* with no business rules. `src/atlas/platform/` has four real
->   files (`config.py` 1,078 lines, `db.py`, `context.py`, `logging.py`).
-> * **Everything that works** is in the flat `src/aida/` package — ~36,500 lines across 87
->   modules, one declarative base, one PostgreSQL schema, one migration space.
+>   files (`config.py` 1,106 lines, `db.py`, `context.py`, `logging.py`).
+> * **Everything that works** is in the flat `src/aida/` package — ~120,000 lines across 282
+>   top-level modules (304 files and ~131,000 lines counting the `connectors/`, `workflows/`
+>   and `projectors/` subpackages), one declarative base, one PostgreSQL schema, one migration
+>   space.
 >
 > Read §3–§7 as "what a module will look like", never as "what you can open". §2's
 > *Enforcement* column is likewise mostly aspirational — see the status note in §5.2 for the
@@ -25,13 +29,14 @@
 
 ## 1. The problem being solved
 
-The current implementation is a **flat package monolith**: `src/aida/` with ~36,500 lines in which two files — `models.py` (2,721 lines) and `schemas.py` (2,222 lines) — hold the ORM models and DTOs for *every* domain, and `api.py` (1,837 lines) holds a large share of the HTTP surface.
+The current implementation is a **flat package monolith**: `src/aida/` with ~120,000 lines in which two files — `models.py` (5,249 lines) and `schemas.py` (3,736 lines) — hold the ORM models and DTOs for *every* domain, and `api.py` (1,786 lines) holds a large share of the HTTP surface.
 
-> **Implementation status (2026-08-30).** The line counts above were re-measured against the
-> tree on 2026-08-30 and corrected; the previous figures (~18,000 / 1,274 / 1,298 / 1,530)
-> were roughly half of actual and understated the problem by a factor of two. The shape of the
-> problem is unchanged and, on the evidence, getting worse rather than better while the
-> extraction is deferred.
+> **Implementation status (2026-09-12).** The line counts above were re-measured against this
+> worktree with `wc -l src/aida/models.py src/aida/schemas.py src/aida/api.py`. This is the
+> second time they have been found stale by roughly a factor of two: the 2026-08-30 pass
+> corrected ~18,000 / 1,274 / 1,298 / 1,530 to ~36,500 / 2,721 / 2,222 / 1,837, and those
+> figures had in turn drifted to the ones now shown. The shape of the problem is unchanged
+> and, on the evidence, getting worse rather than better while the extraction is deferred.
 
 This shape has three specific failure modes, all of which are already visible:
 

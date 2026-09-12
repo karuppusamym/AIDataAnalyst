@@ -1,7 +1,8 @@
 # Product Surface Catalog
 
 > Status: Authoritative. Owner: Product.
-> Purpose: the complete inventory of user-facing surfaces Atlas ships, mapped to the module that implements each. This is the "what does the product actually contain" document.
+> Purpose: the inventory of user-facing surfaces Atlas's product design defines, mapped to the module that owns each. This is the "what is the product meant to contain, and who owns it" document. It is **not** a statement of what is built: several surfaces below are partial or pending — Studio (18) is `Partial` and its Git binding is an open P1 gap — so read implementation state from `60-delivery/00-status.md` and tracker section P, never from this catalog.
+> Claims: competitor statements below assessed 2026-08-28 against vendor-stated public positioning; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`. What a vendor ships, below, is that assessment, not current fact.
 
 ## 1. Surface taxonomy
 
