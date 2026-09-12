@@ -259,6 +259,25 @@ class Settings(BaseSettings):
     # Default every 6 hours; bounded 15 minutes to 7 days so an operator can
     # tighten or loosen it without a code change.
     graph_reconciliation_interval_minutes: int = Field(default=360, ge=15, le=10_080)
+    # R11-D11: the writer for the ADR-0018/ADR-0020 classification projections
+    # (`business_node_closure`, `business_node_rollup`). Both were built and
+    # measured, and then nothing ever called the rebuild -- so `rollup()` took
+    # its authoritative fallback every time. ADR-0020 measured that fallback at
+    # 3,147 ms against 0.4 ms for the materialised read (13,548 nodes,
+    # 5,000,000 assignments, PostgreSQL 16), which is why the projection exists.
+    #
+    # Daily by default, matching the reaper and the two expiry sweeps: a
+    # full recompute is ~47 s for a bank-scale estate, so this is a batch job
+    # and a sub-daily cadence would buy fresher coverage counts at a cost that
+    # scales with the estate. `computed_at` is returned to callers, so the
+    # answer is labelled with its age rather than silently drifting.
+    # `business_rollup_rebuild_enabled=False` is the ops kill switch, and
+    # `business_rollup_rebuild_batch_size` bounds how many organizations one
+    # pass rebuilds so a large multi-tenant deployment spreads the work over
+    # successive passes instead of doing all of it on one tick.
+    business_rollup_rebuild_enabled: bool = True
+    business_rollup_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
+    business_rollup_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
     # P2-06: generic stale-row reaper. Daily by default (86_400s); bounded 15
     # minutes to 7 days so an operator can tighten or loosen it without a code
     # change, but never turn it into a per-tick scan. `reaper_enabled=False`

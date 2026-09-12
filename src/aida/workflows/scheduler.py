@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aida.business_graph import run_rollup_rebuild_pass
 from aida.certification_expiry_warning import run_certification_expiry_warning_pass
 from aida.classification_propagation import propagate_for_datasource
 from aida.config import Settings, get_settings
@@ -750,6 +751,15 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await run_owner_routing_pass(settings, now=now)
     await run_custom_rule_pack_pass(now=now)
     await run_graph_reconciliation_scheduler_pass(settings, now=now)
+    # R11-D11: the writer for the ADR-0018 classification projections. Both
+    # `business_node_closure` and `business_node_rollup` were built and measured
+    # (ADR-0020: 3,147 ms to compute a subtree roll-up on read, 0.4 ms to read the
+    # materialisation) and then never rebuilt by anything, so the roll-up endpoint
+    # took its slow authoritative fallback on every call. Daily by default and
+    # rate-limited inside the pass by `business_rollup_rebuild_interval_seconds`,
+    # so calling it every iteration is a no-op between windows -- the same shape as
+    # the reaper and the two expiry sweeps below.
+    await run_rollup_rebuild_pass(settings, now=now)
     await run_classification_propagation_pass(settings, now=now)
     # R11-B8: DQ-2's watermark contracts, evaluated on a cadence instead of
     # only when a screen asks. Off by default

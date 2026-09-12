@@ -19,11 +19,23 @@ that no longer exists.
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, func, or_, select, text
+import structlog
+from sqlalchemy import (
+    DateTime,
+    Select,
+    Uuid,
+    and_,
+    bindparam,
+    delete,
+    func,
+    or_,
+    select,
+    text,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -36,6 +48,18 @@ from aida.models import (
 )
 from aida.policy_engine import PolicyRecord
 from aida.timeutil import as_utc
+from atlas.platform.config import Settings
+
+logger = structlog.get_logger(__name__)
+
+#: R11-D11: when the projection rebuild last swept, in process memory. The same
+#: tradeoff every other scheduled pass here accepts (`workflows.scheduler`'s
+#: owner-routing and graph-reconciliation passes, `certification_expiry_warning`):
+#: there is no per-organization "next rebuild at" column to persist to without a new
+#: model and migration, and a rebuild is idempotent -- it deletes and rewrites that
+#: organization's own projection rows -- so a scheduler restart costs at most one
+#: redundant rebuild, never a wrong answer.
+_rollup_rebuild_last_run_at: datetime | None = None
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -429,6 +453,15 @@ async def rollup_freshness(
 # truth for an authorization decision without the underlying tables agreeing, which is
 # why every read above falls through to the authoritative query when a projection is
 # empty.
+#
+# The bind types are declared rather than inferred. A bare `text()` parameter has no
+# type, so SQLAlchemy hands the raw Python object to the driver: asyncpg takes a
+# `uuid.UUID` natively and PostgreSQL was the only backend these ever ran against, so
+# an untyped `:org` looked fine while SQLite refused to bind it at all ("type 'UUID'
+# is not supported"). Declaring `Uuid` lets each dialect apply its own bind processing
+# -- native on PostgreSQL, the CHAR(32) form every ORM column here already uses on
+# SQLite -- which is what makes these statements testable on the in-memory database
+# the rest of this suite runs on. Found when R11-D11 gave them their first caller.
 _REBUILD_CLOSURE = text(
     """
     WITH RECURSIVE closure AS (
@@ -444,7 +477,7 @@ _REBUILD_CLOSURE = text(
     INSERT INTO business_node_closure (organization_id, ancestor_id, descendant_id, depth)
     SELECT organization_id, ancestor_id, descendant_id, depth FROM closure
     """
-)
+).bindparams(bindparam("org", type_=Uuid))
 
 _REBUILD_ROLLUP = text(
     """
@@ -463,6 +496,9 @@ _REBUILD_ROLLUP = text(
       AND assignment.organization_id = :org
     GROUP BY assignment.organization_id, closure.ancestor_id, assignment.target_type
     """
+).bindparams(
+    bindparam("org", type_=Uuid),
+    bindparam("now", type_=DateTime(timezone=True)),
 )
 
 
@@ -500,6 +536,136 @@ async def rebuild_rollup(
             BusinessNodeRollup.organization_id == organization_id
         )
     ) or 0
+
+
+async def rebuild_projections(
+    session: AsyncSession, organization_id: UUID, *, now: datetime | None = None
+) -> tuple[int, int]:
+    """Rebuild both classification projections for one organization, closure first.
+
+    The order is not arbitrary and is the reason these two are wired together rather
+    than scheduled separately: `_REBUILD_ROLLUP` aggregates *through*
+    `business_node_closure`, so recomputing the roll-up against a stale closure would
+    reproduce the stale answer faithfully and look fresh doing it. Closure first, then
+    the roll-up from it.
+
+    Both statements are a DELETE plus an INSERT confined to one organization's own
+    projection rows, and the caller holds them in a transaction, so a concurrent reader
+    sees the previous projection until the rebuild commits -- never a half-built one.
+    A torn projection would not be a correctness problem even so (INV-1: every read in
+    this module falls through to the authoritative query when its projection is empty),
+    only a slow one; this keeps it from being slow either.
+
+    Returns `(closure_rows, rollup_rows)`.
+    """
+    closure_rows = await rebuild_closure(session, organization_id)
+    rollup_rows = await rebuild_rollup(session, organization_id, now=now)
+    return closure_rows, rollup_rows
+
+
+async def organizations_by_rollup_staleness(
+    session: AsyncSession, *, limit: int
+) -> tuple[UUID, ...]:
+    """Organizations holding a live classification tree, stalest roll-up first.
+
+    The ordering is the whole point. A plain `LIMIT` over an unordered organization
+    list rebuilds the same first N organizations on every pass and starves every
+    organization after them indefinitely, which on a multi-tenant deployment is
+    indistinguishable from not having a writer at all -- the failure R11-D11 exists to
+    fix. An organization whose projection has never been built sorts ahead of every
+    organization that merely has an old one, because that is the one whose reads are
+    currently taking the ~3 s fallback.
+    """
+    node_rows = await session.execute(
+        select(BusinessNode.organization_id)
+        .where(BusinessNode.status == "ACTIVE", BusinessNode.effective_to.is_(None))
+        .group_by(BusinessNode.organization_id)
+    )
+    organization_ids = [row[0] for row in node_rows.all()]
+    if not organization_ids:
+        return ()
+    computed_rows = await session.execute(
+        select(BusinessNodeRollup.organization_id, func.max(BusinessNodeRollup.computed_at))
+        .where(BusinessNodeRollup.organization_id.in_(organization_ids))
+        .group_by(BusinessNodeRollup.organization_id)
+    )
+    computed_at = {row[0]: _as_utc(row[1]) for row in computed_rows.all()}
+    never_built = datetime.min.replace(tzinfo=UTC)
+
+    def _staleness(organization_id: UUID) -> tuple[bool, datetime, str]:
+        moment = computed_at.get(organization_id)
+        # Never-built (False) sorts before ever-built (True); within each group,
+        # oldest first. The id is a tiebreaker so the order is deterministic rather
+        # than dict-insertion-dependent.
+        return (moment is not None, moment or never_built, str(organization_id))
+
+    return tuple(sorted(organization_ids, key=_staleness)[:limit])
+
+
+async def run_rollup_rebuild_pass(settings: Settings, *, now: datetime | None = None) -> int | None:
+    """Scheduler entry (R11-D11): rebuild the stalest organizations' projections.
+
+    Returns `None` when the pass was skipped -- disabled, or not yet due -- and the
+    number of organizations rebuilt when it ran, the same shape as
+    `certification_expiry_warning.run_certification_expiry_warning_pass`.
+
+    One organization's failure is logged and skipped rather than aborting the sweep,
+    matching every other scheduled pass in this platform. The cost of a skip is bounded
+    and non-corrupting: that organization's projection stays exactly as stale as it
+    already was, and `rollup()` goes on returning the correct answer by the slow path.
+
+    One failure is expected rather than exceptional and is the reason the isolation is
+    per-organization and not per-sweep: `business_node_closure` is keyed on
+    `(ancestor_id, descendant_id)`, and `extend_closure_for_new_node` writes into it on
+    every node creation. A node created in the window between this rebuild's DELETE and
+    its INSERT therefore collides on that key. The losing side is this pass, which is
+    the right side to lose -- the node creation is a user's write and must not fail for
+    a cache rebuild -- so the rebuild rolls back, that organization keeps the projection
+    it had, and the next sweep (which will then find it the stalest) picks it up.
+    """
+    from aida.db import session_factory  # local import: keeps module import acyclic
+
+    global _rollup_rebuild_last_run_at
+    if not settings.business_rollup_rebuild_enabled:
+        return None
+    effective_now = now or datetime.now(UTC)
+    interval = timedelta(seconds=settings.business_rollup_rebuild_interval_seconds)
+    if (
+        _rollup_rebuild_last_run_at is not None
+        and (effective_now - _rollup_rebuild_last_run_at) < interval
+    ):
+        return None
+
+    async with session_factory() as session:
+        organization_ids = await organizations_by_rollup_staleness(
+            session, limit=settings.business_rollup_rebuild_batch_size
+        )
+
+    rebuilt = 0
+    for organization_id in organization_ids:
+        async with session_factory() as session:
+            try:
+                closure_rows, rollup_rows = await rebuild_projections(
+                    session, organization_id, now=effective_now
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                logger.exception(
+                    "business_rollup_rebuild_failed", organization_id=str(organization_id)
+                )
+                continue
+        rebuilt += 1
+        logger.info(
+            "business_rollup_rebuilt",
+            organization_id=str(organization_id),
+            closure_rows=closure_rows,
+            rollup_rows=rollup_rows,
+        )
+    # Set after the sweep, and set even when nothing was due to be rebuilt, so an
+    # estate with no classification tree does not re-query every tick.
+    _rollup_rebuild_last_run_at = effective_now
+    return rebuilt
 
 
 async def extend_closure_for_new_node(session: AsyncSession, node: BusinessNode) -> None:
