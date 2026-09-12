@@ -179,6 +179,33 @@ It is safe to re-run.
 `AIDA_ENVIRONMENT` must be **unset** for pytest and **set** for the generator
 scripts — they disagree deliberately. Do not pass `-q`; it hides the summary.
 
+**Those four are not the whole gate set.** CI runs eight more, and a green
+`pytest` says nothing about them — two of them were red on this branch while
+the suite was passing, because a doc derived from the source tree was not
+regenerated when a module landed. Run them:
+
+```bash
+export AIDA_ENVIRONMENT=development
+./.venv/Scripts/python.exe scripts/shim_register.py --check
+./.venv/Scripts/python.exe scripts/generate_architecture_map.py --check
+./.venv/Scripts/python.exe scripts/generate_destination_inventory.py --check
+./.venv/Scripts/python.exe scripts/check_frontend_reachability.py --check
+./.venv/Scripts/python.exe scripts/check_npm_audit.py --check
+./.venv/Scripts/python.exe scripts/check_docs_links.py
+./.venv/Scripts/python.exe scripts/check_image_packaging.py
+./.venv/Scripts/python.exe scripts/check_proxy_contract.py
+./.venv/Scripts/python.exe scripts/openapi_diff.py
+./.venv/Scripts/python.exe scripts/generate_ui_types.py
+unset AIDA_ENVIRONMENT
+```
+
+Every one exits non-zero on a finding and prints the command that fixes it.
+The `--check` ones compare a committed document against what the code
+currently says; drop `--check` to regenerate. The last two rewrite the OpenAPI
+baseline and `ui-next/src/lib/types.ts` in place, so check `git status`
+afterwards — and if either moved, read the diff before committing it, because
+those two files are the usual collision between concurrent sessions.
+
 The full suite takes about 20 minutes. Expect roughly ten thousand passing
 tests and zero failures.
 

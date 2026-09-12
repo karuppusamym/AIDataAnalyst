@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-384 Python modules under `src/`, 1896 intra-`src` import edges.
+385 Python modules under `src/`, 1908 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 63 |
-| aida domain modules | everything else flat in `aida.*` | 218 |
+| aida domain modules | everything else flat in `aida.*` | 219 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 12 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 12 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 12 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>63 modules"]
-  domain["aida domain modules<br/>218 modules"]
+  domain["aida domain modules<br/>219 modules"]
   ctx_catalog["atlas.modules.catalog<br/>12 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>12 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>12 modules"]
@@ -60,10 +60,10 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|531| domain
+  routers -->|532| domain
   app -->|62| routers
   domain -->|45| platform
-  workflows -->|41| domain
+  workflows -->|43| domain
   ctx_catalog -->|19| domain
   ctx_identity_tenancy -->|18| domain
   app -->|14| domain
@@ -138,13 +138,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 320 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 321 |
 | `aida.workflows.worker` | Temporal worker | 113 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 126 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 131 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 338 of 384 modules.
+Union of all five: 339 of 385 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -153,7 +153,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 63 | 0 | 2 | 1 | 0 | 63 |
-| aida domain modules | 204 | 68 | 90 | 33 | 6 | 218 |
+| aida domain modules | 205 | 68 | 95 | 33 | 6 | 219 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 12 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 12 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 12 |
@@ -172,13 +172,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>320 reached"])
+  aida_main(["aida.main<br/>321 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>113 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>126 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>131 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>64 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>184 modules"]
+  only_aida_main["only this process<br/>180 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
@@ -499,13 +499,13 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 186 |
+| `aida.models` | aida domain modules | 187 |
 | `aida.security` | aida domain modules | 106 |
-| `aida.db` | aida domain modules | 95 |
+| `aida.db` | aida domain modules | 97 |
 | `aida.schemas` | aida domain modules | 94 |
-| `aida.config` | aida domain modules | 82 |
-| `aida.events` | aida domain modules | 81 |
-| `aida.context` | aida domain modules | 64 |
+| `aida.config` | aida domain modules | 83 |
+| `aida.events` | aida domain modules | 82 |
+| `aida.context` | aida domain modules | 65 |
 | `atlas.platform.config` | atlas.platform | 23 |
 | `aida.authorization_gate` | aida domain modules | 13 |
 | `aida.connectors.base` | aida.connectors | 13 |
