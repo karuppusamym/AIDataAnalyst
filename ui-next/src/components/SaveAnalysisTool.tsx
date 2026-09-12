@@ -1,6 +1,6 @@
 import { navigateTo } from "../lib/navigate";
 import { useState } from "react";
-import { createToolVersion, postJson } from "../lib/api";
+import { createToolVersion, fetchAnalysisToolBlueprint } from "../lib/api";
 import type { GovernedToolVersionCreate } from "../lib/types";
 import { Button, Field } from "./primitives";
 
@@ -16,7 +16,7 @@ export function SaveAnalysisTool({ runId }: { runId: string }) {
   return <details className="workflow-author"><summary>Save analysis as a reusable tool</summary>
     <p>Prepare a draft from this successful analysis. Stored SQL has redacted values: supply parameter types and names before saving. The tool must pass validation and independent review before publication.</p>
     <Button disabled={busy} onClick={() => void run(async () => {
-      const result = await postJson<{ project_id: string; definition: GovernedToolVersionCreate }>(`/v1/agent-runs/${runId}/tool-blueprint`, {});
+      const result = await fetchAnalysisToolBlueprint(runId);
       setProject(result.project_id); setDraft(result.definition); setParameters(JSON.stringify(result.definition.parameters, null, 2)); setReviewed(false); setSaved(null);
     })}>Prepare draft tool</Button>
     {draft ? <>

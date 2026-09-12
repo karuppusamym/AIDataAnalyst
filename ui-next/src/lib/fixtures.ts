@@ -1,4 +1,5 @@
 import type {
+  AnalysisToolBlueprintRead,
   ParsedLineageEdgeReviewQueueItemRead,
   ParsedLineageEdgeReviewQueueRead,
   AgentAnalysisRequest,
@@ -3913,6 +3914,42 @@ export async function makeFixtureCreateToolVersion(
   };
   items.push(version);
   return version;
+}
+
+/** `POST /v1/agent-runs/{id}/tool-blueprint`.
+ *
+ *  Demo mode had no answer for this at all: `SaveAnalysisTool` called
+ *  `postJson` directly and so bypassed `demoOr`, which meant the *first*
+ *  button in the propose-a-tool flow made a live network call against the
+ *  demo estate and failed. The second button already had a fixture, which is
+ *  what made the gap easy to miss: the flow could not be demonstrated, and
+ *  the failure read as a broken feature rather than as "not available here".
+ *
+ *  The real endpoint renders the run's own **stored** SQL, which
+ *  `AgentRunRead` does not carry -- it lives on the execution the answer
+ *  returned. So this repeats the statement the demo answer shows, rather than
+ *  reading it back from a record that does not have it or inventing an
+ *  unrelated one, which would teach the wrong thing about what this action
+ *  does. */
+export async function makeFixtureAnalysisToolBlueprint(
+  runId: string,
+): Promise<AnalysisToolBlueprintRead> {
+  await wait(140);
+  void runId;
+  return {
+    project_id: "proj_core",
+    parameter_review_required: true,
+    definition: {
+      slug: "monthly_net_revenue",
+      name: "Monthly net revenue",
+      description: "Net revenue by month, from the analysis this was proposed from.",
+      datasource_id: "ds_snowflake_prod",
+      semantic_model_version_id: null,
+      sql_template: "SELECT date_trunc('month', order_date) AS month, SUM(net_amount) AS net_revenue\nFROM analytics.core.orders_raw\nGROUP BY 1\nORDER BY 1",
+      parameters: [],
+      allowed_roles: ["Analyst"],
+    },
+  };
 }
 
 /** `POST /v1/tool-versions/{id}/submit`. */

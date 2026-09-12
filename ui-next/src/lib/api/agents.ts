@@ -16,6 +16,7 @@ import { demoOr, get, postJson, putJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
 import { ApiError } from "../http";
 import type {
+  AnalysisToolBlueprintRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
   AgentContractRequestCreate,
@@ -853,5 +854,33 @@ export async function resolveAuditSample(
   return postJson<ReviewAuditSampleRead>(
     `/v1/organizations/${organizationId}/reviewer-agent/samples/${sampleId}/resolve`,
     body,
+  );
+}
+
+/** `POST /v1/agent-runs/{id}/tool-blueprint` (`analysis_tool_blueprint`) --
+ *  render this run's own stored SQL into a candidate governed tool definition.
+ *
+ *  Reads nothing the caller supplies: the blueprint comes from what the run
+ *  actually executed, so an answer cannot be proposed as a tool that does
+ *  something else, and the endpoint refuses anyone but the run's own author.
+ *
+ *  Here rather than inline in `SaveAnalysisTool` because the component called
+ *  `postJson` directly and so bypassed `demoOr`: in the demo estate the first
+ *  step of proposing a tool made a live network call and failed, while the
+ *  second step (`createToolVersion`) had a fixture. The flow could not be
+ *  demonstrated and the failure read as a broken feature. */
+export function fetchAnalysisToolBlueprint(
+  agentRunId: string,
+  signal?: AbortSignal,
+): Promise<AnalysisToolBlueprintRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureAnalysisToolBlueprint(agentRunId),
+    async () => {
+      return postJson<AnalysisToolBlueprintRead>(
+        `/v1/agent-runs/${agentRunId}/tool-blueprint`,
+        {},
+        signal,
+      );
+    },
   );
 }
