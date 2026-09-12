@@ -253,7 +253,18 @@ function GlossaryTab({
   const [terms, setTerms] = useState<GlossaryTermRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [q, setQ] = useState("");
+  /* The filter lives in the URL (`?q=`), not in local state, so a link *to a
+     term* arrives filtered to it. A catalog glossary chip links here; with a
+     local-only filter it opened the full glossary and left the reader to find
+     the term again, which is most of the way to not having linked at all.
+     `q` is already a declared field of the `meaning` route, and the annotations
+     tab reads the same one. */
+  const [params, setParams] = useUrlState();
+  const q = params.get("q") ?? "";
+  const setQ = useCallback(
+    (value: string) => setParams({ q: value || null }),
+    [setParams],
+  );
   const [creating, setCreating] = useState(false);
   const [linkingTerm, setLinkingTerm] = useState<GlossaryTermRead | null>(null);
 

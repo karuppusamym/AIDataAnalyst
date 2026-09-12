@@ -174,6 +174,36 @@ describe("ReliabilityScreen against the real observability/notification/runtime-
     expect(screen.getByText("99.40%")).toBeInTheDocument();
   });
 
+  it("says so when an SLO has no measurements, rather than showing a bare NO_DATA", async () => {
+    // R11-D10: `slo_measurement` has no writer, so a defined SLO returns
+    // NO_DATA forever. Rendering only the status pill left an operator unable
+    // to tell "nothing is collecting this" from "collected and fine", which
+    // made a defined SLO look supervised. The demo fixtures return healthy
+    // values, so this state only ever appears against a real backend -- which
+    // is why it is pinned here rather than checked in the running app.
+    fetchSloBudget.mockResolvedValue({
+      slo_id: "slo_1",
+      slo_key: "agent-answer-latency-p95",
+      name: "Agent answer latency (p95)",
+      target: 99,
+      current_value: null,
+      budget_remaining: null,
+      window_days: 30,
+      status: "NO_DATA",
+    });
+    const ReliabilityScreen = await loadScreen();
+    render(<ReliabilityScreen />);
+    await waitFor(() => expect(screen.getByText("Agent answer latency (p95)")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "View budget" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("no measurements recorded — this SLO is defined but not yet collected"),
+      ).toBeInTheDocument(),
+    );
+  });
+
   it("creating an SLO posts the typed body and prepends the result to the list", async () => {
     createSloDefinition.mockResolvedValue({
       id: "slo_2", organization_id: "org1", slo_key: "ingestion-freshness",

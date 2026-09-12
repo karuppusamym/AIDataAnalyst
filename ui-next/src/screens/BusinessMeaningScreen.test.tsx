@@ -231,6 +231,28 @@ describe("BusinessMeaningScreen Glossary tab (P1-03)", () => {
     expect(screen.getByText("mrr")).toBeInTheDocument();
   });
 
+  it("filters the glossary to ?q= so a link to one term arrives selected", async () => {
+    // R11-D5: a catalog glossary chip links here as ?view=glossary&q=<term>.
+    // The filter used to be local component state, so the link opened the full
+    // glossary and left the reader to find the term again -- most of the way to
+    // not having linked at all. Verified live in the browser as well.
+    listGlossaryTerms.mockResolvedValue({
+      items: [APPROVED_TERM, DRAFT_TERM],
+      limit: 200,
+      offset: 0,
+      total: 2,
+    });
+    history.replaceState(null, "", "/?view=glossary&q=Monthly%20Recurring%20Revenue");
+    const BusinessMeaningScreen = await loadScreen();
+
+    render(<BusinessMeaningScreen />);
+
+    expect(await screen.findByText("Monthly Recurring Revenue")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText("Annual Recurring Revenue")).not.toBeInTheDocument(),
+    );
+  });
+
   it("create-term flow calls createGlossaryTerm then submitGlossaryTermVersion", async () => {
     listGlossaryTerms.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
     createGlossaryTerm.mockResolvedValue({ ...DRAFT_TERM, id: "ver_new" });
