@@ -17,6 +17,33 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    docker compose up --build -d
    ```
 
+   That starts **ten services** — `postgres`, `temporal`, `migrate`, `api`,
+   `ui-next`, `metadata-worker`, `fleet-scheduler` and the three sample source
+   containers. Redis, Neo4j, Redpanda, MinIO and their companion processes are
+   **not** started, because with default settings none of them is reached: the
+   graph backend defaults to `postgres`, the lineage cache and MCP budget
+   default to off, and the audit archive destination defaults to `none`. Each
+   is one `--profile` flag away.
+
+   | Profile | Brings back | Off in the default stack |
+   |---|---|---|
+   | `cache` | `redis` | Redis-backed lineage cache and MCP rate-limit counters. The MCP limits themselves are unchanged and still enforced; without this profile there is no store to enforce them in, so set `AIDA_LINEAGE_CACHE_ENABLED=true` / `AIDA_MCP_BUDGET_ENABLED=true` alongside it. |
+   | `graph` | `neo4j`, `graph-projector`, plus `redpanda` and `outbox-publisher` to feed them | **Neo4j graph reads.** Graph and lineage screens still work — they are served by the certified `postgres` graph adapter, which reads the same relational tables. Add `AIDA_LINEAGE_NEO4J_READ_ENABLED=true` to actually read from Neo4j. |
+   | `events` | `redpanda`, `redpanda-console`, `outbox-publisher` | **Kafka projection and the topic browser.** Events are still written to the `outbox_event` table by every producer; they simply stay `PENDING` until a publisher runs. PostgreSQL is authoritative (INV-1), so nothing is lost and the backlog drains when the profile is enabled. |
+   | `archive` | `minio` | **The audit archive destination.** `audit_archive_storage_backend` defaults to `none`, which refuses rather than reporting success. Set `AIDA_AUDIT_ARCHIVE_STORAGE_BACKEND=s3` alongside it. |
+   | `temporal-ui` | `temporal-ui` | The Temporal Web UI. Temporal itself is in the default stack — only the web console is optional. |
+   | `full` | all of the above | — |
+   | `seed` | `seed` | Demonstration data (step 5 below). |
+
+   ```powershell
+   docker compose --profile graph up -d --build     # one optional group
+   docker compose --profile full up -d --build      # the whole 18-service stack
+   ```
+
+   Profiles combine (`--profile cache --profile events`). Nothing has been
+   removed: the Kafka consumers, the Redis-backed limits and Temporal are all
+   still here — this only changes what a plain `docker compose up` starts.
+
    For local UI/API editing with automatic pickup, use the development overlay:
 
    ```powershell
@@ -63,10 +90,13 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
      portal, which is what the **Agent gateway** screen copies. nginx proxies it to the API
      (`ui-next/nginx.conf`), so the URL the screen shows is the URL that works. It requires the
      same bearer token as the REST API.
-   - Temporal UI: <http://localhost:8080>
-   - Neo4j browser: <http://localhost:7474>
-   - MinIO console: <http://localhost:9001>
-   - Redpanda console: <http://localhost:8081>
+   The four consoles below belong to optional services, so each needs its
+   profile from step 2 before the URL resolves:
+
+   - Temporal UI: <http://localhost:8080> — `--profile temporal-ui`
+   - Neo4j browser: <http://localhost:7474> — `--profile graph`
+   - MinIO console: <http://localhost:9001> — `--profile archive`
+   - Redpanda console: <http://localhost:8081> — `--profile events`
 
 4. Verify the API:
 
