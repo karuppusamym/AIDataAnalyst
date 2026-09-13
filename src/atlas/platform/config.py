@@ -324,6 +324,12 @@ class Settings(BaseSettings):
     # --- ADR-0027: risk-tiered agent checking -----------------------------
     # Off by default. An organization that never enables this sees exactly
     # today's behaviour: every review item waits for a human.
+    #
+    # R11-C3 (decided 2026-09-12): and refused outright in production. Measured
+    # against labelled false twins it approved 9 of 14 false proposals and told
+    # no pair apart, and no adjudication mechanism exists to fix that, so "off"
+    # is a decision rather than a default. Development and test still accept it,
+    # because the benchmark that measured it has to be able to run it.
     reviewer_agent_enabled: bool = False
     #: The reviewer agent's own workload identity. Must differ from every
     #: human principal -- `reviewer_agent` refuses to decide an item it
@@ -1123,6 +1129,11 @@ class Settings(BaseSettings):
             raise ValueError("default query row limit cannot exceed the hard limit")
         if self.environment == "production" and self.allow_development_sql_override:
             raise ValueError("development SQL override is forbidden in production")
+        if self.environment == "production" and self.reviewer_agent_enabled:
+            raise ValueError(
+                "unattended reviewer-agent approvals are forbidden in production: "
+                "measured unsafe under R11-C3 (9 of 14 false proposals approved)"
+            )
         if self.model_generation_enabled and not self.model_route:
             raise ValueError("model generation requires an explicit approved route")
         if self.environment == "production" and (

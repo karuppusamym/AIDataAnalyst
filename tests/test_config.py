@@ -31,6 +31,27 @@ def test_production_rejects_development_sql_override() -> None:
         )
 
 
+def test_production_refuses_unattended_reviewer_approvals() -> None:
+    """R11-C3: measured unsafe with no fix, so off is a decision that holds
+    where it matters rather than a default someone can flip."""
+    with pytest.raises(ValidationError, match="unattended reviewer-agent approvals"):
+        Settings(
+            environment="production",
+            identity_provider="oidc",
+            oidc_issuer="https://identity.bank.example",
+            oidc_audience="atlas",
+            oidc_jwks_json='{"keys":[]}',
+            credential_provider="vault",
+            allow_development_sql_override=False,
+            reviewer_agent_enabled=True,
+            _env_file=None,
+        )
+
+
+def test_development_can_still_run_the_reviewer_agent_to_measure_it() -> None:
+    assert Settings(reviewer_agent_enabled=True, _env_file=None).reviewer_agent_enabled
+
+
 def test_production_requires_strong_audit_hmac_key() -> None:
     with pytest.raises(ValidationError, match="production audit HMAC key"):
         Settings(
