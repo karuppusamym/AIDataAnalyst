@@ -496,6 +496,7 @@ anything from you.
 | R11-B8 | **Done.** Freshness is measured: an approved contract's watermark is read on the schedule through the query gateway, and the table is judged on it ([ADR-0014 addendum](../10-architecture/adr/ADR-0014-value-free-control-plane.md)) |
 | R11-C3 | **Done.** Unattended reviewer approvals stay off for good, and production now refuses the setting |
 | R11-C7 | **Done.** INV-3 is accepted as the control for rows a tool call returns |
+| R11-X5 | **Done.** Every backend capability still without a screen has an owner and a date on the tracker; four had gained one since the triage |
 
 ### 8.2 Decisions only you can make
 
@@ -507,7 +508,6 @@ it.
 |---|---|
 | R11-X2 | For two tables nothing uses (`business_assignment_rule`, `isolation_boundary`): build a writer, or retire them. For three that are written but never read (`contract_sla_record`, `procedure_tool_generation_record`, `studio_test_run`): build a reader, or retire them. Retiring drops a table. |
 | R11-S9 | Fifteen features ship switched off. For each: enable it with evidence, or retire it. Unattended reviewer approvals stay off regardless — measured unsafe. |
-| R11-X5 | About thirteen backend capabilities have no screen. For each: fund the UI, or name an owner and a date. |
 | R11-X4 | Whether the remaining module relocation (S6) goes ahead. The empty scaffolds cannot be removed until it is decided. |
 
 ### 8.3 Things only you can provide
