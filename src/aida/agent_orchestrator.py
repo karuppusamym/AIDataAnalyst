@@ -1067,6 +1067,7 @@ class GovernedAgentOrchestrator:
             tool_parameters=request.tool_parameters,
             preferred_tool_version_id=request.preferred_tool_version_id,
             prompt_risk=screened.prompt_risk,
+            question=request.question,
         )
         ledger.plan_evidence = plan.evidence()
         ledger.publish_plan_evidence()

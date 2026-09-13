@@ -208,6 +208,7 @@ async def preview_agent_retrieval(
         candidate_sql_available=body.candidate_sql_available,
         tool_parameters={},
         prompt_risk=prompt_risk,
+        question=body.question,
     )
     return AgentRetrievalPreviewRead(
         datasource_id=datasource.id,

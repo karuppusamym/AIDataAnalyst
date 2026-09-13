@@ -507,6 +507,7 @@ async def run_tool_selection_benchmark(
             roles=case.roles,
             candidate_sql_available=case.candidate_sql_available,
             tool_parameters={},
+            question=case.question,
         )
         actual_tool_key = (
             tool_key_by_version_id.get(plan.selected_tool_version_id)

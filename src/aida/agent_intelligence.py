@@ -38,6 +38,77 @@ def normalized_terms(text: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(term for term in terms if len(term) > 1 and term not in STOP_WORDS))
 
 
+#: R11-B2: words that say what *kind* of identifier a parameter is rather than
+#: what it identifies, plus connectives that appear in names like `as_of_date`.
+#: `branch_code` is about a branch; a question that says "code" has not asked
+#: about one.
+_NON_REFERENCING_TERMS = frozenset(
+    {
+        "as",
+        "at",
+        "code",
+        "id",
+        "identifier",
+        "key",
+        "no",
+        "num",
+        "number",
+        "param",
+        "per",
+        "ref",
+        "value",
+    }
+)
+
+
+def _stem(term: str) -> str:
+    """Just enough plural folding that "branches" mentions a branch."""
+    if len(term) > 4 and term.endswith("ies"):
+        return term[:-3] + "y"
+    if len(term) > 4 and term.endswith("es") and term[:-2].endswith(("ch", "sh", "ss", "x")):
+        return term[:-2]
+    if len(term) > 3 and term.endswith("s") and not term.endswith("ss"):
+        return term[:-1]
+    return term
+
+
+def question_terms(question: str) -> frozenset[str]:
+    return frozenset(_stem(term) for term in normalized_terms(question))
+
+
+def parameter_is_referenced(parameter: str, terms: frozenset[str]) -> bool | None:
+    """R11-B2: whether a question mentions what a tool parameter names.
+
+    `None` when the name is made only of generic words (`id`, `code`): there is
+    nothing to look for, so the planner cannot tell and keeps asking rather than
+    guessing. Deliberately generous in what counts as a mention -- any one
+    meaningful word of the name -- because the cost of a false "mentioned" is
+    today's behaviour (ask for the input), while a false "not mentioned" hands
+    the question to generation.
+    """
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", parameter)
+    words = {
+        _stem(word)
+        for word in re.findall(r"[a-z0-9]+", spaced.lower())
+        if len(word) > 1 and word not in STOP_WORDS and word not in _NON_REFERENCING_TERMS
+    }
+    if not words:
+        return None
+    return not words.isdisjoint(terms)
+
+
+def _unmentioned_required_parameters(
+    hit: "RetrievalHit", tool_parameters: dict[str, Any], terms: frozenset[str] | None
+) -> list[str]:
+    if terms is None:
+        return []
+    return sorted(
+        name
+        for name in hit.metadata["required_parameters"]
+        if name not in tool_parameters and parameter_is_referenced(name, terms) is False
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalHit:
     object_type: str
@@ -186,6 +257,7 @@ class GovernedPlanner:
         tool_parameters: dict[str, Any],
         preferred_tool_version_id: UUID | None = None,
         prompt_risk: PromptRiskAssessment | None = None,
+        question: str | None = None,
     ) -> AgentPlan:
         risk_evidence = prompt_risk.evidence() if prompt_risk else {}
         if prompt_risk and prompt_risk.decision == "BLOCK":
@@ -199,6 +271,17 @@ class GovernedPlanner:
                 risk_evidence,
             )
         tools = [hit for hit in retrieval_hits if hit.object_type == "GOVERNED_TOOL"]
+        # R11-B2: a tool is not chosen for a question that never mentions an
+        # input the tool requires. Lexical retrieval scores a tool on its
+        # description, and a description that lists the columns a tool returns
+        # matches every question about those columns -- measured live, "how many
+        # accounts of each account type" scored 0.94 against a one-branch
+        # lookup, and the user was asked for a branch code they never mentioned.
+        # Declining the tool sends the question on to generation, which is still
+        # governed end to end. A tool the caller chose explicitly, an input the
+        # caller supplied, and a parameter whose name gives nothing to look for
+        # are all left exactly as before; with no question, nothing changes.
+        terms = question_terms(question) if question is not None else None
         eligible: list[RetrievalHit] = []
         tool_decisions: list[dict[str, str]] = []
         for hit in tools:
@@ -208,14 +291,22 @@ class GovernedPlanner:
             meets_threshold = (
                 explicitly_selected or hit.score >= self.settings.agent_tool_match_threshold
             )
-            if role_allowed and meets_threshold:
+            unmentioned = (
+                _unmentioned_required_parameters(hit, tool_parameters, terms)
+                if role_allowed and meets_threshold and not explicitly_selected
+                else []
+            )
+            if role_allowed and meets_threshold and not unmentioned:
                 eligible.append(hit)
             else:
-                reason = (
-                    "role not in tool allowed_roles"
-                    if not role_allowed
-                    else "score below the governed-tool match threshold"
-                )
+                if not role_allowed:
+                    reason = "role not in tool allowed_roles"
+                elif not meets_threshold:
+                    reason = "score below the governed-tool match threshold"
+                else:
+                    reason = "requires parameters the question does not mention: " + ", ".join(
+                        unmentioned
+                    )
                 tool_decisions.append(
                     {"tool_version_id": hit.object_id, "decision": "REJECTED", "reason": reason}
                 )
