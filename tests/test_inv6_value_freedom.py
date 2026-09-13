@@ -419,6 +419,12 @@ _COLUMN_NAME_EXEMPTIONS: dict[str, str] = {
         "raw question or query text; the mined question row itself carries no source "
         "values either, only object_type/object_id and an evidence edge id"
     ),
+    "description_withdrawal.review_audit_sample_id": (
+        "foreign key to review_audit_sample.id (R11-C8) -- the same governance edge "
+        "bulk_stewardship_operation.review_audit_sample_id carries, here on the "
+        "withdrawal raised from a disputed agent decision: the id of a row in this "
+        "platform's own audit table, never a sample of source data"
+    ),
     "bulk_stewardship_operation.review_audit_sample_id": (
         "foreign key to review_audit_sample.id (AR-11, R11-C8) -- the governance "
         "record of which decision a human re-checked, not a sample of source data. "
