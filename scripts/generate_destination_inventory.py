@@ -101,7 +101,7 @@ READINESS_MODULE = SRC_ROOT / "aida" / "readiness.py"
 #:   as probed by `/health/ready`, contradicting B10's own finding that delivery
 #:   to a real Slack or Teams endpoint remains unverified. A queue being
 #:   watched is not its destinations being watched.
-#: * `aida.model_route_health` arrived with R11-B16 and is the subtler case,
+#: * `aida.model_route_health` arrived with R11-B18 and is the subtler case,
 #:   because it really does contact the provider -- just never from this
 #:   endpoint. `/health/ready` calls `unreachable_route_summary`, which reads
 #:   the verdict already **recorded** in the database and deliberately makes no

@@ -475,7 +475,59 @@ test, and a token whose roles claim merely contained the string
 
 ---
 
-## 8. Reporting back
+## 8. Closing the remaining work: what needs you
+
+*A dated snapshot taken 2026-09-12 against 16 PARTIAL rows. Status lives in
+[tracker section P](../60-delivery/03-tracker.md), not here — if the two
+disagree, section P is right and this list is stale.*
+
+Every remaining row falls into one of three groups, and only the last two need
+anything from you.
+
+### 8.1 Engineering — being closed without you
+
+| Row | What is left |
+|---|---|
+| R11-D6 | Exercise the session banner's loading, expired and reconnect states under a real OIDC session (the mock issuer is enough) |
+| R11-B2 | Score generated SQL by execution match against the live model route |
+| R11-C1 | Run the ontology lifecycle — draft, independent review, publication — through the running application |
+| R11-C6 | A per-agent allowlist over the native MCP tools, and a filter on the project-level product listing |
+| R11-C8 | Before-image capture for the five remaining operation types, and a withdrawal path for enrichment annotations |
+| R11-B8 | Something that actually writes freshness observations — today nothing does, so every freshness contract correctly reads STALE |
+
+### 8.2 Decisions only you can make
+
+For each of these I will bring a recommendation; none will be acted on
+without your yes, because each one removes something or commits to building
+it.
+
+| Row | The decision |
+|---|---|
+| R11-X2 | For two tables nothing uses (`business_assignment_rule`, `isolation_boundary`): build a writer, or retire them. For three that are written but never read (`contract_sla_record`, `procedure_tool_generation_record`, `studio_test_run`): build a reader, or retire them. Retiring drops a table. |
+| R11-S9 | Fifteen features ship switched off. For each: enable it with evidence, or retire it. Unattended reviewer approvals stay off regardless — measured unsafe. |
+| R11-X5 | About thirteen backend capabilities have no screen. For each: fund the UI, or name an owner and a date. |
+| R11-X4 | Whether the remaining module relocation (S6) goes ahead. The empty scaffolds cannot be removed until it is decided. |
+| R11-C3 | Unattended review approved 9 of 14 deliberately false proposals and no fix exists. Keep it off permanently, or fund a real adjudication mechanism. |
+| R11-C7 | Screening every row a tool returns is the bulk projection the design forbids. Accept the existing control (INV-3) and close, or reopen the design. |
+
+### 8.3 Things only you can provide
+
+I cannot create accounts, enter credentials, or be a person with a screen
+reader. Each of these has a step-by-step document already:
+
+| Row | You need | Follow |
+|---|---|---|
+| R11-I1, R11-B10 | A Slack workspace, and a Microsoft tenant with Teams | [Notification delivery runbook](12-notification-delivery-runbook.md) §3.1 (Slack) and §3.2 (Teams) |
+| R11-B9 | An AWS S3 bucket with object lock | [Audit archive destination verification](../50-security/audit-archive-destination-verification.md) |
+| R11-C2 | A person using NVDA or VoiceOver, plus contrast, zoom and multi-screen checks | [Accessibility acceptance](../60-delivery/24-accessibility-acceptance-2026-09-12.md) |
+
+Before any of section 8.3, you can already exercise the whole delivery path
+with no account at all by pointing the webhook at a dead local port — see
+section 5.7. That proves everything except the vendor's end.
+
+---
+
+## 9. Reporting back
 
 For anything that fails: what you did, what you expected, what happened, and
 the correlation id if the UI showed one.

@@ -1,4 +1,4 @@
-"""R11-B16: an approved route whose model the provider retired must be noticed.
+"""R11-B18: an approved route whose model the provider retired must be noticed.
 
 This happened here. A route was approved for `gemini-2.0-flash`, Google had
 retired it, and the route read as entirely healthy -- APPROVED, credentialed,

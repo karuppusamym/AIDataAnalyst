@@ -458,7 +458,7 @@ def _staleness_signals(names: tuple[str, ...], *, now: datetime) -> dict[str, st
 
 
 async def _model_route_signals(settings: Settings) -> dict[str, str]:
-    """R11-B16: which approved model routes the provider no longer serves.
+    """R11-B18: which approved model routes the provider no longer serves.
 
     Reads the state the scheduled sweep recorded -- it makes **no** provider
     call, because a readiness scrape whose latency and cost a third party

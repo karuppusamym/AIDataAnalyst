@@ -726,7 +726,7 @@ class Settings(BaseSettings):
     vector_index_rebuild_enabled: bool = True
     vector_index_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     vector_index_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
-    # R11-B16: an approved route can be silently retired by its provider, and
+    # R11-B18: an approved route can be silently retired by its provider, and
     # the approval cannot expire when they do. The sweep lists models (free)
     # and never generates (not free), so it is on by default; it is a no-op
     # for a provider it cannot probe or a credential it does not have.

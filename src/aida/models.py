@@ -559,7 +559,7 @@ class ModelRouteConfiguration(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # R11-B16: whether the provider still serves `model_id`, recorded *beside*
+    # R11-B18: whether the provider still serves `model_id`, recorded *beside*
     # the approval and never in place of it -- a background sweep must not
     # revoke what a human decided through maker-checker. NULL means never
     # checked, which is distinct from UNKNOWN (checked, could not tell).

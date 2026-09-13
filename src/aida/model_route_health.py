@@ -1,4 +1,4 @@
-"""R11-B16: notice when an approved model route's model disappears upstream.
+"""R11-B18: notice when an approved model route's model disappears upstream.
 
 An approved route is a governed object: a human decided, through maker-checker,
 that this provider and this model may generate answers for this organization.

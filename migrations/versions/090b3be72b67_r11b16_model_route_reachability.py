@@ -1,4 +1,4 @@
-"""R11-B16: record whether an approved route's model is still served.
+"""R11-B18: record whether an approved route's model is still served.
 
 Three nullable columns on `model_route_configuration`, and nullable is the
 point: NULL means "never checked", which is a different fact from "checked and

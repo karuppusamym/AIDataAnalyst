@@ -767,7 +767,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # paid a provider call per candidate per query instead. A no-op when no
     # embedding provider is configured, which is the default.
     await run_vector_index_rebuild_pass(settings, now=now)
-    # R11-B16: an approved model route whose model the provider has retired
+    # R11-B18: an approved model route whose model the provider has retired
     # looks entirely healthy and fails every generated answer. Listing models
     # is free; this never generates.
     await run_model_route_reachability_pass(settings, now=now)
