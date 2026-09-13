@@ -40,10 +40,12 @@ from aida.models import (
     AssetTermLink,
     BulkStewardshipOperation,
     GlossaryTerm,
+    GlossaryTermVersion,
     GovernanceReview,
     MetadataColumn,
     MetadataTable,
     Organization,
+    OwnershipAssignment,
     ReviewAuditSample,
 )
 from aida.review_risk_tiers import (
@@ -297,23 +299,25 @@ async def test_withdrawing_a_certification_leaves_the_asset_uncertified_not_refu
 @pytest.mark.parametrize(
     ("operation_type", "status", "record_effect", "expected_status", "expected_detail"),
     [
-        # No sound compensating action: reversing these needs a before-image
-        # of what they overwrote, which nothing captures for these types.
-        ("ASSIGN_OWNERSHIP", "APPLIED", True, 422, "no compensating action"),
-        ("DEPRECATE_TERM", "APPLIED", True, 422, "no compensating action"),
-        ("REASSIGN_LEAVER", "APPLIED", True, 422, "no compensating action"),
+        # A reversal is not itself reversed: undoing an undo is a fresh,
+        # reviewed operation, so the compensating types have no entry.
+        ("UNLINK_TERM", "APPLIED", True, 422, "no compensating action"),
+        ("RESTORE_TAG", "APPLIED", True, 422, "no compensating action"),
         # Never applied: there is nothing to compensate.
         ("LINK_TERM", "REJECTED", True, 409, "only an applied bulk operation"),
         # Applied before the effect ledger existed. An empty list means "not
         # recorded", never "changed nothing" -- falling back to `subject_ids`
         # would let the reversal exceed the original's blast radius.
         ("LINK_TERM", "APPLIED", False, 409, "did not record which subjects"),
-        # R11-C8: TAG and CLASSIFY are reversible now, but only with a
+        # R11-C8: the five overwriting types are reversible now, but only with a
         # before-image. A row that recorded its subjects and not what it
         # overwrote -- every row applied before the column existed -- is
         # refused rather than restored from a guess.
         ("TAG", "APPLIED", True, 409, "did not record what it overwrote"),
         ("CLASSIFY", "APPLIED", True, 409, "did not record what it overwrote"),
+        ("ASSIGN_OWNERSHIP", "APPLIED", True, 409, "did not record what it overwrote"),
+        ("DEPRECATE_TERM", "APPLIED", True, 409, "did not record what it overwrote"),
+        ("REASSIGN_LEAVER", "APPLIED", True, 409, "did not record what it overwrote"),
     ],
 )
 async def test_what_cannot_be_reversed_is_refused_by_name(
@@ -785,3 +789,273 @@ async def test_the_before_image_is_recorded_only_for_applied_subjects(
 
     assert set(operation.applied_before_images) <= set(operation.applied_subject_ids)
     assert operation.applied_before_images[str(changed.id)] == {"classification": "INTERNAL"}
+
+
+# --------------------------------------------------------------------------- #
+# R11-C8: ownership, term deprecation and leaver reassignment
+# --------------------------------------------------------------------------- #
+
+
+def _assignment(
+    org: Organization,
+    subject_id: UUID,
+    principal: str,
+    *,
+    status: str = "ACTIVE",
+) -> OwnershipAssignment:
+    return OwnershipAssignment(
+        id=uuid4(),
+        organization_id=org.id,
+        subject_type="TABLE",
+        subject_id=str(subject_id),
+        owner_type="STEWARD",
+        owner_principal=principal,
+        assignment_kind="MANUAL",
+        status=status,
+        assigned_by="steward-z",
+    )
+
+
+def _owner_parameters(principal: str) -> dict[str, object]:
+    return {"owner_type": "STEWARD", "owner_principal": principal}
+
+
+def _leaver_parameters() -> dict[str, object]:
+    return {
+        "leaving_principal": "leaver",
+        "successor_principal": "successor",
+        "owner_type": "STEWARD",
+    }
+
+
+async def _reverse(
+    session: AsyncSession, operation: BulkStewardshipOperation
+) -> tuple[str, int]:
+    reversal, _review = await request_bulk_operation_reversal(
+        session, operation, reason="the agent was wrong", requested_by="steward-b"
+    )
+    return await apply_bulk_operation(session, reversal, reviewer="steward-c", now=NOW)
+
+
+async def test_reversing_an_assignment_withdraws_the_one_it_created(
+    session: AsyncSession,
+) -> None:
+    """The prior state of an assignment the operation created is *no owner*.
+    Withdrawn rather than deleted: ownership keeps every non-ACTIVE row as
+    evidence of who was named, and no reader counts it as the owner."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    operation = await _operation(
+        session,
+        org,
+        operation_type="ASSIGN_OWNERSHIP",
+        subject_ids=[table.id],
+        parameters=_owner_parameters("wrong-owner"),
+    )
+
+    event_type, restored = await _apply_and_reverse(session, operation)
+
+    row = await session.scalar(
+        select(OwnershipAssignment).where(OwnershipAssignment.subject_id == str(table.id))
+    )
+    assert (event_type, restored) == ("ownership.assignment_withdrawn_bulk.v1", 1)
+    assert row is not None
+    assert (row.owner_principal, row.status) == ("wrong-owner", "WITHDRAWN")
+
+
+async def test_reversing_a_reactivated_assignment_puts_back_what_it_held(
+    session: AsyncSession,
+) -> None:
+    """A reactivation overwrote a status, an assigner and an expiry. Undoing
+    it restores all three, not merely a status."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    lapsed_on = NOW - timedelta(days=30)
+    lapsed = _assignment(org, table.id, "returning-owner", status="LAPSED")
+    lapsed.expires_at = lapsed_on
+    session.add(lapsed)
+    await session.flush()
+    operation = await _operation(
+        session,
+        org,
+        operation_type="ASSIGN_OWNERSHIP",
+        subject_ids=[table.id],
+        parameters=_owner_parameters("returning-owner"),
+    )
+
+    _, restored = await _apply_and_reverse(session, operation)
+
+    assert restored == 1
+    assert (lapsed.status, lapsed.assigned_by, lapsed.expires_at) == (
+        "LAPSED",
+        "steward-z",
+        lapsed_on,
+    )
+
+
+async def test_an_assignment_reaffirmed_since_is_not_withdrawn(session: AsyncSession) -> None:
+    """A reaffirmation is the owner confirming the assignment is right -- a
+    later, independent decision the reversal must not undo."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    operation = await _operation(
+        session,
+        org,
+        operation_type="ASSIGN_OWNERSHIP",
+        subject_ids=[table.id],
+        parameters=_owner_parameters("confirmed-owner"),
+    )
+    await apply_bulk_operation(session, operation, reviewer="steward-a", now=NOW)
+    row = await session.scalar(
+        select(OwnershipAssignment).where(OwnershipAssignment.subject_id == str(table.id))
+    )
+    assert row is not None
+    row.reaffirmed_at = NOW + timedelta(days=1)
+    row.reaffirmed_by = "confirmed-owner"
+    await session.flush()
+
+    _, restored = await _reverse(session, operation)
+
+    assert restored == 0
+    assert row.status == "ACTIVE"
+
+
+async def test_reversing_a_deprecation_reapproves_exactly_the_versions_it_deprecated(
+    session: AsyncSession,
+) -> None:
+    """A version already DEPRECATED before the operation ran was never this
+    operation's doing, and stays deprecated."""
+    org = await _org(session)
+    term = await _term(session, org)
+    session.add_all(
+        [
+            GlossaryTermVersion(
+                organization_id=org.id,
+                term_id=term.id,
+                version=version,
+                status=status,
+                display_name="Exposure",
+                definition=f"definition {version}",
+                created_by="author",
+            )
+            for version, status in ((1, "DEPRECATED"), (2, "APPROVED"))
+        ]
+    )
+    await session.flush()
+    operation = await _operation(
+        session,
+        org,
+        operation_type="DEPRECATE_TERM",
+        subject_ids=[term.id],
+        parameters={"rationale": "duplicate of another term"},
+    )
+
+    event_type, restored = await _apply_and_reverse(session, operation)
+
+    statuses = {
+        version: status
+        for version, status in (
+            await session.execute(
+                select(GlossaryTermVersion.version, GlossaryTermVersion.status).where(
+                    GlossaryTermVersion.term_id == term.id
+                )
+            )
+        ).all()
+    }
+    assert (event_type, restored) == ("glossary.term_restored.v1", 1)
+    assert statuses == {1: "DEPRECATED", 2: "APPROVED"}
+    assert (
+        term.lifecycle_status,
+        term.deprecated_by,
+        term.deprecated_at,
+        term.deprecation_reason,
+    ) == ("ACTIVE", None, None, None)
+
+
+async def test_a_term_redeprecated_since_is_not_reinstated(session: AsyncSession) -> None:
+    """A steward who re-deprecated the term for their own reason made a later
+    decision; reversing the agent's deprecation must not undo theirs."""
+    org = await _org(session)
+    term = await _term(session, org)
+    operation = await _operation(
+        session,
+        org,
+        operation_type="DEPRECATE_TERM",
+        subject_ids=[term.id],
+        parameters={"rationale": "duplicate of another term"},
+    )
+    await apply_bulk_operation(session, operation, reviewer="steward-a", now=NOW)
+    term.deprecated_by = "steward-h"
+    term.deprecation_reason = "superseded by the risk definition"
+    await session.flush()
+
+    _, restored = await _reverse(session, operation)
+
+    assert restored == 0
+    assert term.lifecycle_status == "DEPRECATED"
+
+
+async def test_reversing_a_leaver_reassignment_restores_the_leaver_and_the_successor_rows(
+    session: AsyncSession,
+) -> None:
+    """Deliberately makes the leaver the owner again -- that is what each
+    subject held. A successor row the operation created is withdrawn; one that
+    already existed gets back the status and assigner it had."""
+    org = await _org(session)
+    first, second = await _tables(session, org, 2)
+    leaver_first = _assignment(org, first.id, "leaver")
+    leaver_second = _assignment(org, second.id, "leaver")
+    lapsed_successor = _assignment(org, second.id, "successor", status="LAPSED")
+    session.add_all([leaver_first, leaver_second, lapsed_successor])
+    await session.flush()
+    operation = await _operation(
+        session,
+        org,
+        operation_type="REASSIGN_LEAVER",
+        subject_ids=[leaver_first.id, leaver_second.id],
+        parameters=_leaver_parameters(),
+    )
+
+    event_type, restored = await _apply_and_reverse(session, operation)
+
+    successors = {
+        row.subject_id: row
+        for row in (
+            await session.scalars(
+                select(OwnershipAssignment).where(
+                    OwnershipAssignment.owner_principal == "successor"
+                )
+            )
+        ).all()
+    }
+    assert (event_type, restored) == ("ownership.leaver_reassignment_reversed.v1", 2)
+    assert (leaver_first.status, leaver_second.status) == ("ACTIVE", "ACTIVE")
+    assert successors[str(first.id)].status == "WITHDRAWN"
+    assert (lapsed_successor.status, lapsed_successor.assigned_by) == ("LAPSED", "steward-z")
+
+
+async def test_a_successor_that_has_moved_on_is_left_alone(session: AsyncSession) -> None:
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    leaver = _assignment(org, table.id, "leaver")
+    session.add(leaver)
+    await session.flush()
+    operation = await _operation(
+        session,
+        org,
+        operation_type="REASSIGN_LEAVER",
+        subject_ids=[leaver.id],
+        parameters=_leaver_parameters(),
+    )
+    await apply_bulk_operation(session, operation, reviewer="steward-a", now=NOW)
+    successor = await session.scalar(
+        select(OwnershipAssignment).where(OwnershipAssignment.owner_principal == "successor")
+    )
+    assert successor is not None
+    successor.status = "LAPSED"  # the successor's own assignment ran its course
+    await session.flush()
+
+    _, restored = await _reverse(session, operation)
+
+    assert restored == 0
+    assert (leaver.status, successor.status) == ("REASSIGNED", "LAPSED")

@@ -1930,6 +1930,11 @@ class OwnershipAssignment(Base, TimestampMixin):
     #                    no successor was named in the merge event. Retained as
     #                    evidence; never the current owner. Written only by
     #                    `ownership_principal_lifecycle.handle_principal_deleted`.
+    #   WITHDRAWN     -- R11-C8: an assignment a reviewed bulk operation created (or
+    #                    a leaver reassignment's successor row), retracted by an
+    #                    approved reversal of that operation. Retained as evidence
+    #                    of who was named; never the current owner. Written only by
+    #                    `stewardship_service.apply_bulk_operation`.
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
     # P2-07: re-affirmation cadence. Nullable because every pre-P2-07 row was
@@ -2136,9 +2141,15 @@ class BulkStewardshipOperation(Base, TimestampMixin):
     applied_subject_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     #: R11-C8: what each applied subject held *before* this operation wrote to
     #: it, keyed by the same subject id `applied_subject_ids` uses. Only the
-    #: overwriting operation types fill it -- TAG (whether the tag existed, and
-    #: its prior value and author) and CLASSIFY (the column's prior
-    #: classification) -- because the additive types undo from the ids alone.
+    #: five overwriting operation types fill it -- TAG (whether the tag existed,
+    #: its prior value and author), CLASSIFY (the prior classification),
+    #: ASSIGN_OWNERSHIP (that the assignment was created, or a reactivated one's
+    #: prior status, assigner and expiry), DEPRECATE_TERM (the prior lifecycle
+    #: and which versions were APPROVED) and REASSIGN_LEAVER (the successor
+    #: row's prior state) -- because the additive types undo from the ids
+    #: alone. The ownership and term images also name the reviewer who wrote
+    #: them, which is how a restore tells a row still as the operation left it
+    #: from one a person has changed since.
     #: Empty on rows applied before this column existed, and a reversal refuses
     #: those rather than guessing: an absent before-image means "not
     #: recorded", and restoring a guess is a second wrong change.

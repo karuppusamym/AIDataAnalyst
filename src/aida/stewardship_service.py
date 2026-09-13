@@ -110,6 +110,24 @@ def active_certified_table_ids(
     }
 
 
+def _instant(value: datetime | None) -> str | None:
+    """R11-C8: a timestamp as a before-image holds it.
+
+    SQLite returns naive datetimes for timezone-aware columns, so a naive value
+    is read as UTC. One spelling per instant is what lets a restore compare
+    "unchanged since" as strings on both backends.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def _from_instant(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value is not None else None
+
+
 async def apply_bulk_operation(
     session: AsyncSession,
     operation: BulkStewardshipOperation,
@@ -141,6 +159,17 @@ async def apply_bulk_operation(
             )
             if existing is not None:
                 if existing.status != "ACTIVE":
+                    # R11-C8: read before the reactivation below overwrites it.
+                    before_images[str(subject_id)] = {
+                        "assignment_id": str(existing.id),
+                        "existed": True,
+                        "status": existing.status,
+                        "assigned_by": existing.assigned_by,
+                        "expires_at": _instant(existing.expires_at),
+                        "expiry_warning_emitted_at": _instant(existing.expiry_warning_emitted_at),
+                        "reaffirmed_at": _instant(existing.reaffirmed_at),
+                        "written_by": reviewer,
+                    }
                     existing.status = "ACTIVE"
                     existing.assigned_by = reviewer
                     # A reactivation is treated as a fresh assertion of
@@ -150,8 +179,19 @@ async def apply_bulk_operation(
                     existing.expiry_warning_emitted_at = None
                     applied_subjects.append(str(subject_id))
                 continue
+            # R11-C8: the prior state of an assignment this creates is no
+            # assignment. The id is fixed here so the before-image can name the
+            # row before a flush would otherwise assign it.
+            created_id = uuid4()
+            before_images[str(subject_id)] = {
+                "assignment_id": str(created_id),
+                "existed": False,
+                "reaffirmed_at": None,
+                "written_by": reviewer,
+            }
             session.add(
                 OwnershipAssignment(
+                    id=created_id,
                     organization_id=operation.organization_id,
                     subject_type=operation.subject_type,
                     subject_id=str(subject_id),
@@ -267,6 +307,26 @@ async def apply_bulk_operation(
         for term in terms:
             if term.lifecycle_status == "DEPRECATED":
                 continue
+            # R11-C8: the term's lifecycle, and exactly which versions were
+            # APPROVED, read before both are overwritten below. The ids matter:
+            # a version already DEPRECATED before this ran was never this
+            # operation's to bring back.
+            approved_version_ids = (
+                await session.scalars(
+                    select(GlossaryTermVersion.id).where(
+                        GlossaryTermVersion.term_id == term.id,
+                        GlossaryTermVersion.status == "APPROVED",
+                    )
+                )
+            ).all()
+            before_images[str(term.id)] = {
+                "lifecycle_status": term.lifecycle_status,
+                "deprecated_by": term.deprecated_by,
+                "deprecated_at": _instant(term.deprecated_at),
+                "deprecation_reason": term.deprecation_reason,
+                "version_ids": [str(version_id) for version_id in approved_version_ids],
+                "written_by": reviewer,
+            }
             term.lifecycle_status = "DEPRECATED"
             term.deprecated_by = reviewer
             term.deprecated_at = now
@@ -445,10 +505,19 @@ async def apply_bulk_operation(
             assignment.status = "REASSIGNED"
             successor_row = successor_lookup.get((assignment.subject_type, assignment.subject_id))
             if successor_row is not None:
+                # R11-C8: an existing successor row is overwritten, so what it
+                # held is kept first.
+                successor_image: dict[str, Any] = {
+                    "successor_id": str(successor_row.id),
+                    "successor_existed": True,
+                    "successor_status": successor_row.status,
+                    "successor_assigned_by": successor_row.assigned_by,
+                }
                 successor_row.status = "ACTIVE"
                 successor_row.assigned_by = reviewer
             else:
                 successor_row = OwnershipAssignment(
+                    id=uuid4(),
                     organization_id=operation.organization_id,
                     subject_type=assignment.subject_type,
                     subject_id=assignment.subject_id,
@@ -459,7 +528,12 @@ async def apply_bulk_operation(
                 )
                 session.add(successor_row)
                 successor_lookup[(assignment.subject_type, assignment.subject_id)] = successor_row
+                successor_image = {
+                    "successor_id": str(successor_row.id),
+                    "successor_existed": False,
+                }
             applied_subjects.append(str(subject_id))
+            before_images[str(subject_id)] = {**successor_image, "written_by": reviewer}
         event_type = "ownership.leaver_reassigned.v1"
     elif operation.operation_type == "RESTORE_TAG":
         # R11-C8: the compensating action for TAG. `subject_ids` are the
@@ -524,6 +598,160 @@ async def apply_bulk_operation(
             column.classification = image["classification"]
             applied_subjects.append(str(subject_id))
         event_type = "catalog.column.classification_restored.v1"
+    elif operation.operation_type == "WITHDRAW_OWNERSHIP":
+        # R11-C8: the compensating action for ASSIGN_OWNERSHIP. An assignment
+        # the original created moves to WITHDRAWN -- kept as evidence of who
+        # was named, as every non-ACTIVE ownership status is, and never read as
+        # the owner -- and one it reactivated gets back the status, assigner,
+        # expiry and warning stamp it held.
+        #
+        # Only an assignment still as the original left it is restored: ACTIVE,
+        # assigned by the original's reviewer, and not reaffirmed since. A
+        # reaffirmation is an owner confirming the assignment is right -- a
+        # later, independent decision -- and a lapse or a leaver reassignment
+        # has already moved the row on. Any of those is skipped and not counted.
+        images = parameters["before_images"]
+        withdraw_ids = [UUID(image["assignment_id"]) for image in images.values()]
+        assignments_to_restore = {
+            row.id: row
+            for row in (
+                await session.scalars(
+                    select(OwnershipAssignment).where(
+                        OwnershipAssignment.organization_id == operation.organization_id,
+                        OwnershipAssignment.id.in_(withdraw_ids),
+                    )
+                )
+            ).all()
+        }
+        for subject_id in subject_ids:
+            image = images.get(str(subject_id))
+            assignment = (
+                assignments_to_restore.get(UUID(image["assignment_id"]))
+                if image is not None
+                else None
+            )
+            if (
+                assignment is None
+                or assignment.status != "ACTIVE"
+                or assignment.assigned_by != image["written_by"]
+                or _instant(assignment.reaffirmed_at) != image["reaffirmed_at"]
+            ):
+                continue
+            if image["existed"]:
+                assignment.status = image["status"]
+                assignment.assigned_by = image["assigned_by"]
+                assignment.expires_at = _from_instant(image["expires_at"])
+                assignment.expiry_warning_emitted_at = _from_instant(
+                    image["expiry_warning_emitted_at"]
+                )
+            else:
+                assignment.status = WITHDRAWN
+            applied_subjects.append(str(subject_id))
+        event_type = "ownership.assignment_withdrawn_bulk.v1"
+    elif operation.operation_type == "RESTORE_TERM":
+        # R11-C8: the compensating action for DEPRECATE_TERM. The term gets back
+        # its lifecycle and deprecation fields, and exactly the versions the
+        # original moved from APPROVED to DEPRECATED are APPROVED again.
+        #
+        # The version rows are flipped back rather than republished, unlike a
+        # reinstated description, and on purpose. That rule exists so an
+        # AgentRun replays against exactly the text it saw; a deprecation
+        # changed no text, it overwrote a status in place, so its inverse is
+        # the status put back. A deprecated term cannot gain a newer approved
+        # version meanwhile (`create_glossary_term_version` refuses one), so
+        # there is nothing for these to collide with.
+        #
+        # Only a term still deprecated by the original -- same reviewer, same
+        # rationale -- is restored; one reinstated or re-deprecated since is
+        # skipped. Term links the reaper removed after the deprecation's grace
+        # period are not brought back: that was a separate, later change.
+        images = parameters["before_images"]
+        terms_to_restore = (
+            await session.scalars(
+                select(GlossaryTerm).where(
+                    GlossaryTerm.organization_id == operation.organization_id,
+                    GlossaryTerm.id.in_(subject_ids),
+                )
+            )
+        ).all()
+        terms_by_id = {row.id: row for row in terms_to_restore}
+        for subject_id in subject_ids:
+            restore_term = terms_by_id.get(subject_id)
+            image = images.get(str(subject_id))
+            if (
+                restore_term is None
+                or image is None
+                or restore_term.lifecycle_status != "DEPRECATED"
+                or restore_term.deprecated_by != image["written_by"]
+                or restore_term.deprecation_reason != parameters["rationale"]
+            ):
+                continue
+            restore_term.lifecycle_status = image["lifecycle_status"]
+            restore_term.deprecated_by = image["deprecated_by"]
+            restore_term.deprecated_at = _from_instant(image["deprecated_at"])
+            restore_term.deprecation_reason = image["deprecation_reason"]
+            if image["version_ids"]:
+                await session.execute(
+                    update(GlossaryTermVersion)
+                    .where(
+                        GlossaryTermVersion.id.in_([UUID(v) for v in image["version_ids"]]),
+                        GlossaryTermVersion.status == "DEPRECATED",
+                    )
+                    .values(status="APPROVED", updated_at=now)
+                )
+            applied_subjects.append(str(subject_id))
+        event_type = "glossary.term_restored.v1"
+    elif operation.operation_type == "RESTORE_LEAVER_OWNERSHIP":
+        # R11-C8: the compensating action for REASSIGN_LEAVER. `subject_ids` are
+        # the leaver's assignment ids the original moved to REASSIGNED. Each
+        # goes back to ACTIVE; a successor row the original created moves to
+        # WITHDRAWN, and one it reactivated gets back its status and assigner.
+        #
+        # This deliberately makes the leaver the owner again, because that is
+        # what the subject held. Whether that is acceptable for someone who has
+        # left is for the person deciding this reversal -- it is T2 -- and not
+        # something to guess here. Restored only while both rows are as the
+        # original left them: the leaver's still REASSIGNED, the successor's
+        # still ACTIVE and assigned by the original's reviewer. A row moved on
+        # since is skipped and not counted.
+        images = parameters["before_images"]
+        involved_ids = [
+            *subject_ids,
+            *(UUID(image["successor_id"]) for image in images.values()),
+        ]
+        ownership_rows = {
+            row.id: row
+            for row in (
+                await session.scalars(
+                    select(OwnershipAssignment).where(
+                        OwnershipAssignment.organization_id == operation.organization_id,
+                        OwnershipAssignment.id.in_(involved_ids),
+                    )
+                )
+            ).all()
+        }
+        for subject_id in subject_ids:
+            image = images.get(str(subject_id))
+            leaver_row = ownership_rows.get(subject_id)
+            successor = (
+                ownership_rows.get(UUID(image["successor_id"])) if image is not None else None
+            )
+            if (
+                leaver_row is None
+                or successor is None
+                or leaver_row.status != "REASSIGNED"
+                or successor.status != "ACTIVE"
+                or successor.assigned_by != image["written_by"]
+            ):
+                continue
+            leaver_row.status = "ACTIVE"
+            if image["successor_existed"]:
+                successor.status = image["successor_status"]
+                successor.assigned_by = image["successor_assigned_by"]
+            else:
+                successor.status = WITHDRAWN
+            applied_subjects.append(str(subject_id))
+        event_type = "ownership.leaver_reassignment_reversed.v1"
     else:
         raise HTTPException(status_code=422, detail="unsupported stewardship operation")
     operation.status = "APPLIED"
@@ -539,34 +767,40 @@ async def apply_bulk_operation(
     return event_type, operation.applied_count
 
 
-#: AR-11: which applied bulk operations have a compensating action, and what
-#: it is. Only the two purely *additive* operation types are here, and that is
-#: the whole rule rather than an accident of effort: LINK_TERM and
-#: CERTIFY_ASSET add a row that did not exist, so undoing them needs nothing
-#: but the list of rows they added, which `applied_subject_ids` now is.
+#: AR-11 / R11-C8: which applied bulk operations have a compensating action,
+#: and what it is. Every forward operation type is here, in two kinds.
 #:
-#: The others overwrite state nobody recorded the previous value of. TAG's
-#: `apply_tag_item` updates `tag_value` on a row that may already have had
-#: one; CLASSIFY replaces a column's classification; ASSIGN_OWNERSHIP
-#: reactivates an assignment that had a status and an expiry before;
-#: DEPRECATE_TERM moves a term's lifecycle and its approved versions;
-#: REASSIGN_LEAVER rewrites two assignment rows. Reversing any of them
-#: correctly needs a before-image the platform does not capture, and
-#: reversing them *incorrectly* -- deleting the tag rather than restoring the
-#: value it replaced -- is a second wrong change dressed as a correction.
-#: `request_bulk_operation_reversal` refuses them by name for that reason.
+#: LINK_TERM and CERTIFY_ASSET are *additive*: they add a row that did not
+#: exist, so undoing them needs nothing but the list of rows they added, which
+#: `applied_subject_ids` is.
+#:
+#: The other five *overwrite* state. TAG's `apply_tag_item` updates
+#: `tag_value` on a row that may already have had one; CLASSIFY replaces a
+#: column's classification; ASSIGN_OWNERSHIP reactivates an assignment that
+#: had a status and an expiry before; DEPRECATE_TERM moves a term's lifecycle
+#: and its approved versions; REASSIGN_LEAVER rewrites two assignment rows.
+#: Undoing them needs a before-image of what they replaced. Reversing them
+#: without one -- deleting the tag rather than restoring the value it
+#: replaced -- is a second wrong change dressed as a correction, so since
+#: R11-C8 `apply_bulk_operation` records that image, and an operation applied
+#: before it did is refused rather than guessed at (`_NEEDS_BEFORE_IMAGE`).
+#:
+#: The compensating types have no entry: a reversal is not itself reversed.
+#: Undoing an undo is a fresh operation, authored and reviewed like any other.
 _REVERSAL_OF: dict[str, str] = {
     "LINK_TERM": "UNLINK_TERM",
     "CERTIFY_ASSET": "WITHDRAW_CERTIFICATION",
-    # R11-C8: overwriting types, reversible now that `apply_bulk_operation`
-    # records a before-image of what they replaced. ASSIGN_OWNERSHIP,
-    # DEPRECATE_TERM and REASSIGN_LEAVER still capture none, and stay refused.
     "TAG": "RESTORE_TAG",
     "CLASSIFY": "RESTORE_CLASSIFICATION",
+    "ASSIGN_OWNERSHIP": "WITHDRAW_OWNERSHIP",
+    "DEPRECATE_TERM": "RESTORE_TERM",
+    "REASSIGN_LEAVER": "RESTORE_LEAVER_OWNERSHIP",
 }
 
 #: R11-C8: the reversible types whose undo needs a before-image, not just ids.
-_NEEDS_BEFORE_IMAGE: frozenset[str] = frozenset({"TAG", "CLASSIFY"})
+_NEEDS_BEFORE_IMAGE: frozenset[str] = frozenset(
+    {"TAG", "CLASSIFY", "ASSIGN_OWNERSHIP", "DEPRECATE_TERM", "REASSIGN_LEAVER"}
+)
 
 
 async def request_bulk_operation_reversal(
@@ -619,12 +853,14 @@ async def request_bulk_operation_reversal(
         )
     reversal_type = _REVERSAL_OF.get(original.operation_type)
     if reversal_type is None:
+        reason = (
+            "it is itself a reversal, and undoing one is a fresh, reviewed operation"
+            if original.operation_type in _REVERSAL_OF.values()
+            else "no reversal is defined for it"
+        )
         raise HTTPException(
             status_code=422,
-            detail=(
-                f"{original.operation_type} has no compensating action: reversing it "
-                "would need a record of what it overwrote, which is not captured"
-            ),
+            detail=f"{original.operation_type} has no compensating action: {reason}",
         )
     if not original.applied_subject_ids:
         raise HTTPException(
