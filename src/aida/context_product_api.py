@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, delete, false, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -14,6 +14,7 @@ from aida.agent_contracts import (
     AgentContractValidationError,
     context_product_violation,
     load_contract_for_principal,
+    parse_capability_envelope,
 )
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
@@ -466,6 +467,72 @@ async def create_context_product(
     return _product_read(product, version)
 
 
+async def _envelope_listing_clause(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    organization_id: UUID,
+    project_id: UUID,
+) -> ColumnElement[bool] | None:
+    """R11-C6: a contracted agent lists only the context products it may reach.
+
+    Every single-product door checks the envelope -- the version read, its
+    scope, the version listing (`_enforce_capability_envelope`). The
+    project-level listing did not, so an agent whose envelope named product A
+    could learn that products B and C exist, and what they are called, just by
+    listing the project. That is the enumeration the per-product 404s exist to
+    prevent, answered one level up.
+
+    A *filter*, not a gate, because a listing has no single product to refuse:
+    the agent sees the products its envelope names and nothing else, and the
+    count is filtered with the rows so the total cannot leak how many were
+    hidden. Either identifier matches, as `context_product_violation` allows.
+
+    Fail closed without a signal: an agent identity whose contract cannot be
+    resolved, or whose envelope cannot be parsed, is allowed nothing and sees
+    an empty page -- the same answer an empty project gives -- while the
+    refusal is audited so an operator can see it. A human principal holds no
+    contract and gets `None`: this never becomes a second role check.
+    """
+    try:
+        contract = await load_contract_for_principal(
+            session,
+            organization_id=organization_id,
+            agent_principal_id=context.principal_id,
+            principal_type=context.principal_type,
+        )
+    except AgentContractValidationError as exc:
+        record_audit(
+            session,
+            context,
+            action="context_product.list.agent_contract_denied",
+            resource_type="project",
+            resource_id=str(project_id),
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details={"reason": exc.code},
+        )
+        await session.commit()
+        return false()
+    if contract is None:
+        return None
+    try:
+        envelope = parse_capability_envelope(dict(contract.capability_envelope or {}))
+    except AgentContractValidationError:
+        return false()
+    allowed = set(envelope.context_product_ids)
+    if not allowed:
+        return false()
+    product_ids: list[UUID] = []
+    for value in allowed:
+        try:
+            product_ids.append(UUID(value))
+        except ValueError:
+            continue
+    by_key = ContextProduct.product_key.in_(allowed)
+    return or_(by_key, ContextProduct.id.in_(product_ids)) if product_ids else by_key
+
+
 @router.get("/projects/{project_id}/context-products", response_model=Page)
 async def list_context_products(
     project_id: UUID,
@@ -475,10 +542,15 @@ async def list_context_products(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     project = await load_project_in_scope(session, project_id, context)
-    filters = (
+    filters: tuple[ColumnElement[bool], ...] = (
         ContextProduct.organization_id == project.organization_id,
         ContextProduct.project_id == project.id,
     )
+    envelope_clause = await _envelope_listing_clause(
+        session, context, organization_id=project.organization_id, project_id=project.id
+    )
+    if envelope_clause is not None:
+        filters = (*filters, envelope_clause)
     statement = select(ContextProduct, ContextProductVersion).join(
         ContextProductVersion,
         ContextProductVersion.product_id == ContextProduct.id,
