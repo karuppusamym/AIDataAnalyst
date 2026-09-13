@@ -2134,6 +2134,17 @@ class BulkStewardshipOperation(Base, TimestampMixin):
     #: `request_bulk_operation_reversal` refuses those explicitly rather than
     #: reading the empty list as "nothing to undo".
     applied_subject_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    #: R11-C8: what each applied subject held *before* this operation wrote to
+    #: it, keyed by the same subject id `applied_subject_ids` uses. Only the
+    #: overwriting operation types fill it -- TAG (whether the tag existed, and
+    #: its prior value and author) and CLASSIFY (the column's prior
+    #: classification) -- because the additive types undo from the ids alone.
+    #: Empty on rows applied before this column existed, and a reversal refuses
+    #: those rather than guessing: an absent before-image means "not
+    #: recorded", and restoring a guess is a second wrong change.
+    applied_before_images: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     #: AR-11: set when this operation exists to undo `reverses_operation_id`.
     #: A reversal is itself an ordinary bulk operation -- same table, same
     #: review, same maker-checker -- because it is the same decision shape,

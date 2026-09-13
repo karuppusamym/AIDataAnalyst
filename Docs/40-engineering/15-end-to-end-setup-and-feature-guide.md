@@ -492,7 +492,7 @@ anything from you.
 | R11-B2 | Score generated SQL by execution match against the live model route |
 | R11-C1 | **Done.** Run it yourself: `./.venv/Scripts/python.exe scripts/verify_ontology_lifecycle.py` — draft, a refused self-approval, independent approval, publication. It publishes a new version each run |
 | R11-C6 | A per-agent allowlist over the native MCP tools, and a filter on the project-level product listing |
-| R11-C8 | Before-image capture for the five remaining operation types, and a withdrawal path for enrichment annotations |
+| R11-C8 | **Partly done:** bulk TAG and CLASSIFY operations can now be reversed, restoring exactly what they overwrote. Still to do: the same for ownership, term deprecation and leaver reassignment, and a withdrawal path for enrichment annotations |
 | R11-B8 | Something that actually writes freshness observations — today nothing does, so every freshness contract correctly reads STALE |
 
 ### 8.2 Decisions only you can make

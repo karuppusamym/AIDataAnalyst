@@ -36,10 +36,12 @@ from aida.agent_contract_api import ResolveSampleRequest, resolve_sample
 from aida.db import Base
 from aida.models import (
     AssetCertification,
+    AssetTag,
     AssetTermLink,
     BulkStewardshipOperation,
     GlossaryTerm,
     GovernanceReview,
+    MetadataColumn,
     MetadataTable,
     Organization,
     ReviewAuditSample,
@@ -296,9 +298,7 @@ async def test_withdrawing_a_certification_leaves_the_asset_uncertified_not_refu
     ("operation_type", "status", "record_effect", "expected_status", "expected_detail"),
     [
         # No sound compensating action: reversing these needs a before-image
-        # of what they overwrote, which nothing captures.
-        ("TAG", "APPLIED", True, 422, "no compensating action"),
-        ("CLASSIFY", "APPLIED", True, 422, "no compensating action"),
+        # of what they overwrote, which nothing captures for these types.
         ("ASSIGN_OWNERSHIP", "APPLIED", True, 422, "no compensating action"),
         ("DEPRECATE_TERM", "APPLIED", True, 422, "no compensating action"),
         ("REASSIGN_LEAVER", "APPLIED", True, 422, "no compensating action"),
@@ -308,6 +308,12 @@ async def test_withdrawing_a_certification_leaves_the_asset_uncertified_not_refu
         # recorded", never "changed nothing" -- falling back to `subject_ids`
         # would let the reversal exceed the original's blast radius.
         ("LINK_TERM", "APPLIED", False, 409, "did not record which subjects"),
+        # R11-C8: TAG and CLASSIFY are reversible now, but only with a
+        # before-image. A row that recorded its subjects and not what it
+        # overwrote -- every row applied before the column existed -- is
+        # refused rather than restored from a guess.
+        ("TAG", "APPLIED", True, 409, "did not record what it overwrote"),
+        ("CLASSIFY", "APPLIED", True, 409, "did not record what it overwrote"),
     ],
 )
 async def test_what_cannot_be_reversed_is_refused_by_name(
@@ -603,3 +609,179 @@ async def test_the_agent_recomputes_the_reversal_tier_from_the_row(
     # evidence an auditor reads back.
     assert (ordinary_tier, reversal_tier) == ("T1", "T2")
     assert evidence["reverses_operation_id"] == str(reversal.reverses_operation_id)
+
+
+# --------------------------------------------------------------------------- #
+# R11-C8: the overwriting types, reversible through a before-image
+# --------------------------------------------------------------------------- #
+
+
+async def _apply_and_reverse(
+    session: AsyncSession, operation: BulkStewardshipOperation
+) -> tuple[str, int]:
+    await apply_bulk_operation(session, operation, reviewer="steward-a", now=NOW)
+    operation.status = "APPLIED"
+    await session.flush()
+    reversal, _review = await request_bulk_operation_reversal(
+        session, operation, reason="the agent was wrong", requested_by="steward-b"
+    )
+    return await apply_bulk_operation(session, reversal, reviewer="steward-c", now=NOW)
+
+
+async def _columns(
+    session: AsyncSession,
+    org: Organization,
+    table: MetadataTable,
+    classifications: list[str | None],
+) -> list[MetadataColumn]:
+    rows = [
+        MetadataColumn(
+            id=uuid4(),
+            organization_id=org.id,
+            table_id=table.id,
+            name=f"col_{index}",
+            ordinal_position=index,
+            physical_type="text",
+            nullable=True,
+            fingerprint="fp",
+            status="ACTIVE",
+            classification=classification,
+        )
+        for index, classification in enumerate(classifications)
+    ]
+    session.add_all(rows)
+    await session.flush()
+    return rows
+
+
+def _tag(org: Organization, table: MetadataTable, value: str) -> AssetTag:
+    return AssetTag(
+        organization_id=org.id,
+        table_id=table.id,
+        tag_key="pii",
+        tag_value=value,
+        applied_by="steward-a",
+    )
+
+
+async def test_reversing_a_tag_restores_the_value_it_overwrote(session: AsyncSession) -> None:
+    """The defect this closes. TAG was refused by name because nothing kept
+    the value it replaced; deleting the tag instead would have been a second
+    wrong change. The before-image is that value."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    session.add(_tag(org, table, "low"))
+    await session.flush()
+    operation = await _operation(
+        session,
+        org,
+        operation_type="TAG",
+        subject_ids=[table.id],
+        parameters={"tag_key": "pii", "tag_value": "high"},
+    )
+
+    event_type, restored = await _apply_and_reverse(session, operation)
+
+    tag = await session.scalar(select(AssetTag).where(AssetTag.table_id == table.id))
+    assert (event_type, restored) == ("catalog.asset_tag.restored.v1", 1)
+    assert tag is not None
+    assert (tag.tag_value, tag.applied_by) == ("low", "steward-a")
+
+
+async def test_reversing_a_tag_the_operation_created_removes_it(session: AsyncSession) -> None:
+    """The prior state of a tag the operation added is *no tag*, so the
+    restore deletes it rather than leaving an empty value behind."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    operation = await _operation(
+        session,
+        org,
+        operation_type="TAG",
+        subject_ids=[table.id],
+        parameters={"tag_key": "pii", "tag_value": "high"},
+    )
+
+    await _apply_and_reverse(session, operation)
+
+    assert await session.scalar(select(AssetTag).where(AssetTag.table_id == table.id)) is None
+
+
+async def test_a_later_human_edit_is_not_overwritten_by_the_reversal(
+    session: AsyncSession,
+) -> None:
+    """A tag a person changed after the operation now carries *their*
+    decision. Restoring what the operation overwrote would erase it, so the
+    subject is skipped and not counted."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    session.add(_tag(org, table, "low"))
+    await session.flush()
+    operation = await _operation(
+        session,
+        org,
+        operation_type="TAG",
+        subject_ids=[table.id],
+        parameters={"tag_key": "pii", "tag_value": "high"},
+    )
+    await apply_bulk_operation(session, operation, reviewer="steward-a", now=NOW)
+    operation.status = "APPLIED"
+    tag = await session.scalar(select(AssetTag).where(AssetTag.table_id == table.id))
+    assert tag is not None
+    tag.tag_value = "medium"  # a person's later, independent decision
+    await session.flush()
+    reversal, _ = await request_bulk_operation_reversal(
+        session, operation, reason="the agent was wrong", requested_by="steward-b"
+    )
+
+    _, restored = await apply_bulk_operation(session, reversal, reviewer="steward-c", now=NOW)
+
+    assert restored == 0
+    assert tag.tag_value == "medium"
+
+
+async def test_reversing_a_classification_restores_the_prior_one(
+    session: AsyncSession,
+) -> None:
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    # "No classification" is stored as UNCLASSIFIED on this model, not NULL --
+    # the first version of this test assumed NULL and was wrong about the
+    # domain, not about the restore.
+    was_internal, was_unclassified = await _columns(
+        session, org, table, ["INTERNAL", "UNCLASSIFIED"]
+    )
+    operation = await _operation(
+        session,
+        org,
+        operation_type="CLASSIFY",
+        subject_ids=[was_internal.id, was_unclassified.id],
+        parameters={"classification": "CONFIDENTIAL"},
+    )
+
+    event_type, restored = await _apply_and_reverse(session, operation)
+
+    assert (event_type, restored) == ("catalog.column.classification_restored.v1", 2)
+    assert was_internal.classification == "INTERNAL"
+    assert was_unclassified.classification == "UNCLASSIFIED"
+
+
+async def test_the_before_image_is_recorded_only_for_applied_subjects(
+    session: AsyncSession,
+) -> None:
+    """A subject the operation skipped -- already in the requested state --
+    was not overwritten, so it has no before-image to restore."""
+    org = await _org(session)
+    [table] = await _tables(session, org, 1)
+    already, changed = await _columns(session, org, table, ["CONFIDENTIAL", "INTERNAL"])
+    operation = await _operation(
+        session,
+        org,
+        operation_type="CLASSIFY",
+        subject_ids=[already.id, changed.id],
+        parameters={"classification": "CONFIDENTIAL"},
+    )
+
+    await apply_bulk_operation(session, operation, reviewer="steward-a", now=NOW)
+
+    assert set(operation.applied_before_images) <= set(operation.applied_subject_ids)
+    assert operation.applied_before_images[str(changed.id)] == {"classification": "INTERNAL"}

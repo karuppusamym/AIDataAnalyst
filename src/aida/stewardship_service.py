@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -117,6 +118,8 @@ async def apply_bulk_operation(
     now: datetime,
 ) -> tuple[str, int]:
     applied_subjects: list[str] = []
+    # R11-C8: what each applied subject held before this operation wrote to it.
+    before_images: dict[str, dict[str, Any]] = {}
     parameters = operation.parameters
     subject_ids = [UUID(value) for value in operation.subject_ids]
     if operation.operation_type == "ASSIGN_OWNERSHIP":
@@ -338,6 +341,14 @@ async def apply_bulk_operation(
         ).all()
         existing_tags = {row.table_id: row for row in existing_tag_rows}
         for subject_id in subject_ids:
+            # Read before the call: `apply_tag_item` mutates an existing row
+            # in place, so afterwards its prior value is gone.
+            prior_tag = existing_tags.get(subject_id)
+            prior_image: dict[str, Any] = {
+                "existed": prior_tag is not None,
+                "tag_value": prior_tag.tag_value if prior_tag is not None else None,
+                "applied_by": prior_tag.applied_by if prior_tag is not None else None,
+            }
             try:
                 row, is_new = apply_tag_item(
                     subject_id,
@@ -358,6 +369,7 @@ async def apply_bulk_operation(
             if is_new:
                 session.add(row)
             applied_subjects.append(str(subject_id))
+            before_images[str(subject_id)] = prior_image
         event_type = "catalog.asset_tag.applied.v1"
     elif operation.operation_type == "CLASSIFY":
         # AT-1: a playbook's CLASSIFY action, same reuse as TAG above but of
@@ -371,6 +383,8 @@ async def apply_bulk_operation(
         ).all()
         columns_by_id = {row[0].id: (row[0], row[1]) for row in column_rows}
         for subject_id in subject_ids:
+            found = columns_by_id.get(subject_id)
+            prior_classification = found[0].classification if found is not None else None
             try:
                 apply_classify_item(
                     subject_id,
@@ -380,6 +394,7 @@ async def apply_bulk_operation(
             except CatalogBulkItemError:
                 continue
             applied_subjects.append(str(subject_id))
+            before_images[str(subject_id)] = {"classification": prior_classification}
         event_type = "catalog.column.classified.v1"
     elif operation.operation_type == "REASSIGN_LEAVER":
         # GL-7: `subject_ids` here are `OwnershipAssignment.id` values (not
@@ -446,6 +461,69 @@ async def apply_bulk_operation(
                 successor_lookup[(assignment.subject_type, assignment.subject_id)] = successor_row
             applied_subjects.append(str(subject_id))
         event_type = "ownership.leaver_reassigned.v1"
+    elif operation.operation_type == "RESTORE_TAG":
+        # R11-C8: the compensating action for TAG. `subject_ids` are the
+        # original's applied tables; `before_images` is what each held.
+        #
+        # A subject is restored only if its tag still carries the value the
+        # original wrote. If a person has changed it since, the current value
+        # is theirs, and putting back what the operation overwrote would erase
+        # a later, independent decision -- a second wrong change, the thing
+        # this ledger exists to prevent. Such a subject is skipped and not
+        # counted, as every other branch skips a stale subject.
+        tag_key = parameters["tag_key"]
+        written_value = parameters.get("tag_value")
+        images = parameters["before_images"]
+        tag_rows = (
+            await session.scalars(
+                select(AssetTag).where(
+                    AssetTag.organization_id == operation.organization_id,
+                    AssetTag.table_id.in_(subject_ids),
+                    AssetTag.tag_key == tag_key,
+                )
+            )
+        ).all()
+        tags_by_table = {row.table_id: row for row in tag_rows}
+        for subject_id in subject_ids:
+            tag = tags_by_table.get(subject_id)
+            image = images.get(str(subject_id))
+            if tag is None or image is None or tag.tag_value != written_value:
+                continue
+            if image["existed"]:
+                tag.tag_value = image["tag_value"]
+                tag.applied_by = image["applied_by"]
+            else:
+                # The operation created this tag, so the prior state is no tag.
+                await session.delete(tag)
+            applied_subjects.append(str(subject_id))
+        event_type = "catalog.asset_tag.restored.v1"
+    elif operation.operation_type == "RESTORE_CLASSIFICATION":
+        # R11-C8: the compensating action for CLASSIFY, under the same rule --
+        # only a column still holding what the original wrote is restored, to
+        # exactly the classification it held before, UNCLASSIFIED included.
+        written_classification = parameters["classification"]
+        images = parameters["before_images"]
+        restore_columns = (
+            await session.scalars(
+                select(MetadataColumn).where(
+                    MetadataColumn.organization_id == operation.organization_id,
+                    MetadataColumn.id.in_(subject_ids),
+                )
+            )
+        ).all()
+        columns_by_subject = {column.id: column for column in restore_columns}
+        for subject_id in subject_ids:
+            column = columns_by_subject.get(subject_id)
+            image = images.get(str(subject_id))
+            if (
+                column is None
+                or image is None
+                or column.classification != written_classification
+            ):
+                continue
+            column.classification = image["classification"]
+            applied_subjects.append(str(subject_id))
+        event_type = "catalog.column.classification_restored.v1"
     else:
         raise HTTPException(status_code=422, detail="unsupported stewardship operation")
     operation.status = "APPLIED"
@@ -456,6 +534,7 @@ async def apply_bulk_operation(
     # so this is a subset of `subject_ids` -- and it is the only record of
     # which subset, which is what a compensating action has to act on.
     operation.applied_subject_ids = applied_subjects
+    operation.applied_before_images = before_images
     operation.applied_count = len(applied_subjects)
     return event_type, operation.applied_count
 
@@ -479,7 +558,15 @@ async def apply_bulk_operation(
 _REVERSAL_OF: dict[str, str] = {
     "LINK_TERM": "UNLINK_TERM",
     "CERTIFY_ASSET": "WITHDRAW_CERTIFICATION",
+    # R11-C8: overwriting types, reversible now that `apply_bulk_operation`
+    # records a before-image of what they replaced. ASSIGN_OWNERSHIP,
+    # DEPRECATE_TERM and REASSIGN_LEAVER still capture none, and stay refused.
+    "TAG": "RESTORE_TAG",
+    "CLASSIFY": "RESTORE_CLASSIFICATION",
 }
+
+#: R11-C8: the reversible types whose undo needs a before-image, not just ids.
+_NEEDS_BEFORE_IMAGE: frozenset[str] = frozenset({"TAG", "CLASSIFY"})
 
 
 async def request_bulk_operation_reversal(
@@ -547,6 +634,20 @@ async def request_bulk_operation_reversal(
                 "reversal cannot be bounded to them"
             ),
         )
+    if original.operation_type in _NEEDS_BEFORE_IMAGE:
+        # R11-C8: an overwriting operation is undone by putting back what it
+        # replaced. A subject with no before-image -- every row applied before
+        # the column existed -- has no record of that, and restoring a guess
+        # would be a second wrong change, so the reversal is refused whole.
+        images = original.applied_before_images or {}
+        if any(subject not in images for subject in original.applied_subject_ids):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "this operation did not record what it overwrote, so a "
+                    "reversal cannot restore it"
+                ),
+            )
     existing = await session.scalar(
         select(BulkStewardshipOperation).where(
             BulkStewardshipOperation.reverses_operation_id == original.id,
@@ -575,7 +676,11 @@ async def request_bulk_operation_reversal(
         # Exactly what the original changed -- never what it was asked to
         # change. This is the line the whole ledger exists for.
         subject_ids=list(original.applied_subject_ids),
-        parameters=dict(original.parameters),
+        parameters=(
+            {**original.parameters, "before_images": dict(original.applied_before_images)}
+            if original.operation_type in _NEEDS_BEFORE_IMAGE
+            else dict(original.parameters)
+        ),
         status="REVIEW_REQUIRED",
         governance_review_id=review.id,
         requested_by=requested_by,
