@@ -9,7 +9,13 @@ import type {
   UnifiedLineageImpactRead,
   UnifiedLineageNodeRead,
 } from "../lib/types";
-import { ApiError, fetchLineageImpact, fetchUnifiedLineageGraph, listOrgDatasources } from "../lib/api";
+import {
+  ApiError,
+  fetchLineageImpact,
+  fetchUnifiedLineageGraph,
+  findOrgDatasourceById,
+  listOrgDatasources,
+} from "../lib/api";
 import {
   domainsWithDatasources,
   fetchDomainLineageGraph,
@@ -189,18 +195,22 @@ function EdgeRow({ edge }: { edge: UnifiedLineageEdgeRead }) {
   );
 }
 
-function ImpactRow({ direction, item }: { direction: "Upstream" | "Downstream"; item: UnifiedLineageImpactNodeRead }) {
+/* Three columns, not five. The impact panel is 240-320px wide, and Direction
+   and Evidence as columns of their own pushed Evidence and Quality past its
+   right edge -- reachable only by scrolling sideways. Direction is now the
+   group a row sits under, and evidence a line under the asset. */
+function ImpactRow({ item }: { item: UnifiedLineageImpactNodeRead }) {
   const qualityState = item.quality_state ?? "UNKNOWN";
+  const evidence = item.contributing_edge_sources.map((s) => s.toLowerCase().replace(/_/g, " ")).join(", ");
   return (
     <tr>
-      <td>{direction}</td>
       <td>
         <div className="ult__impactasset">{item.label}</div>
         <div className="ult__impactqn">{item.qualified_name}</div>
+        {evidence ? <div className="ult__impactevidence">via {evidence}</div> : null}
       </td>
-      <td className="tnum">{item.depth}</td>
-      <td>{item.contributing_edge_sources.map((s) => s.toLowerCase().replace(/_/g, " ")).join(", ")}</td>
-      <td>
+      <td className="tnum ult__impactdepth">{item.depth}</td>
+      <td className="ult__impactquality">
         <Pill tone={qualityTone(qualityState)}>{qualityState.toLowerCase().replace(/_/g, " ")}</Pill>
       </td>
     </tr>
@@ -231,7 +241,29 @@ export function UnifiedLineageScreen() {
   const selectedNodeId = params.get("node");
   const tab = params.get("tab") === "nodes" || params.get("tab") === "edges" ? params.get("tab")! : "topology";
 
-  const { datasources, error: datasourcesError } = useDatasourcePicker(ORG);
+  const {
+    datasources,
+    error: datasourcesError,
+    loading: datasourcesLoading,
+  } = useDatasourcePicker(ORG);
+  // The picker is scoped to what the active workspace reaches, deliberately.
+  // A link can still name a source outside that list, and its graph loads when
+  // the caller may read it -- so the picker has to say which source that is,
+  // not show "Select a datasource…" above a graph it did not select.
+  const linkedOutsideScope =
+    scopeKind === "source" && !!ds && !datasourcesLoading && !datasources.some((d) => d.id === ds);
+  const [linkedSourceName, setLinkedSourceName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!linkedOutsideScope || !ds) {
+      setLinkedSourceName(null);
+      return;
+    }
+    const ac = new AbortController();
+    void findOrgDatasourceById(ORG, ds, ac.signal).then((source) => {
+      if (!ac.signal.aborted) setLinkedSourceName(source?.name ?? null);
+    });
+    return () => ac.abort();
+  }, [ORG, ds, linkedOutsideScope]);
 
   const [nodeLimit, setNodeLimit] = useState("300");
   const [edgeLimit, setEdgeLimit] = useState("1500");
@@ -474,6 +506,9 @@ export function UnifiedLineageScreen() {
           <Field label="Data source">
             <select value={ds ?? ""} onChange={(e) => setParams({ ds: e.target.value || null, node: null })}>
               <option value="">Select a datasource…</option>
+              {linkedOutsideScope && ds ? (
+                <option value={ds}>{`${linkedSourceName ?? ds} (outside this workspace)`}</option>
+              ) : null}
               {datasources.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.name}
@@ -525,6 +560,13 @@ export function UnifiedLineageScreen() {
           ? "Every data source in one domain, merged — the only scope in which a relationship spanning two systems renders as an edge. Selecting a node still resolves impact against the source that owns it."
           : "One data source. Switch scope to Domain to see relationships that cross between sources."}
       </p>
+
+      {linkedOutsideScope ? (
+        <p className="ult__note" role="status">
+          This link opens <strong>{linkedSourceName ?? "a data source"}</strong>, which the active workspace does not
+          list. Pick one of the workspace's sources above to stay within it.
+        </p>
+      ) : null}
 
       {/* Reported by the server, never inferred here. A domain with candidates
           reaching in but no ACTIVE grant is named rather than dropped, so an
@@ -644,7 +686,7 @@ export function UnifiedLineageScreen() {
                 <Field label="Minimum edge confidence"><select value={minimumConfidence} onChange={e => setMinimumConfidence(Number(e.target.value))}><option value={0}>All confidence levels</option><option value={0.75}>75% and above</option><option value={0.9}>90% and above</option><option value={1}>100%</option></select></Field>
                 <Button onClick={() => { setAssetSearch(""); setNodeKind("ALL"); setMinimumConfidence(0); }}>Clear asset filters</Button>
               </div>
-              <p>Filters apply to the loaded graph. Impact queries use the authorized source graph, independently of these display filters.</p>
+              <p className="ult__note">Filters apply to the loaded graph. Impact queries use the authorized source graph, independently of these display filters.</p>
               <form onSubmit={e => { e.preventDefault(); setQuestionPlan(null); setQuestionError(null); try { setQuestionPlan(resolveGraphQuestion(question, graph.nodes)); } catch (error) { setQuestionError((error as Error).message); } }}>
                 <Field label="Ask the graph"><input value={question} onChange={e => { setQuestion(e.target.value); setQuestionPlan(null); }} placeholder="downstream of sales.orders within 3 hops" /></Field>
                 <Button type="submit">Preview graph query</Button>
@@ -653,7 +695,9 @@ export function UnifiedLineageScreen() {
                   <p>{questionPlan.direction} of {questionPlan.node.qualified_name || questionPlan.node.label}, up to {questionPlan.depth} hops; 200-node limit. Domain selections inspect impact within the asset's own source.</p>
                   <Button onClick={() => { setParams({ node: questionPlan.node.id, depth: String(questionPlan.depth), direction: questionPlan.direction }); setDetailsVisible(true); }}>Run impact query</Button>
                 </div> : null}
-                <p>Supported phrases: upstream of / downstream of an exact asset name. This is a guided read-only lookup.</p>
+                <p className="ult__note">
+                  {'Ask "upstream of", "downstream of" or "lineage of" an exact asset name, optionally "within 1–5 hops" -- or "what depends on …" and "what feeds …". A guided, read-only lookup.'}
+                </p>
               </form>
 
               {tab === "topology" ? (
@@ -789,18 +833,27 @@ export function UnifiedLineageScreen() {
                   <table className="ult__impacttable">
                     <thead>
                       <tr>
-                        <th>Direction</th>
-                        <th>Asset</th>
-                        <th>Depth</th>
-                        <th>Evidence</th>
-                        <th>Quality</th>
+                        <th scope="col">Asset</th>
+                        <th scope="col" className="ult__impactdepth">Depth</th>
+                        <th scope="col" className="ult__impactquality">Quality</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      {impactRows.map(({ direction, item }) => (
-                        <ImpactRow key={`${direction}-${item.node_id}`} direction={direction} item={item} />
-                      ))}
-                    </tbody>
+                    {(["Upstream", "Downstream"] as const).map((direction) => {
+                      const rows = impactRows.filter((row) => row.direction === direction);
+                      return rows.length > 0 ? (
+                        <tbody key={direction}>
+                          <tr>
+                            <th scope="colgroup" colSpan={3} className="ult__impactgroup">
+                              <span>{direction}</span>
+                              <span className="ult__impactgroupcount">{rows.length}</span>
+                            </th>
+                          </tr>
+                          {rows.map(({ item }) => (
+                            <ImpactRow key={`${direction}-${item.node_id}`} item={item} />
+                          ))}
+                        </tbody>
+                      ) : null;
+                    })}
                   </table>
                 </div>
               )}

@@ -12,12 +12,17 @@
 .ult__controls .field:nth-child(1){width:240px}
 .ult__controls input[type="number"]{width:90px}
 .ult__note{margin:0;font-size:11.5px;color:var(--ink-3);max-width:80ch}
+.ult__note strong{color:var(--ink-2)}
 .ult__dserr{color:var(--bad);font-size:12px;margin:0}
 
-.ult__layout{display:grid;grid-template-columns:1fr 360px;gap:14px;flex:1;min-height:0}
+/* Sized to its content, not to what is left of the viewport. Stretching it to
+   fill the screen squeezed the graph panel into whatever height remained under
+   the filters -- 58px on a 900px window -- and hid the diagram behind a second,
+   inner scrollbar. The screen scrolls instead, as every other panel here does. */
+.ult__layout{display:grid;grid-template-columns:1fr 360px;gap:14px;flex:none}
 @media (max-width:980px){.ult__layout{grid-template-columns:1fr}}
 
-.ult__main{display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px;gap:10px}
+.ult__main{display:flex;flex-direction:column;min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px;gap:10px}
 .ult__panelhead{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex:none;flex-wrap:wrap}
 .ult__eyebrow{margin:0;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:700}
 .ult__h2{margin:2px 0 0;font-size:15px;letter-spacing:-.01em}
@@ -39,7 +44,9 @@
 .ult__tab{all:unset;padding:7px 11px;font-size:12px;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent}
 .ult__tab--active{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
 
-.ult__topowrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;border:1px solid var(--line-soft);border-radius:var(--radius-sm);background:var(--sunk)}
+/* The canvas below owns the only scrollbar the diagram needs (for a zoomed
+   graph); the wrapper around it must not add a second one. */
+.ult__topowrap{flex:none;display:flex;flex-direction:column;border:1px solid var(--line-soft);border-radius:var(--radius-sm);background:var(--sunk)}
 .ult__topo{display:block}
 .ult__topocolhead{font-family:var(--mono);font-size:9px;fill:var(--ink-3);text-transform:uppercase;letter-spacing:.04em}
 .ult__topoedge{stroke-width:1.4;opacity:.65}
@@ -56,7 +63,10 @@
 .ult__toponode--sel text{fill:var(--accent);font-weight:600}
 .ult__topocap{margin:0;padding:6px 10px;font-size:11px;color:var(--ink-3);border-top:1px solid var(--line-soft);flex:none}
 
-.ult__listwrap{flex:1;min-height:220px;display:flex;flex-direction:column}
+/* A virtualized list measures its own box, so it needs a definite height now
+   that the layout no longer hands it the leftover viewport. Same bound as the
+   diagram, so switching tabs does not make the panel jump. */
+.ult__listwrap{height:clamp(350px,55vh,850px);display:flex;flex-direction:column}
 .ult__listwrap .vlist{flex:1}
 
 .ult__noderow{all:unset;box-sizing:border-box;width:100%;display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr) auto;align-items:center;gap:10px;padding:7px 9px;border-radius:var(--radius-sm);cursor:pointer;font-size:12.5px}
@@ -72,20 +82,30 @@
 .ult__edgemeta{font-size:10.5px;color:var(--ink-3);flex:none}
 .ult__edgecols{grid-column:2/4;font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:-2px}
 
-.ult__impact{display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px;gap:10px;overflow-y:auto}
+.ult__impact{display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px;gap:10px;overflow-y:auto;align-self:start}
+/* Kept as a last resort for an extreme name, but the table is built to fit its
+   240-320px column: three columns, rows grouped by direction, evidence under the
+   asset, and qualified names allowed to wrap. Five columns made Evidence and
+   Quality reachable only by scrolling sideways. */
 .ult__impactscroll{overflow-x:auto;flex:1}
 .ult__impacttable{width:100%;border-collapse:collapse;font-size:12px}
 .ult__impacttable th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3);padding:6px 8px;border-bottom:1px solid var(--line)}
 .ult__impacttable td{padding:7px 8px;border-bottom:1px solid var(--line-soft);vertical-align:top}
-.ult__impactasset{color:var(--ink);font-weight:600}
-.ult__impactqn{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.ult__impacttable th.ult__impactgroup{padding-top:12px;font-size:11px;letter-spacing:.02em;color:var(--ink-2);text-transform:none;background:var(--surface)}
+.ult__impactgroupcount{margin-left:6px;font-weight:400;color:var(--ink-3)}
+.ult__impactasset{color:var(--ink);font-weight:600;overflow-wrap:anywhere}
+.ult__impactqn{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);overflow-wrap:anywhere}
+.ult__impactevidence{margin-top:3px;font-size:10.5px;color:var(--ink-3)}
+.ult__impactdepth{width:1%;white-space:nowrap}
+.ult__impactquality{width:1%;white-space:nowrap}
 .tnum{font-variant-numeric:tabular-nums}
 
 .ult--maximized{position:fixed;inset:0;z-index:1000;background:var(--surface);box-sizing:border-box}
 .ult__layout--wide{grid-template-columns:minmax(0,1fr)}
 .ult__impact[hidden]{display:none}
 .ult__viewtools{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px;flex:none}
-.ult__canvas{height:clamp(350px,55vh,850px);min-height:350px;overflow:auto;flex:1}
+.ult__viewtools label{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
+.ult__canvas{height:clamp(350px,55vh,850px);min-height:350px;overflow:auto}
 .ult__canvas .ult__topo{min-width:0;min-height:0}
 .ult--maximized .ult__canvas{height:70vh}
 
