@@ -98,6 +98,7 @@ from aida.models import (
     BulkStewardshipOperation,
     ColumnDescriptionDraft,
     DataQualityIncident,
+    DescriptionWithdrawal,
     GovernanceReview,
     MetadataEnrichmentProposal,
     MetadataTable,
@@ -740,7 +741,7 @@ def _correction_pending() -> Any:
     stands until someone decides the correction. Correlated on the enclosing
     `ReviewAuditSample`, so it can sit inside either counter's WHERE clause.
     """
-    return (
+    reversal = (
         select(BulkStewardshipOperation.id)
         .where(
             BulkStewardshipOperation.review_audit_sample_id == ReviewAuditSample.id,
@@ -749,6 +750,17 @@ def _correction_pending() -> Any:
         )
         .exists()
     )
+    # The correction for a disputed enrichment proposal is a withdrawal of the
+    # annotation version the agent approved.
+    withdrawal = (
+        select(DescriptionWithdrawal.id)
+        .where(
+            DescriptionWithdrawal.review_audit_sample_id == ReviewAuditSample.id,
+            DescriptionWithdrawal.status == "PENDING_REVIEW",
+        )
+        .exists()
+    )
+    return or_(reversal, withdrawal)
 
 
 async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID) -> int:
@@ -811,9 +823,16 @@ async def oldest_unresolved_sample_age_hours(
             BulkStewardshipOperation.status == "REVIEW_REQUIRED",
         )
     )
+    oldest_withdrawal = await session.scalar(
+        select(func.min(DescriptionWithdrawal.created_at)).where(
+            DescriptionWithdrawal.organization_id == organization_id,
+            DescriptionWithdrawal.review_audit_sample_id.is_not(None),
+            DescriptionWithdrawal.status == "PENDING_REVIEW",
+        )
+    )
     waiting = [
         value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        for value in (oldest_unread, oldest_correction)
+        for value in (oldest_unread, oldest_correction, oldest_withdrawal)
         if value is not None
     ]
     if not waiting:

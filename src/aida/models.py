@@ -1716,8 +1716,10 @@ class DescriptionWithdrawal(Base, TimestampMixin):
     __tablename__ = "description_withdrawal"
     __table_args__ = (
         UniqueConstraint("governance_review_id"),
+        # R11-C8: ANNOTATION withdraws a business annotation version.
         CheckConstraint(
-            "subject_type IN ('TABLE', 'COLUMN')", name="withdrawal_subject_type_is_supported"
+            "subject_type IN ('TABLE', 'COLUMN', 'ANNOTATION')",
+            name="withdrawal_subject_type_is_supported",
         ),
         CheckConstraint(
             "request_type IN ('WITHDRAW', 'REINSTATE')",
@@ -1749,6 +1751,14 @@ class DescriptionWithdrawal(Base, TimestampMixin):
     #: version themselves.
     withdrawn_text: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    #: R11-C8: the sampled agent decision a DISAGREED verdict raised this from,
+    #: when it was -- the sample-to-correction edge
+    #: `BulkStewardshipOperation.review_audit_sample_id` carries for reversals.
+    #: A disputed sample counts as unresolved while the correction it names is
+    #: still pending, which needs the correction to say which sample it answers.
+    review_audit_sample_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("review_audit_sample.id", ondelete="SET NULL"), index=True
+    )
     status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)
     governance_review_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("governance_review.id", ondelete="SET NULL")

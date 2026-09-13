@@ -59,8 +59,11 @@ from aida.models import (
     ColumnDocumentationVersion,
     DescriptionWithdrawal,
     GovernanceReview,
+    MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataColumn,
     MetadataTable,
+    ReviewAuditSample,
 )
 
 #: The status a withdrawn version carries. Deliberately not `SUPERSEDED`: that
@@ -79,6 +82,22 @@ async def _current_table_version(
     session: AsyncSession, table_id: UUID
 ) -> AssetDocumentationVersion | None:
     return (await _latest_approved_documentation(session, [table_id])).get(table_id)
+
+
+async def _current_annotation_version(
+    session: AsyncSession, annotation_id: UUID
+) -> MetadataBusinessAnnotationVersion | None:
+    """The approved version of one business annotation, if it has one (R11-C8)."""
+    version: MetadataBusinessAnnotationVersion | None = await session.scalar(
+        select(MetadataBusinessAnnotationVersion)
+        .where(
+            MetadataBusinessAnnotationVersion.annotation_id == annotation_id,
+            MetadataBusinessAnnotationVersion.status == "APPROVED",
+        )
+        .order_by(MetadataBusinessAnnotationVersion.version.desc())
+        .limit(1)
+    )
+    return version
 
 
 async def _latest_withdrawn_version(
@@ -140,6 +159,7 @@ async def request_description_withdrawal(
     reason: str,
     requested_by: str,
     request_type: str = "WITHDRAW",
+    sample: ReviewAuditSample | None = None,
 ) -> tuple[DescriptionWithdrawal, GovernanceReview]:
     """Raise a withdrawal, or a reinstatement, for one asset's description.
 
@@ -147,12 +167,26 @@ async def request_description_withdrawal(
     retire, or no retired one to bring back -- rather than filing a review that
     would resolve to nothing. A reviewer should never be handed a decision whose
     subject does not exist.
+
+    R11-C8: `subject_type="ANNOTATION"` withdraws the approved version of a
+    business annotation -- the correction for an enrichment proposal an agent
+    should not have approved. An annotation is withdrawn but not reinstated
+    here: the better annotation is a new proposal. `sample` names the sampled
+    agent decision a DISAGREED verdict raised this from, the edge bulk
+    stewardship reversals already carry.
     """
-    if subject_type not in ("TABLE", "COLUMN"):
-        raise HTTPException(status_code=422, detail="subject_type must be TABLE or COLUMN")
+    if subject_type not in ("TABLE", "COLUMN", "ANNOTATION"):
+        raise HTTPException(
+            status_code=422, detail="subject_type must be TABLE, COLUMN or ANNOTATION"
+        )
     if request_type not in ("WITHDRAW", "REINSTATE"):
         raise HTTPException(
             status_code=422, detail="request_type must be WITHDRAW or REINSTATE"
+        )
+    if subject_type == "ANNOTATION" and request_type == "REINSTATE":
+        raise HTTPException(
+            status_code=422,
+            detail="a withdrawn business annotation is not reinstated; propose a new one",
         )
 
     if subject_type == "COLUMN":
@@ -162,8 +196,26 @@ async def request_description_withdrawal(
         table = await session.get(MetadataTable, column.table_id)
         label = f"{table.name}.{column.name}" if table else column.name
         column_version = await _current_column_version(session, column.id)
-        version: ColumnDocumentationVersion | AssetDocumentationVersion | None = column_version
+        version: (
+            ColumnDocumentationVersion
+            | AssetDocumentationVersion
+            | MetadataBusinessAnnotationVersion
+            | None
+        ) = column_version
         text = column_version.description if column_version else None
+    elif subject_type == "ANNOTATION":
+        annotation = await session.get(MetadataBusinessAnnotation, subject_id)
+        if annotation is None or annotation.organization_id != organization_id:
+            raise HTTPException(status_code=404, detail="business annotation not found")
+        annotated_table = await session.get(MetadataTable, annotation.table_id)
+        label = (
+            f"{annotated_table.name} (business annotation)"
+            if annotated_table
+            else "business annotation"
+        )
+        annotation_version = await _current_annotation_version(session, annotation.id)
+        version = annotation_version
+        text = annotation_version.business_description if annotation_version else None
     else:
         table = await session.get(MetadataTable, subject_id)
         if table is None or table.organization_id != organization_id:
@@ -226,6 +278,7 @@ async def request_description_withdrawal(
         reason=reason,
         status="PENDING_REVIEW",
         requested_by=requested_by,
+        review_audit_sample_id=sample.id if sample is not None else None,
     )
     session.add(withdrawal)
     await session.flush()
@@ -234,7 +287,11 @@ async def request_description_withdrawal(
         object_type="DESCRIPTION_WITHDRAWAL",
         object_id=str(withdrawal.id),
         requested_action=(
-            "WITHDRAW_DESCRIPTION" if request_type == "WITHDRAW" else "REINSTATE_DESCRIPTION"
+            "WITHDRAW_ANNOTATION"
+            if subject_type == "ANNOTATION"
+            else "WITHDRAW_DESCRIPTION"
+            if request_type == "WITHDRAW"
+            else "REINSTATE_DESCRIPTION"
         ),
         requested_by=requested_by,
     )
@@ -272,11 +329,18 @@ async def apply_description_withdrawal(
     # One union-typed local rather than two branches: the retirement below is
     # identical for both stores (flip `status`, stamp `updated_at`), and only
     # the lookup differs.
-    current: ColumnDocumentationVersion | AssetDocumentationVersion | None = (
-        await _current_column_version(session, subject_id)
-        if withdrawal.subject_type == "COLUMN"
-        else await _current_table_version(session, subject_id)
+    current: (
+        ColumnDocumentationVersion
+        | AssetDocumentationVersion
+        | MetadataBusinessAnnotationVersion
+        | None
     )
+    if withdrawal.subject_type == "COLUMN":
+        current = await _current_column_version(session, subject_id)
+    elif withdrawal.subject_type == "ANNOTATION":
+        current = await _current_annotation_version(session, subject_id)
+    else:
+        current = await _current_table_version(session, subject_id)
 
     withdrawal.status = "APPROVED"
     withdrawal.reviewed_by = reviewer

@@ -487,7 +487,7 @@ async def test_an_object_type_with_no_compensating_action_says_so(
     org = await _org(session)
     review = GovernanceReview(
         organization_id=org.id,
-        object_type="METADATA_ENRICHMENT_PROPOSAL",
+        object_type="MODEL_IMPORT_BATCH",
         object_id=str(uuid4()),
         requested_action="APPLY",
         requested_by="agent:reviewer",
@@ -498,7 +498,7 @@ async def test_an_object_type_with_no_compensating_action_says_so(
         organization_id=org.id,
         governance_review_id=review.id,
         agent_principal_id="agent:reviewer",
-        object_type="METADATA_ENRICHMENT_PROPOSAL",
+        object_type="MODEL_IMPORT_BATCH",
         risk_tier="T0",
         decision="APPROVED",
         sampled_at=datetime.now(UTC) - timedelta(hours=2),
@@ -513,7 +513,7 @@ async def test_an_object_type_with_no_compensating_action_says_so(
             sample.id,
             ResolveSampleRequest(
                 human_outcome="DISAGREED",
-                rationale="the annotation invented a system of record",
+                rationale="the batch published descriptions for the wrong tables",
                 reverse_applied_changes=True,
             ),
             context=_context(org, "reviewer-h"),
@@ -521,7 +521,7 @@ async def test_an_object_type_with_no_compensating_action_says_so(
         )
 
     assert refused.value.status_code == 422
-    assert "METADATA_ENRICHMENT_PROPOSAL" in str(refused.value.detail)
+    assert "MODEL_IMPORT_BATCH" in str(refused.value.detail)
 
 
 async def test_a_reversal_cannot_accompany_an_agreement(session: AsyncSession) -> None:

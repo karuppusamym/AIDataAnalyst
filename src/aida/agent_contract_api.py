@@ -37,6 +37,7 @@ from aida.agent_contracts import (
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.description_withdrawal import request_description_withdrawal
 from aida.events import record_audit, record_outbox
 from aida.governance_notifications import notify_safely
 from aida.models import (
@@ -50,6 +51,8 @@ from aida.models import (
     AuditEvent,
     BulkStewardshipOperation,
     GovernanceReview,
+    MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     Organization,
     ReviewAuditSample,
 )
@@ -1314,14 +1317,18 @@ async def _raise_sample_reversal(
     it is walked here rather than trusted from the request body -- the
     reviewer says "reverse this sample", never "reverse operation X".
 
-    Only bulk stewardship is reachable today, and the refusal for everything
-    else is deliberately explicit. The other object types an agent can
-    approve either already have a compensating path of their own
-    (`description_withdrawal`, for the two description draft types) or have
-    none at all (`METADATA_ENRICHMENT_PROPOSAL`), and answering "no such
-    reversal" is honest where quietly doing nothing would let a reviewer
-    believe a correction had been filed.
+    Bulk stewardship is reachable, and since R11-C8 so is an enrichment
+    proposal, corrected by withdrawing the annotation version the agent
+    approved (`_raise_annotation_withdrawal`). The refusal for everything else
+    is deliberately explicit: the two description draft types have a
+    compensating path of their own (`description_withdrawal`), raised by a
+    steward rather than from here, and answering "no such reversal" is honest
+    where quietly doing nothing would let a reviewer believe a correction had
+    been filed.
     """
+    if sample.object_type == "METADATA_ENRICHMENT_PROPOSAL":
+        await _raise_annotation_withdrawal(session, sample, context=context)
+        return
     if sample.object_type != "BULK_STEWARDSHIP_OPERATION":
         raise HTTPException(
             status_code=422,
@@ -1361,6 +1368,86 @@ async def _raise_sample_reversal(
             "governance_review_id": str(review.id),
             "operation_type": reversal.operation_type,
             "subject_count": len(reversal.subject_ids),
+        },
+    )
+
+
+async def _raise_annotation_withdrawal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """R11-C8: undo an agent-approved business annotation by withdrawing it.
+
+    The chain is walked, not trusted: the sample names its review, the review
+    names the enrichment proposal, and the annotation records the proposal that
+    last wrote it. The version withdrawn is the approved one -- and only if the
+    agent the sample audits is the one who approved it. If a person has approved
+    a newer version since, that version is theirs, and withdrawing it would be
+    the second wrong change this ledger exists to prevent; the correction is then
+    a new proposal, and this refuses rather than guesses.
+
+    Withdrawn rather than deleted or rolled back to the superseded version: the
+    content stays for any run grounded on it, and the table reads as having no
+    approved annotation until a better one is proposed -- the same rule a
+    withdrawn description follows.
+    """
+    review = await session.get(GovernanceReview, sample.governance_review_id)
+    annotation = (
+        await session.scalar(
+            select(MetadataBusinessAnnotation).where(
+                MetadataBusinessAnnotation.organization_id == sample.organization_id,
+                MetadataBusinessAnnotation.source_proposal_id == UUID(review.object_id),
+            )
+        )
+        if review is not None
+        else None
+    )
+    if annotation is None:
+        raise HTTPException(
+            status_code=409,
+            detail="the sampled proposal's annotation is no longer the one on this table",
+        )
+    current = await session.scalar(
+        select(MetadataBusinessAnnotationVersion)
+        .where(
+            MetadataBusinessAnnotationVersion.annotation_id == annotation.id,
+            MetadataBusinessAnnotationVersion.status == "APPROVED",
+        )
+        .order_by(MetadataBusinessAnnotationVersion.version.desc())
+        .limit(1)
+    )
+    if current is None or current.approved_by != sample.agent_principal_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this annotation has been approved again since the agent's decision; "
+                "correct it with a new proposal rather than withdrawing a person's version"
+            ),
+        )
+    withdrawal, withdrawal_review = await request_description_withdrawal(
+        session,
+        organization_id=sample.organization_id,
+        subject_type="ANNOTATION",
+        subject_id=annotation.id,
+        reason=f"withdraws a disputed reviewer-agent decision (sample {sample.id})",
+        requested_by=context.principal_id,
+        sample=sample,
+    )
+    record_audit(
+        session,
+        context,
+        action="business_annotation.withdrawal_requested",
+        resource_type="description_withdrawal",
+        resource_id=str(withdrawal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "annotation_id": str(annotation.id),
+            "version_id": str(current.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(withdrawal_review.id),
         },
     )
 
