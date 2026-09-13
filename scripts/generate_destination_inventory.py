@@ -481,7 +481,7 @@ def enabling_flag(name: str, boolean_fields: dict[str, bool]) -> tuple[str, bool
     """The longest-prefix boolean switch that gates this destination.
 
     `siem_endpoint` -> `siem_enabled`; `audit_archive_bucket_name` ->
-    `audit_archive_enabled`; `dq_itsm_webhook_url` -> `dq_itsm_webhook_enabled`.
+    `audit_archive_enabled`.
     Longest prefix wins so `audit_archive_*` is not matched by a shorter,
     unrelated `audit_*` flag.
     """

@@ -19,6 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from configuration_decisions import DECISIONS, KINDS  # noqa: E402
 from generate_configuration_inventory import (  # noqa: E402
     OUTPUT_PATH,
     collect,
@@ -63,3 +64,28 @@ def test_no_setting_is_read_by_nothing() -> None:
         "remove them, rather than shipping configuration that silently does nothing:\n"
         + "\n".join(f"  - {name}" for name in unread)
     )
+
+
+def test_every_setting_that_ships_off_carries_a_decision() -> None:
+    """R11-S9's closure, made mechanical.
+
+    *Enable with evidence or retire deliberately* is a judgement per setting,
+    so the judgement is recorded per setting, and a setting that ships off,
+    empty or zero with no decision fails here -- as does a decision whose
+    setting is gone or now ships on, because a stale decision reads as a live
+    one. Record the decision in `scripts/configuration_decisions.py`.
+    """
+    fields = collect()
+    off = {
+        field.name
+        for field in fields
+        if field.off_by_default and not (field.reads == 0 and not field.dynamic)
+    }
+    undecided = sorted(off - set(DECISIONS))
+    stale = sorted(set(DECISIONS) - off)
+    unknown_kinds = sorted(name for name, (kind, _) in DECISIONS.items() if kind not in KINDS)
+    assert not undecided, f"settings ship off with no recorded decision: {undecided}"
+    assert not stale, f"decisions name settings that no longer ship off: {stale}"
+    assert not unknown_kinds, f"decisions with an unknown kind: {unknown_kinds}"
+    assert all(reason.strip() for _, reason in DECISIONS.values()), "a decision needs a reason"
+

@@ -6,9 +6,12 @@
 > `python scripts/generate_configuration_inventory.py`; `tests/test_configuration_inventory.py` fails when it is stale.
 
 R11-S9's first clause: *inventory supported/default-off features; enable with
-evidence or retire deliberately.* This is the inventory. It decides nothing —
-"enable or retire" is a judgement per feature, and a generated file that
-proposed retirements would be read as having made them.
+evidence or retire deliberately.* This is the inventory. It decides nothing on
+its own -- "enable or retire" is a judgement per feature, and a generated file
+that proposed retirements would be read as having made them -- so section 2's
+decisions come from `scripts/configuration_decisions.py`, written by a person,
+and `tests/test_configuration_inventory.py` fails when a setting ships off
+without one.
 
 **How to read the Reads column.** It counts attribute accesses of that name
 anywhere under `src/` outside the config module itself. A *high* count is a
@@ -19,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**253 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
+**252 settings.** 0 are read nowhere. 50 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -37,59 +40,62 @@ means *never* by the task-agent convention. It is listed because the capability
 register's own rule is that a setting which exists and defaults to off does not
 earn a *Configured: Yes*, so this is the list that claim must be checked against.
 
-| Setting | Type | Default | Reads |
-|---|---|---|---|
-| `oidc_issuer` | `str | None` | `None` | 3 |
-| `oidc_audience` | `str | None` | `None` | 3 |
-| `oidc_jwks_url` | `str | None` | `None` | 4 |
-| `oidc_jwks_json` | `str | None` | `None` | 4 |
-| `oidc_role_mappings` | `dict[str, list[str]]` | `dict` | 1 |
-| `oidc_persona_mappings` | `dict[str, str]` | `dict` | 1 |
-| `oidc_default_persona` | `str | None` | `None` | 2 |
-| `secrets_vault_url` | `str | None` | `None` | 1 |
-| `secrets_vault_token` | `SecretStr | None` | `None` | 1 |
-| `neo4j_password` | `str` | `''` | 4 |
-| `object_store_secret_key` | `str` | `''` | 1 |
-| `reaper_retention_overrides` | `str | None` | `None` | 1 |
-| `lineage_cache_enabled` | `bool` | `False` | 5 |
-| `lineage_neo4j_read_enabled` | `bool` | `False` | 1 |
-| `reviewer_agent_enabled` | `bool` | `False` | 3 |
-| `reviewer_agent_suspended` | `bool` | `False` | 6 |
-| `steward_agent_interval_minutes` | `int` | `0` | dynamic |
-| `classification_propagation_interval_minutes` | `int` | `0` | 1 |
-| `freshness_evaluation_interval_minutes` | `int` | `0` | 1 |
-| `lineage_agent_interval_minutes` | `int` | `0` | dynamic |
-| `quality_agent_interval_minutes` | `int` | `0` | dynamic |
-| `governance_notifications_enabled` | `bool` | `False` | 6 |
-| `slack_webhook_url` | `str | None` | `None` | 2 |
-| `teams_webhook_url` | `str | None` | `None` | 2 |
-| `portal_base_url` | `str | None` | `None` | 1 |
-| `mcp_budget_enabled` | `bool` | `False` | 1 |
-| `quality_seasonal_thresholds_enabled` | `bool` | `False` | 1 |
-| `quality_seasonal_month_end_enabled` | `bool` | `False` | 1 |
-| `quality_certification_expiry_enabled` | `bool` | `False` | 1 |
-| `principal_reconciliation_enabled` | `bool` | `False` | 1 |
-| `vector_index_url` | `str | None` | `None` | 2 |
-| `embedding_credential_reference` | `str` | `''` | 1 |
-| `entitlement_webhook_url` | `str | None` | `None` | 4 |
-| `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 |
-| `dq_itsm_webhook_enabled` | `bool` | `False` | 1 |
-| `dq_itsm_webhook_url` | `str | None` | `None` | 2 |
-| `dq_itsm_webhook_token` | `SecretStr | None` | `None` | 2 |
-| `agent_query_memory_enabled` | `bool` | `False` | 1 |
-| `model_generation_enabled` | `bool` | `False` | 7 |
-| `model_route` | `str | None` | `None` | 14 |
-| `model_route_fallbacks` | `str | None` | `None` | 3 via `model_route_fallback_keys` |
-| `model_endpoint_urls` | `dict[str, str]` | `dict` | 1 |
-| `openai_api_key` | `SecretStr | None` | `None` | 3 |
-| `gemini_api_key` | `SecretStr | None` | `None` | 3 |
-| `hmac_signing_vault_url` | `str | None` | `None` | 2 |
-| `hmac_signing_vault_token_reference` | `str` | `''` | 2 |
-| `tokenization_vault_url` | `str | None` | `None` | 2 |
-| `tokenization_vault_token_reference` | `str` | `''` | 2 |
-| `audit_archive_legal_hold_enabled` | `bool` | `False` | 1 |
-| `audit_archive_filesystem_root` | `str` | `''` | 1 |
-| `delivery_worker_enabled` | `bool` | `False` | 2 |
+Each row carries its decision. *Supplied* is a value only the deployment has;
+*Off by design* is a switch whose off state is the safe one; *Opt-in* names the
+precondition an estate meets first; *Blocked* names the tracker row it waits on.
+
+| Setting | Type | Default | Reads | Decision |
+|---|---|---|---|---|
+| `oidc_issuer` | `str | None` | `None` | 3 | Supplied: the identity provider's issuer |
+| `oidc_audience` | `str | None` | `None` | 3 | Supplied: the audience the provider issues tokens for |
+| `oidc_jwks_url` | `str | None` | `None` | 4 | Supplied: one of this or `oidc_jwks_json` is required with OIDC |
+| `oidc_jwks_json` | `str | None` | `None` | 4 | Supplied: a pinned key set, instead of `oidc_jwks_url` |
+| `oidc_role_mappings` | `dict[str, list[str]]` | `dict` | 1 | Supplied: maps the provider's group claims to platform roles |
+| `oidc_persona_mappings` | `dict[str, str]` | `dict` | 1 | Supplied: maps provider claims to personas |
+| `oidc_default_persona` | `str | None` | `None` | 2 | Supplied: the persona for a principal no mapping names |
+| `secrets_vault_url` | `str | None` | `None` | 1 | Supplied: production refuses the environment secret provider |
+| `secrets_vault_token` | `SecretStr | None` | `None` | 1 | Supplied: the vault credential |
+| `neo4j_password` | `str` | `''` | 4 | Supplied: only for an organization served from Neo4j |
+| `object_store_secret_key` | `str` | `''` | 1 | Supplied: the object store credential |
+| `reaper_retention_overrides` | `str | None` | `None` | 1 | Opt-in: per-rule retention; the rule defaults apply when unset |
+| `lineage_cache_enabled` | `bool` | `False` | 5 | Opt-in: needs the optional Redis service (`--profile cache`); a Redis error is a cache miss |
+| `lineage_neo4j_read_enabled` | `bool` | `False` | 1 | Off by design: INV-9: Neo4j reads wait for the projection rebuild drill (E5) |
+| `reviewer_agent_enabled` | `bool` | `False` | 3 | Off by design: R11-C3: measured unsafe, and production refuses it |
+| `reviewer_agent_suspended` | `bool` | `False` | 6 | Off by design: the process-wide kill switch; off means agents act only under their contracts |
+| `steward_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
+| `classification_propagation_interval_minutes` | `int` | `0` | 1 | Opt-in: files proposals for human review on a cadence; an estate opts into that review load |
+| `freshness_evaluation_interval_minutes` | `int` | `0` | 1 | Opt-in: an open CRITICAL freshness incident fails governed tools closed, so an estate opts in after approving its contracts (R11-B8) |
+| `lineage_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
+| `quality_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
+| `governance_notifications_enabled` | `bool` | `False` | 6 | Opt-in: needs a Slack or Teams destination to deliver to (R11-I1, R11-B10) |
+| `slack_webhook_url` | `str | None` | `None` | 2 | Supplied: the Slack destination |
+| `teams_webhook_url` | `str | None` | `None` | 2 | Supplied: the Teams destination |
+| `portal_base_url` | `str | None` | `None` | 1 | Supplied: links in notifications are omitted when unset |
+| `mcp_budget_enabled` | `bool` | `False` | 1 | Opt-in: needs Redis for the budget buckets |
+| `quality_seasonal_thresholds_enabled` | `bool` | `False` | 1 | Opt-in: changes VOLUME_CHANGE verdicts; an estate reviews it against its own history first |
+| `quality_seasonal_month_end_enabled` | `bool` | `False` | 1 | Opt-in: the month-end refinement of the seasonal baseline, reviewed the same way |
+| `quality_certification_expiry_enabled` | `bool` | `False` | 1 | Opt-in: opens incidents at write time; a reviewed opt-in, not a behaviour change on upgrade |
+| `principal_reconciliation_enabled` | `bool` | `False` | 1 | Opt-in: useful only once an identity source emits principal lifecycle events |
+| `vector_index_url` | `str | None` | `None` | 2 | Supplied: the persisted vector index; the vector channel embeds live when unset (R11-B2) |
+| `embedding_credential_reference` | `str` | `''` | 1 | Supplied: the embedding provider credential |
+| `entitlement_webhook_url` | `str | None` | `None` | 4 | Supplied: the entitlement fulfilment target |
+| `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 | Supplied: the entitlement webhook credential |
+| `dq_itsm_webhook_url` | `str | None` | `None` | 2 | Supplied: the ITSM target; setting it is the opt-in (R11-S9 retired the separate switch) |
+| `dq_itsm_webhook_token` | `SecretStr | None` | `None` | 2 | Supplied: the ITSM webhook credential |
+| `agent_query_memory_enabled` | `bool` | `False` | 1 | Opt-in: changes what grounds a generated prompt; the SQL still passes the gateway |
+| `model_generation_enabled` | `bool` | `False` | 7 | Opt-in: requires an approved model route, checked at startup |
+| `model_route` | `str | None` | `None` | 14 | Supplied: the approved route generation uses |
+| `model_route_fallbacks` | `str | None` | `None` | 3 via `model_route_fallback_keys` | Supplied: approved routes tried in order after the primary |
+| `model_endpoint_urls` | `dict[str, str]` | `dict` | 1 | Supplied: private model endpoints by alias |
+| `openai_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
+| `gemini_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
+| `hmac_signing_vault_url` | `str | None` | `None` | 2 | Supplied: production refuses the local HMAC signer |
+| `hmac_signing_vault_token_reference` | `str` | `''` | 2 | Supplied: the signing vault credential |
+| `tokenization_vault_url` | `str | None` | `None` | 2 | Supplied: production refuses the local tokenization provider |
+| `tokenization_vault_token_reference` | `str` | `''` | 2 | Supplied: the tokenization vault credential |
+| `audit_archive_legal_hold_enabled` | `bool` | `False` | 1 | Blocked: R11-B9: needs an S3 bucket with Object Lock to verify against |
+| `audit_archive_filesystem_root` | `str` | `''` | 1 | Supplied: only for a filesystem archive destination |
+| `delivery_worker_enabled` | `bool` | `False` | 2 | Opt-in: needs a delivery destination (R11-I1, R11-B10) |
 
 ## 3. Every setting
 
@@ -281,7 +287,6 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `entitlement_webhook_url` | `str | None` | `None` | 4 |
 | `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 |
 | `entitlement_timeout_seconds` | `int` | `10` | 1 |
-| `dq_itsm_webhook_enabled` | `bool` | `False` | 1 |
 | `dq_itsm_webhook_url` | `str | None` | `None` | 2 |
 | `dq_itsm_webhook_token` | `SecretStr | None` | `None` | 2 |
 | `dq_itsm_webhook_timeout_seconds` | `int` | `10` | 1 |

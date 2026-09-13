@@ -12,8 +12,8 @@ formatting a payload and writing it to the outbox for an unbuilt external
 consumer. These tests prove, against a real (in-memory sqlite) database and
 a mocked HTTP transport (no real network access), that:
 
-  * `emit_itsm_webhook` is off by default and fails closed with a clear
-    reason when disabled or unconfigured -- never silently "succeeds";
+  * `emit_itsm_webhook` is off until its URL is set and fails closed with a
+    clear reason when unconfigured -- never silently "succeeds";
   * given a real endpoint it POSTs the ITSM-formatted payload with an
     idempotency key and reports SENT/FAILED accurately;
   * `evaluate_analysis_run` -- the real incident-opening call site --
@@ -29,7 +29,9 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -92,9 +94,9 @@ def _mock_async_client(handler):
 # --- emit_itsm_webhook (unit-level) --------------------------------------------
 
 
-async def test_disabled_by_default_fails_closed_without_any_network_attempt(monkeypatch) -> None:
+async def test_no_url_fails_closed_without_any_network_attempt(monkeypatch) -> None:
     def _unreachable(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("must not attempt a network call when disabled")
+        raise AssertionError("must not attempt a network call with no URL configured")
 
     monkeypatch.setattr(quality_service.httpx, "AsyncClient", _mock_async_client(_unreachable))
 
@@ -103,17 +105,15 @@ async def test_disabled_by_default_fails_closed_without_any_network_attempt(monk
     )
 
     assert status == "FAILED"
-    assert error is not None and "off" in error
-
-
-async def test_enabled_but_unconfigured_url_fails_closed() -> None:
-    status, error = await emit_itsm_webhook(
-        Settings(dq_itsm_webhook_enabled=True, _env_file=None),
-        {"short_description": "x"},
-        idempotency_key="k1",
-    )
-    assert status == "FAILED"
     assert error is not None and "not configured" in error
+
+
+async def test_the_retired_switch_is_refused_rather_than_ignored() -> None:
+    """R11-S9 retired `dq_itsm_webhook_enabled`; the URL is the opt-in now.
+    Settings forbid unknown keys, so a deployment still setting the old switch
+    fails at startup and is told, instead of believing it turned something off."""
+    with pytest.raises(ValidationError):
+        Settings(dq_itsm_webhook_enabled=True, _env_file=None)
 
 
 async def test_successful_post_reports_sent_and_carries_idempotency_key(monkeypatch) -> None:
@@ -129,7 +129,6 @@ async def test_successful_post_reports_sent_and_carries_idempotency_key(monkeypa
 
     status, error = await emit_itsm_webhook(
         Settings(
-            dq_itsm_webhook_enabled=True,
             dq_itsm_webhook_url="https://itsm.example.test/incidents",
             _env_file=None,
         ),
@@ -151,7 +150,6 @@ async def test_server_error_reports_failed_with_the_http_error(monkeypatch) -> N
 
     status, error = await emit_itsm_webhook(
         Settings(
-            dq_itsm_webhook_enabled=True,
             dq_itsm_webhook_url="https://itsm.example.test/incidents",
             _env_file=None,
         ),
@@ -324,7 +322,6 @@ async def test_new_incident_with_matching_itsm_rule_persists_event_and_calls_web
         quality_service,
         "get_settings",
         lambda: Settings(
-            dq_itsm_webhook_enabled=True,
             dq_itsm_webhook_url="https://itsm.example.test/incidents",
             _env_file=None,
         ),
@@ -388,7 +385,6 @@ async def test_webhook_failure_is_recorded_without_failing_the_analysis_run(
         quality_service,
         "get_settings",
         lambda: Settings(
-            dq_itsm_webhook_enabled=True,
             dq_itsm_webhook_url="https://itsm.example.test/incidents",
             _env_file=None,
         ),

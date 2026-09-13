@@ -144,13 +144,11 @@ async def emit_itsm_webhook(
 
     Returns ``(status, error)`` where ``status`` is ``"SENT"`` or
     ``"FAILED"``. Never raises -- a downed/misconfigured ITSM endpoint must
-    not fail the quality-evaluation transaction that triggered it. Disabled
-    (or unconfigured) deployments return ``"FAILED"`` with an explanatory
+    not fail the quality-evaluation transaction that triggered it. An
+    unconfigured deployment returns ``"FAILED"`` with an explanatory
     error rather than silently pretending delivery succeeded, so a caller can
     tell "not configured" apart from "delivered" in the persisted event.
     """
-    if not settings.dq_itsm_webhook_enabled:
-        return "FAILED", "dq_itsm_webhook_enabled is off"
     if not settings.dq_itsm_webhook_url:
         return "FAILED", "dq_itsm_webhook_url is not configured"
     token = (

@@ -52,6 +52,10 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from configuration_decisions import DECISIONS  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "src/atlas/platform/config.py"
 SRC_ROOT = REPO_ROOT / "src"
@@ -368,6 +372,14 @@ def _row(field: SettingField) -> str:
     return f"| `{field.name}` | `{field.annotation}` | `{default}` | {reads} |"
 
 
+def _decided_row(field: SettingField) -> str:
+    decision = DECISIONS.get(field.name)
+    if decision is None:
+        return _row(field) + " **undecided** |"
+    kind, reason = decision
+    return _row(field) + f" {kind}: {reason} |"
+
+
 def render(fields: list[SettingField]) -> str:
     unread = [f for f in fields if f.reads == 0 and not f.dynamic]
     off = [f for f in fields if f.off_by_default and f not in unread]
@@ -381,9 +393,12 @@ def render(fields: list[SettingField]) -> str:
         "`tests/test_configuration_inventory.py` fails when it is stale.",
         "",
         "R11-S9's first clause: *inventory supported/default-off features; enable with",
-        "evidence or retire deliberately.* This is the inventory. It decides nothing —",
-        "\"enable or retire\" is a judgement per feature, and a generated file that",
-        "proposed retirements would be read as having made them.",
+        "evidence or retire deliberately.* This is the inventory. It decides nothing on",
+        "its own -- \"enable or retire\" is a judgement per feature, and a generated file",
+        "that proposed retirements would be read as having made them -- so section 2's",
+        "decisions come from `scripts/configuration_decisions.py`, written by a person,",
+        "and `tests/test_configuration_inventory.py` fails when a setting ships off",
+        "without one.",
         "",
         "**How to read the Reads column.** It counts attribute accesses of that name",
         "anywhere under `src/` outside the config module itself. A *high* count is a",
@@ -419,10 +434,14 @@ def render(fields: list[SettingField]) -> str:
         "register's own rule is that a setting which exists and defaults to off does not",
         "earn a *Configured: Yes*, so this is the list that claim must be checked against.",
         "",
-        "| Setting | Type | Default | Reads |",
-        "|---|---|---|---|",
+        "Each row carries its decision. *Supplied* is a value only the deployment has;",
+        "*Off by design* is a switch whose off state is the safe one; *Opt-in* names the",
+        "precondition an estate meets first; *Blocked* names the tracker row it waits on.",
+        "",
+        "| Setting | Type | Default | Reads | Decision |",
+        "|---|---|---|---|---|",
     ]
-    lines += [_row(field) for field in off]
+    lines += [_decided_row(field) for field in off]
     lines += [
         "",
         "## 3. Every setting",

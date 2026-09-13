@@ -805,15 +805,16 @@ class Settings(BaseSettings):
     entitlement_timeout_seconds: int = Field(default=10, ge=1, le=60)
 
     # --- GROUP C (DQ-1): ITSM webhook emitter for routed quality incidents.
-    # Off by default (`dq_itsm_webhook_enabled=False`) so an unconfigured
-    # deployment's behaviour is unchanged -- a quality incident is still
-    # routed and persisted (`NotificationEventRecord`) even with the emitter
-    # disabled, it just stays in status PENDING rather than attempting an
-    # outbound call. The actual ITSM system (ServiceNow/Jira/...) is an infra
-    # concern; this is a generic, configurable webhook target that receives
-    # `notification_routing.format_itsm_payload`'s JSON body, mirroring
-    # `entitlement_webhook_url`'s shape.
-    dq_itsm_webhook_enabled: bool = False
+    # Off until `dq_itsm_webhook_url` is set: the URL is the opt-in. An
+    # unconfigured deployment's behaviour is unchanged -- a quality incident is
+    # still routed and persisted (`NotificationEventRecord`), it just stays in
+    # status PENDING rather than attempting an outbound call. R11-S9 retired a
+    # separate `dq_itsm_webhook_enabled` switch: it gated its own URL a second
+    # time, so the switch on with no URL and a URL with the switch off both
+    # failed, and the pair expressed one decision in two places. The ITSM system
+    # itself (ServiceNow/Jira/...) is an infra concern; this is a generic
+    # webhook target that receives `notification_routing.format_itsm_payload`'s
+    # JSON body, mirroring `entitlement_webhook_url`'s shape.
     dq_itsm_webhook_url: str | None = None
     dq_itsm_webhook_token: SecretStr | None = None
     dq_itsm_webhook_timeout_seconds: int = Field(default=10, ge=1, le=60)
