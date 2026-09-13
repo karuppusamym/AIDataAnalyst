@@ -989,6 +989,7 @@ export interface CapabilityEnvelopeModel {
   tool_slugs?: string[];
   context_product_ids?: string[];
   write_lanes?: string[];
+  native_tools?: string[];
 }
 
 export interface CatalogBulkActionItemRead {

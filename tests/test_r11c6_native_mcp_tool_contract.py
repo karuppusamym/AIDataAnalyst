@@ -110,6 +110,10 @@ def _contract(*, kill_engaged: bool, kill_scope: str = "AGENT") -> AgentContract
             "tool_slugs": ["quarterly_revenue"],
             "context_product_ids": ["revenue_context"],
             "write_lanes": [],
+            # Every native tool, so the kill-switch and existence tests below
+            # exercise those controls rather than the allowlist (R11-C6 finding 10,
+            # tested in tests/test_r11c6_native_tool_allowlist.py).
+            "native_tools": sorted(NATIVE_ALL_TOOL_SLUGS),
         },
         autonomy_tier="T1",
         supervisor_persona="STEWARD",

@@ -67,6 +67,7 @@ from aida.agent_contracts import (
     agent_kill_blocking_reason,
     context_product_violation,
     load_contract_for_principal,
+    native_tool_violation,
 )
 from aida.agent_orchestrator import (
     AgentClarificationRequired,
@@ -1705,12 +1706,11 @@ async def _native_tool_contract_denial(
       that is what `envelope_violation` is called with on every other path.
       A native tool has no governed-tool version, so an envelope cannot name
       one in the sense the field means, and reading it as though it could
-      would silently redefine the field for every stored contract. The
-      residual is real and is recorded as such: `validate_sql` and
-      `request_data_product_access` are bounded by roles, per-object
-      gateway authorization, maker-checker and now the kill switch -- but not
-      by a per-agent allowlist. Giving native tools their own envelope
-      dimension is a contract-schema change, not a check.
+      would silently redefine the field for every stored contract. Native
+      tools have their own dimension instead,
+      `capability_envelope.native_tools` (R11-C6 finding 10, 2026-09-13),
+      checked below after the kill switch; absent or empty allows none, as
+      every allowlist here does.
     - `context_product_ids` already applies: a native call that arrives with
       a `contextProductUri` is refused outright by the branches below, so
       there is no product-scoped native path for an envelope to bound.
@@ -1766,16 +1766,26 @@ async def _native_tool_contract_denial(
     if contract is None:
         return None
     blocked = await agent_kill_blocking_reason(session, contract)
-    if blocked is None:
-        return None
-    return await _denied(
-        "mcp.native_tool.kill_switch_denied",
-        blocked,
-        {
-            "kill_scope": contract.kill_scope,
-            "agent_principal_id": contract.agent_principal_id,
-        },
-    )
+    if blocked is not None:
+        return await _denied(
+            "mcp.native_tool.kill_switch_denied",
+            blocked,
+            {
+                "kill_scope": contract.kill_scope,
+                "agent_principal_id": contract.agent_principal_id,
+            },
+        )
+    # R11-C6 finding 10: the contract's own allowlist over native tools, after
+    # the kill switch so a stopped agent is told it is stopped, not that the
+    # tool is outside its envelope.
+    outside = native_tool_violation(contract, tool_slug=slug)
+    if outside is not None:
+        return await _denied(
+            "mcp.native_tool.envelope_denied",
+            outside,
+            {"agent_principal_id": contract.agent_principal_id},
+        )
+    return None
 
 
 async def _handle_tools_call(

@@ -125,6 +125,7 @@ class CapabilityEnvelopeModel(ApiModel):
     tool_slugs: list[str] = Field(default_factory=list)
     context_product_ids: list[str] = Field(default_factory=list)
     write_lanes: list[str] = Field(default_factory=list)
+    native_tools: list[str] = Field(default_factory=list)
 
 
 class AgentContractWrite(ApiModel):
@@ -372,6 +373,7 @@ def _definition_from(body: AgentContractWrite) -> AgentContractDefinition:
             tool_slugs=envelope.tool_slugs,
             context_product_ids=envelope.context_product_ids,
             write_lanes=envelope.write_lanes,
+            native_tools=envelope.native_tools,
         ),
         autonomy_tier=body.autonomy_tier,
         supervisor_persona=body.supervisor_persona,
@@ -684,6 +686,7 @@ async def put_agent_contract(
                                 "tool_slugs",
                                 "context_product_ids",
                                 "write_lanes",
+                                "native_tools",
                             )
                             if getattr(definition.capability_envelope, field)
                         ),

@@ -477,7 +477,7 @@ test, and a token whose roles claim merely contained the string
 
 ## 8. Closing the remaining work: what needs you
 
-*A dated snapshot taken 2026-09-13 against 6 PARTIAL rows. Status lives in
+*A dated snapshot taken 2026-09-13 against 5 PARTIAL rows. Status lives in
 [tracker section P](../60-delivery/03-tracker.md), not here — if the two
 disagree, section P is right and this list is stale.*
 
@@ -491,7 +491,7 @@ anything from you.
 | R11-D6 | **Done.** Every session transition was exercised in a browser under real OIDC. It found that a *rejected* token was reported as *expired* — now told apart, so a misconfigured identity provider no longer sends you into a sign-in loop |
 | R11-B2 | **Done.** Ask no longer picks a tool for an input the question never mentions. Re-measured live: 7 of 7 answered questions matched, none wrongly refused |
 | R11-C1 | **Done.** Run it yourself: `./.venv/Scripts/python.exe scripts/verify_ontology_lifecycle.py` — draft, a refused self-approval, independent approval, publication. It publishes a new version each run |
-| R11-C6 | **Mostly done:** the project-level product listing and context-product compile now honour the agent's contract. Left: a per-agent allowlist over the native MCP tools, which needs a change to the contract schema |
+| R11-C6 | **Done.** Every door checks the agent's contract, including a new per-agent allowlist over the native MCP tools. Existing contracts reach no native tool until an amendment names them, and that amendment goes to review |
 | R11-C8 | **Mostly done:** every bulk stewardship operation can now be reversed, restoring exactly what it overwrote, and a change a person made since is never overwritten. Left: a withdrawal path for enrichment annotations, a check that a filed reversal is actually decided, and a test of maker-checker on reversals in its own right |
 | R11-B8 | **Done.** Freshness is measured: an approved contract's watermark is read on the schedule through the query gateway, and the table is judged on it ([ADR-0014 addendum](../10-architecture/adr/ADR-0014-value-free-control-plane.md)) |
 | R11-C3 | **Done.** Unattended reviewer approvals stay off for good, and production now refuses the setting |

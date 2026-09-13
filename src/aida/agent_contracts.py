@@ -60,12 +60,18 @@ class CapabilityEnvelope:
     tool_slugs: tuple[str, ...]
     context_product_ids: tuple[str, ...]
     write_lanes: tuple[str, ...]
+    #: R11-C6 finding 10: the native MCP tools this agent may call, by slug
+    #: (`get_lineage_graph`, `validate_sql`, ...). A native tool has no
+    #: `GovernedToolVersion`, so `tool_slugs` cannot name one; this is their own
+    #: allowlist. Absent or empty allows none, as every allowlist here does.
+    native_tools: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, Any]:
         return {
             "tool_slugs": list(self.tool_slugs),
             "context_product_ids": list(self.context_product_ids),
             "write_lanes": list(self.write_lanes),
+            "native_tools": list(self.native_tools),
         }
 
 
@@ -102,7 +108,7 @@ def parse_capability_envelope(raw: dict[str, Any]) -> CapabilityEnvelope:
     unknown write lanes are refused rather than ignored -- an envelope the
     platform cannot fully interpret is not an envelope it can enforce.
     """
-    unknown = set(raw) - {"tool_slugs", "context_product_ids", "write_lanes"}
+    unknown = set(raw) - {"tool_slugs", "context_product_ids", "write_lanes", "native_tools"}
     if unknown:
         raise AgentContractValidationError(
             "envelope_unknown_key",
@@ -120,6 +126,7 @@ def parse_capability_envelope(raw: dict[str, Any]) -> CapabilityEnvelope:
             raw.get("context_product_ids", []), field="context_product_ids"
         ),
         write_lanes=write_lanes,
+        native_tools=_string_list(raw.get("native_tools", []), field="native_tools"),
     )
 
 
@@ -229,9 +236,9 @@ def contract_widening(
     The dimensions, and why each counts as more authority:
 
     - `capability_envelope.tool_slugs` / `.context_product_ids` /
-      `.write_lanes` -- an allowlist gained an entry. These are the envelope
-      the orchestrator, the MCP boundary and the REST context-product reads
-      all enforce.
+      `.write_lanes` / `.native_tools` -- an allowlist gained an entry. These
+      are the envelope the orchestrator, the MCP boundary and the REST
+      context-product reads all enforce.
     - `autonomy_tier` -- a higher tier acts with less supervision.
     - `kill_scope` -- *narrowing* the scope is widening the agent: `ALL`
       stops every agent in the organization, `TIER` stops its tier, `AGENT`
@@ -256,7 +263,7 @@ def contract_widening(
     except AgentContractValidationError:
         before = CapabilityEnvelope(tool_slugs=(), context_product_ids=(), write_lanes=())
     after = definition.capability_envelope
-    for field in ("tool_slugs", "context_product_ids", "write_lanes"):
+    for field in ("tool_slugs", "context_product_ids", "write_lanes", "native_tools"):
         if set(getattr(after, field)) - set(getattr(before, field)):
             widened.add(f"capability_envelope.{field}")
 
@@ -422,6 +429,27 @@ def envelope_violation(contract: AgentContract, *, tool_slug: str) -> str | None
     except AgentContractValidationError:
         return REASON_ENVELOPE_VIOLATION
     if tool_slug not in envelope.tool_slugs:
+        return REASON_ENVELOPE_VIOLATION
+    return None
+
+
+def native_tool_violation(contract: AgentContract, *, tool_slug: str) -> str | None:
+    """`REASON_ENVELOPE_VIOLATION` when a native MCP tool is outside the
+    contract's `capability_envelope.native_tools` (R11-C6 finding 10).
+
+    The native tools had the kill switch and contract existence from
+    2026-09-12, but no allowlist naming *this* agent -- and two of them are
+    not read-only: `validate_sql` reaches the source for a dry-run estimate
+    and `request_data_product_access` opens a maker-checker request. An
+    envelope that cannot be parsed, or a contract stored before the field
+    existed, allows none: an allowlist nobody wrote is empty, never
+    unrestricted. Granting one is a widening, so it goes to review.
+    """
+    try:
+        envelope = parse_capability_envelope(dict(contract.capability_envelope or {}))
+    except AgentContractValidationError:
+        return REASON_ENVELOPE_VIOLATION
+    if tool_slug not in envelope.native_tools:
         return REASON_ENVELOPE_VIOLATION
     return None
 

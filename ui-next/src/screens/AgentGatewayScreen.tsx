@@ -226,6 +226,7 @@ function RegisterTab({
   const [samplingRate, setSamplingRate] = useState("0.1");
   const [toolSlugs, setToolSlugs] = useState("");
   const [contextProductIds, setContextProductIds] = useState("");
+  const [nativeTools, setNativeTools] = useState("");
   const [dailyTokenCap, setDailyTokenCap] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
@@ -242,6 +243,7 @@ function RegisterTab({
       capability_envelope: {
         tool_slugs: csv(toolSlugs),
         context_product_ids: csv(contextProductIds),
+        native_tools: csv(nativeTools),
         write_lanes: [],
       },
       daily_token_cap: dailyTokenCap.trim() ? Number(dailyTokenCap) : null,
@@ -252,6 +254,7 @@ function RegisterTab({
       setAgentPrincipalId("");
       setToolSlugs("");
       setContextProductIds("");
+      setNativeTools("");
       setDailyTokenCap("");
     }
   };
@@ -330,6 +333,13 @@ function RegisterTab({
                 value={contextProductIds}
                 onChange={(e) => setContextProductIds(e.target.value)}
                 placeholder="cp_…, …"
+              />
+            </Field>
+            <Field label="Native tools (comma-separated)">
+              <input
+                value={nativeTools}
+                onChange={(e) => setNativeTools(e.target.value)}
+                placeholder="get_lineage_graph, validate_sql, …"
               />
             </Field>
             <Field label="Daily token cap (optional)">

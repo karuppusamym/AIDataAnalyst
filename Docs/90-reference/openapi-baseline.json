@@ -5929,6 +5929,13 @@
             "title": "Context Product Ids",
             "type": "array"
           },
+          "native_tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Native Tools",
+            "type": "array"
+          },
           "tool_slugs": {
             "items": {
               "type": "string"
