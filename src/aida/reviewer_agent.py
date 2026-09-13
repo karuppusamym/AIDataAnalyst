@@ -74,7 +74,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.column_description_service import ORIGIN_MODEL_INFERRED
@@ -732,6 +732,25 @@ async def pre_review_pending(
     return outcomes
 
 
+def _correction_pending() -> Any:
+    """A reversal raised from this sample that nobody has decided yet (R11-C8).
+
+    A sample resolved as DISAGREED is not finished while its reversal waits:
+    the human said the agent was wrong, and the change they disputed still
+    stands until someone decides the correction. Correlated on the enclosing
+    `ReviewAuditSample`, so it can sit inside either counter's WHERE clause.
+    """
+    return (
+        select(BulkStewardshipOperation.id)
+        .where(
+            BulkStewardshipOperation.review_audit_sample_id == ReviewAuditSample.id,
+            BulkStewardshipOperation.reverses_operation_id.is_not(None),
+            BulkStewardshipOperation.status == "REVIEW_REQUIRED",
+        )
+        .exists()
+    )
+
+
 async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID) -> int:
     """How many of this agent's decisions are sampled and still unread (AR-11).
 
@@ -741,13 +760,17 @@ async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID)
     while the agent kept deciding, and the safety case would degrade with no
     signal. This is the number that makes the degradation visible, and
     `auto_decide_tier0_tier1` refuses on it.
+
+    R11-C8: a disputed sample whose reversal is still undecided counts too.
+    Until 2026-09-13 a correction nobody ever decided read as resolved, so the
+    original change could stand indefinitely behind a sample marked done.
     """
     count = await session.scalar(
         select(func.count())
         .select_from(ReviewAuditSample)
         .where(
             ReviewAuditSample.organization_id == organization_id,
-            ReviewAuditSample.human_outcome == "PENDING",
+            or_(ReviewAuditSample.human_outcome == "PENDING", _correction_pending()),
         )
     )
     return int(count or 0)
@@ -772,17 +795,30 @@ async def oldest_unresolved_sample_age_hours(
     date arithmetic, and because the stored value comes back naive on SQLite
     -- the same `.replace(tzinfo=UTC)` normalisation the metrics module does.
     """
-    oldest = await session.scalar(
+    oldest_unread = await session.scalar(
         select(func.min(ReviewAuditSample.sampled_at)).where(
             ReviewAuditSample.organization_id == organization_id,
             ReviewAuditSample.human_outcome == "PENDING",
         )
     )
-    if oldest is None:
+    # R11-C8: a waiting correction is measured from when it was filed -- the
+    # human read the sample then, and the clock since is the correction's.
+    oldest_correction = await session.scalar(
+        select(func.min(BulkStewardshipOperation.created_at)).where(
+            BulkStewardshipOperation.organization_id == organization_id,
+            BulkStewardshipOperation.review_audit_sample_id.is_not(None),
+            BulkStewardshipOperation.reverses_operation_id.is_not(None),
+            BulkStewardshipOperation.status == "REVIEW_REQUIRED",
+        )
+    )
+    waiting = [
+        value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        for value in (oldest_unread, oldest_correction)
+        if value is not None
+    ]
+    if not waiting:
         return None
-    if oldest.tzinfo is None:
-        oldest = oldest.replace(tzinfo=UTC)
-    return round((now - oldest).total_seconds() / 3600, 2)
+    return round((now - min(waiting)).total_seconds() / 3600, 2)
 
 
 def record_audit_backlog_refusal(
