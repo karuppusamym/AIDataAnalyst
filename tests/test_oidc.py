@@ -7,7 +7,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from aida.config import Settings
-from aida.oidc import OidcVerificationError, OidcVerifier, context_from_claims
+from aida.oidc import OidcTokenExpired, OidcVerificationError, OidcVerifier, context_from_claims
 
 
 def oidc_fixture() -> tuple[Settings, rsa.RSAPrivateKey]:
@@ -197,3 +197,66 @@ def test_a_name_can_be_accepted_as_is_by_mapping_it_to_itself() -> None:
     context = context_from_claims(_claims(["Analyst", "PlatformAdmin"]), settings)
 
     assert context.roles == frozenset({"Analyst"})
+
+
+# --------------------------------------------------------------------------- #
+# R11-D6: an expired token is not the same refusal as a rejected one
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_an_expired_token_is_reported_as_expired() -> None:
+    """Found in a browser, not by reading: a token the deployment rejected for
+    its audience produced the same detail as an expired one, and the shell told
+    the operator to sign in again -- which could never work. Expiry is the one
+    refusal a caller can act on, and disclosing it is safe because the holder
+    can read `exp` themselves."""
+    settings, private_key = oidc_fixture()
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": "bank-user-123",
+            "iss": settings.oidc_issuer,
+            "aud": settings.oidc_audience,
+            # Ten minutes past, well beyond the 30-second default leeway.
+            "iat": now - timedelta(minutes=20),
+            "exp": now - timedelta(minutes=10),
+            "principal_type": "USER",
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "bank-key-1"},
+    )
+
+    with pytest.raises(OidcTokenExpired) as excinfo:
+        await OidcVerifier(settings).verify(token)
+
+    # Still a verification failure: every existing handler still denies it.
+    assert isinstance(excinfo.value, OidcVerificationError)
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_token_is_not_reported_as_expired() -> None:
+    """The other direction, and the one that matters for INV-4: a token that
+    failed for any reason other than time must not be called expired, or the
+    distinction would leak why a forged or misdirected token was refused."""
+    settings, private_key = oidc_fixture()
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": "bank-user-123",
+            "iss": settings.oidc_issuer,
+            "aud": "some-other-service",
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+            "principal_type": "USER",
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "bank-key-1"},
+    )
+
+    with pytest.raises(OidcVerificationError) as excinfo:
+        await OidcVerifier(settings).verify(token)
+
+    assert not isinstance(excinfo.value, OidcTokenExpired)

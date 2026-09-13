@@ -43,6 +43,24 @@ class OidcVerificationError(RuntimeError):
     pass
 
 
+class OidcTokenExpired(OidcVerificationError):
+    """The token verified in every respect except that it has expired.
+
+    A subclass, so every existing `except OidcVerificationError` still catches
+    it and still denies. It exists so the one refusal a caller can usefully act
+    on -- sign in again -- can be told apart from the ones it cannot.
+
+    Found by running the OIDC flow in a browser (R11-D6): a token whose
+    audience the deployment did not accept produced the same 401 detail as an
+    expired one, the shell reported "The session has expired. Sign in again",
+    and signing in again could never fix it. Disclosing *expiry* alone is safe:
+    anyone holding a JWT can already read its `exp` claim, so the server saying
+    so tells them nothing new. Signature, audience, issuer and revocation stay
+    generic, because those do tell a holder something -- whether a forged or
+    stolen token came close.
+    """
+
+
 def _claim(claims: dict[str, Any], path: str) -> Any:
     value: Any = claims
     for part in path.split("."):
@@ -248,6 +266,10 @@ class OidcVerifier:
                 leeway=self.settings.oidc_clock_skew_seconds,
                 options={"require": ["exp", "iat", "iss", "aud", "sub"]},
             )
+        except jwt.ExpiredSignatureError as exc:
+            # Before the generic clause: `ExpiredSignatureError` is a
+            # `PyJWTError`, so the order is what keeps expiry distinguishable.
+            raise OidcTokenExpired("bearer token has expired") from exc
         except (jwt.PyJWTError, TypeError, ValueError) as exc:
             raise OidcVerificationError("bearer token verification failed") from exc
         if not isinstance(claims, dict):

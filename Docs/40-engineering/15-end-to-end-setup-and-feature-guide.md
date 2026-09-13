@@ -488,7 +488,7 @@ anything from you.
 
 | Row | What is left |
 |---|---|
-| R11-D6 | Exercise the session banner's loading, expired and reconnect states under a real OIDC session (the mock issuer is enough) |
+| R11-D6 | **Done.** Every session transition was exercised in a browser under real OIDC. It found that a *rejected* token was reported as *expired* — now told apart, so a misconfigured identity provider no longer sends you into a sign-in loop |
 | R11-B2 | Score generated SQL by execution match against the live model route |
 | R11-C1 | **Done.** Run it yourself: `./.venv/Scripts/python.exe scripts/verify_ontology_lifecycle.py` — draft, a refused self-approval, independent approval, publication. It publishes a new version each run |
 | R11-C6 | A per-agent allowlist over the native MCP tools, and a filter on the project-level product listing |

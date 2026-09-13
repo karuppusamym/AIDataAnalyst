@@ -82,6 +82,7 @@ vi.mock("../lib/session", async (importOriginal) => {
     useSession: (): Session => ({
       state: "demo",
       me: sessionMe,
+      lapsed: false,
       lastSuccessAt: null,
       error: null,
       dataMode: "fixtures",

@@ -387,3 +387,40 @@ async def test_revoking_the_same_token_twice_conflicts(session: AsyncSession) ->
             session=session,
         )
     assert excinfo.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_an_expired_token_is_refused_as_expired_not_as_rejected(
+    session: AsyncSession,
+) -> None:
+    """R11-D6, at the HTTP boundary.
+
+    Expiry is the one refusal the caller is told about, because it is the one
+    they can act on and because the holder can read `exp` for themselves. The
+    revocation test above still pins the rest: a revoked token gets the same
+    generic detail as a forged one.
+    """
+    settings, private_key = _oidc_fixture()
+    # Issued twenty minutes ago for five: fifteen minutes past, well beyond leeway.
+    token = _sign(
+        settings,
+        private_key,
+        jti="expired-session-token",
+        minutes_valid=5,
+        now=datetime.now(UTC) - timedelta(minutes=20),
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await get_security_context(
+            settings=settings,
+            session=session,
+            principal_id=None,
+            principal_type="USER",
+            organization_header=None,
+            roles="Viewer",
+            authorization=f"Bearer {token}",
+            business_purpose=None,
+        )
+
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == "bearer token has expired"

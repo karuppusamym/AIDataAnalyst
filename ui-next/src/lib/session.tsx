@@ -6,10 +6,12 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import type { ReactNode } from "react";
 
 import { APP_CONFIG, USE_FIXTURES } from "./appConfig";
+import { sessionLapsed, subscribeAuth } from "./authSession";
 import { ApiError, observeRequests } from "./http";
 import type { MeRead } from "./types";
 
@@ -57,6 +59,15 @@ export type SessionState =
 export interface Session {
   readonly state: SessionState;
   readonly me: MeRead | null;
+  /**
+   * True when this browser held a token that lapsed and nothing replaced it.
+   *
+   * The API cannot say "expired" for this case: a lapsed token is never
+   * sent, so the request arrives with no token and the answer is "a bearer
+   * token is required". Only the browser knows the difference, so it is
+   * carried here for the banner to read (R11-D6).
+   */
+  readonly lapsed: boolean;
   /** Epoch millis of the most recent successful request, or null. */
   readonly lastSuccessAt: number | null;
   /** The error that produced a non-connected state, when there was one. */
@@ -80,6 +91,7 @@ const SessionContext = createContext<Session | null>(null);
 const STANDALONE_SESSION: Session = {
   state: "demo",
   me: null,
+  lapsed: false,
   lastSuccessAt: null,
   error: null,
   dataMode: APP_CONFIG.dataMode,
@@ -104,6 +116,7 @@ export function SessionProvider({
   const succeededOnce = useRef(false);
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
+  const lapsed = useSyncExternalStore(subscribeAuth, sessionLapsed, () => false);
 
   // Every completed request updates the picture. A success clears a previous
   // failure; a failure does not erase the fact that something worked before,
@@ -186,6 +199,7 @@ export function SessionProvider({
     () => ({
       state,
       me,
+      lapsed,
       lastSuccessAt,
       error,
       dataMode: APP_CONFIG.dataMode,
@@ -193,7 +207,7 @@ export function SessionProvider({
       authModeInferred: APP_CONFIG.authModeInferred,
       reload,
     }),
-    [state, me, lastSuccessAt, error, reload],
+    [state, me, lapsed, lastSuccessAt, error, reload],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
@@ -202,6 +216,19 @@ export function SessionProvider({
 export function useSession(): Session {
   return useContext(SessionContext) ?? STANDALONE_SESSION;
 }
+
+/**
+ * The API's 401 details, matched exactly rather than by pattern, and pinned by
+ * tests on both sides (`tests/test_oidc.py`, `session.describe.test.ts`).
+ *
+ * R11-D6: before these were told apart, a token the deployment rejected for
+ * its audience rendered "The session has expired. Sign in again" -- found by
+ * signing in through a real OIDC flow, where signing in again could never
+ * work. Only expiry is named by the API; everything else, revocation
+ * included, stays one generic detail.
+ */
+export const TOKEN_EXPIRED_DETAIL = "bearer token has expired";
+export const TOKEN_REJECTED_DETAIL = "bearer token verification failed";
 
 /** Short label and tone for the shell badge. Kept here so it is stated once. */
 export function describeSession(session: Session): {
@@ -240,15 +267,40 @@ export function describeSession(session: Session): {
         tone: "error",
         hint: "The API could not be reached. Data on screen may be stale or missing.",
       };
-    case "session-expired":
-      return {
-        label: "Sign-in required",
-        tone: "error",
-        hint:
-          session.authMode === "development"
-            ? "The backend rejected this build's development identity."
-            : "The session has expired. Sign in again to continue.",
-      };
+    case "session-expired": {
+      if (session.authMode === "development") {
+        return {
+          label: "Sign-in required",
+          tone: "error",
+          hint: "The backend rejected this build's development identity.",
+        };
+      }
+      const detail = session.error instanceof ApiError ? session.error.detail : null;
+      // Either the browser watched its own token lapse (the common case: a
+      // renewal failed, and the next request went out with no token at all)
+      // or the API says the token it received had expired.
+      if (session.lapsed || detail === TOKEN_EXPIRED_DETAIL) {
+        return {
+          label: "Sign-in required",
+          tone: "error",
+          hint: "The session has expired. Sign in again to continue.",
+        };
+      }
+      if (detail === TOKEN_REJECTED_DETAIL) {
+        // Deliberately not "expired". The API answers this for a revoked token
+        // too (INV-4 keeps revocation indistinguishable), and there signing in
+        // again *does* help -- so the copy says what a repeat failure means
+        // rather than promising either outcome.
+        return {
+          label: "Sign-in rejected",
+          tone: "error",
+          hint:
+            "The identity provider's token was not accepted. If signing in again does not clear " +
+            "this, the provider's issuer or audience does not match this deployment's configuration.",
+        };
+      }
+      return { label: "Sign-in required", tone: "error", hint: "Sign in to continue." };
+    }
     case "forbidden":
       return {
         label: "Not permitted",

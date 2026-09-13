@@ -12,7 +12,12 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.delegation import DelegationGrant, delegated_roles_available, is_delegation_active
 from aida.models import Delegation
-from aida.oidc import OidcVerificationError, OidcVerifier, context_from_claims
+from aida.oidc import (
+    OidcTokenExpired,
+    OidcVerificationError,
+    OidcVerifier,
+    context_from_claims,
+)
 from aida.security_types import SecurityContext as SecurityContext
 from aida.siem_delivery import siem_config_from_settings
 from aida.siem_routing import SecurityEvent, route_to_siem_durably
@@ -92,9 +97,16 @@ async def get_security_context(
             return context_from_claims(claims, settings)
         except (OidcVerificationError, TokenRevokedError) as exc:
             await _route_auth_failure(settings, str(exc))
+            # Expiry is the only reason named to the caller (see
+            # `OidcTokenExpired`). Revocation stays identical to every other
+            # failure, as `TokenRevokedError` requires (INV-4).
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="bearer token verification failed",
+                detail=(
+                    "bearer token has expired"
+                    if isinstance(exc, OidcTokenExpired)
+                    else "bearer token verification failed"
+                ),
             ) from exc
     if settings.identity_provider == "development":
         if not principal_id:
