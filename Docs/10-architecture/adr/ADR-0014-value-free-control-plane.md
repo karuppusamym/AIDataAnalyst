@@ -51,7 +51,26 @@ A policy-approved masked-value mode may be enabled **per classification and per 
 
 Classification-specific retention approval could permit bounded, approved value access for a specific purpose — with its own residency, retention, and audit contract.
 
+## Addendum — 2026-09-12: freshness watermarks (R11-B8)
+
+**Decided 2026-09-12 on the product owner's delegation, under this ADR's own revisit trigger.** A freshness contract (`FreshnessWatermarkConfig`) is the shape that trigger describes: approved maker-checker, for one purpose, on one column, with its own classification and `retention_days`.
+
+Freshness cannot be measured without one value from the source -- when the data last changed -- and no statistic in the Profiles row carries it. Without it every freshness contract evaluates STALE forever, correctly, and the control is decorative.
+
+**Permitted:** the maximum of one column, and nothing else about it, only when all of these hold:
+
+| Condition | Enforced by |
+|---|---|
+| The column is named by an ACTIVE (approved) freshness contract. An edit returns the contract to PENDING_APPROVAL, and reading stops | `freshness_observation.observe_freshness_for_datasource` reads ACTIVE contracts only |
+| The catalog types the column as a date or a time | Refused before any statement is built (`COLUMN_NOT_TEMPORAL`), so a contract cannot be used to read `MAX(balance)` |
+| The read is an ordinary governed query through the Query Execution Gateway, as the scheduler's identity (ADR-0004) | A masked or tokenized result yields no observation; a refusal is counted, never worked around |
+| The value is stored only as `freshness_observation.watermark_value` -- and, as before this addendum, the latest one in a freshness incident's evidence | The observation sweep's audit record and log lines carry counts and reason codes only |
+| Observations older than the contract's `retention_days` are deleted | Each observation pass |
+
+Everything else in this ADR is unchanged. This is not a precedent for other statistics: a second one needs its own addendum with its own purpose, approval and retention, which is what the table above is for.
+
 ## Enforcement
 
 - INV-6 in `10-architecture/01-principles-and-invariants.md`
 - Test: `test_no_source_values_in_control_plane` (`tests/test_inv6_value_freedom.py`; sentinel scan across tables, logs, events, traces)
+- Test: `tests/test_r11b8_freshness_observation.py` (the addendum above: only ACTIVE contracts on temporal columns are read, a masked read stores nothing, and the value never reaches the audit record)

@@ -209,7 +209,7 @@ earn a *Configured: Yes*, so this is the list that claim must be checked against
 | `classification_propagation_interval_minutes` | `int` | `0` | 1 |
 | `classification_propagation_max_edges` | `int` | `5000` | 1 |
 | `freshness_evaluation_interval_minutes` | `int` | `0` | 1 |
-| `freshness_evaluation_max_tables` | `int` | `500` | 1 |
+| `freshness_evaluation_max_tables` | `int` | `500` | 2 |
 | `lineage_agent_principal_id` | `str` | `'agent:lineage'` | dynamic |
 | `lineage_agent_max_proposals_per_run` | `int` | `25` | dynamic |
 | `lineage_agent_max_pending_proposals` | `int` | `500` | dynamic |

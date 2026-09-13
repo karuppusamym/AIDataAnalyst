@@ -23,6 +23,7 @@ from aida.freshness import (
     FRESHNESS_SCHEDULER_PRINCIPAL,
     evaluate_freshness_for_datasource,
 )
+from aida.freshness_observation import observe_freshness_for_datasource
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
 from aida.governance_review_relay import run_review_notification_pass
 from aida.graph_reconciliation import run_graph_reconciliation_pass
@@ -42,6 +43,7 @@ from aida.ownership_expiry_warning import run_ownership_expiry_pass
 from aida.playbooks import run_due_playbooks_pass
 from aida.principal_reconciliation import run_principal_reconciliation_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
+from aida.query_gateway import QueryExecutionGateway
 from aida.reaper_service import run_reaper_scheduler_pass
 from aida.security import SecurityContext
 from aida.stewardship_api import (
@@ -605,22 +607,36 @@ async def run_freshness_evaluation_pass(
             await session.execute(select(DataSource.id, DataSource.organization_id))
         ).all()
     swept = 0
+    gateway = QueryExecutionGateway(settings)
     for datasource_id, organization_id in rows:
         previous = _freshness_evaluation_last_run_at.get(datasource_id)
         if previous is not None and effective_now - previous < timedelta(minutes=interval):
             continue
         try:
             async with session_factory() as session:
+                context = SecurityContext(
+                    principal_id=FRESHNESS_SCHEDULER_PRINCIPAL,
+                    principal_type="WORKER",
+                    organization_id=organization_id,
+                    roles=frozenset({"SchedulerWorker"}),
+                )
+                # R11-B8: observe first, so each contract is judged on a
+                # watermark read in this pass. Before this nothing ever wrote
+                # an observation, and every approved contract read STALE.
+                await observe_freshness_for_datasource(
+                    session,
+                    organization_id=organization_id,
+                    datasource_id=datasource_id,
+                    context=context,
+                    gateway=gateway,
+                    max_tables=settings.freshness_evaluation_max_tables,
+                    now=effective_now,
+                )
                 await evaluate_freshness_for_datasource(
                     session,
                     organization_id=organization_id,
                     datasource_id=datasource_id,
-                    context=SecurityContext(
-                        principal_id=FRESHNESS_SCHEDULER_PRINCIPAL,
-                        principal_type="WORKER",
-                        organization_id=organization_id,
-                        roles=frozenset({"SchedulerWorker"}),
-                    ),
+                    context=context,
                     now=effective_now,
                     max_tables=settings.freshness_evaluation_max_tables,
                 )
@@ -772,7 +788,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # is free; this never generates.
     await run_model_route_reachability_pass(settings, now=now)
     await run_classification_propagation_pass(settings, now=now)
-    # R11-B8: DQ-2's watermark contracts, evaluated on a cadence instead of
+    # R11-B8: DQ-2's watermark contracts, observed and evaluated on a cadence instead of
     # only when a screen asks. Off by default
     # (`freshness_evaluation_interval_minutes`), and the pass returns before
     # opening a session when off -- the same shape as the propagation pass
