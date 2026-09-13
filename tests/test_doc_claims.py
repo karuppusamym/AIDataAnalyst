@@ -214,6 +214,30 @@ RETIRED_SOURCE_PATHS: dict[str, str] = {
         "`d41a7b8e6c02`). No screen was ever built against it and nothing outside its "
         "own test module called it; KG-5 is open again, not delivered."
     ),
+    "src/atlas/modules/identity_tenancy/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+    "src/atlas/modules/ingestion/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+    "src/atlas/modules/observability_audit/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
+    "src/atlas/modules/profiling/api.py": (
+        "a docstring-only public-interface stub (\"Status: scaffold only\"), removed by "
+        "R11-X4 (2026-09-13) once the S6 relocation was decided against. Nothing had "
+        "moved behind it; the module's real code is its models, schemas and router, "
+        "guarded by its import-linter privacy contract."
+    ),
 }
 
 RETIRED_SOURCE_BASENAMES = {path.rsplit("/", 1)[-1] for path in RETIRED_SOURCE_PATHS}

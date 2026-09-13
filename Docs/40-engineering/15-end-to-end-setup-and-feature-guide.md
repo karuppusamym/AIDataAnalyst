@@ -477,7 +477,7 @@ test, and a token whose roles claim merely contained the string
 
 ## 8. Closing the remaining work: what needs you
 
-*A dated snapshot taken 2026-09-13 against 7 PARTIAL rows. Status lives in
+*A dated snapshot taken 2026-09-13 against 6 PARTIAL rows. Status lives in
 [tracker section P](../60-delivery/03-tracker.md), not here — if the two
 disagree, section P is right and this list is stale.*
 
@@ -499,16 +499,12 @@ anything from you.
 | R11-X5 | **Done.** Every backend capability still without a screen has an owner and a date on the tracker; four had gained one since the triage |
 | R11-S9 | **Done.** Every setting that ships switched off has a recorded decision, checked by a test; one redundant switch was retired and none was turned on to shrink the count |
 | R11-X2 | **Done.** Five tables nothing used are retired. ADR-0018's unenforced hard wall and assignment rules wait until they are built with their enforcement (API version 2.0.0) |
+| R11-X4 | **Done.** The module relocation does not go ahead (R11-S6 cancelled), so the 32 empty scaffold files that were waiting for it are removed |
 
 ### 8.2 Decisions only you can make
 
-For each of these I will bring a recommendation; none will be acted on
-without your yes, because each one removes something or commits to building
-it.
-
-| Row | The decision |
-|---|---|
-| R11-X4 | Whether the remaining module relocation (S6) goes ahead. The empty scaffolds cannot be removed until it is decided. |
+*None open.* Every decision this section listed was taken on 2026-09-13 on your
+delegation, and each is recorded on its tracker row and summarised in 8.1.
 
 ### 8.3 Things only you can provide
 

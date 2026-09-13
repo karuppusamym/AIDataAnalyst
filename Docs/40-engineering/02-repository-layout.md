@@ -139,11 +139,11 @@ One image, four entrypoints (ADR-0011).
 
 ## 5. Test placement
 
-> **Implementation status (2026-08-30). Target.** `pyproject.toml` sets
-> `testpaths = ["tests"]` and `tests/` is flat — none of the four directories below exists,
-> and `pytest src/atlas/modules/<name>` is not a supported invocation. The one module-local
-> test file, `src/atlas/modules/identity_tenancy/tests/test_module_scaffold.py`, is outside
-> the collected path.
+> **Implementation status (re-measured 2026-09-13). Target.** `pyproject.toml` sets
+> `testpaths = ["tests", "src/atlas"]`, so `pytest src/atlas/modules/<name>` is a supported
+> invocation, but `tests/` is still flat — none of the four directories below exists. The
+> module-local tests are `src/atlas/modules/catalog/tests/test_module_scaffold.py` and
+> `connectivity`'s; the other four modules' went with their empty scaffolds (R11-X4).
 
 | Test kind | Location | Runs |
 |---|---|---|

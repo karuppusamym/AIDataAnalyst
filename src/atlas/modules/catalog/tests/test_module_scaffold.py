@@ -15,16 +15,14 @@ _PRIVATE_MODULES = ("models", "schemas", "repository", "service")
 
 
 def test_public_surface_imports_cleanly() -> None:
-    """The two public files (`api.py`, `contracts.py`) must import
+    """The public file (`api.py`) must import
     without error and without requiring anything from the rest of the
     codebase -- they are this module's entire surface to the outside
     world.
     """
     api = importlib.import_module("atlas.modules.catalog.api")
-    contracts = importlib.import_module("atlas.modules.catalog.contracts")
 
     assert api is not None
-    assert contracts is not None
 
 
 def test_private_files_are_not_imported_by_the_public_surface() -> None:
@@ -34,7 +32,7 @@ def test_private_files_are_not_imported_by_the_public_surface() -> None:
     `api.py`/`contracts.py` re-exports.
     """
     module_dir = Path(__file__).resolve().parent.parent
-    for public_file in ("api.py", "contracts.py"):
+    for public_file in ("api.py",):
         tree = ast.parse((module_dir / public_file).read_text(encoding="utf-8"))
         imported_names = set()
         for node in ast.walk(tree):

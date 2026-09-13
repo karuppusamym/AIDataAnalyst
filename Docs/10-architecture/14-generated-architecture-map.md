@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-386 Python modules under `src/`, 1916 intra-`src` import edges.
+346 Python modules under `src/`, 1916 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -22,12 +22,12 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 63 |
 | aida domain modules | everything else flat in `aida.*` | 220 |
-| atlas.modules.catalog | `atlas.modules.catalog.*` | 12 |
-| atlas.modules.connectivity | `atlas.modules.connectivity.*` | 12 |
-| atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 12 |
-| atlas.modules.ingestion | `atlas.modules.ingestion.*` | 12 |
-| atlas.modules.observability_audit | `atlas.modules.observability_audit.*` | 12 |
-| atlas.modules.profiling | `atlas.modules.profiling.*` | 12 |
+| atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
+| atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
+| atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
+| atlas.modules.ingestion | `atlas.modules.ingestion.*` | 4 |
+| atlas.modules.observability_audit | `atlas.modules.observability_audit.*` | 4 |
+| atlas.modules.profiling | `atlas.modules.profiling.*` | 4 |
 | aida.connectors | `aida.connectors.*` | 12 |
 | aida.workflows | `aida.workflows.*` | 7 |
 | aida.projectors | `aida.projectors.*` | 3 |
@@ -50,12 +50,12 @@ graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>63 modules"]
   domain["aida domain modules<br/>220 modules"]
-  ctx_catalog["atlas.modules.catalog<br/>12 modules"]
-  ctx_connectivity["atlas.modules.connectivity<br/>12 modules"]
-  ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>12 modules"]
-  ctx_ingestion["atlas.modules.ingestion<br/>12 modules"]
-  ctx_observability_audit["atlas.modules.observability_audit<br/>12 modules"]
-  ctx_profiling["atlas.modules.profiling<br/>12 modules"]
+  ctx_catalog["atlas.modules.catalog<br/>9 modules"]
+  ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
+  ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
+  ctx_ingestion["atlas.modules.ingestion<br/>4 modules"]
+  ctx_observability_audit["atlas.modules.observability_audit<br/>4 modules"]
+  ctx_profiling["atlas.modules.profiling<br/>4 modules"]
   connectors["aida.connectors<br/>12 modules"]
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
@@ -144,7 +144,7 @@ whether code can run in it at all — not whether it does.
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 340 of 386 modules.
+Union of all five: 340 of 346 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -154,12 +154,12 @@ Per group, how much of each group each process pulls in:
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 63 | 0 | 2 | 1 | 0 | 63 |
 | aida domain modules | 205 | 68 | 108 | 33 | 6 | 220 |
-| atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 12 |
-| atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 12 |
-| atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 12 |
-| atlas.modules.ingestion | 4 | 3 | 3 | 3 | 2 | 12 |
-| atlas.modules.observability_audit | 4 | 3 | 3 | 3 | 2 | 12 |
-| atlas.modules.profiling | 3 | 3 | 3 | 3 | 2 | 12 |
+| atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
+| atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
+| atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
+| atlas.modules.ingestion | 4 | 3 | 3 | 3 | 2 | 4 |
+| atlas.modules.observability_audit | 4 | 3 | 3 | 3 | 2 | 4 |
+| atlas.modules.profiling | 3 | 3 | 3 | 3 | 2 | 4 |
 | aida.connectors | 12 | 11 | 12 | 0 | 0 | 12 |
 | aida.workflows | 5 | 6 | 4 | 0 | 0 | 7 |
 | aida.projectors | 0 | 0 | 2 | 2 | 2 | 3 |
@@ -201,12 +201,12 @@ public face is being used or a compatibility shim still stands in front of it.
 
 | Context | Modules | Owned tables | Routes | Mounted via | Privacy contract |
 |---|---:|---:|---:|---|---|
-| [`catalog`](../20-modules/domain-guides/catalog.md) | 12 | 7 | 10 | `atlas.modules.catalog.api` (public face) | `catalog module privacy` |
-| [`connectivity`](../20-modules/domain-guides/connectivity.md) | 12 | 2 | 7 | `atlas.modules.connectivity.api` (public face) | `connectivity module privacy` |
-| [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 12 | 17 | 29 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
-| [`ingestion`](../20-modules/domain-guides/ingestion.md) | 12 | 3 | 15 | `aida.ingestion_api` (compatibility shim) | `ingestion module privacy` |
-| [`observability_audit`](../20-modules/domain-guides/observability-audit.md) | 12 | 9 | 2 | `aida.observability_api` (compatibility shim) | `observability_audit module privacy` |
-| [`profiling`](../20-modules/domain-guides/profiling.md) | 12 | 9 | 0 | not mounted from `aida.main` | `profiling module privacy` |
+| [`catalog`](../20-modules/domain-guides/catalog.md) | 9 | 7 | 10 | `atlas.modules.catalog.api` (public face) | `catalog module privacy` |
+| [`connectivity`](../20-modules/domain-guides/connectivity.md) | 7 | 2 | 7 | `atlas.modules.connectivity.api` (public face) | `connectivity module privacy` |
+| [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 4 | 17 | 29 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
+| [`ingestion`](../20-modules/domain-guides/ingestion.md) | 4 | 3 | 15 | `aida.ingestion_api` (compatibility shim) | `ingestion module privacy` |
+| [`observability_audit`](../20-modules/domain-guides/observability-audit.md) | 4 | 9 | 2 | `aida.observability_api` (compatibility shim) | `observability_audit module privacy` |
+| [`profiling`](../20-modules/domain-guides/profiling.md) | 4 | 9 | 0 | not mounted from `aida.main` | `profiling module privacy` |
 
 Each context's own guide is linked from the name. Owned tables, per context:
 
@@ -225,12 +225,12 @@ push rather than described.
 
 | Contract | Type | Guards |
 |---|---|---|
-| identity_tenancy module privacy | protected | 6 protected module(s), 12 allowed importer(s) |
-| connectivity module privacy | protected | 6 protected module(s), 11 allowed importer(s) |
-| ingestion module privacy | protected | 6 protected module(s), 12 allowed importer(s) |
-| catalog module privacy | protected | 6 protected module(s), 13 allowed importer(s) |
-| observability_audit module privacy | protected | 6 protected module(s), 12 allowed importer(s) |
-| profiling module privacy | protected | 6 protected module(s), 11 allowed importer(s) |
+| identity_tenancy module privacy | protected | 3 protected module(s), 6 allowed importer(s) |
+| connectivity module privacy | protected | 3 protected module(s), 7 allowed importer(s) |
+| ingestion module privacy | protected | 3 protected module(s), 6 allowed importer(s) |
+| catalog module privacy | protected | 5 protected module(s), 11 allowed importer(s) |
+| observability_audit module privacy | protected | 3 protected module(s), 6 allowed importer(s) |
+| profiling module privacy | protected | 3 protected module(s), 5 allowed importer(s) |
 | INV-2 connector SQL execution is reachable only from the query gateway | protected | 1 protected module(s), 1 allowed importer(s) |
 | security_types never depends on api (leaf-module ratchet) | forbidden | 1 source module(s) may not import 1 module(s) |
 | C4 / ST-11 lineage and intelligence modules never import the query gateway | forbidden | 12 source module(s) may not import 1 module(s) |

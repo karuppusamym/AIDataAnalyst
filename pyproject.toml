@@ -164,23 +164,14 @@ root_packages = ["aida", "atlas"]
 name = "identity_tenancy module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.identity_tenancy.service",
-  "atlas.modules.identity_tenancy.repository",
   "atlas.modules.identity_tenancy.models",
   "atlas.modules.identity_tenancy.schemas",
   "atlas.modules.identity_tenancy.router",
-  "atlas.modules.identity_tenancy.workers",
 ]
 allowed_importers = [
-  "atlas.modules.identity_tenancy.api",
-  "atlas.modules.identity_tenancy.contracts",
-  "atlas.modules.identity_tenancy.service",
-  "atlas.modules.identity_tenancy.repository",
   "atlas.modules.identity_tenancy.models",
   "atlas.modules.identity_tenancy.schemas",
   "atlas.modules.identity_tenancy.router",
-  "atlas.modules.identity_tenancy.workers",
-  "atlas.modules.identity_tenancy.tests",
   "aida.models",
   "aida.schemas",
   # ST-07 Commit C for identity_tenancy (2026-09-03): workspace_api moved into
@@ -202,22 +193,15 @@ allowed_importers = [
 name = "connectivity module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.connectivity.service",
-  "atlas.modules.connectivity.repository",
   "atlas.modules.connectivity.models",
   "atlas.modules.connectivity.schemas",
   "atlas.modules.connectivity.router",
-  "atlas.modules.connectivity.workers",
 ]
 allowed_importers = [
   "atlas.modules.connectivity.api",
-  "atlas.modules.connectivity.contracts",
-  "atlas.modules.connectivity.service",
-  "atlas.modules.connectivity.repository",
   "atlas.modules.connectivity.models",
   "atlas.modules.connectivity.schemas",
   "atlas.modules.connectivity.router",
-  "atlas.modules.connectivity.workers",
   "atlas.modules.connectivity.tests",
   "aida.models",
   "aida.schemas",
@@ -229,23 +213,14 @@ allowed_importers = [
 name = "ingestion module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.ingestion.service",
-  "atlas.modules.ingestion.repository",
   "atlas.modules.ingestion.models",
   "atlas.modules.ingestion.schemas",
   "atlas.modules.ingestion.router",
-  "atlas.modules.ingestion.workers",
 ]
 allowed_importers = [
-  "atlas.modules.ingestion.api",
-  "atlas.modules.ingestion.contracts",
-  "atlas.modules.ingestion.service",
-  "atlas.modules.ingestion.repository",
   "atlas.modules.ingestion.models",
   "atlas.modules.ingestion.schemas",
   "atlas.modules.ingestion.router",
-  "atlas.modules.ingestion.workers",
-  "atlas.modules.ingestion.tests",
   "aida.models",
   "aida.schemas",
   # ST-07 Commit C for ingestion (2026-09-03): ingestion_api moved into
@@ -269,17 +244,14 @@ protected_modules = [
   "atlas.modules.catalog.models",
   "atlas.modules.catalog.schemas",
   "atlas.modules.catalog.router",
-  "atlas.modules.catalog.workers",
 ]
 allowed_importers = [
   "atlas.modules.catalog.api",
-  "atlas.modules.catalog.contracts",
   "atlas.modules.catalog.service",
   "atlas.modules.catalog.repository",
   "atlas.modules.catalog.models",
   "atlas.modules.catalog.schemas",
   "atlas.modules.catalog.router",
-  "atlas.modules.catalog.workers",
   "atlas.modules.catalog.tests",
   "aida.models",
   "aida.schemas",
@@ -303,23 +275,14 @@ allowed_importers = [
 name = "observability_audit module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.observability_audit.service",
-  "atlas.modules.observability_audit.repository",
   "atlas.modules.observability_audit.models",
   "atlas.modules.observability_audit.schemas",
   "atlas.modules.observability_audit.router",
-  "atlas.modules.observability_audit.workers",
 ]
 allowed_importers = [
-  "atlas.modules.observability_audit.api",
-  "atlas.modules.observability_audit.contracts",
-  "atlas.modules.observability_audit.service",
-  "atlas.modules.observability_audit.repository",
   "atlas.modules.observability_audit.models",
   "atlas.modules.observability_audit.schemas",
   "atlas.modules.observability_audit.router",
-  "atlas.modules.observability_audit.workers",
-  "atlas.modules.observability_audit.tests",
   "aida.models",
   "aida.schemas",
   # ST-07 Commit C for observability_audit (2026-09-03): observability_api
@@ -366,23 +329,14 @@ allowed_importers = [
 name = "profiling module privacy"
 type = "protected"
 protected_modules = [
-  "atlas.modules.profiling.service",
-  "atlas.modules.profiling.repository",
   "atlas.modules.profiling.models",
   "atlas.modules.profiling.schemas",
   "atlas.modules.profiling.router",
-  "atlas.modules.profiling.workers",
 ]
 allowed_importers = [
-  "atlas.modules.profiling.api",
-  "atlas.modules.profiling.contracts",
-  "atlas.modules.profiling.service",
-  "atlas.modules.profiling.repository",
   "atlas.modules.profiling.models",
   "atlas.modules.profiling.schemas",
   "atlas.modules.profiling.router",
-  "atlas.modules.profiling.workers",
-  "atlas.modules.profiling.tests",
   "aida.models",
   "aida.schemas",
 ]
