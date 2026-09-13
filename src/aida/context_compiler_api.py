@@ -16,6 +16,7 @@ from aida.context_compiler import (
     validate_compiled_artifact,
 )
 from aida.context_path import derive_context_path
+from aida.context_product_api import _enforce_capability_envelope
 from aida.context_product_policy import (
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
@@ -153,6 +154,14 @@ async def _load_source(
     product = await session.get(ContextProduct, version.product_id)
     if product is None or product.lifecycle_status != "ACTIVE":
         raise HTTPException(status_code=404, detail="context product version not found")
+    # R11-C6 finding 12: compile and its download read a product's governed
+    # content by version id -- the same kind of door as the version reads,
+    # which gate on the envelope -- and asked only roles. So an agent whose
+    # envelope omitted a product could still compile it. Both routes load
+    # through here, so one check covers both. It sits above the role, purpose
+    # and quality gates so an out-of-envelope agent learns nothing from which
+    # of those it would have failed.
+    await _enforce_capability_envelope(session, context, product, version)
     lifecycle_reader = bool(
         context.roles & {"PlatformAdmin", "MetadataAdmin", "DataProductOwner", "DataSteward"}
     )
