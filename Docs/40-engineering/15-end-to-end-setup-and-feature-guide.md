@@ -477,7 +477,7 @@ test, and a token whose roles claim merely contained the string
 
 ## 8. Closing the remaining work: what needs you
 
-*A dated snapshot taken 2026-09-12 against 16 PARTIAL rows. Status lives in
+*A dated snapshot taken 2026-09-12 against 14 PARTIAL rows. Status lives in
 [tracker section P](../60-delivery/03-tracker.md), not here — if the two
 disagree, section P is right and this list is stale.*
 
@@ -489,11 +489,10 @@ anything from you.
 | Row | What is left |
 |---|---|
 | R11-D6 | **Done.** Every session transition was exercised in a browser under real OIDC. It found that a *rejected* token was reported as *expired* — now told apart, so a misconfigured identity provider no longer sends you into a sign-in loop |
-| R11-B2 | Score generated SQL by execution match against the live model route |
+| R11-B2 | **Measured.** `scripts/execution_match_benchmark.py` asks each question through Ask and compares the rows it returns with a known-correct query's rows. Every answered question matched (5 of 5). Two were wrongly refused, which needs a decision from you (8.2) |
 | R11-C1 | **Done.** Run it yourself: `./.venv/Scripts/python.exe scripts/verify_ontology_lifecycle.py` — draft, a refused self-approval, independent approval, publication. It publishes a new version each run |
-| R11-C6 | A per-agent allowlist over the native MCP tools, and a filter on the project-level product listing |
-| R11-C8 | **Partly done:** bulk TAG and CLASSIFY operations can now be reversed, restoring exactly what they overwrote. Still to do: the same for ownership, term deprecation and leaver reassignment, and a withdrawal path for enrichment annotations |
-| R11-B8 | Something that actually writes freshness observations — today nothing does, so every freshness contract correctly reads STALE |
+| R11-C6 | **Mostly done:** the project-level product listing and context-product compile now honour the agent's contract. Left: a per-agent allowlist over the native MCP tools, which needs a change to the contract schema |
+| R11-C8 | **Mostly done:** every bulk stewardship operation can now be reversed, restoring exactly what it overwrote, and a change a person made since is never overwritten. Left: a withdrawal path for enrichment annotations, a check that a filed reversal is actually decided, and a test of maker-checker on reversals in its own right |
 
 ### 8.2 Decisions only you can make
 
@@ -509,6 +508,8 @@ it.
 | R11-X4 | Whether the remaining module relocation (S6) goes ahead. The empty scaffolds cannot be removed until it is decided. |
 | R11-C3 | Unattended review approved 9 of 14 deliberately false proposals and no fix exists. Keep it off permanently, or fund a real adjudication mechanism. |
 | R11-C7 | Screening every row a tool returns is the bulk projection the design forbids. Accept the existing control (INV-3) and close, or reopen the design. |
+| R11-B2 | Ask refuses some legitimate questions. A governed tool is chosen because its description mentions the question's columns, and then asks for an input the question never mentioned (a branch code). Fix it by rewriting that tool's description (fixes only the demo); by never choosing a tool whose required input the question does not mention, so the model answers instead (**recommended**); or by weighting description matches lower (changes every ranking). |
+| R11-B8 | Freshness can never read green. Nothing records when data last changed, and the only way to learn it is reading `MAX(<timestamp column>)` from the source, which ADR-0014's list of value-free statistics does not include. Permit it narrowly -- only for the column named in an approved freshness contract, storing that one time and never rows (**recommended**) -- or keep freshness unmeasured. A last-activity time can itself be sensitive, which is why this is yours to decide. |
 
 ### 8.3 Things only you can provide
 
