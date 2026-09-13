@@ -4553,14 +4553,11 @@ export interface StudioParameterContractValidateResult {
 }
 
 export interface StudioTestResultRead {
-  id: string;
   change_set_id: string;
   started_at: string;
   completed_at: string | null;
   passed: boolean;
   evidence: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
 }
 
 /** One table's authored documentation, in the same shape the column pane */
@@ -5124,7 +5121,6 @@ export interface WorkspaceCreate {
   name: string;
   slug: string;
   purpose?: string;
-  isolation_boundary_id?: string | null;
   monthly_cost_ceiling?: number | null;
 }
 
@@ -5161,7 +5157,6 @@ export interface WorkspaceMembershipRead {
 export interface WorkspaceRead {
   id: string;
   organization_id: string;
-  isolation_boundary_id: string | null;
   name: string;
   slug: string;
   purpose: string;

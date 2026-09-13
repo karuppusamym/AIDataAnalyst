@@ -145,39 +145,3 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
         ForeignKey("deep_procedure_lineage_edge.id", ondelete="SET NULL")
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
-
-
-class ProcedureToolGenerationRecord(Base, TimestampMixin):
-    """Provenance for one N12 "procedure -> governed tool" draft: which
-    routine it was generated from, the exact redacted-body hash the
-    read-only proof was computed against, and how many statements that proof
-    covered. `GovernedToolVersion` (`models.py`) carries no pointer back to
-    the routine it came from and this table is deliberately never that
-    pointer's replacement -- it is the audit trail proving *this specific*
-    draft passed N12's eligibility gate (fully parsed, zero writes, exactly
-    one terminal result statement), independent of anything that later
-    happens to the tool version itself (edited, republished, deprecated).
-    """
-
-    __tablename__ = "procedure_tool_generation_record"
-    __table_args__ = (
-        Index("ix_procedure_tool_generation_record_routine", "routine_id"),
-        Index("ix_procedure_tool_generation_record_tool_version", "tool_version_id"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    datasource_id: Mapped[UUID] = mapped_column(
-        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    routine_id: Mapped[UUID] = mapped_column(
-        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    tool_version_id: Mapped[UUID] = mapped_column(
-        ForeignKey("governed_tool_version.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    statement_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)

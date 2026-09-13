@@ -52,7 +52,7 @@ const POLICY: AccessPolicyRead = {
 };
 
 const WORKSPACE: WorkspaceRead = {
-  id: "ws_governed_analytics", organization_id: ORG_ID, isolation_boundary_id: null,
+  id: "ws_governed_analytics", organization_id: ORG_ID,
   name: "Governed analytics", slug: "governed-analytics", purpose: "Curated workspace.",
   status: "ACTIVE", monthly_cost_ceiling: null,
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",

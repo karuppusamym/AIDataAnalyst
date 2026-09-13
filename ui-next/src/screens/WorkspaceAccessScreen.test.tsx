@@ -69,7 +69,7 @@ vi.mock("../lib/api", async (importOriginal) => {
 });
 
 const WORKSPACE: WorkspaceRead = {
-  id: "ws_governed_analytics", organization_id: ORG, isolation_boundary_id: null,
+  id: "ws_governed_analytics", organization_id: ORG,
   name: "Governed analytics", slug: "governed-analytics", purpose: "Curated analysis",
   status: "ACTIVE", monthly_cost_ceiling: null,
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",

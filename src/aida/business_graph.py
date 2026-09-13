@@ -379,7 +379,6 @@ async def assign(
     assigned_by: str,
     assignment_kind: str = "MANUAL",
     confidence: float | None = None,
-    rule_id: UUID | None = None,
     as_of: datetime | None = None,
 ) -> BusinessAssignment:
     """Attach an object to a business node from `as_of` onward.
@@ -409,7 +408,6 @@ async def assign(
             # supplies an explicit `as_of`, or when two writes land in one clock tick.
             row.assignment_kind = assignment_kind
             row.confidence = confidence
-            row.rule_id = rule_id
             row.assigned_by = assigned_by
             await session.flush()
             return row
@@ -422,7 +420,6 @@ async def assign(
         target_id=target_id,
         assignment_kind=assignment_kind,
         confidence=confidence,
-        rule_id=rule_id,
         assigned_by=assigned_by,
         effective_from=moment,
     )

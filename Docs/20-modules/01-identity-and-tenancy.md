@@ -36,10 +36,10 @@ P4 (rotate a credential without an outage), and the tenancy foundation for every
 
 ```text
 # Access axis (ADR-0018) -- the only axis with permission semantics
-organization, workspace, workspace_membership, source_binding, isolation_boundary
+organization, workspace, workspace_membership, source_binding
 
 # Classification axis (ADR-0018) -- grants nothing; policy keys on it
-business_node, business_assignment, business_assignment_rule
+business_node, business_assignment
 
 # Pre-ADR-0018 tenancy levels: still authoritative during the transition
 line_of_business, data_domain, project
@@ -53,8 +53,9 @@ identity_provider_config
 > **`legal_entity` is not part of this model** (corrected 2026-08-30). It appeared here and in
 > ADR-0005 but has never existed in the schema — there is no `LegalEntity` model anywhere in
 > `src/`. ADR-0018 withdraws it rather than deferring it: a legal-entity requirement is served
-> either by an `isolation_boundary` or by a classification attribute, both of which that ADR
-> defines. Two documents previously disagreed in writing about this and about `data_domain`
+> by a classification attribute and a policy that denies across it (ADR-0018's 2026-09-13
+> addendum retires the unenforced `isolation_boundary` until a hard wall is built with its
+> enforcement). Two documents previously disagreed in writing about this and about `data_domain`
 > (which *does* exist, with a model and a migration); both are now settled.
 >
 > **Direction of travel (ADR-0018).** `line_of_business` and `data_domain` move off the tenancy

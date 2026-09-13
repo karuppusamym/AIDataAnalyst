@@ -477,7 +477,7 @@ test, and a token whose roles claim merely contained the string
 
 ## 8. Closing the remaining work: what needs you
 
-*A dated snapshot taken 2026-09-13 against 8 PARTIAL rows. Status lives in
+*A dated snapshot taken 2026-09-13 against 7 PARTIAL rows. Status lives in
 [tracker section P](../60-delivery/03-tracker.md), not here — if the two
 disagree, section P is right and this list is stale.*
 
@@ -498,6 +498,7 @@ anything from you.
 | R11-C7 | **Done.** INV-3 is accepted as the control for rows a tool call returns |
 | R11-X5 | **Done.** Every backend capability still without a screen has an owner and a date on the tracker; four had gained one since the triage |
 | R11-S9 | **Done.** Every setting that ships switched off has a recorded decision, checked by a test; one redundant switch was retired and none was turned on to shrink the count |
+| R11-X2 | **Done.** Five tables nothing used are retired. ADR-0018's unenforced hard wall and assignment rules wait until they are built with their enforcement (API version 2.0.0) |
 
 ### 8.2 Decisions only you can make
 
@@ -507,7 +508,6 @@ it.
 
 | Row | The decision |
 |---|---|
-| R11-X2 | For two tables nothing uses (`business_assignment_rule`, `isolation_boundary`): build a writer, or retire them. For three that are written but never read (`contract_sla_record`, `procedure_tool_generation_record`, `studio_test_run`): build a reader, or retire them. Retiring drops a table. |
 | R11-X4 | Whether the remaining module relocation (S6) goes ahead. The empty scaffolds cannot be removed until it is decided. |
 
 ### 8.3 Things only you can provide

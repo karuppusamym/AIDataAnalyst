@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-386 Python modules under `src/`, 1917 intra-`src` import edges.
+386 Python modules under `src/`, 1916 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -60,7 +60,7 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|533| domain
+  routers -->|532| domain
   app -->|62| routers
   domain -->|45| platform
   workflows -->|45| domain
@@ -203,7 +203,7 @@ public face is being used or a compatibility shim still stands in front of it.
 |---|---:|---:|---:|---|---|
 | [`catalog`](../20-modules/domain-guides/catalog.md) | 12 | 7 | 10 | `atlas.modules.catalog.api` (public face) | `catalog module privacy` |
 | [`connectivity`](../20-modules/domain-guides/connectivity.md) | 12 | 2 | 7 | `atlas.modules.connectivity.api` (public face) | `connectivity module privacy` |
-| [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 12 | 19 | 29 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
+| [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 12 | 17 | 29 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
 | [`ingestion`](../20-modules/domain-guides/ingestion.md) | 12 | 3 | 15 | `aida.ingestion_api` (compatibility shim) | `ingestion module privacy` |
 | [`observability_audit`](../20-modules/domain-guides/observability-audit.md) | 12 | 9 | 2 | `aida.observability_api` (compatibility shim) | `observability_audit module privacy` |
 | [`profiling`](../20-modules/domain-guides/profiling.md) | 12 | 9 | 0 | not mounted from `aida.main` | `profiling module privacy` |
@@ -212,7 +212,7 @@ Each context's own guide is linked from the name. Owned tables, per context:
 
 - **catalog** — `metadata_catalog`, `metadata_schema`, `metadata_table`, `metadata_column`, `metadata_constraint`, `metadata_index`, `metadata_partition`
 - **connectivity** — `datasource`, `connector_certification_run`
-- **identity_tenancy** — `organization`, `organization_integration_policy`, `line_of_business`, `data_domain`, `cross_boundary_grant`, `isolation_boundary`, `workspace`, `workspace_membership`, `workspace_access_rule`, `authorization_shadow_record`, `source_binding`, `business_node`, `business_assignment`, `business_assignment_rule`, `business_node_closure`, `business_node_rollup`, `project`, `delegation`, `revoked_token`
+- **identity_tenancy** — `organization`, `organization_integration_policy`, `line_of_business`, `data_domain`, `cross_boundary_grant`, `workspace`, `workspace_membership`, `workspace_access_rule`, `authorization_shadow_record`, `source_binding`, `business_node`, `business_assignment`, `business_node_closure`, `business_node_rollup`, `project`, `delegation`, `revoked_token`
 - **ingestion** — `metadata_ingestion_job`, `metadata_ingestion_batch`, `metadata_ingestion_chunk`
 - **observability_audit** — `outbox_event`, `audit_archive_record`, `audit_archive_membership`, `audit_archive_lease`, `audit_event`, `compliance_pack`, `access_review_report`, `delivery_intent`, `delivery_attempt`
 - **profiling** — `classification_evidence`, `column_derived_classification`, `analysis_run`, `analysis_task`, `scan_policy`, `table_profile`, `column_profile`, `profiling_exception_policy`, `column_value_profile_artifact`

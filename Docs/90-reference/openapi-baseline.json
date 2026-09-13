@@ -27075,20 +27075,10 @@
             ],
             "title": "Completed At"
           },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
           "evidence": {
             "additionalProperties": true,
             "title": "Evidence",
             "type": "object"
-          },
-          "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
           },
           "passed": {
             "title": "Passed",
@@ -27098,22 +27088,14 @@
             "format": "date-time",
             "title": "Started At",
             "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
           }
         },
         "required": [
-          "id",
           "change_set_id",
           "started_at",
           "completed_at",
           "passed",
-          "evidence",
-          "created_at",
-          "updated_at"
+          "evidence"
         ],
         "title": "StudioTestResultRead",
         "type": "object"
@@ -30439,18 +30421,6 @@
       "WorkspaceCreate": {
         "additionalProperties": false,
         "properties": {
-          "isolation_boundary_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Isolation Boundary Id"
-          },
           "monthly_cost_ceiling": {
             "anyOf": [
               {
@@ -30676,18 +30646,6 @@
             "title": "Id",
             "type": "string"
           },
-          "isolation_boundary_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Isolation Boundary Id"
-          },
           "monthly_cost_ceiling": {
             "anyOf": [
               {
@@ -30729,7 +30687,6 @@
         "required": [
           "id",
           "organization_id",
-          "isolation_boundary_id",
           "name",
           "slug",
           "purpose",
@@ -30794,7 +30751,7 @@
   "info": {
     "description": "Governed metadata, semantic intelligence, and analytical control-plane API.",
     "title": "Bank Data Intelligence Platform API",
-    "version": "1.2.0"
+    "version": "2.0.0"
   },
   "openapi": "3.1.0",
   "paths": {

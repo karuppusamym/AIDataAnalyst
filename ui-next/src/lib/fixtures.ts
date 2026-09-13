@@ -998,7 +998,6 @@ const FIXTURE_WORKSPACES: WorkspaceRead[] = [
   {
     id: "ws_governed_analytics",
     organization_id: "00000000-0000-0000-0000-000000000001",
-    isolation_boundary_id: null,
     name: "Governed analytics",
     slug: "governed-analytics",
     purpose: "Curated workspace for governed analysis across approved project sources.",
@@ -1086,7 +1085,6 @@ export async function makeFixtureCreateWorkspace(
   const workspace: WorkspaceRead = {
     id: `ws_${body.slug}`,
     organization_id: organizationId,
-    isolation_boundary_id: body.isolation_boundary_id ?? null,
     name: body.name,
     slug: body.slug,
     purpose: body.purpose ?? "",

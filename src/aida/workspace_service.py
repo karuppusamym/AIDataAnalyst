@@ -266,7 +266,6 @@ async def authorize(
             roles=frozenset(context.roles) | roles,
             workspace_id=workspace_id,
             purpose=context.business_purpose,
-            isolation_boundary_id=workspace.isolation_boundary_id,
         ),
         Resource(
             resource_type=resource_type,
@@ -375,7 +374,6 @@ async def create_workspace(
     slug: str,
     purpose: str,
     owner_principal: str,
-    isolation_boundary_id: UUID | None = None,
     monthly_cost_ceiling: int | None = None,
 ) -> Workspace:
     """Create a workspace and seat its first owner in one step.
@@ -390,7 +388,6 @@ async def create_workspace(
         name=name,
         slug=slug,
         purpose=purpose,
-        isolation_boundary_id=isolation_boundary_id,
         monthly_cost_ceiling=monthly_cost_ceiling,
     )
     session.add(workspace)

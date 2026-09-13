@@ -68,7 +68,7 @@ Explicitly NOT moved here: `NotificationRuleRecord`/`NotificationEventRecord`
 ("routing rule for quality incidents" -- module 11 data-quality's domain),
 `FreshnessWatermarkConfig`/`FreshnessObservation` (also module 11, register's
 "freshness contracts, SLAs"), and `ContractViolationRecord`/
-`ContractSlaRecord`/`DataContractVersion` (data-product contracts, keyed off
+`DataContractVersion` (data-product contracts, keyed off
 `product_id`, not this module's audit ledger). All stay in `aida.models`.
 """
 

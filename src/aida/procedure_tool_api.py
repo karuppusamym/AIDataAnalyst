@@ -23,7 +23,6 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit
-from aida.procedure_lineage_models import ProcedureToolGenerationRecord
 from aida.procedure_tool_blueprint import (
     ProcedureNotEligibleError,
     ProcedureToolBlueprintError,
@@ -130,16 +129,23 @@ async def create_procedure_tool_blueprint(
         project, datasource, create_body, context=context, session=session, settings=settings
     )
 
-    session.add(
-        ProcedureToolGenerationRecord(
-            organization_id=project.organization_id,
-            datasource_id=datasource.id,
-            routine_id=routine.id,
-            tool_version_id=tool_version.id,
-            sql_hash=blueprint.sql_hash,
-            statement_count=blueprint.statement_count,
-            created_by=context.principal_id,
-        )
+    # R11-X2: which routine and statement a draft was generated from is evidence,
+    # and evidence is the audit record. `procedure_tool_generation_record` held the
+    # same facts in a table nothing read.
+    record_audit(
+        session,
+        context,
+        action="governed_tool.version.generated_from_procedure",
+        resource_type="governed_tool_version",
+        resource_id=str(tool_version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "routine_id": str(routine.id),
+            "datasource_id": str(datasource.id),
+            "sql_hash": blueprint.sql_hash,
+            "statement_count": blueprint.statement_count,
+        },
     )
     await session.commit()
 

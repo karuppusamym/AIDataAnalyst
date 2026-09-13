@@ -13,13 +13,13 @@ Who is asking, and on behalf of which part of the bank. The largest of the five
 contexts by owned state — 19 tables, in four families:
 
 - **The tenant hierarchy** — `organization`, `line_of_business`, `data_domain`,
-  `project`, `isolation_boundary`, `organization_integration_policy`.
+  `project`, `organization_integration_policy`.
 - **Workspaces** — `workspace`, `workspace_membership`, `workspace_access_rule`,
   `source_binding`, `authorization_shadow_record`. A workspace is where work
   happens; a source binding is a *requested and decided* right to reach a source
   from one, not an implicit consequence of being in the same tenant.
 - **The business hierarchy** — `business_node`, `business_assignment`,
-  `business_assignment_rule`, `business_node_closure`, `business_node_rollup`.
+  `business_node_closure`, `business_node_rollup`.
   The closure and rollup tables are projections kept correct as the tree changes.
 - **Delegated and revoked authority** — `delegation`, `revoked_token`,
   `cross_boundary_grant`.

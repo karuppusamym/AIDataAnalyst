@@ -32,14 +32,12 @@ from aida.db import Base
 from atlas.modules.identity_tenancy.models import (
     AuthorizationShadowRecord as AuthorizationShadowRecord,
     BusinessAssignment as BusinessAssignment,
-    BusinessAssignmentRule as BusinessAssignmentRule,
     BusinessNode as BusinessNode,
     BusinessNodeClosure as BusinessNodeClosure,
     BusinessNodeRollup as BusinessNodeRollup,
     CrossBoundaryGrant as CrossBoundaryGrant,
     DataDomain as DataDomain,
     Delegation as Delegation,
-    IsolationBoundary as IsolationBoundary,
     LineOfBusiness as LineOfBusiness,
     Organization as Organization,
     OrganizationIntegrationPolicy as OrganizationIntegrationPolicy,
@@ -3600,27 +3598,6 @@ class StudioChangeItem(Base, TimestampMixin):
     test_status: Mapped[str] = mapped_column(String(30), default="UNTESTED", nullable=False)
 
 
-class StudioTestRun(Base, TimestampMixin):
-    """Test run evidence for a Studio change set."""
-
-    __tablename__ = "studio_test_run"
-    __table_args__ = (
-        Index("ix_studio_test_run_change_set", "change_set_id"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    change_set_id: Mapped[UUID] = mapped_column(
-        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-
-
 class StudioEvalQuestion(Base, TimestampMixin):
     """A regression question mined from real usage (ST-A8).
 
@@ -3961,29 +3938,6 @@ class ContractViolationRecord(Base, TimestampMixin):
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_by: Mapped[str | None] = mapped_column(String(255))
-
-
-class ContractSlaRecord(Base, TimestampMixin):
-    """Periodic SLA compliance record for a data contract."""
-
-    __tablename__ = "contract_sla_record"
-    __table_args__ = (
-        UniqueConstraint("contract_id", "period_start", name="uq_contract_sla_period"),
-        Index("ix_contract_sla_org_contract", "organization_id", "contract_id"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    contract_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_contract_version.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    uptime_percent: Mapped[float] = mapped_column(Float, nullable=False)
-    violations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    breach_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 # ---------------------------------------------------------------------------

@@ -2657,14 +2657,11 @@ class StudioParameterContractValidateResult(ApiModel):
 
 
 class StudioTestResultRead(ApiModel):
-    id: UUID
     change_set_id: UUID
     started_at: datetime
     completed_at: datetime | None
     passed: bool
     evidence: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
 
 
 class StudioEvalQuestionRead(ApiModel):

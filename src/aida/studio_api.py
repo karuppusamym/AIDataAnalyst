@@ -29,7 +29,6 @@ from aida.models import (
     StudioEvalQuestion,
     StudioEvalResult,
     StudioEvalRun,
-    StudioTestRun,
 )
 from aida.schemas import (
     StudioChangeItemCreate,
@@ -468,16 +467,17 @@ async def run_tests(
     combined_evidence["eval_regression_checked"] = len(eval_checks)
     combined_evidence["eval_regression_failed"] = len(eval_failed)
 
-    test_run = StudioTestRun(
-        organization_id=context.organization_id,
+    # R11-X2: the result is the response and the audit record below, and is not
+    # stored a third time. `studio_test_run` held a copy nothing read back; the
+    # outcome and its counts are in `studio.change_set.test`, and each eval
+    # question's verdict is in `StudioEvalResult`.
+    test_result = StudioTestResultRead(
         change_set_id=cs.id,
         started_at=suite_result.started_at,
         completed_at=suite_result.completed_at or datetime.now(UTC),
         passed=overall_passed,
         evidence=combined_evidence,
     )
-    session.add(test_run)
-    await session.flush()
 
     record_audit(
         session,
@@ -510,7 +510,7 @@ async def run_tests(
             },
         )
 
-    return StudioTestResultRead.model_validate(test_run)
+    return test_result
 
 
 # ---------------------------------------------------------------------------

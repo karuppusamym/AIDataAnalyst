@@ -105,7 +105,7 @@ Steps 1-4 of the migration below are **built**; step 5 is deliberately a later r
 
 | Step | State |
 |---|---|
-| 1. Add `workspace` | Done — `workspace`, `workspace_membership`, `source_binding`, `isolation_boundary` models and migration `f1a2b3c4d5e6` |
+| 1. Add `workspace` | Done — `workspace`, `workspace_membership`, `source_binding`, `isolation_boundary` models and migration `f1a2b3c4d5e6`; `isolation_boundary` retired 2026-09-13, see the addendum below |
 | 2. Move LOB/domain into `business_node` + assignments | Done — migration backfills a node per `line_of_business` and per `data_domain`, preserves the parent chain, and writes `MIGRATED` assignments for every project and datasource |
 | 3. Tenancy columns nullable and read-only for one release | **In effect now.** `line_of_business`, `data_domain` and the tenancy columns on `project`/`datasource` are untouched and remain authoritative; the new axes are additive and read alongside them |
 | 4. Policy engine alongside RBAC, seeded to today's outcomes | Done — `policy_engine.py`, `access_policy`, and seeded RBAC-parity policies. The one policy that would change behaviour (agents denied sensitive classifications) is seeded `DRAFT`, so migration day changes nothing |
@@ -179,6 +179,17 @@ ungated one.
 3. Keep tenancy columns nullable and read-only for one release while call sites move to workspace scoping.
 4. Introduce the policy engine alongside RBAC, seeded so existing RBAC outcomes are the default ALLOW policies — behaviour identical on day one.
 5. Retire the tenancy columns once the repository base class scopes on `(organization_id, workspace_id)` and a Tier-0 test proves it.
+
+## Addendum — 2026-09-13: hard walls and assignment rules are built with their enforcement, not ahead of it (R11-X2)
+
+**Decided 2026-09-13 on the product owner's delegation.** Two mechanisms this ADR describes were given a schema and nothing else. Both schemas are retired by migration `c4e7b2d9a613`:
+
+| Mechanism | What existed | Why it is retired rather than kept |
+|---|---|---|
+| `isolation_boundary`, the STRICT / ADVISORY hard wall | A table, a nullable `workspace.isolation_boundary_id` foreign key, and a field on the workspace-create API | Nothing ever created a boundary and nothing enforced one: no grant path, policy or administrator action consulted it. The only reachable behaviour was a request refused because the boundary it named could not exist. An unenforced wall is worse than none, because a workspace carrying one would look protected |
+| Rule-driven assignment (`business_assignment_rule`) | A table and a nullable `business_assignment.rule_id` | No rule was ever constructed or evaluated, and no caller supplied a rule id; in practice assignments are `MANUAL`, `MIGRATED` or `INFERRED` |
+
+The intent above is unchanged; the order of work is what changes. **A hard wall is built together with its enforcement** — a cross-boundary refusal on every grant path, with a test that an administrator cannot cross a STRICT boundary — in the same change that reintroduces its table, and rule-driven assignment is built together with its evaluator and its drift proposals. Until then a legal-entity or information-barrier requirement is served by a classification attribute and an access policy that denies across it, which the policy engine already evaluates; read the `legal_entity` paragraph above that way. The reversal condition is unaffected, except that promoting boundaries to the norm would now begin by building them.
 
 ## Reversal condition
 

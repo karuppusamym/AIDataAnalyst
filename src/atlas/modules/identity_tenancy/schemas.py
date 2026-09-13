@@ -152,14 +152,12 @@ class WorkspaceCreate(ApiModel):
     name: str = Field(min_length=2, max_length=200)
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
     purpose: str = Field(default="", max_length=1000)
-    isolation_boundary_id: UUID | None = None
     monthly_cost_ceiling: int | None = Field(default=None, ge=0)
 
 
 class WorkspaceRead(ApiModel):
     id: UUID
     organization_id: UUID
-    isolation_boundary_id: UUID | None
     name: str
     slug: str
     purpose: str

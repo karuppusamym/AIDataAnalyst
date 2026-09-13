@@ -86,7 +86,6 @@ class Subject:
     roles: frozenset[str]
     workspace_id: UUID | None = None
     purpose: str | None = None
-    isolation_boundary_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -56,7 +56,6 @@ from aida.models import (
     DataDomain,
     DataSource,
     GovernanceReview,
-    IsolationBoundary,
     LineOfBusiness,
     Organization,
     OrganizationIntegrationPolicy,
@@ -159,30 +158,6 @@ async def create_workspace_route(
     )
     if existing is not None:
         raise HTTPException(status_code=409, detail="workspace slug already exists")
-    # `isolation_boundary_id` reaches a real ForeignKey with `ondelete=RESTRICT`,
-    # and until this check it was forwarded unvalidated -- so a caller supplying
-    # one got an IntegrityError shaped like a server fault instead of a refusal
-    # naming what was wrong with their request. Nothing in this platform yet
-    # creates an `IsolationBoundary`, which makes *every* non-NULL value a
-    # guaranteed failure, so the honest 422 also says the feature has no rows to
-    # point at rather than leaving the caller to guess at a malformed id
-    # (R11-X2, 2026-09-12).
-    if body.isolation_boundary_id is not None:
-        boundary = await session.scalar(
-            select(IsolationBoundary).where(
-                IsolationBoundary.id == body.isolation_boundary_id,
-                IsolationBoundary.organization_id == organization_id,
-            )
-        )
-        if boundary is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "isolation_boundary_id does not name an isolation boundary in this "
-                    "organization; no isolation boundaries are defined yet, so this field "
-                    "cannot be set"
-                ),
-            )
     workspace = await create_workspace(
         session,
         organization_id=organization_id,
@@ -190,7 +165,6 @@ async def create_workspace_route(
         slug=body.slug,
         purpose=body.purpose,
         owner_principal=context.principal_id,
-        isolation_boundary_id=body.isolation_boundary_id,
         monthly_cost_ceiling=body.monthly_cost_ceiling,
     )
     record_audit(
@@ -777,7 +751,6 @@ async def simulate_authorization(
             roles=frozenset(simulated.roles),
             workspace_id=workspace_id,
             purpose=simulated.purpose,
-            isolation_boundary_id=workspace.isolation_boundary_id,
         )
         for index, simulated in enumerate(body.subjects)
     )
