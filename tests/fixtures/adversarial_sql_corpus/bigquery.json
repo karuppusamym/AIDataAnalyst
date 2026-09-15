@@ -3,6 +3,15 @@
   "description": "QG-1 adversarial SQL corpus for the bigquery dialect. Every case must be rejected by aida.query_gateway.QueryExecutionGateway's single validation pipeline -- zero bypasses is the exit condition.",
   "cases": [
     {
+      "id": "bigquery-dialect_specific-unauthorized-udf-under-safe-prefix",
+      "category": "dialect_specific",
+      "sql": "SELECT SAFE.fn_rate(c.customer_id) AS rate FROM retail.customer AS c",
+      "description": "the SAFE. prefix does not make an unrecognised function a built-in",
+      "expected_codes": [
+        "UNAUTHORIZED_FUNCTION"
+      ]
+    },
+    {
       "id": "bigquery-stacked_statement-stacked-ddl",
       "category": "stacked_statement",
       "sql": "SELECT customer_id FROM retail.customer; DROP TABLE retail.customer;",

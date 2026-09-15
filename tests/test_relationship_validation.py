@@ -28,6 +28,7 @@ from aida.composite_key_api import (
     decide_composite_key_candidate,
     discover_composite_key_candidates,
 )
+from aida.config import Settings
 from aida.db import Base
 from aida.intelligence_api import (
     bulk_decide_relationship_candidates,
@@ -410,7 +411,8 @@ async def test_approving_a_join_that_rests_on_a_name_match_is_refused(
     detail = refused.value.detail
     assert isinstance(detail, dict)
     assert detail["code"] == NAME_MATCH_ONLY_CODE
-    assert detail["validation"]["outcome"] == NAME_MATCH_ONLY
+    assert detail["outcome"] == NAME_MATCH_ONLY
+    assert "validation" not in detail, "the evidence is served only by the gated read"
     assert candidate.status == "PENDING" and "validation" not in candidate.evidence
     assert (await session.scalars(select(OutboxEvent))).all() == []
 
@@ -439,7 +441,7 @@ async def test_an_approval_keeps_its_validation_and_a_dropped_key_shows_as_lost(
     )
     assert recorded["validated_at"]
     unchanged = await get_relationship_candidate_validation(
-        candidate.id, context=reviewer, session=session
+        candidate.id, context=reviewer, session=session, settings=Settings()
     )
     assert (unchanged.drift, unchanged.recorded_fingerprint) == (
         "UNCHANGED",
@@ -453,7 +455,7 @@ async def test_an_approval_keeps_its_validation_and_a_dropped_key_shows_as_lost(
     key.status = "DEPRECATED"
     await session.flush()
     lost = await get_relationship_candidate_validation(
-        candidate.id, context=reviewer, session=session
+        candidate.id, context=reviewer, session=session, settings=Settings()
     )
     assert (lost.drift, lost.approvable) == ("CORROBORATION_LOST", False)
 
@@ -633,7 +635,7 @@ async def test_composite_key_discovery_persists_and_an_approved_key_corroborates
     await session.flush()
 
     validation = await get_relationship_candidate_validation(
-        candidate.id, context=_context(org, "reviewer"), session=session
+        candidate.id, context=_context(org, "reviewer"), session=session, settings=Settings()
     )
 
     assert validation.approvable

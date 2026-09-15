@@ -20,6 +20,7 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.edition_entitlements import evaluate_entitlement
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import (
@@ -198,7 +199,7 @@ async def _persist_tool_version_draft(
     context: SecurityContext,
     session: AsyncSession,
     settings: Settings,
-    source_routine_id: UUID | None = None,
+    source_routine: MetadataRoutine | None = None,
 ) -> GovernedToolVersionRead:
     """The shared draft-creation tail: validate `body.sql_template` the same
     way regardless of whether it was hand-authored (`create_tool_version`)
@@ -219,7 +220,7 @@ async def _persist_tool_version_draft(
             body,
             audit_context=context,
             settings=settings,
-            source_routine_id=source_routine_id,
+            source_routine=source_routine,
         )
     except ToolDraftRefused as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc

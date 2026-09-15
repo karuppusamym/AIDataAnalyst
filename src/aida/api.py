@@ -1482,6 +1482,7 @@ async def validate_query(
     guard = SqlGuard(
         default_row_limit=settings.default_query_row_limit,
         hard_row_limit=settings.hard_query_row_limit,
+        allowed_functions=settings.sql_guard_allowed_functions,
     )
     result = guard.validate(body.sql, dialect=body.dialect, requested_limit=body.max_rows)
     record_audit(

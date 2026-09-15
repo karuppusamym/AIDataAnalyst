@@ -790,6 +790,10 @@ class GovernedToolVersion(Base, TimestampMixin):
     # routine holds this version (`aida.routine_tool_hold`). No foreign key: the routine table
     # lives in `envelope_models`, and a retired routine is kept rather than deleted.
     source_routine_id: Mapped[UUID | None] = mapped_column(index=True)
+    # The fingerprint of the routine definition the SQL was copied from. Approval and execution
+    # compare it with the routine as it is now; when a version was approved proves nothing about
+    # which definition it came from.
+    source_definition_fingerprint: Mapped[str | None] = mapped_column(String(64))
 
 
 class ToolExecution(Base, TimestampMixin):

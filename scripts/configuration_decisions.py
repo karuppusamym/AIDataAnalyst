@@ -82,6 +82,11 @@ DECISIONS: dict[str, tuple[str, str]] = {
         "an open CRITICAL freshness incident fails governed tools closed, so an estate opts "
         "in after approving its contracts (R11-B8)",
     ),
+    "sql_guard_allowed_functions": (
+        SUPPLIED,
+        "the user-defined functions a deployment has reviewed for effects; empty refuses "
+        "every function the SQL guard does not recognise as a built-in (R11-FP14)",
+    ),
     "change_signal_processing_interval_minutes": (
         OPT_IN,
         "a redefined view or retired table opens a CRITICAL incident that holds the governed "

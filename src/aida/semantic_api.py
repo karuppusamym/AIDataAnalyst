@@ -101,6 +101,7 @@ from aida.product_marketplace_api import approve_access_request
 from aida.quality_rule_proposals import decide_quality_rule_proposal
 from aida.query_history_miner import apply_query_history_metric_candidate_decision
 from aida.retrieval import hybrid_retrieve_cross_source
+from aida.routine_tool_hold import source_routine_drift, source_routine_refusal
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
     ApiModel,
@@ -1572,6 +1573,12 @@ async def _decide_governed_tool_version(
         else:
             event_type = "tool.version.deprecation_rejected.v1"
     elif decision == "APPROVE":
+        # R11-FP16: approval time proves nothing about which routine definition a procedure
+        # tool's SQL was copied from; its binding does. A draft generated before its routine
+        # changed is refused, not published.
+        drift = await source_routine_drift(session, tool_version)
+        if drift is not None:
+            raise HTTPException(status_code=409, detail=source_routine_refusal(drift))
         await session.execute(
             update(GovernedToolVersion)
             .where(

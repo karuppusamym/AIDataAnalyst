@@ -132,7 +132,7 @@ async def create_procedure_tool_blueprint(
         context=context,
         session=session,
         settings=settings,
-        source_routine_id=routine.id,
+        source_routine=routine,
     )
 
     # R11-X2: which routine and statement a draft was generated from is evidence,

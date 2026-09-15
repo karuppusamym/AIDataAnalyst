@@ -306,6 +306,7 @@ class QueryExecutionGateway:
         self.guard = SqlGuard(
             default_row_limit=settings.default_query_row_limit,
             hard_row_limit=settings.hard_query_row_limit,
+            allowed_functions=settings.sql_guard_allowed_functions,
         )
         # QG-3: resolved through the process-wide cache, not stored as a
         # request-scoped registry -- this gateway is constructed fresh per

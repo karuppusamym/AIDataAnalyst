@@ -1,3 +1,5 @@
+import pytest
+
 from aida.sql_guard import SqlGuard
 
 
@@ -76,4 +78,89 @@ def test_forbidden_database_function_is_rejected() -> None:
     result = guard().validate("SELECT pg_sleep(5)", dialect="postgres")
 
     assert not result.valid
+    assert "FORBIDDEN_FUNCTION:pg_sleep" in result.violations
+
+
+# R11-FP14: a SELECT can call a function that writes, sleeps or reaches outside the engine, so a
+# function the guard does not recognise as a built-in is refused unless an operator authorized it.
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql", "violation"),
+    [
+        (
+            "postgres",
+            "SELECT fn_send_mail(customer_id) FROM retail.customer",
+            "UNAUTHORIZED_FUNCTION:fn_send_mail",
+        ),
+        (
+            "postgres",
+            "SELECT finance.fn_rate(amount) FROM finance.loan",
+            "UNAUTHORIZED_FUNCTION:finance.fn_rate",
+        ),
+        ("tsql", "SELECT dbo.fn_rate(amount) FROM dbo.loan", "UNAUTHORIZED_FUNCTION:dbo.fn_rate"),
+        (
+            "oracle",
+            "SELECT risk_pkg.score(customer_id) FROM retail.customer",
+            "UNAUTHORIZED_FUNCTION:risk_pkg.score",
+        ),
+    ],
+)
+def test_an_unknown_or_user_defined_function_is_refused(
+    dialect: str, sql: str, violation: str
+) -> None:
+    result = guard().validate(sql, dialect=dialect)
+
+    assert not result.valid
+    assert violation in result.violations
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql"),
+    [
+        (
+            "postgres",
+            "SELECT COALESCE(SUM(amount), 0), DATE_TRUNC('month', booked_at), btrim(note) "
+            "FROM finance.loan GROUP BY DATE_TRUNC('month', booked_at), btrim(note)",
+        ),
+        ("postgres", "SELECT pg_catalog.btrim(note) FROM finance.loan"),
+        (
+            "tsql",
+            "SELECT ISNULL(SUM(amount), 0), DATEPART(year, booked_at), PATINDEX('%x%', note) "
+            "FROM dbo.loan GROUP BY DATEPART(year, booked_at), PATINDEX('%x%', note)",
+        ),
+        ("snowflake", "SELECT IFF(amount > 0, 1, 0), DATEADD(day, 1, booked_at) FROM finance.loan"),
+        ("bigquery", "SELECT SAFE.SUBSTR(note, 1, 2), SAFE_DIVIDE(amount, term) FROM finance.loan"),
+    ],
+)
+def test_built_in_functions_are_still_accepted(dialect: str, sql: str) -> None:
+    result = guard().validate(sql, dialect=dialect)
+
+    assert result.valid, result.violations
+
+
+def test_an_operator_authorized_function_is_accepted_by_its_exact_name() -> None:
+    authorized = SqlGuard(
+        default_row_limit=5000,
+        hard_row_limit=100_000,
+        allowed_functions=[" Finance.FN_RATE ", "fn_send_mail", ""],
+    )
+
+    assert authorized.validate(
+        "SELECT finance.fn_rate(amount) FROM finance.loan", dialect="postgres"
+    ).valid
+    assert authorized.validate(
+        "SELECT fn_send_mail(customer_id) FROM retail.customer", dialect="postgres"
+    ).valid
+    other_schema = authorized.validate(
+        "SELECT risk.fn_rate(amount) FROM finance.loan", dialect="postgres"
+    )
+    assert "UNAUTHORIZED_FUNCTION:risk.fn_rate" in other_schema.violations
+
+
+def test_authorization_never_lifts_the_adversarial_denylist() -> None:
+    result = SqlGuard(
+        default_row_limit=5000, hard_row_limit=100_000, allowed_functions=["pg_sleep"]
+    ).validate("SELECT pg_sleep(5)", dialect="postgres")
+
     assert "FORBIDDEN_FUNCTION:pg_sleep" in result.violations

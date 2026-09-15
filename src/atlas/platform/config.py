@@ -172,6 +172,11 @@ class Settings(BaseSettings):
     object_store_secret_key: str = ""
     default_query_row_limit: int = Field(default=5000, ge=1, le=100_000)
     hard_query_row_limit: int = Field(default=100_000, ge=1, le=1_000_000)
+    # R11-FP14: user-defined functions an operator has reviewed for effects and authorizes
+    # queries and generated tools to call, by the exact name the SQL uses (`fn_rate`, or
+    # `finance.fn_rate` for a qualified call). `SqlGuard` refuses any other function the
+    # parser does not recognise as a built-in, and every schema-qualified call.
+    sql_guard_allowed_functions: list[str] = Field(default_factory=list)
     query_timeout_seconds: int = Field(default=60, ge=1, le=3600)
     # QG-3: fairness under contention. Each line of business (DataSource.line_of_
     # business_id, the same per-LOB dimension aida.cost_showback already groups

@@ -48,6 +48,7 @@ from aida.models import (
     ViewLineageEdge,
 )
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.refusal import RefusalDetail
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 # Below this overall score a draft carries too little evidence to be worth an
@@ -740,16 +741,6 @@ async def publish_asset_documentation_version(
 
 #: R11-FP08: a view's definition moved after its description was drafted.
 DEFINITION_MOVED = "DEFINITION_MOVED"
-
-
-class RefusalDetail(dict[str, Any]):
-    """A structured 409 body whose `str()` is the sentence a person reads.
-
-    The bulk and agent decision paths report a refused item as `str(exc.detail)`.
-    """
-
-    def __str__(self) -> str:
-        return str(self.get("message", ""))
 
 
 async def definition_moved(

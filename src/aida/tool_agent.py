@@ -368,7 +368,7 @@ class _Proposal:
         body: GovernedToolVersionCreate,
         details: dict[str, Any],
         *,
-        source_routine_id: UUID | None = None,
+        source_routine: MetadataRoutine | None = None,
     ) -> TaskAgentItem:
         run = self.run
         if not run.proposing:
@@ -386,7 +386,7 @@ class _Proposal:
                 body,
                 audit_context=run.agent_context,
                 settings=run.settings,
-                source_routine_id=source_routine_id,
+                source_routine=source_routine,
             )
         except ToolDraftRefused as exc:
             return await self.decline(exc.code)
@@ -477,7 +477,7 @@ async def _propose_procedure_tool(run: TaskAgentRun, candidate: _Candidate) -> T
         return target
     project, datasource = target
     try:
-        _routine, result_node, parse_result, parameters = await resolve_procedure_tool_source(
+        routine, result_node, parse_result, parameters = await resolve_procedure_tool_source(
             run.session,
             organization_id=run.organization_id,
             datasource_id=datasource.id,
@@ -518,7 +518,7 @@ async def _propose_procedure_tool(run: TaskAgentRun, candidate: _Candidate) -> T
             "sql_hash": blueprint.sql_hash,
             "statement_count": blueprint.statement_count,
         },
-        source_routine_id=candidate.subject_id,
+        source_routine=routine,
     )
 
 

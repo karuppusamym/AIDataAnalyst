@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**258 settings.** 0 are read nowhere. 52 more ship switched off, empty or zero.
+**259 settings.** 0 are read nowhere. 53 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -57,6 +57,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `secrets_vault_token` | `SecretStr | None` | `None` | 1 | Supplied: the vault credential |
 | `neo4j_password` | `str` | `''` | 4 | Supplied: only for an organization served from Neo4j |
 | `object_store_secret_key` | `str` | `''` | 1 | Supplied: the object store credential |
+| `sql_guard_allowed_functions` | `list[str]` | `list` | 5 | Supplied: the user-defined functions a deployment has reviewed for effects; empty refuses every function the SQL guard does not recognise as a built-in (R11-FP14) |
 | `reaper_retention_overrides` | `str | None` | `None` | 1 | Opt-in: per-rule retention; the rule defaults apply when unset |
 | `lineage_cache_enabled` | `bool` | `False` | 5 | Opt-in: needs the optional Redis service (`--profile cache`); a Redis error is a cache miss |
 | `lineage_neo4j_read_enabled` | `bool` | `False` | 1 | Off by design: INV-9: Neo4j reads wait for the projection rebuild drill (E5) |
@@ -154,6 +155,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `object_store_secret_key` | `str` | `''` | 1 |
 | `default_query_row_limit` | `int` | `5000` | 8 |
 | `hard_query_row_limit` | `int` | `100000` | 8 |
+| `sql_guard_allowed_functions` | `list[str]` | `list` | 5 |
 | `query_timeout_seconds` | `int` | `60` | 5 |
 | `query_gateway_lob_max_concurrent` | `int` | `8` | 1 |
 | `query_gateway_lob_queue_timeout_seconds` | `float` | `5.0` | 1 |

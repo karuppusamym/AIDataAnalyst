@@ -664,11 +664,15 @@ async def validate_composite_relationship_candidate(
 
 
 def refusal_detail(validation: RelationshipValidation) -> dict[str, Any]:
-    """The 409 body for an approval the evidence does not support."""
+    """The 409 body for an approval the evidence does not support.
+
+    The outcome only: the evidence names columns and carries profile counts from both sides, so
+    it is served by the validation read, under that read's datasource and domain gates.
+    """
     return {
         "code": NAME_MATCH_ONLY_CODE,
         "message": NAME_MATCH_ONLY_MESSAGE,
-        "validation": validation.as_evidence(),
+        "outcome": validation.outcome,
     }
 
 

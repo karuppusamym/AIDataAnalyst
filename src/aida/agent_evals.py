@@ -24,6 +24,7 @@ def run_control_evaluation(settings: Settings) -> EvaluationSummary:
     guard = SqlGuard(
         default_row_limit=settings.default_query_row_limit,
         hard_row_limit=settings.hard_query_row_limit,
+        allowed_functions=settings.sql_guard_allowed_functions,
     )
     findings: list[dict[str, Any]] = []
 
@@ -430,6 +431,7 @@ def run_bank_model_risk_evaluation(
     guard = SqlGuard(
         default_row_limit=settings.default_query_row_limit,
         hard_row_limit=settings.hard_query_row_limit,
+        allowed_functions=settings.sql_guard_allowed_functions,
     )
     planner = GovernedPlanner(settings)
     return BankModelRiskEvaluation(

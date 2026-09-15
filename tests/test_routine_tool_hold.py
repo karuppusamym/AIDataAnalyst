@@ -1,18 +1,21 @@
-"""R11-FP16: a governed tool extracted from a routine is held once that routine changes.
+"""R11-FP16: a governed tool extracted from a routine stands only while that routine does.
 
-* The procedure-tool route records the routine a draft's SQL was extracted from.
-* A version whose routine was redefined or retired after it was approved is blocked at execution,
-  before any SQL is rendered, with the reason in the refusal and in the audit record.
-* A change from before the version's approval holds nothing, and a version approved after the
-  change runs: approving a version is the re-verification that lifts the hold, with nothing to
-  resolve by hand.
+* The procedure-tool route binds a draft to its routine and to the fingerprint of the definition
+  its SQL was copied from.
+* A draft generated before its routine changed is refused at approval, however late it is
+  approved. A draft regenerated from the current definition is approved.
+* A published version whose routine was redefined, retired or removed is blocked at execution,
+  before any SQL is rendered, and the audit record says why. A routine restored to exactly the
+  bound definition stands again.
+* A version recorded before the binding existed falls back to change signals detected after it
+  was generated -- never after it was approved.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -24,12 +27,23 @@ from sqlalchemy.pool import StaticPool
 from aida.change_signal_models import MetadataChangeSignal
 from aida.config import Settings
 from aida.db import Base
-from aida.models import AuditEvent, GovernedToolVersion, ToolExecution
+from aida.envelope_models import MetadataRoutine
+from aida.models import AuditEvent, GovernanceReview, GovernedToolVersion, ToolExecution
 from aida.procedure_tool_api import ProcedureToolBlueprintRequest, create_procedure_tool_blueprint
 from aida.query_gateway import QueryExecutionGateway
-from aida.routine_tool_hold import SOURCE_ROUTINE_CHANGED_MESSAGE, fetch_source_routine_holds
-from aida.schemas import ToolExecutionRequest
+from aida.routine_tool_hold import (
+    REASON_CHANGED_SINCE_GENERATION,
+    REASON_DEFINITION_CHANGED,
+    REASON_ROUTINE_RETIRED,
+    SOURCE_ROUTINE_CHANGED_MESSAGE,
+    SOURCE_ROUTINE_MOVED,
+    fetch_source_routine_holds,
+    source_routine_drift,
+)
+from aida.schemas import GovernedToolVersionRead, ToolExecutionRequest
+from aida.semantic_api import _decide_governed_tool_version
 from aida.tool_api import execute_tool
+from tests.support.doubles import security_context
 from tests.test_procedure_tool_blueprint import _Scenario as ProcedureScenario
 from tests.test_quality_runtime_coupling import _fake_execute
 from tests.test_quality_runtime_coupling import _Scenario as CouplingScenario
@@ -40,6 +54,8 @@ _REPORT_BODY = (
     "FROM public.orders o JOIN public.customers c ON c.customer_id = o.customer_id "
     "GROUP BY c.customer_id; END"
 )
+DEFINITION_A = "a" * 64
+DEFINITION_B = "b" * 64
 
 
 @pytest_asyncio.fixture
@@ -53,37 +69,10 @@ async def db() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
-async def _signal(
-    db: AsyncSession,
-    scenario: CouplingScenario,
-    routine_id: UUID,
-    *,
-    detected_at: datetime,
-    signal_type: str = "DEFINITION_CHANGED",
-) -> None:
-    db.add(
-        MetadataChangeSignal(
-            organization_id=scenario.organization.id,
-            datasource_id=scenario.datasource.id,
-            subject_kind="ROUTINE",
-            subject_id=routine_id,
-            signal_type=signal_type,
-            change_class="STRUCTURAL" if signal_type == "DEFINITION_CHANGED" else None,
-            detected_at=detected_at,
-        )
-    )
-    await db.flush()
-
-
-async def test_a_procedure_tool_draft_records_the_routine_it_was_extracted_from(
-    db: AsyncSession,
-) -> None:
-    scenario = await ProcedureScenario(db).build()
-    routine = scenario.routine(body=_REPORT_BODY)
-    db.add(routine)
-    await db.flush()
-
-    created = await create_procedure_tool_blueprint(
+async def _generate(
+    db: AsyncSession, scenario: ProcedureScenario, routine: MetadataRoutine
+) -> GovernedToolVersionRead:
+    return await create_procedure_tool_blueprint(
         scenario.project.id,
         ProcedureToolBlueprintRequest(
             slug="customer_order_totals",
@@ -98,23 +87,116 @@ async def test_a_procedure_tool_draft_records_the_routine_it_was_extracted_from(
         settings=Settings(),
     )
 
-    assert created.source_routine_id == routine.id
-    version = await db.get(GovernedToolVersion, created.id)
-    assert version is not None and version.source_routine_id == routine.id
+
+async def _approve(
+    db: AsyncSession, scenario: ProcedureScenario, version_id: object
+) -> GovernedToolVersion:
+    review = GovernanceReview(
+        organization_id=scenario.organization.id,
+        object_type="GOVERNED_TOOL_VERSION",
+        object_id=str(version_id),
+        requested_action="PUBLISH",
+        requested_by="tool-maker",
+    )
+    db.add(review)
+    await db.flush()
+    await _decide_governed_tool_version(
+        db,
+        review,
+        decision="APPROVE",
+        reason=None,
+        context=security_context(
+            organization_id=scenario.organization.id, roles=frozenset({"Reviewer"})
+        ),
+        now=datetime.now(UTC),
+    )
+    version = await db.get(GovernedToolVersion, version_id)
+    assert version is not None
+    return version
 
 
-async def test_a_routine_redefined_after_approval_blocks_the_tool_before_any_sql(
+def _catalog_routine(scenario: CouplingScenario) -> MetadataRoutine:
+    return MetadataRoutine(
+        id=uuid4(),
+        organization_id=scenario.organization.id,
+        datasource_id=scenario.datasource.id,
+        schema_id=scenario.table.schema_id,
+        name="usp_report",
+        routine_type="PROCEDURE",
+        body_sql_redacted="SELECT 1",
+        body_fingerprint=DEFINITION_A,
+        redaction_status="PARSED",
+        screening_status="CLEAN",
+        availability="AVAILABLE",
+        status="ACTIVE",
+        fingerprint="fp-routine",
+    )
+
+
+async def test_a_procedure_tool_draft_is_bound_to_its_routine_definition(
     db: AsyncSession,
 ) -> None:
-    scenario = await CouplingScenario(db).build()
-    version = await scenario.tool_version()
-    routine_id = uuid4()
-    approved_at = datetime.now(UTC) - timedelta(days=2)
-    version.approved_at = approved_at
-    version.source_routine_id = routine_id
-    await _signal(db, scenario, routine_id, detected_at=approved_at + timedelta(days=1))
+    scenario = await ProcedureScenario(db).build()
+    routine = scenario.routine(body=_REPORT_BODY)
+    routine.body_fingerprint = DEFINITION_A
+    db.add(routine)
+    await db.flush()
+
+    created = await _generate(db, scenario, routine)
+
+    version = await db.get(GovernedToolVersion, created.id)
+    assert version is not None
+    assert (created.source_routine_id, version.source_definition_fingerprint) == (
+        routine.id,
+        DEFINITION_A,
+    )
+
+
+async def test_a_draft_generated_before_its_routine_changed_is_refused_at_approval(
+    db: AsyncSession,
+) -> None:
+    scenario = await ProcedureScenario(db).build()
+    routine = scenario.routine(body=_REPORT_BODY)
+    routine.body_fingerprint = DEFINITION_A
+    db.add(routine)
+    await db.flush()
+    stale = await _generate(db, scenario, routine)
+    # The source redefines the routine after the draft was generated, before anyone approves it.
+    routine.body_fingerprint = DEFINITION_B
+    await db.flush()
 
     with pytest.raises(HTTPException) as refused:
+        await _approve(db, scenario, stale.id)
+
+    detail = refused.value.detail
+    assert refused.value.status_code == 409
+    assert (detail["code"], detail["reason"]) == (SOURCE_ROUTINE_MOVED, REASON_DEFINITION_CHANGED)
+    assert str(detail) == SOURCE_ROUTINE_CHANGED_MESSAGE
+    draft = await db.get(GovernedToolVersion, stale.id)
+    assert draft is not None and (draft.status, draft.approved_at) == ("DRAFT", None)
+
+    regenerated = await _generate(db, scenario, routine)
+    published = await _approve(db, scenario, regenerated.id)
+    assert (published.status, published.source_definition_fingerprint) == (
+        "PUBLISHED",
+        DEFINITION_B,
+    )
+
+
+async def test_a_published_version_stands_only_while_its_routine_matches_the_binding(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(QueryExecutionGateway, "execute", _fake_execute)
+    scenario = await CouplingScenario(db).build()
+    routine = _catalog_routine(scenario)
+    db.add(routine)
+    version = await scenario.tool_version()
+    version.source_routine_id = routine.id
+    version.source_definition_fingerprint = DEFINITION_A
+    version.approved_at = datetime.now(UTC)
+    await db.flush()
+
+    async def run() -> None:
         await execute_tool(
             version.id,
             ToolExecutionRequest(parameters={}),
@@ -123,45 +205,61 @@ async def test_a_routine_redefined_after_approval_blocks_the_tool_before_any_sql
             settings=Settings(),
         )
 
-    assert refused.value.status_code == 409
-    assert SOURCE_ROUTINE_CHANGED_MESSAGE in refused.value.detail
-    assert (await db.scalars(select(ToolExecution))).all() == []
-    denied = (await db.scalars(select(AuditEvent).where(AuditEvent.outcome == "DENIED"))).one()
-    assert denied.details["source_routine_changed"] is True
-
-
-async def test_the_hold_counts_only_changes_after_approval_and_a_later_approval_lifts_it(
-    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(QueryExecutionGateway, "execute", _fake_execute)
-    scenario = await CouplingScenario(db).build()
-    version = await scenario.tool_version()
-    routine_id = uuid4()
-    now = datetime.now(UTC)
-    version.source_routine_id = routine_id
-    version.approved_at = now - timedelta(days=3)
-    await _signal(db, scenario, routine_id, detected_at=now - timedelta(days=4))
-
-    assert await fetch_source_routine_holds(db, version) == ([str(routine_id)], [])
-
-    await _signal(
-        db, scenario, routine_id, detected_at=now - timedelta(days=2), signal_type="DEPRECATED"
-    )
-    assets, holds = await fetch_source_routine_holds(db, version)
-    assert assets == [str(routine_id)]
-    assert [(hold.severity, hold.status) for hold in holds] == [("CRITICAL", "OPEN")]
-
-    # Re-verified: the version is approved again after the change, and it runs.
-    version.approved_at = now - timedelta(days=1)
+    await run()
+    routine.body_fingerprint = DEFINITION_B
     await db.flush()
-    await execute_tool(
-        version.id,
-        ToolExecutionRequest(parameters={}),
-        context=scenario.analyst(),
-        session=db,
-        settings=Settings(),
+    with pytest.raises(HTTPException) as redefined:
+        await run()
+    assert redefined.value.status_code == 409
+    assert SOURCE_ROUTINE_CHANGED_MESSAGE in redefined.value.detail
+
+    routine.body_fingerprint = DEFINITION_A
+    await db.flush()
+    await run()
+
+    routine.status = "DEPRECATED"
+    await db.flush()
+    assert await source_routine_drift(db, version) == REASON_ROUTINE_RETIRED
+    with pytest.raises(HTTPException):
+        await run()
+
+    assert len((await db.scalars(select(ToolExecution))).all()) == 2
+    denied = (await db.scalars(select(AuditEvent).where(AuditEvent.outcome == "DENIED"))).all()
+    assert len(denied) == 2
+    assert all(event.details["source_routine_changed"] is True for event in denied)
+
+
+async def test_a_version_without_a_bound_definition_is_held_by_changes_after_generation(
+    db: AsyncSession,
+) -> None:
+    scenario = await CouplingScenario(db).build()
+    routine = _catalog_routine(scenario)
+    db.add(routine)
+    version = await scenario.tool_version()
+    version.source_routine_id = routine.id
+    generated_at = version.created_at
+    # Approved after the change: approval time must not hide it.
+    version.approved_at = generated_at + timedelta(days=2)
+    await db.flush()
+    assert await source_routine_drift(db, version) is None
+
+    db.add(
+        MetadataChangeSignal(
+            organization_id=scenario.organization.id,
+            datasource_id=scenario.datasource.id,
+            subject_kind="ROUTINE",
+            subject_id=routine.id,
+            signal_type="DEFINITION_CHANGED",
+            change_class="STRUCTURAL",
+            detected_at=generated_at + timedelta(days=1),
+        )
     )
-    assert len((await db.scalars(select(ToolExecution))).all()) == 1
+    await db.flush()
+
+    assert await source_routine_drift(db, version) == REASON_CHANGED_SINCE_GENERATION
+    assets, holds = await fetch_source_routine_holds(db, version)
+    assert assets == [str(routine.id)]
+    assert [(hold.severity, hold.status) for hold in holds] == [("CRITICAL", "OPEN")]
 
 
 async def test_a_tool_not_extracted_from_a_routine_has_no_routine_dependency(
