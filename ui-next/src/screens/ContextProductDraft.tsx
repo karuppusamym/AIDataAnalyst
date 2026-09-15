@@ -1,6 +1,12 @@
 import { useCallback, useState } from "react";
 import type { ContextProductCreate } from "../lib/types";
-import { createContextProduct, fetchCatalogRows, fetchSemanticModelVersions, fetchTools } from "../lib/api";
+import {
+  createContextProduct,
+  fetchCatalogRows,
+  fetchContextProductRoutineOptions,
+  fetchSemanticModelVersions,
+  fetchTools,
+} from "../lib/api";
 import { listGlossaryTerms } from "../lib/_api_append";
 import { ReferencePicker, usePickerOptions } from "../components/ReferencePicker";
 import { Button, Field, Pill } from "../components/primitives";
@@ -20,9 +26,14 @@ import type { StatusChannel } from "../components/screenState";
    therefore no way for a typo to become a 422, and no id ever passes through
    a human's clipboard.
 
-   Tables are organization-scoped; semantics, glossary terms and tools are
-   project-scoped, so those three stay empty (and say so) until a project is
-   chosen, rather than offering another project's objects.
+   Tables are organization-scoped; semantics, glossary terms, tools and
+   routines are project-scoped, so those stay empty (and say so) until a
+   project is chosen, rather than offering another project's objects.
+
+   Routines (R11-FP12) are the fifth picker. A view needs none of its own: it
+   is a table, and compiling the product reports its definition coverage.
+   `routine_ids` is sent only when one is picked, so a draft without routines
+   posts the same body it always did.
 
    `policy_summary` is fixed to gateway-only / no-raw-context, exactly as the
    legacy form hard-codes it: a Context Product is a description of approved
@@ -40,6 +51,7 @@ interface DraftState {
   semanticIds: string[];
   glossaryIds: string[];
   toolIds: string[];
+  routineIds: string[];
   consumerRoles: string;
   lineageDepth: string;
   minimumScore: string;
@@ -57,6 +69,7 @@ const INITIAL_DRAFT: DraftState = {
   semanticIds: [],
   glossaryIds: [],
   toolIds: [],
+  routineIds: [],
   consumerRoles: "Analyst",
   lineageDepth: "2",
   minimumScore: "85",
@@ -111,6 +124,17 @@ export function CreateDraftPanel({
     { enabled: Boolean(projectId) },
   );
 
+  const routineOptions = usePickerOptions(
+    (signal) => fetchContextProductRoutineOptions(projectId ?? "", signal),
+    (routine) => ({
+      id: routine.id,
+      label: `${routine.schema_name}.${routine.name}${routine.signature}`,
+      hint: `${routine.routine_type.toLowerCase()} on ${routine.datasource_name}`,
+    }),
+    [projectId],
+    { enabled: Boolean(projectId) },
+  );
+
   const submit = useCallback(
     async (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
@@ -129,6 +153,7 @@ export function CreateDraftPanel({
         semantic_model_version_ids: draft.semanticIds,
         glossary_term_version_ids: draft.glossaryIds,
         eligible_tool_version_ids: draft.toolIds,
+        ...(draft.routineIds.length > 0 ? { routine_ids: draft.routineIds } : {}),
         allowed_consumer_roles: splitList(draft.consumerRoles),
         lineage_depth: Number(draft.lineageDepth || 2),
         quality_requirements: {
@@ -277,6 +302,18 @@ export function CreateDraftPanel({
               selected={draft.toolIds}
               onChange={(ids) => setField("toolIds", ids)}
               emptyHint="No published tools in this project. Publish one from Tool registry."
+              visibleRows={4}
+            />
+          </div>
+          <div className="cpform__span2">
+            <ReferencePicker
+              label="Stored procedures and functions"
+              options={routineOptions.options}
+              loading={routineOptions.loading}
+              error={routineOptions.error}
+              selected={draft.routineIds}
+              onChange={(ids) => setField("routineIds", ids)}
+              emptyHint="No active routines on this project's sources. Scan a source that exposes them first."
               visibleRows={4}
             />
           </div>

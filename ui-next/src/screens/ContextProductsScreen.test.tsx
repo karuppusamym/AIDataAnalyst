@@ -32,6 +32,7 @@ const fetchCatalogRows = vi.fn();
 const fetchSemanticModelVersions = vi.fn();
 const fetchTools = vi.fn();
 const listGlossaryTerms = vi.fn();
+const fetchContextProductRoutineOptions = vi.fn();
 
 /* Staged rollout (AT-7(b) consumer bindings). */
 const fetchContextProductVersions = vi.fn();
@@ -51,6 +52,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchCatalogRows: (...args: unknown[]) => fetchCatalogRows(...args),
     fetchSemanticModelVersions: (...args: unknown[]) => fetchSemanticModelVersions(...args),
     fetchTools: (...args: unknown[]) => fetchTools(...args),
+    fetchContextProductRoutineOptions: (...args: unknown[]) => fetchContextProductRoutineOptions(...args),
     fetchContextProductVersions: (...args: unknown[]) => fetchContextProductVersions(...args),
     fetchContextProductBindings: (...args: unknown[]) => fetchContextProductBindings(...args),
     setContextProductBinding: (...args: unknown[]) => setContextProductBinding(...args),
@@ -111,9 +113,11 @@ beforeEach(() => {
   compileContextProductVersion.mockReset();
   for (const fn of [
     fetchCatalogRows, fetchSemanticModelVersions, fetchTools, listGlossaryTerms,
+    fetchContextProductRoutineOptions,
     fetchContextProductVersions, fetchContextProductBindings,
     setContextProductBinding, removeContextProductBinding,
   ]) fn.mockReset();
+  fetchContextProductRoutineOptions.mockResolvedValue([]);
 
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
   fetchCatalogRows.mockResolvedValue({ items: CATALOG_ROWS, limit: 200, offset: 0, total: CATALOG_ROWS.length });
@@ -286,6 +290,38 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     // created..." one on the same shared message target (see the submit
     // test above for the identical, legacy-faithful race).
     await waitFor(() => expect(fetchContextProducts).toHaveBeenCalledTimes(2));
+  });
+
+  it("names a routine through its own picker and sends routine_ids only then (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+    fetchContextProductRoutineOptions.mockResolvedValue([
+      {
+        id: "r1", datasource_id: "ds_snowflake_prod", datasource_name: "snowflake_prod",
+        schema_name: "core", name: "rebuild_totals", routine_type: "PROCEDURE", signature: "()",
+      },
+    ]);
+    createContextProduct.mockResolvedValue(DRAFT_PRODUCT);
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("No Context Products")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Stable key"), { target: { value: "consumer-risk-context" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Consumer risk analysis" } });
+    fireEvent.change(screen.getByLabelText("Owner principal"), { target: { value: "risk-data-stewards" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Bounded context for risk analysts." } });
+    fireEvent.change(screen.getByLabelText("Approved purpose"), {
+      target: { value: "Explain drivers of consumer delinquency for the monthly risk packet." },
+    });
+    fireEvent.click(await screen.findByRole("checkbox", { name: /core\.rebuild_totals\(\)/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create governed draft" }));
+
+    await waitFor(() => expect(createContextProduct).toHaveBeenCalledTimes(1));
+    expect(fetchContextProductRoutineOptions).toHaveBeenCalledWith("proj_core", expect.anything());
+    const [, bodyArg] = createContextProduct.mock.calls[0]!;
+    expect(bodyArg.routine_ids).toEqual(["r1"]);
+    expect(bodyArg.table_ids).toEqual([]);
   });
   /* ---- Staged rollout (AT-7(b) consumer bindings) --------------------- */
 

@@ -82,6 +82,8 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings, get_settings
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
+from aida.context_compiler import coverage_section
+from aida.context_product_coverage import load_routine_references, load_view_coverage
 from aida.context_product_policy import (
     ContextProductQualityDecision,
     can_serve_pinned_version,
@@ -2654,7 +2656,21 @@ async def _read_context_product_resource(
             "semantic_model_version_ids": product_version.semantic_model_version_ids,
             "glossary_term_version_ids": product_version.glossary_term_version_ids,
             "eligible_tool_version_ids": product_version.eligible_tool_version_ids,
+            "routine_ids": list(product_version.routine_ids or []),
         },
+        # R11-FP12: built after every gate above, so it is read under the same decision as the
+        # rest of the product, and rendered by the compiler's own helper.
+        "coverage": coverage_section(
+            await load_routine_references(
+                session,
+                product_version.organization_id,
+                list(product_version.routine_ids or []),
+                product_version.table_ids,
+            ),
+            await load_view_coverage(
+                session, product_version.organization_id, product_version.table_ids
+            ),
+        ),
         "allowed_consumer_roles": product_version.allowed_consumer_roles,
         "lineage_depth": product_version.lineage_depth,
         "quality_requirements": product_version.quality_requirements,

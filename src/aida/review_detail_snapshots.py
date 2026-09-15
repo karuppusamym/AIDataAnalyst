@@ -21,6 +21,7 @@ CONTEXT_FIELDS = (
     "semantic_model_version_ids",
     "glossary_term_version_ids",
     "eligible_tool_version_ids",
+    "routine_ids",
     "allowed_consumer_roles",
     "lineage_depth",
     "quality_requirements",

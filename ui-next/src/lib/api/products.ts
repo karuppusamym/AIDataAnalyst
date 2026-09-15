@@ -21,6 +21,7 @@ import type {
   ContextProductConsumerBindingRead,
   ContextProductCreate,
   ContextProductRead,
+  ContextProductRoutineOptionRead,
   ContextProductScopeRead,
   ContextProductVersionRead,
   GovernanceReviewRead,
@@ -250,6 +251,23 @@ export function fetchContextProducts(
         signal,
       );
     },
+  );
+}
+
+/** `GET /v1/projects/{project_id}/context-product-routine-options` (R11-FP12) — the ACTIVE
+ *  stored procedures and functions on this project's own datasources: exactly the set the
+ *  create call accepts in `routine_ids`. Demo mode offers none. */
+export function fetchContextProductRoutineOptions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductRoutineOptionRead[]> {
+  return demoOr(
+    async () => [],
+    async () =>
+      get<ContextProductRoutineOptionRead[]>(
+        `/v1/projects/${projectId}/context-product-routine-options?limit=200`,
+        signal,
+      ),
   );
 }
 

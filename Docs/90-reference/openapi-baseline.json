@@ -8355,6 +8355,15 @@
           "quality_requirements": {
             "$ref": "#/components/schemas/ContextProductQualityRequirements"
           },
+          "routine_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Routine Ids",
+            "type": "array"
+          },
           "semantic_model_version_ids": {
             "items": {
               "format": "uuid",
@@ -8505,6 +8514,53 @@
           "updated_at"
         ],
         "title": "ContextProductRead",
+        "type": "object"
+      },
+      "ContextProductRoutineOptionRead": {
+        "additionalProperties": false,
+        "description": "R11-FP12: one routine a context product draft in this project may name.",
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "datasource_name": {
+            "title": "Datasource Name",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "routine_type": {
+            "title": "Routine Type",
+            "type": "string"
+          },
+          "schema_name": {
+            "title": "Schema Name",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "datasource_id",
+          "datasource_name",
+          "schema_name",
+          "name",
+          "routine_type",
+          "signature"
+        ],
+        "title": "ContextProductRoutineOptionRead",
         "type": "object"
       },
       "ContextProductScopeRead": {
@@ -8660,6 +8716,15 @@
           },
           "quality_requirements": {
             "$ref": "#/components/schemas/ContextProductQualityRequirements"
+          },
+          "routine_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Routine Ids",
+            "type": "array"
           },
           "semantic_model_version_ids": {
             "items": {
@@ -8859,6 +8924,15 @@
           "quality_requirements": {
             "$ref": "#/components/schemas/ContextProductQualityRequirements"
           },
+          "routine_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Routine Ids",
+            "type": "array"
+          },
           "semantic_model_version_ids": {
             "items": {
               "format": "uuid",
@@ -9040,6 +9114,15 @@
           },
           "quality_requirements": {
             "$ref": "#/components/schemas/ContextProductQualityRequirements"
+          },
+          "routine_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 500,
+            "title": "Routine Ids",
+            "type": "array"
           },
           "semantic_model_version_ids": {
             "items": {
@@ -83302,6 +83385,151 @@
         "summary": "Create Bi Connection",
         "tags": [
           "bi-lineage"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/context-product-routine-options": {
+      "get": {
+        "description": "R11-FP12: the routines a draft in this project may name. The filter is the one\n`validate_context_product_references` applies -- ACTIVE, on this project's own datasources\n-- so the picker never offers a routine the create call would refuse.",
+        "operationId": "list_context_product_routine_options_v1_projects__project_id__context_product_routine_options_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ContextProductRoutineOptionRead"
+                  },
+                  "title": "Response List Context Product Routine Options V1 Projects  Project Id  Context Product Routine Options Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Context Product Routine Options",
+        "tags": [
+          "context-products"
         ]
       }
     },

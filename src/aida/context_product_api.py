@@ -28,6 +28,7 @@ from aida.context_product_policy import (
 )
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
 from aida.models import (
     BusinessDomain,
@@ -42,6 +43,7 @@ from aida.models import (
     GovernedTool,
     GovernedToolVersion,
     MetadataBusinessAnnotation,
+    MetadataSchema,
     MetadataTable,
     Project,
     SemanticModelVersion,
@@ -53,6 +55,7 @@ from aida.schemas import (
     ContextProductCreate,
     ContextProductDefinition,
     ContextProductRead,
+    ContextProductRoutineOptionRead,
     ContextProductScopeRead,
     ContextProductVersionCreate,
     ContextProductVersionRead,
@@ -80,7 +83,12 @@ CONTEXT_PRODUCT_LIFECYCLE_READERS = frozenset(
 
 
 def context_product_fingerprint(body: ContextProductDefinition) -> str:
-    payload = json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    definition = body.model_dump(mode="json")
+    # R11-FP12: a definition naming no routines fingerprints exactly as it did before
+    # `routine_ids` existed, so no stored fingerprint -- or etag built on one -- goes stale.
+    if not definition.get("routine_ids"):
+        definition.pop("routine_ids", None)
+    payload = json.dumps(definition, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -134,6 +142,7 @@ def _definition_from_version(version: ContextProductVersion) -> ContextProductDe
             "semantic_model_version_ids": version.semantic_model_version_ids,
             "glossary_term_version_ids": version.glossary_term_version_ids,
             "eligible_tool_version_ids": version.eligible_tool_version_ids,
+            "routine_ids": version.routine_ids or [],
             "allowed_consumer_roles": version.allowed_consumer_roles,
             "lineage_depth": version.lineage_depth,
             "quality_requirements": version.quality_requirements,
@@ -158,6 +167,7 @@ def apply_context_product_definition(
     version.semantic_model_version_ids = payload["semantic_model_version_ids"]
     version.glossary_term_version_ids = payload["glossary_term_version_ids"]
     version.eligible_tool_version_ids = payload["eligible_tool_version_ids"]
+    version.routine_ids = payload["routine_ids"]
     version.allowed_consumer_roles = list(body.allowed_consumer_roles)
     version.lineage_depth = body.lineage_depth
     version.quality_requirements = payload["quality_requirements"]
@@ -392,6 +402,19 @@ async def validate_context_product_references(
         body.eligible_tool_version_ids,
         "governed tool versions",
     )
+    await _require_exact_ids(
+        session,
+        select(MetadataRoutine.id)
+        .join(DataSource, DataSource.id == MetadataRoutine.datasource_id)
+        .where(
+            MetadataRoutine.id.in_(body.routine_ids),
+            MetadataRoutine.organization_id == project.organization_id,
+            MetadataRoutine.status == "ACTIVE",
+            DataSource.project_id == project.id,
+        ),
+        body.routine_ids,
+        "routines",
+    )
 
 
 @router.post(
@@ -531,6 +554,48 @@ async def _envelope_listing_clause(
             continue
     by_key = ContextProduct.product_key.in_(allowed)
     return or_(by_key, ContextProduct.id.in_(product_ids)) if product_ids else by_key
+
+
+@router.get(
+    "/projects/{project_id}/context-product-routine-options",
+    response_model=list[ContextProductRoutineOptionRead],
+)
+async def list_context_product_routine_options(
+    project_id: UUID,
+    limit: int = Query(default=200, ge=1, le=500),
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> list[ContextProductRoutineOptionRead]:
+    """R11-FP12: the routines a draft in this project may name. The filter is the one
+    `validate_context_product_references` applies -- ACTIVE, on this project's own datasources
+    -- so the picker never offers a routine the create call would refuse."""
+    project = await load_project_in_scope(session, project_id, context)
+    rows = (
+        await session.execute(
+            select(MetadataRoutine, MetadataSchema.name, DataSource.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+            .join(DataSource, DataSource.id == MetadataRoutine.datasource_id)
+            .where(
+                MetadataRoutine.organization_id == project.organization_id,
+                MetadataRoutine.status == "ACTIVE",
+                DataSource.project_id == project.id,
+            )
+            .order_by(MetadataSchema.name, MetadataRoutine.name, MetadataRoutine.signature)
+            .limit(limit)
+        )
+    ).all()
+    return [
+        ContextProductRoutineOptionRead(
+            id=routine.id,
+            datasource_id=routine.datasource_id,
+            datasource_name=datasource_name,
+            schema_name=schema_name,
+            name=routine.name,
+            routine_type=routine.routine_type,
+            signature=routine.signature,
+        )
+        for routine, schema_name, datasource_name in rows
+    ]
 
 
 @router.get("/projects/{project_id}/context-products", response_model=Page)

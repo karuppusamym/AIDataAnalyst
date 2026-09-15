@@ -1413,6 +1413,7 @@ export interface ContextProductCreate {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1444,6 +1445,17 @@ export interface ContextProductRead {
   updated_at: string;
 }
 
+/** R11-FP12: one routine a context product draft in this project may name. */
+export interface ContextProductRoutineOptionRead {
+  id: string;
+  datasource_id: string;
+  datasource_name: string;
+  schema_name: string;
+  name: string;
+  routine_type: string;
+  signature: string;
+}
+
 /** Both ADR-0017 SS9 axes for one context product version, composed for an */
 export interface ContextProductScopeRead {
   context_product_version_id: string;
@@ -1466,6 +1478,7 @@ export interface ContextProductVersionCreate {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1484,6 +1497,7 @@ export interface ContextProductVersionRead {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1518,6 +1532,7 @@ export interface ContextProductVersionUpdate {
   semantic_model_version_ids?: string[];
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
+  routine_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;

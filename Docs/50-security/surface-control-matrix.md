@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **476**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 423, SDK 1
+- Surfaces covered: **477**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 424, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -292,6 +292,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.get_playbook` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/procedure-lineage/capability-matrix` | REST | `aida.procedure_lineage_api.get_procedure_lineage_capability_matrix` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/bi-connections` | REST | `aida.bi_api.list_bi_connections` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
+| `GET /v1/projects/{project_id}/context-product-routine-options` | REST | `aida.context_product_api.list_context_product_routine_options` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/context-products` | REST | `aida.context_product_api.list_context_products` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/projects/{project_id}/data-products` | REST | `aida.product_marketplace_api.list_data_products` | Analyst, Auditor, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/datasources` | REST | `atlas.modules.connectivity.router.list_datasources` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

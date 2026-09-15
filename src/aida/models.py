@@ -2863,6 +2863,8 @@ class ContextProductVersion(Base, TimestampMixin):
     )
     glossary_term_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     eligible_tool_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # R11-FP12: routines named directly; see `ContextProductDefinition.routine_ids`.
+    routine_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     allowed_consumer_roles: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     lineage_depth: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     quality_requirements: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

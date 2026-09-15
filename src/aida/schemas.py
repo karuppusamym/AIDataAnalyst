@@ -2381,6 +2381,9 @@ class ContextProductDefinition(ApiModel):
     semantic_model_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
     glossary_term_version_ids: list[UUID] = Field(default_factory=list, max_length=500)
     eligible_tool_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    #: R11-FP12: stored procedures and functions the product names directly. Views need no list
+    #: of their own -- a view is a table id, and its coverage is derived from `table_ids`.
+    routine_ids: list[UUID] = Field(default_factory=list, max_length=500)
     allowed_consumer_roles: list[str] = Field(min_length=1, max_length=50)
     lineage_depth: int = Field(default=2, ge=0, le=4)
     quality_requirements: ContextProductQualityRequirements = Field(
@@ -2400,6 +2403,7 @@ class ContextProductDefinition(ApiModel):
             self.semantic_model_version_ids,
             self.glossary_term_version_ids,
             self.eligible_tool_version_ids,
+            self.routine_ids,
         )
         if not any(reference_groups):
             raise ValueError("a context product must include at least one governed reference")
@@ -2444,6 +2448,18 @@ class ContextProductVersionRead(ContextProductDefinition):
     superseded_at: datetime | None = None
     support_window_ends_at: datetime | None = None
     superseded_by_version_id: UUID | None = None
+
+
+class ContextProductRoutineOptionRead(ApiModel):
+    """R11-FP12: one routine a context product draft in this project may name."""
+
+    id: UUID
+    datasource_id: UUID
+    datasource_name: str
+    schema_name: str
+    name: str
+    routine_type: str
+    signature: str
 
 
 class ContextProductRead(ApiModel):

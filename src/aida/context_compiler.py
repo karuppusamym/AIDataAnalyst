@@ -20,6 +20,44 @@ class ResolvedTableReference:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedRoutineReference:
+    """R11-FP12: a routine the product names, with what it stands on -- pre-serialized.
+
+    `reads_table_ids`/`writes_table_ids` come from ACTIVE, non-intermediate procedure-lineage
+    edges and are cut to the product's own `table_ids`: a routine that also reads a table the
+    product does not cover says nothing about that table, not even that it exists.
+    `definition_digest` is a SHA-256 of the stored value-free text, so a consumer can tell the
+    definition changed without Atlas publishing a digest of the literal-bearing original.
+    """
+
+    routine_id: str
+    qualified_name: str
+    routine_type: str
+    signature: str
+    status: str
+    definition_available: bool
+    lineage: str
+    fully_parsed: bool
+    reads_table_ids: tuple[str, ...]
+    writes_table_ids: tuple[str, ...]
+    definition_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedViewCoverage:
+    """R11-FP12: how much Atlas holds about a view (or materialized view) in the product's
+    table scope. Same serialization discipline as `ResolvedRoutineReference`."""
+
+    table_id: str
+    object_type: str
+    status: str
+    definition_available: bool
+    truncated: bool
+    lineage: str
+    definition_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedExemplar:
     """A promoted exemplar (N17), pre-scoped and pre-serialized by the caller.
 
@@ -119,6 +157,49 @@ def _exemplars_section(exemplars: list[ResolvedExemplar]) -> dict[str, Any]:
     return {"count": len(items), "exemplars": items}
 
 
+def coverage_section(
+    routines: list[ResolvedRoutineReference], views: list[ResolvedViewCoverage]
+) -> dict[str, Any]:
+    """R11-FP12: the routines and views a product covers, and how completely. Public: MCP's
+    context-product read renders the same section, so the two doors cannot disagree."""
+    return {
+        "routines": sorted(
+            (
+                {
+                    "id": routine.routine_id,
+                    "qualified_name": routine.qualified_name,
+                    "routine_type": routine.routine_type,
+                    "signature": routine.signature,
+                    "status": routine.status,
+                    "definition_available": routine.definition_available,
+                    "lineage": routine.lineage,
+                    "fully_parsed": routine.fully_parsed,
+                    "reads_table_ids": sorted(routine.reads_table_ids),
+                    "writes_table_ids": sorted(routine.writes_table_ids),
+                    "definition_digest": routine.definition_digest,
+                }
+                for routine in routines
+            ),
+            key=lambda item: str(item["id"]),
+        ),
+        "views": sorted(
+            (
+                {
+                    "table_id": view.table_id,
+                    "object_type": view.object_type,
+                    "status": view.status,
+                    "definition_available": view.definition_available,
+                    "truncated": view.truncated,
+                    "lineage": view.lineage,
+                    "definition_digest": view.definition_digest,
+                }
+                for view in views
+            ),
+            key=lambda item: str(item["table_id"]),
+        ),
+    }
+
+
 def _canonical_json(value: Any, *, pretty: bool = True) -> str:
     return json.dumps(
         value,
@@ -136,8 +217,10 @@ def _artifact_payload(
     tables: list[ResolvedTableReference],
     negative_knowledge: list[ResolvedNegativeAssertion],
     exemplars: list[ResolvedExemplar],
+    routines: list[ResolvedRoutineReference],
+    views: list[ResolvedViewCoverage],
 ) -> dict[str, Any]:
-    references = {
+    references: dict[str, Any] = {
         "tables": [
             {"id": table.table_id, "qualified_name": table.qualified_name} for table in tables
         ],
@@ -145,6 +228,16 @@ def _artifact_payload(
         "glossary_term_version_ids": sorted(version.glossary_term_version_ids),
         "eligible_tool_version_ids": sorted(version.eligible_tool_version_ids),
     }
+    # R11-FP12: present only when there is something to say, so a product that names no
+    # routine and holds no view compiles to the byte-identical artifact it always did.
+    if routines:
+        references["routines"] = sorted(
+            (
+                {"id": routine.routine_id, "qualified_name": routine.qualified_name}
+                for routine in routines
+            ),
+            key=lambda item: item["id"],
+        )
     common = {
         "product_key": product.product_key,
         "version": version.version,
@@ -166,6 +259,8 @@ def _artifact_payload(
         "negative_knowledge": _negative_knowledge_section(negative_knowledge),
         "exemplars": _exemplars_section(exemplars),
     }
+    if routines or views:
+        atlas_common["coverage"] = coverage_section(routines, views)
     if target == "MCP":
         return {
             "kind": "AtlasMcpContext",
@@ -264,6 +359,8 @@ def compile_context_product(
     tables: list[ResolvedTableReference],
     negative_knowledge: list[ResolvedNegativeAssertion] | None = None,
     exemplars: list[ResolvedExemplar] | None = None,
+    routines: list[ResolvedRoutineReference] | None = None,
+    views: list[ResolvedViewCoverage] | None = None,
 ) -> ContextCompilationRead:
     """Compile a version-pinned product without time- or environment-dependent fields.
 
@@ -280,6 +377,11 @@ def compile_context_product(
     whose own resolved objects touch this version's table scope, rendered
     only into targets in `_EXEMPLAR_TARGETS`, and defaulting to none so
     existing callers are unaffected.
+
+    `routines` and `views` (R11-FP12) are pre-resolved by
+    `aida.context_product_coverage`. Routine references reach every target that embeds
+    `common`; the coverage section -- availability, lineage state, digests -- reaches only the
+    Atlas-native targets, like the two sections above. Both default to none.
     """
     payload = _artifact_payload(
         product,
@@ -288,6 +390,8 @@ def compile_context_product(
         sorted(tables, key=lambda item: item.table_id),
         negative_knowledge or [],
         exemplars or [],
+        routines or [],
+        views or [],
     )
     content = (
         yaml.safe_dump(payload, sort_keys=True, allow_unicode=False, width=100)

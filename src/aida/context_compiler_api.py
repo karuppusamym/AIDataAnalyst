@@ -10,13 +10,16 @@ from aida.context import get_correlation_id
 from aida.context_compiler import (
     ResolvedExemplar,
     ResolvedNegativeAssertion,
+    ResolvedRoutineReference,
     ResolvedTableReference,
+    ResolvedViewCoverage,
     compilation_drift_paths,
     compile_context_product,
     validate_compiled_artifact,
 )
 from aida.context_path import derive_context_path
 from aida.context_product_api import _enforce_capability_envelope
+from aida.context_product_coverage import load_routine_references, load_view_coverage
 from aida.context_product_policy import (
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
@@ -145,6 +148,8 @@ async def _load_source(
     list[ResolvedTableReference],
     list[ResolvedNegativeAssertion],
     list[ResolvedExemplar],
+    list[ResolvedRoutineReference],
+    list[ResolvedViewCoverage],
     dict[str, object],
 ]:
     version = await session.get(ContextProductVersion, version_id)
@@ -211,7 +216,25 @@ async def _load_source(
         session, version.organization_id, version.table_ids
     )
     exemplars = await _load_exemplars(session, version.organization_id, version.table_ids)
-    return product, version, resolved, negative_knowledge, exemplars, quality.snapshot()
+    routine_ids = list(version.routine_ids or [])
+    routines = await load_routine_references(
+        session, version.organization_id, routine_ids, version.table_ids
+    )
+    if len(routines) != len(routine_ids):
+        raise HTTPException(
+            status_code=409, detail="context product contains unresolved routine references"
+        )
+    views = await load_view_coverage(session, version.organization_id, version.table_ids)
+    return (
+        product,
+        version,
+        resolved,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        quality.snapshot(),
+    )
 
 
 @router.get("/context-product-versions/{version_id}/compile", response_model=ContextCompilationRead)
@@ -221,11 +244,18 @@ async def compile_context_product_version(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextCompilationRead:
-    product, version, tables, negative_knowledge, exemplars, quality_snapshot = await _load_source(
-        session, version_id, context
-    )
+    (
+        product,
+        version,
+        tables,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        quality_snapshot,
+    ) = await _load_source(session, version_id, context)
     compiled = compile_context_product(
-        product, version, target, tables, negative_knowledge, exemplars
+        product, version, target, tables, negative_knowledge, exemplars, routines, views
     )
     correlation_id = get_correlation_id()
     record_audit(
@@ -271,11 +301,18 @@ async def download_context_compilation(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    product, version, tables, negative_knowledge, exemplars, quality_snapshot = await _load_source(
-        session, version_id, context
-    )
+    (
+        product,
+        version,
+        tables,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        quality_snapshot,
+    ) = await _load_source(session, version_id, context)
     compiled = compile_context_product(
-        product, version, target, tables, negative_knowledge, exemplars
+        product, version, target, tables, negative_knowledge, exemplars, routines, views
     )
     validation = validate_compiled_artifact(target, compiled.content)
     if not validation.valid:
@@ -338,11 +375,18 @@ async def inspect_context_compilation_drift(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextCompilationDriftRead:
-    product, version, tables, negative_knowledge, exemplars, _ = await _load_source(
-        session, version_id, context
-    )
+    (
+        product,
+        version,
+        tables,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        _,
+    ) = await _load_source(session, version_id, context)
     compiled = compile_context_product(
-        product, version, body.target, tables, negative_knowledge, exemplars
+        product, version, body.target, tables, negative_knowledge, exemplars, routines, views
     )
     deployed_hash = body.deployed_hash
     changed_paths: list[str] = []
