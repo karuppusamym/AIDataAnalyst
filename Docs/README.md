@@ -96,6 +96,7 @@ Docs/
 | [11 Capacity and cost model](10-architecture/11-capacity-and-cost-model.md) | Workload isolation, sizing tiers, backpressure, cost governance, metrics |
 | [12 Runtime sequences](10-architecture/12-runtime-sequences.md) | How the modules compose at runtime, end to end |
 | [14 Architecture map](10-architecture/14-generated-architecture-map.md) | **Generated, not drawn.** The module graph aggregated to groups, what each of the five processes reaches, the bounded contexts, and the import-linter contracts actually enforced |
+| [20 Database footprint and agent context](10-architecture/20-database-footprint-and-agent-context.md) | **Proposal, 2026-09-14:** source-specific object discovery, package/routine/code mapping, dbt and ETL flows, evidence-backed context, governed tool candidates, current-code gaps and delivery slices |
 | [ADR register](10-architecture/adr/README.md) | Seventeen accepted decisions, one superseded (0017 → 0018) |
 
 ### 20-modules — The bounded contexts
