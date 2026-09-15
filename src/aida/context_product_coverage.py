@@ -1,13 +1,15 @@
 """R11-FP12: what a context product's routines and views stand on, resolved for its readers.
 
 A product scoped by `table_ids` alone can say "these tables", but not "this procedure builds that
-one", nor "this view's definition was withheld from us". The two resolvers here feed both doors a
+one", nor "this view's definition was withheld from us". The resolvers here feed both doors a
 version is read through -- compilation (`context_compiler_api._load_source`) and MCP's resource
 read -- so the two cannot describe the same version differently:
 
 * `load_routine_references` resolves the routines a version names in `routine_ids`: identity,
   status, whether its body would be released on request, the state of its lineage, and the
   tables it reads and writes;
+* `load_ontology_meaning` (R11-FP09) reads the meaning of the ontology versions a version
+  is pinned to, from those versions and never from the ontology's head;
 * `load_view_coverage` derives, from the version's own `table_ids`, the views and materialized
   views among them and the same facts about their definitions.
 
@@ -30,11 +32,22 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.context_compiler import ResolvedRoutineReference, ResolvedViewCoverage
+from aida.context_compiler import (
+    ResolvedOntologyMeaning,
+    ResolvedRoutineReference,
+    ResolvedViewCoverage,
+)
 from aida.discovery_selection import table_kind
 from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
-from aida.ingest_screening import is_eligible_for_model_context
-from aida.models import MetadataCatalog, MetadataSchema, MetadataTable, ViewLineageEdge
+from aida.ingest_screening import is_eligible_for_model_context, screen_text
+from aida.models import (
+    MetadataCatalog,
+    MetadataColumn,
+    MetadataSchema,
+    MetadataTable,
+    ViewLineageEdge,
+)
+from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
@@ -235,3 +248,158 @@ async def load_view_coverage(
         )
         for table_id, kind, status, definition in views
     ]
+
+
+def _screened(value: Any, origin: str, withheld: list[dict[str, Any]]) -> str | None:
+    """Free text an ontology author typed, released only when egress screening allows it."""
+    if value is None:
+        return None
+    text = str(value)
+    verdict = screen_text(text, content_origin=origin)
+    if is_eligible_for_model_context(verdict.status):
+        return text
+    withheld.append(
+        {
+            "field": origin.split(":", 2)[-1],
+            "status": verdict.status,
+            "reason_codes": list(verdict.reason_codes),
+        }
+    )
+    return None
+
+
+async def load_ontology_meaning(
+    session: AsyncSession,
+    organization_id: UUID,
+    ontology_version_ids: Sequence[Any],
+    scope_table_ids: Sequence[Any],
+    scope_routine_ids: Sequence[Any],
+) -> list[ResolvedOntologyMeaning]:
+    """R11-FP09: the meaning of the approved ontology versions named, in this organization.
+
+    Read from each pinned version, never from its ontology's head. The caller compares the count
+    with what it asked for and refuses a version that names one no longer approved here. A mapping
+    stands only on an object the product covers -- a table or view in `scope_table_ids`, a column
+    of one, a routine in `scope_routine_ids` -- so the meaning says nothing about anything else.
+    """
+    ids = _uuids(ontology_version_ids)
+    if not ids:
+        return []
+    rows = (
+        await session.execute(
+            select(OntologyVersion, OntologyHead.ontology_key)
+            .join(OntologyHead, OntologyHead.id == OntologyVersion.ontology_id)
+            .where(
+                OntologyVersion.id.in_(ids),
+                OntologyVersion.organization_id == organization_id,
+                OntologyVersion.status == "APPROVED",
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+    tables = {str(value) for value in scope_table_ids}
+    routines = {str(value) for value in scope_routine_ids}
+    column_ids = {
+        str(mapping.get("subject_id"))
+        for version, _ in rows
+        for mapping in (version.definition or {}).get("mappings") or []
+        if isinstance(mapping, dict) and mapping.get("subject_type") == "COLUMN"
+    }
+    column_tables: dict[str, str] = {}
+    if column_ids:
+        column_rows = (
+            await session.execute(
+                select(MetadataColumn.id, MetadataColumn.table_id).where(
+                    MetadataColumn.id.in_(_uuids(sorted(column_ids))),
+                    MetadataColumn.organization_id == organization_id,
+                )
+            )
+        ).all()
+        column_tables = {str(column_id): str(table_id) for column_id, table_id in column_rows}
+
+    def in_scope(subject_type: str, subject_id: str) -> bool:
+        if subject_type in ("TABLE", "VIEW"):
+            return subject_id in tables
+        if subject_type == "COLUMN":
+            return column_tables.get(subject_id) in tables
+        return subject_type == "ROUTINE" and subject_id in routines
+
+    meanings: list[ResolvedOntologyMeaning] = []
+    for version, ontology_key in rows:
+        definition: dict[str, Any] = version.definition or {}
+        origin = f"ontology_version:{version.id}"
+        withheld: list[dict[str, Any]] = []
+        mappings = [
+            mapping for mapping in definition.get("mappings") or [] if isinstance(mapping, dict)
+        ]
+        concepts: list[dict[str, Any]] = []
+        for concept in definition.get("concepts") or []:
+            if not isinstance(concept, dict) or concept.get("deprecated"):
+                continue
+            key = str(concept.get("key"))
+            aliases = [
+                str(alias)
+                for alias in concept.get("aliases") or []
+                if _screened(alias, f"{origin}:concept:{key}:alias", withheld) is not None
+            ]
+            concepts.append(
+                {
+                    "key": key,
+                    "name": _screened(
+                        concept.get("name"), f"{origin}:concept:{key}:name", withheld
+                    ),
+                    "description": _screened(
+                        concept.get("description"), f"{origin}:concept:{key}:description", withheld
+                    ),
+                    "aliases": sorted(aliases),
+                    "mappings": sorted(
+                        (
+                            {
+                                "subject_type": str(mapping.get("subject_type")),
+                                "subject_id": str(mapping.get("subject_id")),
+                            }
+                            for mapping in mappings
+                            if mapping.get("concept") == key
+                            and in_scope(
+                                str(mapping.get("subject_type")), str(mapping.get("subject_id"))
+                            )
+                        ),
+                        key=lambda item: (item["subject_type"], item["subject_id"]),
+                    ),
+                }
+            )
+        delivered = {concept["key"] for concept in concepts}
+        relations: list[dict[str, Any]] = []
+        for relation in definition.get("relations") or []:
+            if not isinstance(relation, dict) or relation.get("deprecated"):
+                continue
+            if relation.get("source") not in delivered or relation.get("target") not in delivered:
+                continue
+            relation_key = str(relation.get("key"))
+            relations.append(
+                {
+                    "key": relation_key,
+                    "source": str(relation.get("source")),
+                    "target": str(relation.get("target")),
+                    "cardinality": relation.get("cardinality"),
+                    "description": _screened(
+                        relation.get("description"),
+                        f"{origin}:relation:{relation_key}:description",
+                        withheld,
+                    ),
+                }
+            )
+        meanings.append(
+            ResolvedOntologyMeaning(
+                version_id=str(version.id),
+                ontology_key=ontology_key,
+                version=version.version,
+                name=_screened(definition.get("name"), f"{origin}:name", withheld),
+                lifecycle=str(definition.get("lifecycle") or "ACTIVE"),
+                concepts=tuple(sorted(concepts, key=lambda item: str(item["key"]))),
+                relations=tuple(sorted(relations, key=lambda item: str(item["key"]))),
+                withheld=tuple(withheld),
+            )
+        )
+    return meanings

@@ -10,6 +10,7 @@ from aida.context import get_correlation_id
 from aida.context_compiler import (
     ResolvedExemplar,
     ResolvedNegativeAssertion,
+    ResolvedOntologyMeaning,
     ResolvedRoutineReference,
     ResolvedTableReference,
     ResolvedViewCoverage,
@@ -19,7 +20,11 @@ from aida.context_compiler import (
 )
 from aida.context_path import derive_context_path
 from aida.context_product_api import _enforce_capability_envelope
-from aida.context_product_coverage import load_routine_references, load_view_coverage
+from aida.context_product_coverage import (
+    load_ontology_meaning,
+    load_routine_references,
+    load_view_coverage,
+)
 from aida.context_product_policy import (
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
@@ -150,6 +155,7 @@ async def _load_source(
     list[ResolvedExemplar],
     list[ResolvedRoutineReference],
     list[ResolvedViewCoverage],
+    list[ResolvedOntologyMeaning],
     dict[str, object],
 ]:
     version = await session.get(ContextProductVersion, version_id)
@@ -225,6 +231,14 @@ async def _load_source(
             status_code=409, detail="context product contains unresolved routine references"
         )
     views = await load_view_coverage(session, version.organization_id, version.table_ids)
+    ontology_version_ids = list(version.ontology_version_ids or [])
+    ontology = await load_ontology_meaning(
+        session, version.organization_id, ontology_version_ids, version.table_ids, routine_ids
+    )
+    if len(ontology) != len(ontology_version_ids):
+        raise HTTPException(
+            status_code=409, detail="context product contains unresolved ontology references"
+        )
     return (
         product,
         version,
@@ -233,6 +247,7 @@ async def _load_source(
         exemplars,
         routines,
         views,
+        ontology,
         quality.snapshot(),
     )
 
@@ -252,10 +267,19 @@ async def compile_context_product_version(
         exemplars,
         routines,
         views,
+        ontology,
         quality_snapshot,
     ) = await _load_source(session, version_id, context)
     compiled = compile_context_product(
-        product, version, target, tables, negative_knowledge, exemplars, routines, views
+        product,
+        version,
+        target,
+        tables,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        ontology,
     )
     correlation_id = get_correlation_id()
     record_audit(
@@ -309,10 +333,19 @@ async def download_context_compilation(
         exemplars,
         routines,
         views,
+        ontology,
         quality_snapshot,
     ) = await _load_source(session, version_id, context)
     compiled = compile_context_product(
-        product, version, target, tables, negative_knowledge, exemplars, routines, views
+        product,
+        version,
+        target,
+        tables,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        ontology,
     )
     validation = validate_compiled_artifact(target, compiled.content)
     if not validation.valid:
@@ -383,10 +416,19 @@ async def inspect_context_compilation_drift(
         exemplars,
         routines,
         views,
+        ontology,
         _,
     ) = await _load_source(session, version_id, context)
     compiled = compile_context_product(
-        product, version, body.target, tables, negative_knowledge, exemplars, routines, views
+        product,
+        version,
+        body.target,
+        tables,
+        negative_knowledge,
+        exemplars,
+        routines,
+        views,
+        ontology,
     )
     deployed_hash = body.deployed_hash
     changed_paths: list[str] = []

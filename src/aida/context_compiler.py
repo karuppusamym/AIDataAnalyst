@@ -58,6 +58,27 @@ class ResolvedViewCoverage:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedOntologyMeaning:
+    """R11-FP09: the approved ontology meaning a product is pinned to, from that version itself.
+
+    Read from the bound version and never from the ontology's head, so a later publication
+    cannot change what a product says. Mappings are cut to the product's own tables, columns
+    and routines; a concept with none left in scope still says what the word means. Deprecated
+    concepts and relations are left out. Pre-serialized, like the other resolved references:
+    free text egress screening withheld arrives as `None`, with the verdict in `withheld`.
+    """
+
+    version_id: str
+    ontology_key: str
+    version: int
+    name: str | None
+    lifecycle: str
+    concepts: tuple[dict[str, Any], ...]
+    relations: tuple[dict[str, Any], ...] = ()
+    withheld: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedExemplar:
     """A promoted exemplar (N17), pre-scoped and pre-serialized by the caller.
 
@@ -200,6 +221,27 @@ def coverage_section(
     }
 
 
+def ontology_section(meanings: list[ResolvedOntologyMeaning]) -> list[dict[str, Any]]:
+    """R11-FP09: the meaning each bound ontology version gives the product. Public: MCP's
+    context-product read renders the same section, so the two doors cannot disagree."""
+    return sorted(
+        (
+            {
+                "version_id": meaning.version_id,
+                "ontology_key": meaning.ontology_key,
+                "version": meaning.version,
+                "name": meaning.name,
+                "lifecycle": meaning.lifecycle,
+                "concepts": list(meaning.concepts),
+                "relations": list(meaning.relations),
+                "withheld": list(meaning.withheld),
+            }
+            for meaning in meanings
+        ),
+        key=lambda item: str(item["version_id"]),
+    )
+
+
 def _canonical_json(value: Any, *, pretty: bool = True) -> str:
     return json.dumps(
         value,
@@ -219,6 +261,7 @@ def _artifact_payload(
     exemplars: list[ResolvedExemplar],
     routines: list[ResolvedRoutineReference],
     views: list[ResolvedViewCoverage],
+    ontology: list[ResolvedOntologyMeaning],
 ) -> dict[str, Any]:
     references: dict[str, Any] = {
         "tables": [
@@ -264,6 +307,9 @@ def _artifact_payload(
     }
     if routines or views:
         atlas_common["coverage"] = coverage_section(routines, views)
+    # R11-FP09: present only when the product binds an ontology version, as `coverage` is.
+    if ontology:
+        atlas_common["ontology"] = ontology_section(ontology)
     if target == "MCP":
         return {
             "kind": "AtlasMcpContext",
@@ -364,6 +410,7 @@ def compile_context_product(
     exemplars: list[ResolvedExemplar] | None = None,
     routines: list[ResolvedRoutineReference] | None = None,
     views: list[ResolvedViewCoverage] | None = None,
+    ontology: list[ResolvedOntologyMeaning] | None = None,
 ) -> ContextCompilationRead:
     """Compile a version-pinned product without time- or environment-dependent fields.
 
@@ -385,6 +432,10 @@ def compile_context_product(
     `aida.context_product_coverage`. Routine references reach every target that embeds
     `common`; the coverage section -- availability, lineage state, digests -- reaches only the
     Atlas-native targets, like the two sections above. Both default to none.
+
+    `ontology` (R11-FP09) is the meaning of each bound ontology version, pre-resolved by
+    `aida.context_product_coverage.load_ontology_meaning` from the pinned versions, and
+    reaches only the Atlas-native targets. It defaults to none.
     """
     payload = _artifact_payload(
         product,
@@ -395,6 +446,7 @@ def compile_context_product(
         exemplars or [],
         routines or [],
         views or [],
+        ontology or [],
     )
     content = (
         yaml.safe_dump(payload, sort_keys=True, allow_unicode=False, width=100)

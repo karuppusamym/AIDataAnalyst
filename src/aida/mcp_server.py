@@ -82,8 +82,12 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings, get_settings
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
-from aida.context_compiler import coverage_section
-from aida.context_product_coverage import load_routine_references, load_view_coverage
+from aida.context_compiler import coverage_section, ontology_section
+from aida.context_product_coverage import (
+    load_ontology_meaning,
+    load_routine_references,
+    load_view_coverage,
+)
 from aida.context_product_policy import (
     ContextProductQualityDecision,
     can_serve_pinned_version,
@@ -2671,6 +2675,16 @@ async def _read_context_product_resource(
             await load_view_coverage(
                 session, product_version.organization_id, product_version.table_ids
             ),
+        ),
+        # R11-FP09: the ontology meaning the version is pinned to, from those versions.
+        "ontology": ontology_section(
+            await load_ontology_meaning(
+                session,
+                product_version.organization_id,
+                list(product_version.ontology_version_ids or []),
+                product_version.table_ids,
+                list(product_version.routine_ids or []),
+            )
         ),
         "allowed_consumer_roles": product_version.allowed_consumer_roles,
         "lineage_depth": product_version.lineage_depth,
