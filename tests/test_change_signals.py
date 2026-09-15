@@ -6,7 +6,8 @@ persistence halves against in-memory SQLite, the way `test_envelope_v11` does, a
 
 * a first scan, and a rescan of identical metadata, record nothing;
 * a changed definition is classed LITERAL_ONLY when only literals moved, STRUCTURAL otherwise;
-* table shape changes, retirements and revoked grants are signalled against the right subject;
+* table shape changes, retirements and revoked grants are signalled against the right subject,
+  and a shape change is classed by what it can do to a query that still binds;
 * publishing an ontology version records a meaning signal.
 """
 
@@ -296,6 +297,37 @@ async def test_table_shape_retirement_routines_and_grants_are_each_signalled(
     assert ("TABLE", await _table_id(session, "branch")) not in by_subject
     assert all(row.datasource_id == datasource.id for row in rows)
     assert all(row.status == "PENDING" for row in rows)
+
+
+async def test_a_table_shape_change_is_classed_by_what_it_can_do_to_a_query_that_still_binds(
+    session: AsyncSession,
+) -> None:
+    datasource = await _datasource(session)
+    base = (_column("account_id", 1), _column("customer_id", 2))
+    widened = (*base, _column("branch_id", 3))
+    await _scan(session, datasource, _envelope(tables=[_table("account", *base), _view()]))
+
+    added = await _scan(
+        session, datasource, _envelope(tables=[_table("account", *widened), _view()])
+    )
+    removed = await _scan(
+        session, datasource, _envelope(tables=[_table("account", *base), _view()])
+    )
+    returned = await _scan(
+        session, datasource, _envelope(tables=[_table("account", *widened), _view()])
+    )
+    retyped_columns = (_column("account_id", 1), _column("customer_id", 2, "text"), widened[2])
+    retyped = await _scan(
+        session, datasource, _envelope(tables=[_table("account", *retyped_columns), _view()])
+    )
+
+    for run, change_class in (
+        (added, "COLUMNS_ADDED"),
+        (removed, "COLUMNS_REMOVED"),
+        (returned, "COLUMNS_RETURNED"),
+        (retyped, "COLUMNS_RETYPED"),
+    ):
+        assert await _signals(session, run) == {("TABLE", "STRUCTURE_CHANGED", change_class)}
 
 
 async def test_a_datasources_signals_are_read_only_inside_its_organization(

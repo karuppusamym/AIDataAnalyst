@@ -73,7 +73,7 @@ from aida.tool_certification import (
     run_certification_corpus,
 )
 from aida.tool_drafts import ToolDraftRefused, stage_tool_version_draft
-from aida.tool_impact import DeprecationImpact, compute_deprecation_impact
+from aida.tool_impact import DeprecationImpact, compute_deprecation_impact, impact_summary
 from aida.tool_rendering import ToolParameterError, render_tool_sql
 from aida.tool_source_binding import SOURCE_CHANGED_MESSAGE, fetch_source_binding_holds
 from aida.tool_usage import DEFAULT_USAGE_LOOKBACK_DAYS
@@ -177,19 +177,8 @@ def _impact_read(
 
 
 def _impact_summary(impact: DeprecationImpact) -> dict[str, int | bool]:
-    """Compact, audit/outbox-safe summary of a `DeprecationImpact` -- counts
-    only, no node/table identifiers, so the immutable evidence trail stays
-    proportionate to an audit detail payload rather than duplicating the
-    full preview response."""
-    return {
-        "downstream_node_count": len(impact.downstream_nodes),
-        "downstream_truncated": impact.downstream_truncated,
-        "dependent_tool_version_count": len(impact.dependent_tool_versions),
-        "dependent_context_product_count": len(impact.dependent_context_products),
-        "active_consumer_count": impact.active_consumer_count,
-        "recent_execution_count": impact.recent_execution_count,
-        "total_blast_radius": impact.total_blast_radius,
-    }
+    """See `aida.tool_impact.impact_summary`."""
+    return impact_summary(impact)
 
 
 async def _persist_tool_version_draft(

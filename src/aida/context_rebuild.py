@@ -12,15 +12,26 @@ For each organization:
 2. **Tools.** A PUBLISHED tool version generated from a view or routine whose definition has moved
    (`tool_source_binding`) gets a version regenerated from the current definition -- keeping the
    published version's name, description, roles and semantic model -- submitted for review.
-3. **Descriptions.** A view whose current approved description was drafted against another
-   definition gets a draft from today's evidence, submitted for review once it clears the bar.
-4. **Context products.** A PUBLISHED context product version that pins a tool version since
-   superseded gets a version re-pinned to that tool's published version, submitted for review.
-5. **Holds.** A source-change hold on a redefined view is resolved once nothing standing on the
-   view is stale: its change signals are processed, every tool generated from it matches its
-   definition, every other published tool reading it was approved after the change, its approved
-   description matches its definition, and no published context product pins a superseded tool
-   that reads it.
+3. **Descriptions.** A view or table whose current approved description was drafted against
+   another definition, or other columns, gets a draft from today's evidence, submitted for
+   review once it clears the bar.
+4. **Retirements.** A published tool that reads a held table the source no longer has, or
+   whose SQL names a column a held table no longer has (and that is not regenerated from a
+   view or routine), gets a DEPRECATE review. A person decides; a rejected proposal is not
+   made again until the source changes again.
+5. **Context products.** A PUBLISHED context product version that pins a tool version since
+   superseded gets a version re-pinned to that tool's published version; one that includes a
+   held table the source no longer has, or pins a tool reading it, gets a version without
+   them. Each is submitted for review.
+6. **Holds.** A source-change hold is resolved once nothing standing on its table is stale,
+   and its change signals are processed. For a table the source no longer has: no published
+   tool reads it, and no published context product includes it or pins a tool reading it.
+   For a view or table still in the source: every tool generated from it matches its
+   definition; every other published tool reading it still binds to its columns and, where
+   the change can alter what SQL that still binds answers (any held view, a column
+   retyped), was approved after the change; its approved description matches its
+   definition or columns; and no published context product pins a superseded tool reading
+   it.
 
 Nothing is drafted where a newer draft already waits for review. A rebuild that cannot be made (a
 view no longer eligible for a tool, a description below the evidence bar) is counted by its code
@@ -39,6 +50,7 @@ import structlog
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlglot.errors import SqlglotError
 
 from aida.asset_description_service import (
     MINIMUM_EVIDENCE_FOR_REVIEW,
@@ -51,7 +63,8 @@ from aida.asset_description_service import (
     text_fingerprint,
 )
 from aida.change_signal_models import MetadataChangeSignal
-from aida.change_signal_processing import ACTION_VIEW_REDEFINED, SOURCE_CHANGE_ANOMALY_TYPE
+from aida.change_signal_processing import ACTION_TABLE_RESHAPED, SOURCE_CHANGE_ANOMALY_TYPE
+from aida.change_signals import BINDING_SAFE_SHAPE_CHANGES
 from aida.config import Settings
 from aida.context_product_api import (
     _definition_from_version,
@@ -73,6 +86,7 @@ from aida.models import (
     GovernanceReview,
     GovernedTool,
     GovernedToolVersion,
+    MetadataCatalog,
     MetadataSchema,
     MetadataTable,
     Project,
@@ -84,13 +98,19 @@ from aida.procedure_tool_blueprint import (
     build_procedure_tool_blueprint,
     resolve_procedure_tool_source,
 )
-from aida.quality_coupling import resolve_table_ids
+from aida.query_gateway import catalog_columns
 from aida.routine_lineage_edges import RoutineNotEligibleError
 from aida.schemas import GovernedToolVersionCreate
 from aida.security import SecurityContext
 from aida.sql_lineage_parser import parse_view_lineage
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
+from aida.sql_validation import (
+    findings_from_columns,
+    locally_defined_names,
+    resolve_column_references,
+)
 from aida.tool_drafts import ToolDraftRefused, stage_tool_version_draft
+from aida.tool_impact import compute_deprecation_impact, impact_summary
 from aida.tool_source_binding import (
     REASON_SOURCE_MISSING,
     REASON_SOURCE_RETIRED,
@@ -114,10 +134,26 @@ WAIT_TOOL_STALE: Final = "TOOL_STALE"
 WAIT_TOOL_NOT_REVERIFIED: Final = "TOOL_NOT_REVERIFIED"
 WAIT_DESCRIPTION_STALE: Final = "DESCRIPTION_STALE"
 WAIT_PRODUCT_STALE: Final = "PRODUCT_STALE"
+WAIT_TABLE_NOT_STANDING: Final = "TABLE_NOT_STANDING"
+WAIT_TOOL_COLUMNS_MISSING: Final = "TOOL_COLUMNS_MISSING"
+WAIT_RETIRED_TABLE_IN_USE: Final = "RETIRED_TABLE_IN_USE"
+
+#: Why a DEPRECATE review is proposed.
+DEPRECATE_TABLE_RETIRED: Final = "TABLE_RETIRED"
+DEPRECATE_COLUMNS_MISSING: Final = "COLUMNS_MISSING"
 
 HOLD_RELEASE_REASON: Final = (
     "Everything standing on the redefined view was rebuilt against its current definition and "
     "approved, or re-approved after the change."
+)
+RESHAPE_RELEASE_REASON: Final = (
+    "Every published tool reading the table still binds to its current columns, any change "
+    "that could alter an answer was re-approved after it, and its description matches its "
+    "columns."
+)
+RETIREMENT_RELEASE_REASON: Final = (
+    "The table left the source, and nothing published stands on it any more: the tools "
+    "reading it were retired and its context products re-scoped through review."
 )
 SUPERSEDED_EDGE_REASON: Final = "The view's current definition no longer produces this edge."
 
@@ -139,6 +175,7 @@ class RebuildOutcome:
     lineage_edges_superseded: int = 0
     tools_drafted: int = 0
     descriptions_drafted: int = 0
+    deprecations_proposed: int = 0
     products_drafted: int = 0
     holds_released: int = 0
     failed: int = 0
@@ -158,6 +195,7 @@ class RebuildOutcome:
                 self.lineage_edges_superseded,
                 self.tools_drafted,
                 self.descriptions_drafted,
+                self.deprecations_proposed,
                 self.products_drafted,
                 self.holds_released,
                 self.failed,
@@ -170,6 +208,7 @@ class RebuildOutcome:
             "lineage_edges_superseded": self.lineage_edges_superseded,
             "tools_drafted": self.tools_drafted,
             "descriptions_drafted": self.descriptions_drafted,
+            "deprecations_proposed": self.deprecations_proposed,
             "products_drafted": self.products_drafted,
             "holds_released": self.holds_released,
             "failed": self.failed,
@@ -203,12 +242,13 @@ async def _open_review(
     object_type: str,
     object_id: UUID,
     details: dict[str, Any],
+    requested_action: str = "PUBLISH",
 ) -> GovernanceReview:
     review = GovernanceReview(
         organization_id=organization_id,
         object_type=object_type,
         object_id=str(object_id),
-        requested_action="PUBLISH",
+        requested_action=requested_action,
         requested_by=CONTEXT_REBUILD_PRINCIPAL,
     )
     session.add(review)
@@ -221,7 +261,12 @@ async def _open_review(
         resource_id=str(review.id),
         outcome="SUCCESS",
         correlation_id=str(organization_id),
-        details={"object_type": object_type, "object_id": str(object_id), **details},
+        details={
+            "object_type": object_type,
+            "object_id": str(object_id),
+            "requested_action": requested_action,
+            **details,
+        },
     )
     record_outbox(
         session,
@@ -233,7 +278,7 @@ async def _open_review(
             "review_id": str(review.id),
             "object_type": object_type,
             "object_id": str(object_id),
-            "requested_action": "PUBLISH",
+            "requested_action": requested_action,
         },
     )
     return review
@@ -578,7 +623,7 @@ async def _rebuild_descriptions(
     )
     for table_id in table_ids:
         table = await session.get(MetadataTable, table_id, populate_existing=True)
-        if table is None or not _is_view(table):
+        if table is None:
             continue
         approved = await _current_approved_description(session, organization_id, table_id)
         if approved is None or await definition_moved(session, approved) is None:
@@ -608,21 +653,326 @@ async def _rebuild_descriptions(
 
 
 # --------------------------------------------------------------------------
-# 4. Context products
+# What stands on a held table
 # --------------------------------------------------------------------------
 
 
-async def _superseded_pins(
-    session: AsyncSession, pinned: list[str]
-) -> tuple[dict[str, str], str | None]:
-    """Pinned tool versions no longer published, mapped to their tool's published version."""
-    if not pinned:
-        return {}, None
+async def _held_incident_ids(session: AsyncSession, organization_id: UUID) -> list[UUID]:
+    return list(
+        await session.scalars(
+            select(DataQualityIncident.id).where(
+                DataQualityIncident.organization_id == organization_id,
+                DataQualityIncident.anomaly_type == SOURCE_CHANGE_ANOMALY_TYPE,
+                DataQualityIncident.status.in_(_HELD_STATUSES),
+            )
+        )
+    )
+
+
+async def _retired_held_table_ids(session: AsyncSession, organization_id: UUID) -> set[UUID]:
+    """Tables under a source-change hold that the source no longer has."""
+    return set(
+        await session.scalars(
+            select(DataQualityIncident.table_id)
+            .join(MetadataTable, MetadataTable.id == DataQualityIncident.table_id)
+            .where(
+                DataQualityIncident.organization_id == organization_id,
+                DataQualityIncident.anomaly_type == SOURCE_CHANGE_ANOMALY_TYPE,
+                DataQualityIncident.status.in_(_HELD_STATUSES),
+                MetadataTable.status != "ACTIVE",
+            )
+        )
+    )
+
+
+async def _signal_pending(session: AsyncSession, table_id: UUID) -> bool:
+    pending = await session.scalar(
+        select(MetadataChangeSignal.id)
+        .where(
+            MetadataChangeSignal.subject_id == table_id,
+            MetadataChangeSignal.status == "PENDING",
+        )
+        .limit(1)
+    )
+    return pending is not None
+
+
+async def _published_tools(
+    session: AsyncSession, organization_id: UUID, datasource_id: UUID
+) -> list[GovernedToolVersion]:
+    return list(
+        await session.scalars(
+            select(GovernedToolVersion).where(
+                GovernedToolVersion.organization_id == organization_id,
+                GovernedToolVersion.datasource_id == datasource_id,
+                GovernedToolVersion.status == "PUBLISHED",
+            )
+        )
+    )
+
+
+async def _published_products(
+    session: AsyncSession, organization_id: UUID
+) -> list[ContextProductVersion]:
+    return list(
+        await session.scalars(
+            select(ContextProductVersion).where(
+                ContextProductVersion.organization_id == organization_id,
+                ContextProductVersion.status == "PUBLISHED",
+            )
+        )
+    )
+
+
+async def _tool_table_ids(
+    session: AsyncSession, datasource: DataSource, version: GovernedToolVersion
+) -> set[UUID]:
+    """The tables a tool version's SQL names, including ones the source no longer has.
+
+    The name shapes the gateway authorises: `schema.table`, `catalog.schema.table`, or an
+    unambiguous bare name. A retired table still resolves, because a tool naming it is exactly
+    what stands on it. A bare name resolves to its one table in the source, or failing that to
+    its one retired table.
+    """
+    resolved: set[UUID] = set()
+    if version.source_view_table_id is not None:
+        resolved.add(version.source_view_table_id)
+    names = [name.lower() for name in version.referenced_tables]
+    leaf_names = {name.rsplit(".", 1)[-1] for name in names}
+    if not leaf_names:
+        return resolved
+    rows = (
+        await session.execute(
+            select(
+                MetadataCatalog.name,
+                MetadataSchema.name,
+                MetadataTable.name,
+                MetadataTable.id,
+                MetadataTable.status,
+            )
+            .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
+            .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+            .where(
+                MetadataCatalog.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                func.lower(MetadataTable.name).in_(leaf_names),
+            )
+        )
+    ).all()
+    by_qualified: dict[str, UUID] = {}
+    by_leaf: dict[str, set[UUID]] = {}
+    active_by_leaf: dict[str, set[UUID]] = {}
+    for catalog_name, schema_name, table_name, table_id, status in rows:
+        by_qualified[f"{schema_name}.{table_name}".lower()] = table_id
+        by_qualified[f"{catalog_name}.{schema_name}.{table_name}".lower()] = table_id
+        by_leaf.setdefault(table_name.lower(), set()).add(table_id)
+        if status == "ACTIVE":
+            active_by_leaf.setdefault(table_name.lower(), set()).add(table_id)
+    for leaf, table_ids in by_leaf.items():
+        candidates = active_by_leaf.get(leaf) or table_ids
+        if len(candidates) == 1:
+            by_qualified.setdefault(leaf, next(iter(candidates)))
+    resolved.update(by_qualified[name] for name in names if name in by_qualified)
+    return resolved
+
+
+async def _columns_unbound(
+    session: AsyncSession, datasource: DataSource, version: GovernedToolVersion
+) -> bool:
+    """Whether a tool's SQL names a column its tables no longer have: the gateway's own check.
+
+    SQL that can no longer be read counts as unbound, because nothing can vouch for it.
+    """
+    try:
+        references = resolve_column_references(version.sql_template, dialect=datasource.dialect)
+        local_names = locally_defined_names(version.sql_template, dialect=datasource.dialect)
+    except SqlglotError:
+        return True
+    columns = await catalog_columns(session, datasource, list(version.referenced_tables))
+    return bool(findings_from_columns(references, catalog_columns=columns, local_names=local_names))
+
+
+def _answers_can_move(table: MetadataTable, incident: DataQualityIncident) -> bool:
+    """Whether the change can alter what SQL whose columns all still bind answers.
+
+    Any held view can: redefined, reshaped, or gone and back, its logic may differ. A table can
+    when a column was retyped, or when it was reshaped before shape changes were classed.
+    """
+    if _is_view(table):
+        return True
+    changes = (incident.evidence or {}).get("changes") or []
+    return any(
+        change.get("change_class") not in BINDING_SAFE_SHAPE_CHANGES
+        for change in changes
+        if isinstance(change, dict) and change.get("action") == ACTION_TABLE_RESHAPED
+    )
+
+
+# --------------------------------------------------------------------------
+# 4. Retirements
+# --------------------------------------------------------------------------
+
+
+async def _deprecation_proposed(
+    session: AsyncSession, version: GovernedToolVersion, since: datetime
+) -> bool:
+    """A DEPRECATE review for the version waits, or a person decided one since the change."""
+    reviews = await session.scalars(
+        select(GovernanceReview).where(
+            GovernanceReview.object_type == "GOVERNED_TOOL_VERSION",
+            GovernanceReview.object_id == str(version.id),
+            GovernanceReview.requested_action == "DEPRECATE",
+        )
+    )
+    return any(
+        review.status == "PENDING"
+        or (review.decided_at is not None and _aware(review.decided_at) >= since)
+        for review in reviews
+    )
+
+
+async def _propose_deprecation(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    version: GovernedToolVersion,
+    *,
+    reason: str,
+    table_id: UUID,
+) -> None:
+    tool = await session.get(GovernedTool, version.tool_id)
+    datasource = await session.get(DataSource, version.datasource_id)
+    if tool is None or datasource is None:
+        raise _RebuildRefused("TOOL_DEPENDENCY_UNAVAILABLE")
+    # TL-7: the checker sees the same blast radius a person's deprecation request records.
+    impact = await compute_deprecation_impact(
+        session, tool=tool, version=version, datasource=datasource, settings=settings
+    )
+    await _open_review(
+        session,
+        context,
+        organization_id,
+        object_type="GOVERNED_TOOL_VERSION",
+        object_id=version.id,
+        requested_action="DEPRECATE",
+        details={
+            "reason": reason,
+            "table_id": str(table_id),
+            "deprecation_impact": impact_summary(impact),
+        },
+    )
+
+
+async def _propose_deprecations(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    outcome: RebuildOutcome,
+) -> None:
+    for incident_id in await _held_incident_ids(session, organization_id):
+        incident = await session.get(DataQualityIncident, incident_id, populate_existing=True)
+        if incident is None:
+            continue
+        table = await session.get(MetadataTable, incident.table_id, populate_existing=True)
+        if table is None or await _signal_pending(session, table.id):
+            continue
+        table_id, datasource_id = table.id, table.datasource_id
+        retired = table.status != "ACTIVE"
+        since = _aware(incident.last_observed_at)
+        version_ids = [
+            version.id
+            for version in await _published_tools(session, organization_id, datasource_id)
+        ]
+        for version_id in version_ids:
+            datasource = await session.get(DataSource, datasource_id)
+            version = await session.get(GovernedToolVersion, version_id, populate_existing=True)
+            if datasource is None or version is None or version.status != "PUBLISHED":
+                continue
+            if table_id not in await _tool_table_ids(session, datasource, version):
+                continue
+            if retired:
+                reason = DEPRECATE_TABLE_RETIRED
+            elif (
+                version.source_view_table_id is None
+                and version.source_routine_id is None
+                and await _columns_unbound(session, datasource, version)
+            ):
+                # A tool generated from a view or routine is regenerated instead.
+                reason = DEPRECATE_COLUMNS_MISSING
+            else:
+                continue
+            if await _deprecation_proposed(session, version, since):
+                continue
+            replacement = await session.scalar(
+                select(GovernedToolVersion.id)
+                .where(
+                    GovernedToolVersion.tool_id == version.tool_id,
+                    GovernedToolVersion.version > version.version,
+                    GovernedToolVersion.status.in_(_OPEN_TOOL_STATUSES),
+                )
+                .limit(1)
+            )
+            if replacement is not None:
+                # Someone is already drafting the version that replaces it.
+                continue
+            try:
+                async with session.begin_nested():
+                    await _propose_deprecation(
+                        session,
+                        organization_id,
+                        context,
+                        settings,
+                        version,
+                        reason=reason,
+                        table_id=table_id,
+                    )
+            except _RebuildRefused as refused:
+                outcome.block(refused.code)
+                continue
+            except Exception:  # noqa: BLE001 -- one proposal must not stop the pass
+                logger.exception(
+                    "context_rebuild_deprecation_failed", tool_version_id=str(version_id)
+                )
+                outcome.failed += 1
+                continue
+            outcome.deprecations_proposed += 1
+
+
+# --------------------------------------------------------------------------
+# 5. Context products
+# --------------------------------------------------------------------------
+
+
+async def _repin(
+    session: AsyncSession, pinned: list[str], retired_table_ids: set[UUID]
+) -> tuple[dict[str, str], set[str], str | None]:
+    """Pins to point at their tool's published version, pins to drop, or why neither is possible.
+
+    A pin to a version that reads a held table the source no longer has is dropped, published or
+    not. A pin to a version no longer published points at its tool's published version; a tool
+    with none leaves the product for a person.
+    """
     replacements: dict[str, str] = {}
-    versions = await session.scalars(
-        select(GovernedToolVersion).where(GovernedToolVersion.id.in_([UUID(p) for p in pinned]))
+    dropped: set[str] = set()
+    if not pinned:
+        return replacements, dropped, None
+    versions = list(
+        await session.scalars(
+            select(GovernedToolVersion).where(
+                GovernedToolVersion.id.in_([UUID(value) for value in pinned])
+            )
+        )
     )
     for version in versions:
+        if retired_table_ids:
+            datasource = await session.get(DataSource, version.datasource_id)
+            if datasource is not None and (
+                await _tool_table_ids(session, datasource, version) & retired_table_ids
+            ):
+                dropped.add(str(version.id))
+                continue
         if version.status == "PUBLISHED":
             continue
         current = await session.scalar(
@@ -634,9 +984,9 @@ async def _superseded_pins(
             .limit(1)
         )
         if current is None:
-            return {}, "PRODUCT_TOOL_UNPUBLISHED"
+            return {}, set(), "PRODUCT_TOOL_UNPUBLISHED"
         replacements[str(version.id)] = str(current)
-    return replacements, None
+    return replacements, dropped, None
 
 
 async def _draft_product_version(
@@ -645,6 +995,8 @@ async def _draft_product_version(
     context: SecurityContext,
     previous: ContextProductVersion,
     replacements: dict[str, str],
+    dropped_versions: set[str],
+    dropped_tables: set[UUID],
 ) -> None:
     product = await session.get(ContextProduct, previous.product_id)
     if product is None or product.lifecycle_status != "ACTIVE":
@@ -656,8 +1008,12 @@ async def _draft_product_version(
     repinned = [
         UUID(replacements.get(str(version_id), str(version_id)))
         for version_id in definition.eligible_tool_version_ids
+        if str(version_id) not in dropped_versions
     ]
-    definition = definition.model_copy(update={"eligible_tool_version_ids": repinned})
+    tables = [table_id for table_id in definition.table_ids if table_id not in dropped_tables]
+    definition = definition.model_copy(
+        update={"eligible_tool_version_ids": repinned, "table_ids": tables}
+    )
     try:
         await validate_context_product_references(session, project, definition)
     except HTTPException as exc:
@@ -690,6 +1046,8 @@ async def _draft_product_version(
         details={
             "rebuilds_version_id": str(previous.id),
             "repinned_tool_versions": len(replacements),
+            "dropped_tool_versions": len(dropped_versions),
+            "dropped_tables": len(dropped_tables),
         },
     )
 
@@ -700,25 +1058,20 @@ async def _rebuild_products(
     context: SecurityContext,
     outcome: RebuildOutcome,
 ) -> None:
-    version_ids = list(
-        await session.scalars(
-            select(ContextProductVersion.id).where(
-                ContextProductVersion.organization_id == organization_id,
-                ContextProductVersion.status == "PUBLISHED",
-            )
-        )
-    )
+    retired = await _retired_held_table_ids(session, organization_id)
+    version_ids = [version.id for version in await _published_products(session, organization_id)]
     for version_id in version_ids:
         previous = await session.get(ContextProductVersion, version_id, populate_existing=True)
         if previous is None:
             continue
-        replacements, blocked = await _superseded_pins(
-            session, list(previous.eligible_tool_version_ids)
+        replacements, dropped, blocked = await _repin(
+            session, list(previous.eligible_tool_version_ids), retired
         )
         if blocked is not None:
             outcome.block(blocked)
             continue
-        if not replacements:
+        dropped_tables = {UUID(value) for value in previous.table_ids} & retired
+        if not (replacements or dropped or dropped_tables):
             continue
         waiting = await session.scalar(
             select(ContextProductVersion.id)
@@ -733,7 +1086,13 @@ async def _rebuild_products(
         try:
             async with session.begin_nested():
                 await _draft_product_version(
-                    session, organization_id, context, previous, replacements
+                    session,
+                    organization_id,
+                    context,
+                    previous,
+                    replacements,
+                    dropped,
+                    dropped_tables,
                 )
         except _RebuildRefused as refused:
             outcome.block(refused.code)
@@ -746,74 +1105,75 @@ async def _rebuild_products(
 
 
 # --------------------------------------------------------------------------
-# 5. Holds
+# 6. Holds
 # --------------------------------------------------------------------------
 
+_RELEASE_REASONS: Final = {
+    "RETIRED": RETIREMENT_RELEASE_REASON,
+    "VIEW": HOLD_RELEASE_REASON,
+    "TABLE": RESHAPE_RELEASE_REASON,
+}
 
-async def _reads_view(
-    session: AsyncSession,
-    datasource: DataSource,
-    version: GovernedToolVersion,
-    view: MetadataTable,
-) -> bool:
-    if version.source_view_table_id == view.id:
-        return True
-    resolved = await resolve_table_ids(
-        session, datasource=datasource, table_names=version.referenced_tables
-    )
-    return view.id in resolved.values()
+
+async def _retired_table_in_use(
+    session: AsyncSession, table: MetadataTable, datasource: DataSource
+) -> str | None:
+    """Why a table the source no longer has still stands in published context, or `None`."""
+    for version in await _published_tools(session, table.organization_id, datasource.id):
+        if table.id in await _tool_table_ids(session, datasource, version):
+            return WAIT_RETIRED_TABLE_IN_USE
+    for product_version in await _published_products(session, table.organization_id):
+        if table.id in {UUID(value) for value in product_version.table_ids}:
+            return WAIT_RETIRED_TABLE_IN_USE
+        pinned = [UUID(value) for value in product_version.eligible_tool_version_ids]
+        if not pinned:
+            continue
+        versions = await session.scalars(
+            select(GovernedToolVersion).where(
+                GovernedToolVersion.id.in_(pinned),
+                GovernedToolVersion.datasource_id == datasource.id,
+            )
+        )
+        for version in versions:
+            if table.id in await _tool_table_ids(session, datasource, version):
+                return WAIT_RETIRED_TABLE_IN_USE
+    return None
 
 
 async def stale_dependent(session: AsyncSession, incident: DataQualityIncident) -> str | None:
-    """Why a source-change hold on a redefined view must stay, or `None` when nothing is stale."""
-    view = await session.get(MetadataTable, incident.table_id)
-    if view is None or view.status != "ACTIVE" or await _current_definition(session, view) is None:
-        return WAIT_VIEW_NOT_STANDING
-    pending = await session.scalar(
-        select(MetadataChangeSignal.id)
-        .where(
-            MetadataChangeSignal.subject_id == view.id,
-            MetadataChangeSignal.status == "PENDING",
-        )
-        .limit(1)
-    )
-    if pending is not None:
+    """Why a source-change hold must stay, or `None` when nothing standing on its table is stale."""
+    table = await session.get(MetadataTable, incident.table_id)
+    datasource = await session.get(DataSource, table.datasource_id) if table is not None else None
+    if table is None or datasource is None:
+        return WAIT_TABLE_NOT_STANDING
+    if await _signal_pending(session, table.id):
         return WAIT_SIGNAL_PENDING
-    datasource = await session.get(DataSource, view.datasource_id)
-    if datasource is None:
+    if table.status != "ACTIVE":
+        return await _retired_table_in_use(session, table, datasource)
+    if _is_view(table) and await _current_definition(session, table) is None:
         return WAIT_VIEW_NOT_STANDING
     changed_at = _aware(incident.last_observed_at)
+    answers_can_move = _answers_can_move(table, incident)
 
-    published = list(
-        await session.scalars(
-            select(GovernedToolVersion).where(
-                GovernedToolVersion.organization_id == incident.organization_id,
-                GovernedToolVersion.datasource_id == view.datasource_id,
-                GovernedToolVersion.status == "PUBLISHED",
-            )
-        )
-    )
-    for version in published:
-        if version.source_view_table_id == view.id:
+    for version in await _published_tools(session, incident.organization_id, datasource.id):
+        if version.source_view_table_id == table.id:
             if await source_binding_drift(session, version) is not None:
                 return WAIT_TOOL_STALE
             continue
-        if not await _reads_view(session, datasource, version, view):
+        if table.id not in await _tool_table_ids(session, datasource, version):
             continue
-        if version.approved_at is None or _aware(version.approved_at) <= changed_at:
+        if await _columns_unbound(session, datasource, version):
+            return WAIT_TOOL_COLUMNS_MISSING
+        if answers_can_move and (
+            version.approved_at is None or _aware(version.approved_at) <= changed_at
+        ):
             return WAIT_TOOL_NOT_REVERIFIED
 
-    approved = await _current_approved_description(session, incident.organization_id, view.id)
+    approved = await _current_approved_description(session, incident.organization_id, table.id)
     if approved is not None and await definition_moved(session, approved) is not None:
         return WAIT_DESCRIPTION_STALE
 
-    products = await session.scalars(
-        select(ContextProductVersion).where(
-            ContextProductVersion.organization_id == incident.organization_id,
-            ContextProductVersion.status == "PUBLISHED",
-        )
-    )
-    for product_version in products:
+    for product_version in await _published_products(session, incident.organization_id):
         pinned = [UUID(value) for value in product_version.eligible_tool_version_ids]
         if not pinned:
             continue
@@ -821,10 +1181,11 @@ async def stale_dependent(session: AsyncSession, incident: DataQualityIncident) 
             select(GovernedToolVersion).where(
                 GovernedToolVersion.id.in_(pinned),
                 GovernedToolVersion.status != "PUBLISHED",
+                GovernedToolVersion.datasource_id == datasource.id,
             )
         )
         for version in superseded:
-            if await _reads_view(session, datasource, version, view):
+            if table.id in await _tool_table_ids(session, datasource, version):
                 return WAIT_PRODUCT_STALE
     return None
 
@@ -836,32 +1197,25 @@ async def _release_holds(
     outcome: RebuildOutcome,
     now: datetime,
 ) -> None:
-    incident_ids = list(
-        await session.scalars(
-            select(DataQualityIncident.id).where(
-                DataQualityIncident.organization_id == organization_id,
-                DataQualityIncident.anomaly_type == SOURCE_CHANGE_ANOMALY_TYPE,
-                DataQualityIncident.status.in_(_HELD_STATUSES),
-            )
-        )
-    )
-    for incident_id in incident_ids:
+    for incident_id in await _held_incident_ids(session, organization_id):
         incident = await session.get(DataQualityIncident, incident_id, populate_existing=True)
         if incident is None:
-            continue
-        changes = (incident.evidence or {}).get("changes") or []
-        actions = {change.get("action") for change in changes if isinstance(change, dict)}
-        if actions != {ACTION_VIEW_REDEFINED}:
-            # A retired or reshaped table is a person's call; only a redefinition is rebuilt.
             continue
         reason = await stale_dependent(session, incident)
         if reason is not None:
             outcome.wait(reason)
             continue
+        table = await session.get(MetadataTable, incident.table_id)
+        if table is None:
+            continue
+        if table.status != "ACTIVE":
+            release = "RETIRED"
+        else:
+            release = "VIEW" if _is_view(table) else "TABLE"
         incident.status = "RESOLVED"
         incident.resolved_by = CONTEXT_REBUILD_PRINCIPAL
         incident.resolved_at = now
-        incident.resolution_reason = HOLD_RELEASE_REASON
+        incident.resolution_reason = _RELEASE_REASONS[release]
         record_audit(
             session,
             context,
@@ -873,6 +1227,7 @@ async def _release_holds(
             details={
                 "anomaly_type": SOURCE_CHANGE_ANOMALY_TYPE,
                 "table_id": str(incident.table_id),
+                "release": release,
                 "resolved_by": CONTEXT_REBUILD_PRINCIPAL,
             },
         )
@@ -935,6 +1290,7 @@ async def run_context_rebuild(
     await _supersede_lineage(session, organization_id, outcome, effective_now)
     await _rebuild_tools(session, organization_id, context, settings, outcome)
     await _rebuild_descriptions(session, organization_id, context, outcome)
+    await _propose_deprecations(session, organization_id, context, settings, outcome)
     await _rebuild_products(session, organization_id, context, outcome)
     await _release_holds(session, organization_id, context, outcome, effective_now)
     if outcome.acted:

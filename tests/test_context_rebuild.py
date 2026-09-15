@@ -8,7 +8,12 @@ in-memory SQLite through the real draft, review and decision routes, so it runs 
 * the hold is released only once every rebuilt artifact is approved;
 * a hand-written tool reading the view keeps the hold until a version is approved after the change;
 * a view no longer eligible for a tool blocks that rebuild with its eligibility code;
-* a retired table's hold is never released by the pass;
+* a table the source no longer has is retired through review: DEPRECATE reviews for the tools
+  reading it and a context product version without it; its hold is released once approved,
+  and a rejected proposal keeps the hold and is not proposed again;
+* a table back unchanged is released; a column a tool names leaving proposes retiring the tool;
+  a retyped column waits for re-approval and an added one does not;
+* a table description written against other columns is redrafted, and never approved stale;
 * a routine tool is regenerated bound to the routine's new definition;
 * the scheduler pass is off by default and opens no session.
 """
@@ -20,6 +25,7 @@ from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +37,13 @@ from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE, process_change_signals
 from aida.config import Settings
 from aida.context_product_api import create_context_product, submit_context_product_version
-from aida.context_rebuild import CONTEXT_REBUILD_PRINCIPAL, RebuildOutcome, run_context_rebuild
+from aida.context_rebuild import (
+    CONTEXT_REBUILD_PRINCIPAL,
+    RESHAPE_RELEASE_REASON,
+    RETIREMENT_RELEASE_REASON,
+    RebuildOutcome,
+    run_context_rebuild,
+)
 from aida.envelope_models import MetadataViewDefinition
 from aida.lineage_agent import as_create_view
 from aida.models import (
@@ -43,6 +55,7 @@ from aida.models import (
     GovernanceReview,
     GovernedToolVersion,
     MetadataColumn,
+    MetadataConstraint,
     MetadataTable,
     Organization,
     OutboxEvent,
@@ -434,25 +447,333 @@ async def test_a_view_no_longer_eligible_for_a_tool_blocks_its_rebuild_and_keeps
     assert (await _hold(estate, estate.view)).status == "OPEN"
 
 
-async def test_a_retired_table_hold_is_never_released_by_the_pass(session: AsyncSession) -> None:
-    estate = await _estate(session)
-    session.add(
+async def _orders_tool(
+    estate: Estate,
+    sql: str = "SELECT order_id, amount FROM public.orders",
+    *,
+    slug: str = "orders_report",
+) -> GovernedToolVersion:
+    """A tool a developer wrote by hand over the orders table, reviewed and published."""
+    drafted = await create_tool_version(
+        estate.project.id,
+        GovernedToolVersionCreate(
+            slug=slug,
+            name="Orders report",
+            description="Order amounts, written by hand over the orders table.",
+            datasource_id=estate.datasource.id,
+            sql_template=sql,
+            allowed_roles=["Analyst"],
+        ),
+        context=estate.developer,
+        session=estate.session,
+        settings=estate.settings,
+    )
+    review = await submit_tool_for_review(
+        drafted.id, context=estate.developer, session=estate.session
+    )
+    await _approve(estate, review.id)
+    version = await estate.session.get(GovernedToolVersion, drafted.id, populate_existing=True)
+    assert version is not None and version.status == "PUBLISHED"
+    return version
+
+
+async def _table_signal(
+    estate: Estate, table: MetadataTable, signal_type: str, change_class: str | None = None
+) -> None:
+    """A rescan's signal about a table, processed into its hold."""
+    estate.session.add(
         MetadataChangeSignal(
             organization_id=estate.org.id,
             datasource_id=estate.datasource.id,
             subject_kind="TABLE",
-            subject_id=estate.orders.id,
-            signal_type="DEPRECATED",
+            subject_id=table.id,
+            signal_type=signal_type,
+            change_class=change_class,
         )
     )
-    await session.flush()
-    await process_change_signals(session, organization_id=estate.org.id, limit=100)
-    await session.commit()
+    await estate.session.flush()
+    await process_change_signals(estate.session, organization_id=estate.org.id, limit=100)
+    await estate.session.commit()
+
+
+async def _orders_column(estate: Estate, name: str) -> MetadataColumn:
+    column = await estate.session.scalar(
+        select(MetadataColumn).where(
+            MetadataColumn.table_id == estate.orders.id, MetadataColumn.name == name
+        )
+    )
+    assert column is not None
+    return column
+
+
+async def _add_orders_column(estate: Estate, name: str = "channel") -> None:
+    estate.session.add(
+        MetadataColumn(
+            organization_id=estate.org.id,
+            table_id=estate.orders.id,
+            name=name,
+            ordinal_position=5,
+            physical_type="varchar",
+            nullable=True,
+            fingerprint="fp",
+        )
+    )
+    await estate.session.flush()
+
+
+async def _reject_rebuilt(estate: Estate, object_type: str) -> int:
+    reviews = list(
+        await estate.session.scalars(
+            select(GovernanceReview.id).where(
+                GovernanceReview.requested_by == CONTEXT_REBUILD_PRINCIPAL,
+                GovernanceReview.object_type == object_type,
+                GovernanceReview.status == "PENDING",
+            )
+        )
+    )
+    for review_id in reviews:
+        await decide_governance_review(
+            review_id,
+            GovernanceDecisionRequest(decision="REJECT", reason="Kept while checked."),
+            context=estate.reviewer,
+            session=estate.session,
+        )
+    return len(reviews)
+
+
+async def test_a_retired_table_is_retired_through_review_and_its_hold_released(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    customers = await session.scalar(
+        select(MetadataTable).where(
+            MetadataTable.datasource_id == estate.datasource.id, MetadataTable.name == "customers"
+        )
+    )
+    assert customers is not None
+    tool = await _orders_tool(estate)
+    await create_context_product(
+        estate.project.id,
+        ContextProductCreate(
+            product_key="orders",
+            name="Orders",
+            description="Orders and customers, for agents answering order questions.",
+            purpose="Answer questions about order amounts per customer.",
+            owner_type="INDIVIDUAL",
+            owner_principal="steward-1",
+            table_ids=[estate.orders.id, customers.id],
+            eligible_tool_version_ids=[tool.id],
+            allowed_consumer_roles=["Analyst"],
+        ),
+        context=estate.steward,
+        session=session,
+    )
+    product = await session.scalar(
+        select(ContextProductVersion)
+        .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+        .where(ContextProduct.product_key == "orders")
+    )
+    assert product is not None
+    review = await submit_context_product_version(
+        product.id, context=estate.steward, session=session
+    )
+    await _approve(estate, review.id)
+
+    # The source no longer has the orders table: the rescan retires it and it is held.
+    estate.orders.status = "DEPRECATED"
+    await _table_signal(estate, estate.orders, "DEPRECATED")
+    assert (await _hold(estate, estate.orders)).severity == "CRITICAL"
+
+    first = await _rebuild(estate)
+    assert (first.deprecations_proposed, first.products_drafted, first.holds_released) == (
+        1,
+        1,
+        0,
+    ), first.as_details()
+    assert first.waiting == {"RETIRED_TABLE_IN_USE": 1}
+    assert await _approve_rebuilt(estate, "GOVERNED_TOOL_VERSION") == 1
+    assert await _approve_rebuilt(estate, "CONTEXT_PRODUCT_VERSION") == 1
+
+    second = await _rebuild(estate)
+    assert (second.deprecations_proposed, second.products_drafted, second.holds_released) == (
+        0,
+        0,
+        1,
+    ), second.as_details()
+    hold = await _hold(estate, estate.orders)
+    assert (hold.status, hold.resolved_by, hold.resolution_reason) == (
+        "RESOLVED",
+        CONTEXT_REBUILD_PRINCIPAL,
+        RETIREMENT_RELEASE_REASON,
+    )
+    await session.refresh(tool)
+    assert tool.status == "DEPRECATED"
+    current = await session.scalar(
+        select(ContextProductVersion).where(
+            ContextProductVersion.product_id == product.product_id,
+            ContextProductVersion.status == "PUBLISHED",
+        )
+    )
+    assert current is not None
+    assert (current.table_ids, current.eligible_tool_version_ids) == ([str(customers.id)], [])
+    assert not (await _rebuild(estate)).acted
+
+
+async def test_a_rejected_retirement_keeps_the_hold_and_is_not_proposed_again(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    await _orders_tool(estate)
+    estate.orders.status = "DEPRECATED"
+    await _table_signal(estate, estate.orders, "DEPRECATED")
+
+    assert (await _rebuild(estate)).deprecations_proposed == 1
+    assert await _reject_rebuilt(estate, "GOVERNED_TOOL_VERSION") == 1
+
+    again = await _rebuild(estate)
+    assert (again.deprecations_proposed, again.holds_released) == (0, 0), again.as_details()
+    assert again.waiting == {"RETIRED_TABLE_IN_USE": 1}
+    assert (await _hold(estate, estate.orders)).status == "OPEN"
+
+
+async def test_a_table_back_in_the_source_unchanged_is_released_without_retiring_anything(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    tool = await _orders_tool(estate)
+    estate.orders.status = "DEPRECATED"
+    await _table_signal(estate, estate.orders, "DEPRECATED")
+    estate.orders.status = "ACTIVE"
+    await _table_signal(estate, estate.orders, "REACTIVATED")
+    await _table_signal(estate, estate.orders, "STRUCTURE_CHANGED", "COLUMNS_RETURNED")
 
     outcome = await _rebuild(estate)
 
-    assert outcome.holds_released == 0
-    assert (await _hold(estate, estate.orders)).status == "OPEN"
+    assert (outcome.deprecations_proposed, outcome.holds_released) == (0, 1), outcome.as_details()
+    hold = await _hold(estate, estate.orders)
+    assert (hold.status, hold.resolution_reason) == ("RESOLVED", RESHAPE_RELEASE_REASON)
+    await session.refresh(tool)
+    assert tool.status == "PUBLISHED"
+
+
+async def test_a_column_a_tool_names_leaving_its_table_proposes_retiring_that_tool(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    discount_tool = await _orders_tool(estate, "SELECT order_id, discount FROM public.orders")
+    await _orders_tool(estate, slug="order_amounts")
+    (await _orders_column(estate, "discount")).status = "DEPRECATED"
+    await _table_signal(estate, estate.orders, "STRUCTURE_CHANGED", "COLUMNS_REMOVED")
+    assert (await _hold(estate, estate.orders)).severity == "WARNING"
+
+    first = await _rebuild(estate)
+    assert (first.deprecations_proposed, first.holds_released) == (1, 0), first.as_details()
+    assert first.waiting == {"TOOL_COLUMNS_MISSING": 1}
+    proposal = await session.scalar(
+        select(GovernanceReview).where(GovernanceReview.requested_action == "DEPRECATE")
+    )
+    assert proposal is not None and proposal.object_id == str(discount_tool.id)
+    assert await _approve_rebuilt(estate, "GOVERNED_TOOL_VERSION") == 1
+
+    second = await _rebuild(estate)
+    assert second.holds_released == 1, second.as_details()
+    assert (await _hold(estate, estate.orders)).resolution_reason == RESHAPE_RELEASE_REASON
+
+
+@pytest.mark.parametrize(
+    ("change_class", "answers_can_move"), [("COLUMNS_ADDED", False), ("COLUMNS_RETYPED", True)]
+)
+async def test_a_reshape_that_can_change_an_answer_waits_for_re_approval_and_others_do_not(
+    session: AsyncSession, change_class: str, answers_can_move: bool
+) -> None:
+    estate = await _estate(session)
+    await _orders_tool(estate)
+    if answers_can_move:
+        (await _orders_column(estate, "amount")).physical_type = "varchar"
+    else:
+        await _add_orders_column(estate)
+    await _table_signal(estate, estate.orders, "STRUCTURE_CHANGED", change_class)
+
+    first = await _rebuild(estate)
+
+    if not answers_can_move:
+        assert first.holds_released == 1, first.as_details()
+        return
+    assert (first.deprecations_proposed, first.holds_released) == (0, 0), first.as_details()
+    assert first.waiting == {"TOOL_NOT_REVERIFIED": 1}
+    # The developer re-approves the tool against the retyped column: a new version, reviewed.
+    await _orders_tool(estate)
+    assert (await _rebuild(estate)).holds_released == 1
+
+
+async def _key_orders(estate: Estate) -> None:
+    """A declared key: the structural evidence a table description needs to reach review."""
+    estate.session.add(
+        MetadataConstraint(
+            organization_id=estate.org.id,
+            datasource_id=estate.datasource.id,
+            table_id=estate.orders.id,
+            name="orders_pkey",
+            constraint_type="PRIMARY_KEY",
+            columns=["order_id"],
+            fingerprint="fp",
+        )
+    )
+    await estate.session.flush()
+
+
+async def test_a_table_description_written_against_other_columns_is_redrafted_into_review(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    await _key_orders(estate)
+    await generate_asset_description_drafts(
+        estate.org.id,
+        AssetDescriptionDraftGenerate(table_ids=[estate.orders.id]),
+        context=estate.steward,
+        session=session,
+    )
+    draft = await session.scalar(
+        select(AssetDescriptionDraft).where(AssetDescriptionDraft.table_id == estate.orders.id)
+    )
+    assert draft is not None and draft.evidence["column_digest"]
+    review = await submit_asset_description_draft(draft.id, context=estate.steward, session=session)
+    await _approve(estate, review.id)
+
+    await _add_orders_column(estate)
+    await _table_signal(estate, estate.orders, "STRUCTURE_CHANGED", "COLUMNS_ADDED")
+
+    first = await _rebuild(estate)
+    assert (first.descriptions_drafted, first.holds_released) == (1, 0), first.as_details()
+    assert first.waiting == {"DESCRIPTION_STALE": 1}
+    assert await _approve_rebuilt(estate, "ASSET_DESCRIPTION_DRAFT") == 1
+    assert (await _rebuild(estate)).holds_released == 1
+
+
+async def test_a_table_description_is_not_approved_once_its_columns_moved(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    await _key_orders(estate)
+    await generate_asset_description_drafts(
+        estate.org.id,
+        AssetDescriptionDraftGenerate(table_ids=[estate.orders.id]),
+        context=estate.steward,
+        session=session,
+    )
+    draft = await session.scalar(
+        select(AssetDescriptionDraft).where(AssetDescriptionDraft.table_id == estate.orders.id)
+    )
+    assert draft is not None
+    review = await submit_asset_description_draft(draft.id, context=estate.steward, session=session)
+    await _add_orders_column(estate)
+
+    with pytest.raises(HTTPException) as refused:
+        await _approve(estate, review.id)
+
+    assert refused.value.status_code == 409
+    detail = refused.value.detail
+    assert isinstance(detail, dict) and detail["code"] == "COLUMNS_MOVED"
 
 
 async def test_a_routine_tool_is_regenerated_bound_to_the_routine_new_definition(

@@ -109,6 +109,22 @@ class DeprecationImpact:
         )
 
 
+def impact_summary(impact: DeprecationImpact) -> dict[str, int | bool]:
+    """Compact, audit/outbox-safe summary of a `DeprecationImpact` -- counts
+    only, no node/table identifiers, so the immutable evidence trail stays
+    proportionate to an audit detail payload rather than duplicating the
+    full preview response."""
+    return {
+        "downstream_node_count": len(impact.downstream_nodes),
+        "downstream_truncated": impact.downstream_truncated,
+        "dependent_tool_version_count": len(impact.dependent_tool_versions),
+        "dependent_context_product_count": len(impact.dependent_context_products),
+        "active_consumer_count": impact.active_consumer_count,
+        "recent_execution_count": impact.recent_execution_count,
+        "total_blast_radius": impact.total_blast_radius,
+    }
+
+
 async def compute_deprecation_impact(
     session: AsyncSession,
     *,

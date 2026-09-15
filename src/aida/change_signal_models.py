@@ -39,7 +39,8 @@ class MetadataChangeSignal(Base):
         ),
         CheckConstraint(
             "change_class IS NULL OR change_class IN ('LITERAL_ONLY', 'STRUCTURAL', "
-            "'GRANT_ADDED', 'GRANT_MODIFIED', 'GRANT_REVOKED', 'SIGNATURE_CHANGED')",
+            "'GRANT_ADDED', 'GRANT_MODIFIED', 'GRANT_REVOKED', 'SIGNATURE_CHANGED', "
+            "'COLUMNS_ADDED', 'COLUMNS_RETURNED', 'COLUMNS_REMOVED', 'COLUMNS_RETYPED')",
             name="change_class",
         ),
         CheckConstraint("status IN ('PENDING', 'PROCESSED')", name="status"),
@@ -63,7 +64,8 @@ class MetadataChangeSignal(Base):
     signal_type: Mapped[str] = mapped_column(String(30), nullable=False)
     # DEFINITION_CHANGED: whether anything but literals changed. PERMISSION_CHANGED: whether the
     # grant was added, modified or revoked. A retired routine: SIGNATURE_CHANGED when one new
-    # signature replaced it.
+    # signature replaced it. A reshaped table (R11-FP16): COLUMNS_ADDED, COLUMNS_RETURNED or
+    # COLUMNS_REMOVED, which a query whose columns still bind survives, or COLUMNS_RETYPED.
     change_class: Mapped[str | None] = mapped_column(String(20))
     # The routine that replaced a SIGNATURE_CHANGED one. No foreign key: a subject id points into
     # whichever table its kind names.

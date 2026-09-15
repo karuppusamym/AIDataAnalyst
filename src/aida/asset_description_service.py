@@ -97,6 +97,9 @@ class AssetEvidence:
     definition_state: str | None = None
     #: SHA-256 of the stored value-free definition the draft was written against.
     definition_digest: str | None = None
+    #: R11-FP16: for a table, SHA-256 of the active columns' names, types and nullability the
+    #: draft was written against, so a later check can tell its shape moved.
+    column_digest: str | None = None
 
     @property
     def is_view(self) -> bool:
@@ -424,7 +427,25 @@ def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
         payload["object_kind"] = evidence.object_kind
         payload["definition_state"] = evidence.definition_state
         payload["definition_digest"] = evidence.definition_digest
+    elif evidence.column_digest is not None:
+        payload["column_digest"] = evidence.column_digest
     return payload
+
+
+async def column_shape_digest(session: AsyncSession, table_id: UUID) -> str:
+    """SHA-256 of a table's active columns: names, types and nullability. Never a value."""
+    rows = (
+        await session.execute(
+            select(
+                MetadataColumn.name, MetadataColumn.physical_type, MetadataColumn.nullable
+            ).where(MetadataColumn.table_id == table_id, MetadataColumn.status == "ACTIVE")
+        )
+    ).all()
+    shape = sorted(
+        f"{name.lower()}\t{physical_type}\t{int(bool(nullable))}"
+        for name, physical_type, nullable in rows
+    )
+    return hashlib.sha256("\n".join(shape).encode("utf-8")).hexdigest()
 
 
 def _object_kind(object_type: str) -> str:
@@ -616,6 +637,9 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
                 )
             )
         )
+    column_digest = (
+        await column_shape_digest(session, table.id) if object_kind == "TABLE" else None
+    )
 
     return AssetEvidence(
         table_id=table.id,
@@ -649,6 +673,7 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         object_kind=object_kind,
         definition_state=definition_state,
         definition_digest=definition_digest,
+        column_digest=column_digest,
     )
 
 
@@ -741,17 +766,31 @@ async def publish_asset_documentation_version(
 
 #: R11-FP08: a view's definition moved after its description was drafted.
 DEFINITION_MOVED = "DEFINITION_MOVED"
+#: R11-FP16: a table's columns moved after its description was drafted.
+COLUMNS_MOVED = "COLUMNS_MOVED"
 
 
 async def definition_moved(
     session: AsyncSession, draft: AssetDescriptionDraft
 ) -> RefusalDetail | None:
-    """Why a view's draft no longer describes the view as it is, or `None`.
+    """Why a draft no longer describes its view or table as it is, or `None`.
 
-    A view's draft records the state and digest of the definition it was written against
-    (`evidence_payload`). A table's draft records neither and is never refused here.
+    A view's draft records the state and digest of the definition it was written against,
+    and a table's the digest of its columns (`evidence_payload`). A draft recording neither,
+    written before either was recorded, is never refused here.
     """
     evidence = draft.evidence or {}
+    if "column_digest" in evidence:
+        if evidence.get("column_digest") == await column_shape_digest(session, draft.table_id):
+            return None
+        return RefusalDetail(
+            code=COLUMNS_MOVED,
+            message=(
+                "The table's columns changed after this description was drafted, so the draft "
+                "may describe columns the table no longer has, or miss ones it now has. Reject "
+                "it and draft again from the current columns."
+            ),
+        )
     if "definition_state" not in evidence:
         return None
     state, digest = _definition_facts(

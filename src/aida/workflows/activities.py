@@ -23,6 +23,10 @@ from aida.analysis_tasks import (
 )
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signals import (
+    CHANGE_COLUMNS_ADDED,
+    CHANGE_COLUMNS_REMOVED,
+    CHANGE_COLUMNS_RETURNED,
+    CHANGE_COLUMNS_RETYPED,
     SIGNAL_DEPRECATED,
     SIGNAL_REACTIVATED,
     SIGNAL_STRUCTURE_CHANGED,
@@ -108,6 +112,14 @@ logger = structlog.get_logger(__name__)
 _METADATA_WORKER_PRINCIPAL = "metadata-worker"
 
 
+#: R11-FP16: a column retyped can change what a query answers; one returned or added cannot.
+_SHAPE_CHANGE_RANK: dict[str, int] = {
+    CHANGE_COLUMNS_ADDED: 1,
+    CHANGE_COLUMNS_RETURNED: 2,
+    CHANGE_COLUMNS_RETYPED: 3,
+}
+
+
 @dataclass(slots=True)
 class ChangeTracker:
     created: int = 0
@@ -116,7 +128,8 @@ class ChangeTracker:
     # R11-FP15: which tables changed, not just how many objects. A table created in this call
     # is not a change to anything that could depend on it, so its columns signal nothing.
     new_table_ids: set[UUID] = field(default_factory=set)
-    structure_changed_table_ids: set[UUID] = field(default_factory=set)
+    #: R11-FP16: each reshaped table's most consequential shape change (`change_signals`).
+    structure_changes: dict[UUID, str] = field(default_factory=dict)
     signals: list[ChangeSignal] = field(default_factory=list)
 
     def observe(self, existing: object | None, old_fingerprint: str | None, new: str) -> None:
@@ -124,6 +137,11 @@ class ChangeTracker:
             self.created += 1
         elif old_fingerprint != new or getattr(existing, "status", "ACTIVE") != "ACTIVE":
             self.changed += 1
+
+    def reshape(self, table_id: UUID, change_class: str) -> None:
+        current = self.structure_changes.get(table_id)
+        if current is None or _SHAPE_CHANGE_RANK[change_class] > _SHAPE_CHANGE_RANK[current]:
+            self.structure_changes[table_id] = change_class
 
 
 @dataclass(slots=True)
@@ -345,13 +363,16 @@ async def _get_or_create_column(
     tracker.observe(column, column.fingerprint if column else None, column_fingerprint)
     # R11-FP15: a column added to, returned to or retyped in an existing table changes the
     # table's shape. A description edit does not, so only type and nullability are compared.
-    if table.id not in tracker.new_table_ids and (
-        column is None
-        or column.status != "ACTIVE"
-        or column.physical_type != discovered.physical_type
-        or column.nullable != discovered.nullable
-    ):
-        tracker.structure_changed_table_ids.add(table.id)
+    if table.id not in tracker.new_table_ids:
+        if column is None:
+            tracker.reshape(table.id, CHANGE_COLUMNS_ADDED)
+        elif (
+            column.physical_type != discovered.physical_type
+            or column.nullable != discovered.nullable
+        ):
+            tracker.reshape(table.id, CHANGE_COLUMNS_RETYPED)
+        elif column.status != "ACTIVE":
+            tracker.reshape(table.id, CHANGE_COLUMNS_RETURNED)
     rule_result = classify_column_name_with_evidence(discovered.name)
     if column is None:
         column = MetadataColumn(
@@ -631,7 +652,7 @@ async def _deprecate_missing(
                 for table_id in sorted(deprecated_table_ids, key=str)
             ),
             *(
-                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED)
+                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED, CHANGE_COLUMNS_REMOVED)
                 for table_id in sorted(reshaped_table_ids, key=str)
             ),
         ],
@@ -1060,8 +1081,10 @@ async def persist_discovery_snapshot(
         signals=[
             *tracker.signals,
             *(
-                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED)
-                for table_id in sorted(tracker.structure_changed_table_ids, key=str)
+                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED, change_class)
+                for table_id, change_class in sorted(
+                    tracker.structure_changes.items(), key=lambda item: str(item[0])
+                )
             ),
         ],
     )

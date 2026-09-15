@@ -10,7 +10,8 @@ time, and routes each through machinery that already exists rather than a second
   the REST and the agent execution path), and a context product that denies on critical
   incidents stops serving. A literal-only redefinition counts: `status = 'OPEN'` becoming
   `status = 'CLOSED'` leaves lineage intact and changes every answer. A steward resolves the
-  incident once the dependants are checked -- the same act that clears any other incident.
+  incident once the dependants are checked -- the same act that clears any other incident --
+  or `context_rebuild` resolves it once nothing standing on the table is stale.
 * **A table that changed shape, or a view whose definition the source stopped providing**, opens
   a WARNING: tools still run, and say why they might be wrong.
 * **A view or routine redefined, retired or returning** is left to the lineage agent, which
@@ -131,6 +132,9 @@ async def _hold(
         return ACTION_SUBJECT_GONE, None, None
     fingerprint = source_change_fingerprint(signal.organization_id, table.id)
     change = {"signal_id": str(signal.id), "action": action}
+    if signal.change_class is not None:
+        # R11-FP16: the kind of change, so a rebuild can tell one a bound query survives.
+        change["change_class"] = signal.change_class
     incident = await session.scalar(
         select(DataQualityIncident).where(DataQualityIncident.fingerprint == fingerprint)
     )

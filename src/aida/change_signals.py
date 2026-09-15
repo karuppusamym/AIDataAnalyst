@@ -12,6 +12,9 @@ seen, inside the same transaction as the write that makes it:
 * `DEPRECATED` / `REACTIVATED` for a table, view or routine leaving or returning to a snapshot.
   A routine retired because one new signature replaced its one old signature is classed
   `SIGNATURE_CHANGED`, and `related_subject_id` names the routine that replaced it.
+* `STRUCTURE_CHANGED` for a table whose columns changed, classed by what the change can do to
+  a query whose columns all still bind: `COLUMNS_ADDED`, `COLUMNS_RETURNED` (unchanged) and
+  `COLUMNS_REMOVED` cannot change its answer; `COLUMNS_RETYPED` (type or nullability) can.
 * `PERMISSION_CHANGED` for a source grant, classed `GRANT_ADDED` (new to a schema an earlier run
   already read, or back after a revoke), `GRANT_MODIFIED` or `GRANT_REVOKED`.
 * `MEANING_PUBLISHED` when an ontology version is approved.
@@ -49,6 +52,14 @@ CHANGE_GRANT_ADDED: Final = "GRANT_ADDED"
 CHANGE_GRANT_MODIFIED: Final = "GRANT_MODIFIED"
 CHANGE_GRANT_REVOKED: Final = "GRANT_REVOKED"
 CHANGE_SIGNATURE_CHANGED: Final = "SIGNATURE_CHANGED"
+CHANGE_COLUMNS_ADDED: Final = "COLUMNS_ADDED"
+CHANGE_COLUMNS_RETURNED: Final = "COLUMNS_RETURNED"
+CHANGE_COLUMNS_REMOVED: Final = "COLUMNS_REMOVED"
+CHANGE_COLUMNS_RETYPED: Final = "COLUMNS_RETYPED"
+#: Shape changes after which a query whose columns all still bind answers as it did.
+BINDING_SAFE_SHAPE_CHANGES: Final = frozenset(
+    {CHANGE_COLUMNS_ADDED, CHANGE_COLUMNS_RETURNED, CHANGE_COLUMNS_REMOVED}
+)
 
 
 @dataclass(frozen=True, slots=True)

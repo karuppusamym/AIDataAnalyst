@@ -365,52 +365,8 @@ class QueryExecutionGateway:
         datasource: DataSource,
         referenced_tables: Sequence[str],
     ) -> dict[str, frozenset[str]]:
-        """Active column names for the referenced tables, keyed the way SQL names them.
-
-        Same catalog binding, tenancy filter and ACTIVE-only rule as
-        `allowed_tables`, and keyed with the same qualified/unqualified variants,
-        so a name that authorises as a table resolves as a table here too. The
-        query is bounded by the statement's own table list rather than loading
-        the datasource's whole column catalog.
-        """
-        leaf_names = {table.rsplit(".", 1)[-1].lower() for table in referenced_tables}
-        if not leaf_names:
-            return {}
-        rows = (
-            await session.execute(
-                select(
-                    MetadataCatalog.name,
-                    MetadataSchema.name,
-                    MetadataTable.name,
-                    MetadataColumn.name,
-                )
-                .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
-                .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
-                .join(MetadataColumn, MetadataColumn.table_id == MetadataTable.id)
-                .where(
-                    MetadataCatalog.datasource_id == datasource.id,
-                    MetadataTable.organization_id == datasource.organization_id,
-                    MetadataTable.status == "ACTIVE",
-                    MetadataColumn.organization_id == datasource.organization_id,
-                    MetadataColumn.status == "ACTIVE",
-                    func.lower(MetadataTable.name).in_(leaf_names),
-                )
-            )
-        ).all()
-        by_qualified: dict[str, set[str]] = {}
-        qualified_by_leaf: dict[str, set[str]] = {}
-        for catalog_name, schema_name, table_name, column_name in rows:
-            schema_table = f"{schema_name}.{table_name}".lower()
-            catalog_table = f"{catalog_name}.{schema_name}.{table_name}".lower()
-            for key in (schema_table, catalog_table):
-                by_qualified.setdefault(key, set()).add(column_name.lower())
-            qualified_by_leaf.setdefault(table_name.lower(), set()).add(catalog_table)
-        for leaf, qualified in qualified_by_leaf.items():
-            # An unqualified name is only resolvable when it is unambiguous --
-            # the same rule `allowed_tables` applies.
-            if len(qualified) == 1:
-                by_qualified[leaf] = set(by_qualified[next(iter(qualified))])
-        return {name: frozenset(values) for name, values in by_qualified.items()}
+        """Active column names for the referenced tables; see `catalog_columns`."""
+        return await catalog_columns(session, datasource, referenced_tables)
 
     async def _run_validation(
         self,
@@ -1066,3 +1022,56 @@ class QueryExecutionGateway:
             )
             await session.commit()
             raise
+
+
+async def catalog_columns(
+    session: AsyncSession,
+    datasource: DataSource,
+    referenced_tables: Sequence[str],
+) -> dict[str, frozenset[str]]:
+    """Active column names for the referenced tables, keyed the way SQL names them.
+
+    Same catalog binding, tenancy filter and ACTIVE-only rule as
+    `allowed_tables`, and keyed with the same qualified/unqualified variants,
+    so a name that authorises as a table resolves as a table here too. The
+    query is bounded by the statement's own table list rather than loading
+    the datasource's whole column catalog.
+    """
+    leaf_names = {table.rsplit(".", 1)[-1].lower() for table in referenced_tables}
+    if not leaf_names:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MetadataCatalog.name,
+                MetadataSchema.name,
+                MetadataTable.name,
+                MetadataColumn.name,
+            )
+            .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
+            .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+            .join(MetadataColumn, MetadataColumn.table_id == MetadataTable.id)
+            .where(
+                MetadataCatalog.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                MetadataTable.status == "ACTIVE",
+                MetadataColumn.organization_id == datasource.organization_id,
+                MetadataColumn.status == "ACTIVE",
+                func.lower(MetadataTable.name).in_(leaf_names),
+            )
+        )
+    ).all()
+    by_qualified: dict[str, set[str]] = {}
+    qualified_by_leaf: dict[str, set[str]] = {}
+    for catalog_name, schema_name, table_name, column_name in rows:
+        schema_table = f"{schema_name}.{table_name}".lower()
+        catalog_table = f"{catalog_name}.{schema_name}.{table_name}".lower()
+        for key in (schema_table, catalog_table):
+            by_qualified.setdefault(key, set()).add(column_name.lower())
+        qualified_by_leaf.setdefault(table_name.lower(), set()).add(catalog_table)
+    for leaf, qualified in qualified_by_leaf.items():
+        # An unqualified name is only resolvable when it is unambiguous --
+        # the same rule `allowed_tables` applies.
+        if len(qualified) == 1:
+            by_qualified[leaf] = set(by_qualified[next(iter(qualified))])
+    return {name: frozenset(values) for name, values in by_qualified.items()}
