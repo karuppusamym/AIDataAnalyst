@@ -6483,6 +6483,23 @@ const TASK_AGENT_FIXTURE_CAPABILITIES: Record<
         "quality_rule_proposals: worst recent null rate of a normally complete column, plus headroom",
     },
   ],
+  tool: [
+    {
+      capability: "VIEW_TOOL",
+      object_type: "GOVERNED_TOOL_VERSION",
+      review_queue: "GOVERNANCE_REVIEW",
+      risk_tier: "T2",
+      producer: "view_tool_blueprint: a parameterised read over a view's output columns",
+    },
+    {
+      capability: "PROCEDURE_TOOL",
+      object_type: "GOVERNED_TOOL_VERSION",
+      review_queue: "GOVERNANCE_REVIEW",
+      risk_tier: "T2",
+      producer:
+        "procedure_tool_blueprint: the one result query of a routine proven read-only (extracted SQL, not a call to the routine)",
+    },
+  ],
 };
 
 /** What each agent's fixture run looks at, and the reason it skips one. */
@@ -6502,6 +6519,11 @@ const TASK_AGENT_FIXTURE_RUN: Record<
   quality: {
     skipReason: "rule_or_proposal_exists",
     subjects: ["public.fact_card_transactions", "public.dim_branch", "public.customer_master.email"],
+  },
+  tool: {
+    skipReason: "PROCEDURE_WRITES",
+    // The third is the second capability's subject: a routine, not a view.
+    subjects: ["reporting.v_card_spend", "reporting.v_branch_totals", "reporting.usp_branch_totals"],
   },
 };
 

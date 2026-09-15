@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-348 Python modules under `src/`, 1935 intra-`src` import edges.
+351 Python modules under `src/`, 1978 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -20,8 +20,8 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 |---|---|---:|
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
-| aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 63 |
-| aida domain modules | everything else flat in `aida.*` | 222 |
+| aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 64 |
+| aida domain modules | everything else flat in `aida.*` | 224 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -48,8 +48,8 @@ restates the edge next to it and nothing more.
 ```mermaid
 graph LR
   app["aida.main (composition root)<br/>1 module"]
-  routers["aida routers (*_api)<br/>63 modules"]
-  domain["aida domain modules<br/>222 modules"]
+  routers["aida routers (*_api)<br/>64 modules"]
+  domain["aida domain modules<br/>224 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -60,18 +60,18 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|535| domain
-  app -->|62| routers
+  routers -->|540| domain
+  app -->|63| routers
+  domain -->|47| platform
   workflows -->|47| domain
-  domain -->|45| platform
   ctx_catalog -->|19| domain
   ctx_identity_tenancy -->|18| domain
   app -->|14| domain
+  routers -->|12| platform
   ctx_connectivity -->|11| domain
   domain -->|11| routers
   domain -->|10| connectors
   projectors -->|10| domain
-  routers -->|10| platform
   ctx_ingestion -->|9| domain
   domain -->|9| ctx_catalog
   ctx_observability_audit -->|7| domain
@@ -138,13 +138,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 323 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 326 |
 | `aida.workflows.worker` | Temporal worker | 114 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 156 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 163 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 342 of 348 modules.
+Union of all five: 345 of 351 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -152,8 +152,8 @@ Per group, how much of each group each process pulls in:
 |---|---:|---:|---:|---:|---:|---:|
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
-| aida routers (*_api) | 63 | 0 | 2 | 1 | 0 | 63 |
-| aida domain modules | 207 | 69 | 108 | 33 | 6 | 222 |
+| aida routers (*_api) | 64 | 0 | 2 | 1 | 0 | 64 |
+| aida domain modules | 209 | 69 | 115 | 33 | 6 | 224 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -172,13 +172,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>323 reached"])
+  aida_main(["aida.main<br/>326 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>114 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>156 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>163 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>64 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>169 modules"]
+  only_aida_main["only this process<br/>165 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
@@ -236,9 +236,9 @@ push rather than described.
 | C4 / ST-11 lineage and intelligence modules never import the query gateway | forbidden | 12 source module(s) may not import 1 module(s) |
 | F05 the governance decision service is never reached from a router (and never imports one) | forbidden | 3 source module(s) may not import 5 module(s) |
 | R02 extracted lineage/graph/portfolio services never import a router | forbidden | 3 source module(s) may not import 5 module(s) |
-| ADR-0029 the steward agent and the rules it shares never import a router | forbidden | 12 source module(s) may not import 13 module(s) |
+| ADR-0029 the steward agent and the rules it shares never import a router | forbidden | 14 source module(s) may not import 16 module(s) |
 
-12 contracts, 199 forbidden module pairs. The
+12 contracts, 267 forbidden module pairs. The
 forbidden edges, drawn — a dashed line is an import the build rejects:
 
 ```mermaid
@@ -272,11 +272,14 @@ graph LR
   aida_lineage_agent_api["aida.lineage_agent_api"]
   aida_parsed_lineage_review_api["aida.parsed_lineage_review_api"]
   aida_procedure_lineage_api["aida.procedure_lineage_api"]
+  aida_procedure_tool_api["aida.procedure_tool_api"]
   aida_quality_agent_api["aida.quality_agent_api"]
   aida_quality_api["aida.quality_api"]
   aida_steward_agent_api["aida.steward_agent_api"]
   aida_stewardship_api["aida.stewardship_api"]
   aida_task_agent_api["aida.task_agent_api"]
+  aida_tool_agent_api["aida.tool_agent_api"]
+  aida_tool_api["aida.tool_api"]
   aida_view_lineage_api["aida.view_lineage_api"]
   aida_glossary_link_candidates["aida.glossary_link_candidates"]
   aida_lineage_agent["aida.lineage_agent"]
@@ -289,6 +292,8 @@ graph LR
   aida_task_agent["aida.task_agent"]
   aida_task_agent_registry["aida.task_agent_registry"]
   aida_task_agent_schedule["aida.task_agent_schedule"]
+  aida_tool_agent["aida.tool_agent"]
+  aida_tool_drafts["aida.tool_drafts"]
   aida_security_types -.->|forbidden| aida_api
   aida_unified_lineage -.->|forbidden| aida_query_gateway
   aida_unified_lineage_api -.->|forbidden| aida_query_gateway
@@ -338,12 +343,15 @@ graph LR
   aida_documentation_worklist_signals -.->|forbidden| aida_lineage_agent_api
   aida_documentation_worklist_signals -.->|forbidden| aida_parsed_lineage_review_api
   aida_documentation_worklist_signals -.->|forbidden| aida_procedure_lineage_api
+  aida_documentation_worklist_signals -.->|forbidden| aida_procedure_tool_api
   aida_documentation_worklist_signals -.->|forbidden| aida_quality_agent_api
   aida_documentation_worklist_signals -.->|forbidden| aida_quality_api
   aida_documentation_worklist_signals -.->|forbidden| aida_semantic_api
   aida_documentation_worklist_signals -.->|forbidden| aida_steward_agent_api
   aida_documentation_worklist_signals -.->|forbidden| aida_stewardship_api
   aida_documentation_worklist_signals -.->|forbidden| aida_task_agent_api
+  aida_documentation_worklist_signals -.->|forbidden| aida_tool_agent_api
+  aida_documentation_worklist_signals -.->|forbidden| aida_tool_api
   aida_documentation_worklist_signals -.->|forbidden| aida_view_lineage_api
   aida_glossary_link_candidates -.->|forbidden| aida_agent_contract_api
   aida_glossary_link_candidates -.->|forbidden| aida_api
@@ -351,12 +359,15 @@ graph LR
   aida_glossary_link_candidates -.->|forbidden| aida_lineage_agent_api
   aida_glossary_link_candidates -.->|forbidden| aida_parsed_lineage_review_api
   aida_glossary_link_candidates -.->|forbidden| aida_procedure_lineage_api
+  aida_glossary_link_candidates -.->|forbidden| aida_procedure_tool_api
   aida_glossary_link_candidates -.->|forbidden| aida_quality_agent_api
   aida_glossary_link_candidates -.->|forbidden| aida_quality_api
   aida_glossary_link_candidates -.->|forbidden| aida_semantic_api
   aida_glossary_link_candidates -.->|forbidden| aida_steward_agent_api
   aida_glossary_link_candidates -.->|forbidden| aida_stewardship_api
   aida_glossary_link_candidates -.->|forbidden| aida_task_agent_api
+  aida_glossary_link_candidates -.->|forbidden| aida_tool_agent_api
+  aida_glossary_link_candidates -.->|forbidden| aida_tool_api
   aida_glossary_link_candidates -.->|forbidden| aida_view_lineage_api
   aida_lineage_agent -.->|forbidden| aida_agent_contract_api
   aida_lineage_agent -.->|forbidden| aida_api
@@ -364,12 +375,15 @@ graph LR
   aida_lineage_agent -.->|forbidden| aida_lineage_agent_api
   aida_lineage_agent -.->|forbidden| aida_parsed_lineage_review_api
   aida_lineage_agent -.->|forbidden| aida_procedure_lineage_api
+  aida_lineage_agent -.->|forbidden| aida_procedure_tool_api
   aida_lineage_agent -.->|forbidden| aida_quality_agent_api
   aida_lineage_agent -.->|forbidden| aida_quality_api
   aida_lineage_agent -.->|forbidden| aida_semantic_api
   aida_lineage_agent -.->|forbidden| aida_steward_agent_api
   aida_lineage_agent -.->|forbidden| aida_stewardship_api
   aida_lineage_agent -.->|forbidden| aida_task_agent_api
+  aida_lineage_agent -.->|forbidden| aida_tool_agent_api
+  aida_lineage_agent -.->|forbidden| aida_tool_api
   aida_lineage_agent -.->|forbidden| aida_view_lineage_api
   aida_lineage_table_resolution -.->|forbidden| aida_agent_contract_api
   aida_lineage_table_resolution -.->|forbidden| aida_api
@@ -377,12 +391,15 @@ graph LR
   aida_lineage_table_resolution -.->|forbidden| aida_lineage_agent_api
   aida_lineage_table_resolution -.->|forbidden| aida_parsed_lineage_review_api
   aida_lineage_table_resolution -.->|forbidden| aida_procedure_lineage_api
+  aida_lineage_table_resolution -.->|forbidden| aida_procedure_tool_api
   aida_lineage_table_resolution -.->|forbidden| aida_quality_agent_api
   aida_lineage_table_resolution -.->|forbidden| aida_quality_api
   aida_lineage_table_resolution -.->|forbidden| aida_semantic_api
   aida_lineage_table_resolution -.->|forbidden| aida_steward_agent_api
   aida_lineage_table_resolution -.->|forbidden| aida_stewardship_api
   aida_lineage_table_resolution -.->|forbidden| aida_task_agent_api
+  aida_lineage_table_resolution -.->|forbidden| aida_tool_agent_api
+  aida_lineage_table_resolution -.->|forbidden| aida_tool_api
   aida_lineage_table_resolution -.->|forbidden| aida_view_lineage_api
   aida_quality_agent -.->|forbidden| aida_agent_contract_api
   aida_quality_agent -.->|forbidden| aida_api
@@ -390,12 +407,15 @@ graph LR
   aida_quality_agent -.->|forbidden| aida_lineage_agent_api
   aida_quality_agent -.->|forbidden| aida_parsed_lineage_review_api
   aida_quality_agent -.->|forbidden| aida_procedure_lineage_api
+  aida_quality_agent -.->|forbidden| aida_procedure_tool_api
   aida_quality_agent -.->|forbidden| aida_quality_agent_api
   aida_quality_agent -.->|forbidden| aida_quality_api
   aida_quality_agent -.->|forbidden| aida_semantic_api
   aida_quality_agent -.->|forbidden| aida_steward_agent_api
   aida_quality_agent -.->|forbidden| aida_stewardship_api
   aida_quality_agent -.->|forbidden| aida_task_agent_api
+  aida_quality_agent -.->|forbidden| aida_tool_agent_api
+  aida_quality_agent -.->|forbidden| aida_tool_api
   aida_quality_agent -.->|forbidden| aida_view_lineage_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_agent_contract_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_api
@@ -403,12 +423,15 @@ graph LR
   aida_quality_rule_proposal_model -.->|forbidden| aida_lineage_agent_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_parsed_lineage_review_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_procedure_lineage_api
+  aida_quality_rule_proposal_model -.->|forbidden| aida_procedure_tool_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_quality_agent_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_quality_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_semantic_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_steward_agent_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_stewardship_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_task_agent_api
+  aida_quality_rule_proposal_model -.->|forbidden| aida_tool_agent_api
+  aida_quality_rule_proposal_model -.->|forbidden| aida_tool_api
   aida_quality_rule_proposal_model -.->|forbidden| aida_view_lineage_api
   aida_quality_rule_proposals -.->|forbidden| aida_agent_contract_api
   aida_quality_rule_proposals -.->|forbidden| aida_api
@@ -416,12 +439,15 @@ graph LR
   aida_quality_rule_proposals -.->|forbidden| aida_lineage_agent_api
   aida_quality_rule_proposals -.->|forbidden| aida_parsed_lineage_review_api
   aida_quality_rule_proposals -.->|forbidden| aida_procedure_lineage_api
+  aida_quality_rule_proposals -.->|forbidden| aida_procedure_tool_api
   aida_quality_rule_proposals -.->|forbidden| aida_quality_agent_api
   aida_quality_rule_proposals -.->|forbidden| aida_quality_api
   aida_quality_rule_proposals -.->|forbidden| aida_semantic_api
   aida_quality_rule_proposals -.->|forbidden| aida_steward_agent_api
   aida_quality_rule_proposals -.->|forbidden| aida_stewardship_api
   aida_quality_rule_proposals -.->|forbidden| aida_task_agent_api
+  aida_quality_rule_proposals -.->|forbidden| aida_tool_agent_api
+  aida_quality_rule_proposals -.->|forbidden| aida_tool_api
   aida_quality_rule_proposals -.->|forbidden| aida_view_lineage_api
   aida_routine_lineage_edges -.->|forbidden| aida_agent_contract_api
   aida_routine_lineage_edges -.->|forbidden| aida_api
@@ -429,12 +455,15 @@ graph LR
   aida_routine_lineage_edges -.->|forbidden| aida_lineage_agent_api
   aida_routine_lineage_edges -.->|forbidden| aida_parsed_lineage_review_api
   aida_routine_lineage_edges -.->|forbidden| aida_procedure_lineage_api
+  aida_routine_lineage_edges -.->|forbidden| aida_procedure_tool_api
   aida_routine_lineage_edges -.->|forbidden| aida_quality_agent_api
   aida_routine_lineage_edges -.->|forbidden| aida_quality_api
   aida_routine_lineage_edges -.->|forbidden| aida_semantic_api
   aida_routine_lineage_edges -.->|forbidden| aida_steward_agent_api
   aida_routine_lineage_edges -.->|forbidden| aida_stewardship_api
   aida_routine_lineage_edges -.->|forbidden| aida_task_agent_api
+  aida_routine_lineage_edges -.->|forbidden| aida_tool_agent_api
+  aida_routine_lineage_edges -.->|forbidden| aida_tool_api
   aida_routine_lineage_edges -.->|forbidden| aida_view_lineage_api
   aida_steward_agent -.->|forbidden| aida_agent_contract_api
   aida_steward_agent -.->|forbidden| aida_api
@@ -442,12 +471,15 @@ graph LR
   aida_steward_agent -.->|forbidden| aida_lineage_agent_api
   aida_steward_agent -.->|forbidden| aida_parsed_lineage_review_api
   aida_steward_agent -.->|forbidden| aida_procedure_lineage_api
+  aida_steward_agent -.->|forbidden| aida_procedure_tool_api
   aida_steward_agent -.->|forbidden| aida_quality_agent_api
   aida_steward_agent -.->|forbidden| aida_quality_api
   aida_steward_agent -.->|forbidden| aida_semantic_api
   aida_steward_agent -.->|forbidden| aida_steward_agent_api
   aida_steward_agent -.->|forbidden| aida_stewardship_api
   aida_steward_agent -.->|forbidden| aida_task_agent_api
+  aida_steward_agent -.->|forbidden| aida_tool_agent_api
+  aida_steward_agent -.->|forbidden| aida_tool_api
   aida_steward_agent -.->|forbidden| aida_view_lineage_api
   aida_task_agent -.->|forbidden| aida_agent_contract_api
   aida_task_agent -.->|forbidden| aida_api
@@ -455,12 +487,15 @@ graph LR
   aida_task_agent -.->|forbidden| aida_lineage_agent_api
   aida_task_agent -.->|forbidden| aida_parsed_lineage_review_api
   aida_task_agent -.->|forbidden| aida_procedure_lineage_api
+  aida_task_agent -.->|forbidden| aida_procedure_tool_api
   aida_task_agent -.->|forbidden| aida_quality_agent_api
   aida_task_agent -.->|forbidden| aida_quality_api
   aida_task_agent -.->|forbidden| aida_semantic_api
   aida_task_agent -.->|forbidden| aida_steward_agent_api
   aida_task_agent -.->|forbidden| aida_stewardship_api
   aida_task_agent -.->|forbidden| aida_task_agent_api
+  aida_task_agent -.->|forbidden| aida_tool_agent_api
+  aida_task_agent -.->|forbidden| aida_tool_api
   aida_task_agent -.->|forbidden| aida_view_lineage_api
   aida_task_agent_registry -.->|forbidden| aida_agent_contract_api
   aida_task_agent_registry -.->|forbidden| aida_api
@@ -468,12 +503,15 @@ graph LR
   aida_task_agent_registry -.->|forbidden| aida_lineage_agent_api
   aida_task_agent_registry -.->|forbidden| aida_parsed_lineage_review_api
   aida_task_agent_registry -.->|forbidden| aida_procedure_lineage_api
+  aida_task_agent_registry -.->|forbidden| aida_procedure_tool_api
   aida_task_agent_registry -.->|forbidden| aida_quality_agent_api
   aida_task_agent_registry -.->|forbidden| aida_quality_api
   aida_task_agent_registry -.->|forbidden| aida_semantic_api
   aida_task_agent_registry -.->|forbidden| aida_steward_agent_api
   aida_task_agent_registry -.->|forbidden| aida_stewardship_api
   aida_task_agent_registry -.->|forbidden| aida_task_agent_api
+  aida_task_agent_registry -.->|forbidden| aida_tool_agent_api
+  aida_task_agent_registry -.->|forbidden| aida_tool_api
   aida_task_agent_registry -.->|forbidden| aida_view_lineage_api
   aida_task_agent_schedule -.->|forbidden| aida_agent_contract_api
   aida_task_agent_schedule -.->|forbidden| aida_api
@@ -481,13 +519,48 @@ graph LR
   aida_task_agent_schedule -.->|forbidden| aida_lineage_agent_api
   aida_task_agent_schedule -.->|forbidden| aida_parsed_lineage_review_api
   aida_task_agent_schedule -.->|forbidden| aida_procedure_lineage_api
+  aida_task_agent_schedule -.->|forbidden| aida_procedure_tool_api
   aida_task_agent_schedule -.->|forbidden| aida_quality_agent_api
   aida_task_agent_schedule -.->|forbidden| aida_quality_api
   aida_task_agent_schedule -.->|forbidden| aida_semantic_api
   aida_task_agent_schedule -.->|forbidden| aida_steward_agent_api
   aida_task_agent_schedule -.->|forbidden| aida_stewardship_api
   aida_task_agent_schedule -.->|forbidden| aida_task_agent_api
+  aida_task_agent_schedule -.->|forbidden| aida_tool_agent_api
+  aida_task_agent_schedule -.->|forbidden| aida_tool_api
   aida_task_agent_schedule -.->|forbidden| aida_view_lineage_api
+  aida_tool_agent -.->|forbidden| aida_agent_contract_api
+  aida_tool_agent -.->|forbidden| aida_api
+  aida_tool_agent -.->|forbidden| aida_asset_description_api
+  aida_tool_agent -.->|forbidden| aida_lineage_agent_api
+  aida_tool_agent -.->|forbidden| aida_parsed_lineage_review_api
+  aida_tool_agent -.->|forbidden| aida_procedure_lineage_api
+  aida_tool_agent -.->|forbidden| aida_procedure_tool_api
+  aida_tool_agent -.->|forbidden| aida_quality_agent_api
+  aida_tool_agent -.->|forbidden| aida_quality_api
+  aida_tool_agent -.->|forbidden| aida_semantic_api
+  aida_tool_agent -.->|forbidden| aida_steward_agent_api
+  aida_tool_agent -.->|forbidden| aida_stewardship_api
+  aida_tool_agent -.->|forbidden| aida_task_agent_api
+  aida_tool_agent -.->|forbidden| aida_tool_agent_api
+  aida_tool_agent -.->|forbidden| aida_tool_api
+  aida_tool_agent -.->|forbidden| aida_view_lineage_api
+  aida_tool_drafts -.->|forbidden| aida_agent_contract_api
+  aida_tool_drafts -.->|forbidden| aida_api
+  aida_tool_drafts -.->|forbidden| aida_asset_description_api
+  aida_tool_drafts -.->|forbidden| aida_lineage_agent_api
+  aida_tool_drafts -.->|forbidden| aida_parsed_lineage_review_api
+  aida_tool_drafts -.->|forbidden| aida_procedure_lineage_api
+  aida_tool_drafts -.->|forbidden| aida_procedure_tool_api
+  aida_tool_drafts -.->|forbidden| aida_quality_agent_api
+  aida_tool_drafts -.->|forbidden| aida_quality_api
+  aida_tool_drafts -.->|forbidden| aida_semantic_api
+  aida_tool_drafts -.->|forbidden| aida_steward_agent_api
+  aida_tool_drafts -.->|forbidden| aida_stewardship_api
+  aida_tool_drafts -.->|forbidden| aida_task_agent_api
+  aida_tool_drafts -.->|forbidden| aida_tool_agent_api
+  aida_tool_drafts -.->|forbidden| aida_tool_api
+  aida_tool_drafts -.->|forbidden| aida_view_lineage_api
 ```
 
 ## Most-imported modules
@@ -499,21 +572,21 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 190 |
-| `aida.security` | aida domain modules | 107 |
-| `aida.db` | aida domain modules | 97 |
-| `aida.schemas` | aida domain modules | 94 |
-| `aida.config` | aida domain modules | 83 |
-| `aida.events` | aida domain modules | 83 |
-| `aida.context` | aida domain modules | 65 |
-| `atlas.platform.config` | atlas.platform | 23 |
+| `aida.models` | aida domain modules | 192 |
+| `aida.security` | aida domain modules | 110 |
+| `aida.db` | aida domain modules | 98 |
+| `aida.schemas` | aida domain modules | 97 |
+| `aida.events` | aida domain modules | 85 |
+| `aida.config` | aida domain modules | 84 |
+| `aida.context` | aida domain modules | 67 |
+| `atlas.platform.config` | atlas.platform | 25 |
 | `aida.connectors.base` | aida.connectors | 14 |
 | `aida.authorization_gate` | aida domain modules | 13 |
+| `aida.envelope_models` | aida domain modules | 12 |
+| `aida.task_agent` | aida domain modules | 12 |
 | `aida.secrets` | aida domain modules | 11 |
 | `aida.agent_contracts` | aida domain modules | 10 |
 | `aida.business_annotation_versions` | aida domain modules | 10 |
-| `aida.classification` | aida domain modules | 10 |
-| `aida.envelope_models` | aida domain modules | 10 |
 
 ## What this map cannot tell you
 

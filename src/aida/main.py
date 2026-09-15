@@ -97,6 +97,7 @@ from aida.stewardship_api import router as stewardship_router
 from aida.studio_api import router as studio_router
 from aida.table_family_api import router as table_family_router
 from aida.token_revocation_api import router as token_revocation_router
+from aida.tool_agent_api import router as tool_agent_router
 from aida.tool_api import router as tool_router
 from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
@@ -462,6 +463,7 @@ app.include_router(review_queue_router)
 app.include_router(steward_agent_router)
 app.include_router(lineage_agent_router)
 app.include_router(quality_agent_router)
+app.include_router(tool_agent_router)
 # Governed ontology v1: typed definitions, decided in the governance queue.
 app.include_router(ontology_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).

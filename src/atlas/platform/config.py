@@ -456,6 +456,17 @@ class Settings(BaseSettings):
     quality_agent_max_pending_proposals: int = Field(default=50, ge=0, le=10_000)
     quality_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
+    # --- ADR-0029 / R11-FP14: the tool agent ------------------------------
+    # Registered like the others: nothing until an approved AGENT-kind version
+    # carries a contract for this principal.
+    tool_agent_principal_id: str = "agent:tool"
+    #: Tool drafts proposed per capability per run, at most.
+    tool_agent_max_proposals_per_run: int = Field(default=10, ge=1, le=200)
+    #: How many of its own tool reviews may wait before it stops. Every one is T2
+    #: and needs a person, and a tool review asks more of one than a description.
+    tool_agent_max_pending_proposals: int = Field(default=25, ge=0, le=10_000)
+    tool_agent_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+
     # --- RT-1: persisted vector index ------------------------------------
     #: How old the persisted index may be before retrieval falls back to
     #: embedding candidates live. A catalog change newer than the index also

@@ -67,7 +67,7 @@ interface TaskAgentDefinition {
   readonly reviewLink?: ReviewLink;
 }
 
-/** The three agents, and the only thing that ever differed between them. */
+/** The agents, and the only thing that ever differs between them. */
 export const TASK_AGENTS: readonly TaskAgentDefinition[] = [
   {
     kind: "steward",
@@ -126,6 +126,39 @@ export const TASK_AGENTS: readonly TaskAgentDefinition[] = [
     supervisorPersona: "STEWARD",
     emptyRunHint:
       "No table or column has enough recent profile history without a rule or a proposal already covering it.",
+  },
+  {
+    kind: "tool",
+    label: "Tools",
+    title: "Tool agent",
+    description:
+      "Turns captured views, and stored routines proven read-only, into governed tool drafts. A routine's tool runs the query extracted from its body, never the routine itself. Every draft waits in the tool review queue for a person — a published tool is callable by agents — and the agent publishes nothing, and it calls no model.",
+    capabilityLabels: {
+      VIEW_TOOL: "Tools from views",
+      PROCEDURE_TOOL: "Tools from routines",
+    },
+    skipLabels: {
+      tool_already_exists: "a tool for it already exists",
+      datasource_has_no_project: "its source belongs to no project",
+      BLUEPRINT_REFUSED: "the generator could not render a tool",
+      VIEW_DEFINITION_MISSING: "no captured view definition",
+      VIEW_DEFINITION_UNAVAILABLE: "the view definition was not captured",
+      VIEW_DEFINITION_NOT_PARSED: "the view definition could not be parsed",
+      VIEW_DEFINITION_QUARANTINED: "the view definition is quarantined",
+      ROUTINE_BODY_UNAVAILABLE: "the routine body was not captured",
+      ROUTINE_BODY_QUARANTINED: "the routine body is quarantined",
+      PROCEDURE_NOT_FULLY_PARSED: "part of the routine could not be parsed",
+      PROCEDURE_WRITES: "the routine writes data",
+      PROCEDURE_NO_RESULT: "the routine returns no result set",
+      PROCEDURE_AMBIGUOUS_RESULT: "the routine returns more than one result set",
+      PROCEDURE_RESULT_HAS_LITERAL: "its result query depends on a redacted value",
+      PROCEDURE_UNBOUND_VARIABLE: "its result query uses a variable no parameter supplies",
+      SQL_GUARD_REFUSED: "the generated SQL was refused by the SQL guard",
+      TABLES_NOT_ALLOWED: "the generated SQL reads a table that is not allowed",
+    },
+    supervisorPersona: "STEWARD",
+    emptyRunHint:
+      "Every captured view and routine already has a tool, or was examined since it last changed and could not become one.",
   },
 ];
 

@@ -4822,6 +4822,13 @@ export interface TokenRevocationRequest {
   reason: string;
 }
 
+export interface ToolAgentRunRequest {
+  capabilities?: ("VIEW_TOOL" | "PROCEDURE_TOOL")[];
+  limit?: number;
+  datasource_id?: string | null;
+  dry_run?: boolean;
+}
+
 export interface ToolCertificationCaseCreate {
   case_key: string;
   description: string;

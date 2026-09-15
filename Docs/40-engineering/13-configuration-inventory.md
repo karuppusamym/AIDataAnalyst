@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**252 settings.** 0 are read nowhere. 50 more ship switched off, empty or zero.
+**256 settings.** 0 are read nowhere. 51 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -67,6 +67,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `freshness_evaluation_interval_minutes` | `int` | `0` | 1 | Opt-in: an open CRITICAL freshness incident fails governed tools closed, so an estate opts in after approving its contracts (R11-B8) |
 | `lineage_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
 | `quality_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
+| `tool_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
 | `governance_notifications_enabled` | `bool` | `False` | 6 | Opt-in: needs a Slack or Teams destination to deliver to (R11-I1, R11-B10) |
 | `slack_webhook_url` | `str | None` | `None` | 2 | Supplied: the Slack destination |
 | `teams_webhook_url` | `str | None` | `None` | 2 | Supplied: the Teams destination |
@@ -224,6 +225,10 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `quality_agent_max_proposals_per_run` | `int` | `25` | dynamic |
 | `quality_agent_max_pending_proposals` | `int` | `50` | dynamic |
 | `quality_agent_interval_minutes` | `int` | `0` | dynamic |
+| `tool_agent_principal_id` | `str` | `'agent:tool'` | dynamic |
+| `tool_agent_max_proposals_per_run` | `int` | `10` | dynamic |
+| `tool_agent_max_pending_proposals` | `int` | `25` | dynamic |
+| `tool_agent_interval_minutes` | `int` | `0` | dynamic |
 | `vector_index_max_age_minutes` | `int` | `1440` | 2 |
 | `exemplar_fewshot_k` | `int` | `3` | 2 |
 | `governance_notifications_enabled` | `bool` | `False` | 6 |
@@ -282,7 +287,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_route_health_batch_size` | `int` | `50` | 1 |
 | `unresolved_workspace_posture` | `Literal['SHADOW', 'DENY']` | `'SHADOW'` | 2 |
 | `workspace_authorization_posture` | `Literal['OBSERVING', 'ENFORCING']` | `'OBSERVING'` | 2 |
-| `edition` | `Literal['FOUNDATION', 'ENTERPRISE', 'REGULATED']` | `'REGULATED'` | 4 |
+| `edition` | `Literal['FOUNDATION', 'ENTERPRISE', 'REGULATED']` | `'REGULATED'` | 5 |
 | `entitlement_provider` | `Literal['outbox', 'webhook']` | `'outbox'` | 2 |
 | `entitlement_webhook_url` | `str | None` | `None` | 4 |
 | `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 |

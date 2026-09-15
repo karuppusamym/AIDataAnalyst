@@ -1,4 +1,3 @@
-import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -66,15 +65,15 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.signing import sign_value
-from aida.sql_guard import SqlGuard
 from aida.tool_certification import (
     CERTIFICATION_SUITE_VERSION,
     certification_is_active,
     corpus_fingerprint,
     run_certification_corpus,
 )
+from aida.tool_drafts import ToolDraftRefused, stage_tool_version_draft
 from aida.tool_impact import DeprecationImpact, compute_deprecation_impact
-from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
+from aida.tool_rendering import ToolParameterError, render_tool_sql
 from aida.tool_usage import DEFAULT_USAGE_LOOKBACK_DAYS
 from aida.view_tool_blueprint import (
     ViewNotEligibleError,
@@ -204,110 +203,17 @@ async def _persist_tool_version_draft(
     `GovernedToolVersion` in ``DRAFT`` status. Publication is unaffected by
     which path created the draft -- both go through the same
     `submit_tool_for_review` maker-checker flow afterwards.
-    """
-    definitions = body.parameters
-    declared = {definition.name for definition in definitions}
-    try:
-        placeholders = template_placeholders(body.sql_template, dialect=datasource.dialect)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail="tool SQL template cannot be parsed") from exc
-    if placeholders != declared:
-        raise HTTPException(
-            status_code=422,
-            detail="SQL placeholders must exactly match parameter definitions",
-        )
-    guard = SqlGuard(
-        default_row_limit=settings.default_query_row_limit,
-        hard_row_limit=settings.hard_query_row_limit,
-    )
-    validation = guard.validate(body.sql_template, dialect=datasource.dialect)
-    if not validation.valid or not validation.normalized_sql:
-        raise HTTPException(
-            status_code=422,
-            detail=f"invalid governed tool SQL: {', '.join(validation.violations)}",
-        )
-    gateway = QueryExecutionGateway(settings)
-    allowed_tables = await gateway.allowed_tables(session, datasource)
-    unauthorized = sorted(
-        table for table in validation.referenced_tables if table.lower() not in allowed_tables
-    )
-    if unauthorized:
-        raise HTTPException(
-            status_code=422,
-            detail=f"unknown or unauthorized tool tables: {', '.join(unauthorized)}",
-        )
 
-    tool = await session.scalar(
-        select(GovernedTool).where(
-            GovernedTool.project_id == project.id,
-            GovernedTool.slug == body.slug,
+    R11-FP14: the validation and the staged rows are
+    `tool_drafts.stage_tool_version_draft`, shared with the tool agent; this
+    route keeps only the HTTP half -- the 422 for a refusal and the commit.
+    """
+    try:
+        tool, version = await stage_tool_version_draft(
+            session, project, datasource, body, audit_context=context, settings=settings
         )
-    )
-    if tool is None:
-        tool = GovernedTool(
-            organization_id=project.organization_id,
-            project_id=project.id,
-            slug=body.slug,
-        )
-        session.add(tool)
-        await session.flush()
-    latest = await session.scalar(
-        select(func.max(GovernedToolVersion.version)).where(GovernedToolVersion.tool_id == tool.id)
-    )
-    fingerprint_payload = {
-        "name": body.name,
-        "description": body.description,
-        "datasource_id": str(body.datasource_id),
-        "semantic_model_version_id": (
-            str(body.semantic_model_version_id) if body.semantic_model_version_id else None
-        ),
-        "sql_template": validation.normalized_sql,
-        "referenced_tables": sorted(validation.referenced_tables),
-        "parameters": [definition.model_dump(mode="json") for definition in definitions],
-        "allowed_roles": sorted(body.allowed_roles),
-    }
-    fingerprint = hashlib.sha256(
-        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    version = GovernedToolVersion(
-        organization_id=project.organization_id,
-        tool_id=tool.id,
-        version=(latest or 0) + 1,
-        name=body.name,
-        description=body.description,
-        datasource_id=datasource.id,
-        semantic_model_version_id=body.semantic_model_version_id,
-        sql_template=validation.normalized_sql,
-        referenced_tables=sorted(validation.referenced_tables),
-        parameter_schema=[definition.model_dump(mode="json") for definition in definitions],
-        allowed_roles=sorted(body.allowed_roles),
-        fingerprint=fingerprint,
-        created_by=context.principal_id,
-    )
-    session.add(version)
-    await session.flush()
-    record_audit(
-        session,
-        replace(context, organization_id=project.organization_id),
-        action="tool.version.create",
-        resource_type="governed_tool_version",
-        resource_id=str(version.id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
-        details={"tool_slug": tool.slug, "version": version.version},
-    )
-    record_outbox(
-        session,
-        organization_id=project.organization_id,
-        aggregate_type="governed_tool_version",
-        aggregate_id=str(version.id),
-        event_type="tool.version.draft_created.v1",
-        payload={
-            "tool_version_id": str(version.id),
-            "tool_id": str(tool.id),
-            "project_id": str(project.id),
-        },
-    )
+    except ToolDraftRefused as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     try:
         await session.commit()
     except IntegrityError as exc:

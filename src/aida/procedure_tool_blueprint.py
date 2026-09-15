@@ -85,8 +85,10 @@ class ProcedureNotEligibleError(ProcedureToolBlueprintError):
     or its single result statement cannot be safely reconstructed into an
     executable tool. Always names the specific reason -- never guessed."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, code: str = "PROCEDURE_NOT_ELIGIBLE") -> None:
         self.reason = reason
+        #: Stable and value-free, for a caller that records why rather than says it (R11-FP14).
+        self.code = code
         super().__init__(f"procedure is not eligible for tool generation: {reason}")
 
 
@@ -116,7 +118,8 @@ def _require_no_literals(node: exp.Expr) -> None:
             "that cannot be safely reconstructed from redacted source text "
             f"({literal.sql()!r}) -- expose the underlying tables via the "
             "view/multi-table tool generator instead, or rewrite the "
-            "procedure to take the value as a parameter"
+            "procedure to take the value as a parameter",
+            code="PROCEDURE_RESULT_HAS_LITERAL",
         )
 
 
@@ -156,7 +159,8 @@ def _remap_parameters(
             "the procedure's result statement references a variable this "
             "generator cannot safely bind to a tool parameter: "
             f"{sorted(set(unmapped))!r} -- it must match a declared IN/INOUT "
-            "routine parameter with a filterable type"
+            "routine parameter with a filterable type",
+            code="PROCEDURE_UNBOUND_VARIABLE",
         )
     return remapped, parameters
 
@@ -218,25 +222,31 @@ def find_single_read_only_result_statement(
         ProcedureNotEligibleError: any of the above.
     """
     if not _SQLGLOT_AVAILABLE:
-        raise ProcedureNotEligibleError("sqlglot library is not available")
+        raise ProcedureNotEligibleError(
+            "sqlglot library is not available", code="PARSER_UNAVAILABLE"
+        )
 
     statements: list[ParsedStatement] = walk_procedure_statements(body_sql, dialect)
     if not statements:
-        raise ProcedureNotEligibleError("no statements found in procedure body")
+        raise ProcedureNotEligibleError(
+            "no statements found in procedure body", code="PROCEDURE_EMPTY"
+        )
 
     unparsed = [s for s in statements if s.is_unparsed]
     if unparsed:
         reasons = sorted({s.unparsed_reason for s in unparsed if s.unparsed_reason})
         raise ProcedureNotEligibleError(
             f"{len(unparsed)} statement(s) could not be parsed, so read-only "
-            f"cannot be proven (not just \"no write statement found\"): {reasons}"
+            f"cannot be proven (not just \"no write statement found\"): {reasons}",
+            code="PROCEDURE_NOT_FULLY_PARSED",
         )
 
     writes = [s for s in statements if s.is_write]
     if writes:
         raise ProcedureNotEligibleError(
             f"{len(writes)} write statement(s) found (INSERT/UPDATE/DELETE/"
-            "MERGE/CREATE/SELECT INTO) -- not read-only"
+            "MERGE/CREATE/SELECT INTO) -- not read-only",
+            code="PROCEDURE_WRITES",
         )
 
     finals = [
@@ -245,12 +255,14 @@ def find_single_read_only_result_statement(
     ]
     if not finals:
         raise ProcedureNotEligibleError(
-            "no standalone result-producing SELECT statement found (nothing to expose as a tool)"
+            "no standalone result-producing SELECT statement found (nothing to expose as a tool)",
+            code="PROCEDURE_NO_RESULT",
         )
     if len(finals) > 1:
         raise ProcedureNotEligibleError(
             f"{len(finals)} standalone result-producing SELECT statements found -- "
-            "ambiguous which one is the procedure's output"
+            "ambiguous which one is the procedure's output",
+            code="PROCEDURE_AMBIGUOUS_RESULT",
         )
 
     result = parse_procedure_lineage(body_sql, dialect)

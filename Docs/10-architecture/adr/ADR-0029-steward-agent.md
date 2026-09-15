@@ -114,7 +114,7 @@ A proposal is a new governed object, `QUALITY_RULE_PROPOSAL`, classified **T2**.
 **Proposing and deciding are now separate ceilings.** This is the one change to the runtime's rules, and the quality agent needed it:
 
 * **Deciding** stays capped at `HARD_MAX_AGENT_TIER` (T1) for every agent, and nothing about the reviewer agent changes.
-* **Proposing** also defaults to T1. A spec may declare a higher proposal ceiling, up to `HARD_MAX_PROPOSAL_TIER` (T2), and the quality agent is the only spec that does. A spec above T2 cannot be constructed, and the tier is checked again each time a review is opened.
+* **Proposing** also defaults to T1. A spec may declare a higher proposal ceiling, up to `HARD_MAX_PROPOSAL_TIER` (T2). When this was written the quality agent was the only spec that did; the tool agent is the second (see the 2026-09-15 amendment). A spec above T2 cannot be constructed, and the tier is checked again each time a review is opened.
 
 So a person decides every T2 proposal, and no agent ever asks to move the trust boundary (T3).
 
@@ -126,7 +126,7 @@ So a person decides every T2 proposal, and no agent ever asks to move the trust 
 
 ### Revisit trigger (added)
 
-* Any spec other than the quality agent's is proposed with a proposal ceiling above T1.
+* Any spec other than the quality agent's is proposed with a proposal ceiling above T1. *Fired 2026-09-15 by the tool agent; revisited in that amendment.*
 * A second dedicated queue is proposed for the runtime's human-only list.
 
 ## Amendment (2026-09-11, later the same day): procedure lineage
@@ -147,6 +147,41 @@ The routine-aware table now has the same six review columns as the other five (m
 
 Once approved, a routine edge folds into the unified graph as a `PROCEDURE_DEFINITION` edge that names its routine.
 
+## Amendment (2026-09-15): the tool agent, and the revisit trigger it fired
+
+**The trigger.** The first amendment said to revisit this decision if any spec other than the
+quality agent's proposed above T1. The tool agent (`agent:tool`, R11-FP14) does: its proposals are
+`GOVERNED_TOOL_VERSION` reviews, and that object type is T2. A published tool is callable by
+agents and people, which is harm of the same order as a quality rule that gates tools.
+
+**The revisit.** The trigger existed so that raising a proposal ceiling would be a decision, not a
+side effect. The decision is to allow it, because every property the first amendment relied on
+still holds:
+
+* **Deciding** stays capped at T1 for every agent. No agent can approve a tool, and the reviewer
+  agent cannot decide one.
+* **Proposing** at T2 still means a person decides. Maker-checker additionally refuses the agent
+  as the approver of its own draft.
+* **The ceiling is structural.** A spec above T2 cannot be constructed, and `open_review` checks
+  the object type's tier again on every proposal.
+
+What the agent does:
+
+* **VIEW_TOOL.** An ACTIVE view whose captured definition passes the view-tool gate becomes a
+  parameterised read over its output columns.
+* **PROCEDURE_TOOL.** A routine whose stored body is proven read-only, with exactly one result
+  query, becomes a tool that runs that query. This is extracted SQL, not a call to the routine.
+* **Drafting.** Drafts are staged by `tool_drafts.stage_tool_version_draft`: the validation a
+  person's draft gets, moved out of `tool_api` so no agent imports a router (the ADR-0029 import
+  contract now includes the tool agent).
+* **Idempotency without a new table.** A deterministic per-object slug turns an existing tool into
+  a skip. A declined object, recorded with a stable blocker code, is not re-examined until it
+  changes.
+* **Entitlement.** An edition without tool authoring refuses the whole run.
+
+The revisit trigger for further ceilings stands, now reading: *any spec other than the quality
+and tool agents'.*
+
 ## Implementation status (2026-09-11)
 
 **Implemented:**
@@ -161,8 +196,9 @@ Once approved, a routine edge folds into the unified graph as a `PROCEDURE_DEFIN
 * **The ingest side-car under the contract:** where an organization has registered the steward agent, `newly_created_table_drafter` drafts as that agent. The agent's kill switch or a T0 contract stops it; a reviewable draft becomes the agent's request, and each draft gets a ledger row. An organization that never registered the agent sees no change. That removes the behaviour change the Alternatives table deferred on.
 * **An evidence fix:** GL-9 names only same-source lineage that no reviewer rejected, which closes the ADR-0017 gap recorded in the 2026-09-10 status.
 * **Procedure lineage:** the lineage agent's PROCEDURE_LINEAGE capability, and review state on `deep_procedure_lineage_edge` (migration `d81f5a2c9e47`). The routine gate and the table's writes moved out of the router into `routine_lineage_edges.py`, and a person's parse is now written under the review mode. Approved routine edges fold into the unified graph.
+* **The tool agent (2026-09-15):** `tool_agent.py`, `tool_agent_api.py` and `tool_drafts.py`, the fourth registry entry, and a Tools tab in the console. No migration was needed.
 
-Tests: `tests/test_lineage_agent.py`, `tests/test_quality_agent.py`, `tests/test_task_agent_schedule.py`, `tests/test_steward_column_descriptions.py`, `tests/test_side_car_steward_contract.py` and `tests/test_gl9_lineage_same_source.py`, alongside the steward agent's. The routine table's review cases are in `tests/test_parsed_lineage_review.py` and `tests/test_unified_lineage.py`.
+Tests: `tests/test_tool_agent.py`, `tests/test_lineage_agent.py`, `tests/test_quality_agent.py`, `tests/test_task_agent_schedule.py`, `tests/test_steward_column_descriptions.py`, `tests/test_side_car_steward_contract.py` and `tests/test_gl9_lineage_same_source.py`, alongside the steward agent's. The routine table's review cases are in `tests/test_parsed_lineage_review.py` and `tests/test_unified_lineage.py`.
 
 **Not done, stated plainly:**
 

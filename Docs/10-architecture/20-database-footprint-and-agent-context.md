@@ -1196,6 +1196,17 @@ authorization behavior and meaningful answer outcome are demonstrated together.
   - Verification: across the 48 test files that touch the parser, redaction, the lineage
     agent, dbt redaction, MCP routine detail or the query gateway, 5,808 passed, 162 were
     skipped and 1 was an expected failure. The doc-claims gate also passes.
+- **Implementation, 2026-09-15.** Four tasks partly landed; status and remaining acceptance
+  for each are in its tracker row.
+  - FP-01, scoped discovery selection, including the scoped reconciliation that stops a
+    narrowed scan retiring anything.
+  - FP-07, PL/pgSQL program lineage.
+  - FP-11, routines as retrieval candidates with graph edges to their tables.
+  - FP-14, a tool agent that drafts governed tools from views and read-only routines into the
+    existing T2 review.
+
+  One gap found on the way is outside this program's scope and is raised separately: `SqlGuard`
+  accepts a user-defined function called in a SELECT list.
 
 **Recommended outcome:** Atlas can explain what is known about an estate, show exactly
 where that knowledge comes from and what is missing, supply the right context to each

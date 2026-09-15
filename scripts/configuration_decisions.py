@@ -72,6 +72,7 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "steward_agent_interval_minutes": (OPT_IN, _SCHEDULED_AGENT),
     "lineage_agent_interval_minutes": (OPT_IN, _SCHEDULED_AGENT),
     "quality_agent_interval_minutes": (OPT_IN, _SCHEDULED_AGENT),
+    "tool_agent_interval_minutes": (OPT_IN, _SCHEDULED_AGENT),
     "classification_propagation_interval_minutes": (
         OPT_IN,
         "files proposals for human review on a cadence; an estate opts into that review load",

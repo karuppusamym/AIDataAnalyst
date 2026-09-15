@@ -810,7 +810,7 @@ export function fetchSampleDownstreamImpact(
    reviewer agent's run fixture.
 --------------------------------------------------------------------------- */
 
-export type TaskAgentKind = "steward" | "lineage" | "quality";
+export type TaskAgentKind = "steward" | "lineage" | "quality" | "tool";
 
 /** What a run is asked to do. Each agent's own request model narrows
  *  `capabilities` to the keys it has; the shape is otherwise shared. */

@@ -17,6 +17,7 @@ from aida.lineage_agent import LINEAGE_AGENT, LINEAGE_WORK
 from aida.quality_agent import QUALITY_AGENT, QUALITY_WORK
 from aida.steward_agent import STEWARD_AGENT, STEWARD_WORK
 from aida.task_agent import CapabilityWork, TaskAgentSpec
+from aida.tool_agent import TOOL_AGENT, TOOL_WORK
 from atlas.platform.config import Settings
 
 
@@ -30,6 +31,7 @@ TASK_AGENTS: Final[tuple[RegisteredTaskAgent, ...]] = (
     RegisteredTaskAgent(STEWARD_AGENT, STEWARD_WORK),
     RegisteredTaskAgent(LINEAGE_AGENT, LINEAGE_WORK),
     RegisteredTaskAgent(QUALITY_AGENT, QUALITY_WORK),
+    RegisteredTaskAgent(TOOL_AGENT, TOOL_WORK),
 )
 
 

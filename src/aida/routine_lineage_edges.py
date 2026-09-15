@@ -48,8 +48,10 @@ class RoutineNotEligibleError(ValueError):
     quarantined -- refused, never guessed. Mirrors `view_tool_blueprint.py`'s
     `ViewNotEligibleError` gate exactly."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, code: str = "ROUTINE_BODY_NOT_ELIGIBLE") -> None:
         self.reason = reason
+        #: Stable and value-free, for a caller that records why rather than says it (R11-FP14).
+        self.code = code
         super().__init__(f"routine is not eligible for lineage parsing: {reason}")
 
 
@@ -57,12 +59,15 @@ def require_eligible_routine_body(routine: MetadataRoutine | None) -> str:
     """Return the routine's own redacted body text, or raise
     `RoutineNotEligibleError` naming exactly why it cannot be parsed."""
     if routine is None:
-        raise RoutineNotEligibleError("no captured routine for this id")
+        raise RoutineNotEligibleError("no captured routine for this id", code="ROUTINE_MISSING")
     if routine.status != "ACTIVE":
-        raise RoutineNotEligibleError(f"routine status is {routine.status}, not ACTIVE")
+        raise RoutineNotEligibleError(
+            f"routine status is {routine.status}, not ACTIVE", code="ROUTINE_INACTIVE"
+        )
     if routine.availability != AVAILABLE:
         raise RoutineNotEligibleError(
-            f"routine body is UNAVAILABLE ({routine.unavailable_reason or 'no reason recorded'})"
+            f"routine body is UNAVAILABLE ({routine.unavailable_reason or 'no reason recorded'})",
+            code="ROUTINE_BODY_UNAVAILABLE",
         )
     # `LEXICAL` text is as value-free as `PARSED` text; it is the tier that exists so
     # procedure bodies sqlglot cannot read as one statement -- every PL/pgSQL routine,
@@ -70,15 +75,19 @@ def require_eligible_routine_body(routine: MetadataRoutine | None) -> str:
     if routine.redaction_status not in VALUE_FREE_REDACTION_STATUSES:
         raise RoutineNotEligibleError(
             f"routine body redaction status is {routine.redaction_status}, "
-            "not PARSED or LEXICAL"
+            "not PARSED or LEXICAL",
+            code="ROUTINE_BODY_NOT_STORED",
         )
     if not is_eligible_for_model_context(routine.screening_status):
         raise RoutineNotEligibleError(
             f"routine body is quarantined by prompt-risk screening "
-            f"(screening_status={routine.screening_status})"
+            f"(screening_status={routine.screening_status})",
+            code="ROUTINE_BODY_QUARANTINED",
         )
     if routine.body_sql_redacted is None:
-        raise RoutineNotEligibleError("routine has no body text despite AVAILABLE status")
+        raise RoutineNotEligibleError(
+            "routine has no body text despite AVAILABLE status", code="ROUTINE_BODY_MISSING"
+        )
     return routine.body_sql_redacted
 
 

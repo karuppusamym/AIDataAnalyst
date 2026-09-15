@@ -35,7 +35,7 @@ vi.mock("../lib/api", async () => {
 const ORG = "00000000-0000-0000-0000-000000000001";
 
 /** Open the merged console on one agent, the way a URL does. */
-function renderAgent(kind: "steward" | "lineage" | "quality") {
+function renderAgent(kind: "steward" | "lineage" | "quality" | "tool") {
   history.replaceState(null, "", `/?agent=${kind}#/steward/task-agents`);
   return render(<TaskAgentsScreen />);
 }
@@ -273,18 +273,55 @@ describe("the quality agent's console (ADR-0029)", () => {
   });
 });
 
+describe("the tool agent's console (R11-FP14)", () => {
+  beforeEach(() => {
+    fetchTaskAgentState.mockResolvedValue(makeFixtureTaskAgentState(ORG, "tool"));
+  });
+
+  it("shows that every tool it drafts is a T2 decision a person makes", async () => {
+    renderAgent("tool");
+
+    const proposes = await screen.findByRole("list", { name: "What it proposes" });
+    expect(within(proposes).getAllByText("T2")).toHaveLength(2);
+    expect(fetchTaskAgentState.mock.calls[0]!.slice(0, 2)).toEqual([ORG, "tool"]);
+    expect(screen.getByText("agent:tool")).toBeInTheDocument();
+  });
+
+  it("runs both capabilities and names why a routine did not become a tool", async () => {
+    renderAgent("tool");
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Run tool agent" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Run tool agent" }));
+
+    await waitFor(() =>
+      expect(runTaskAgent).toHaveBeenCalledWith(
+        ORG,
+        "tool",
+        expect.objectContaining({ capabilities: ["VIEW_TOOL", "PROCEDURE_TOOL"] }),
+      ),
+    );
+    const list = await screen.findByRole("list", { name: "What the run looked at" });
+    expect(within(list).getAllByRole("link", { name: "Open in review queue" })[0]!.getAttribute("href")).toContain(
+      "#/reviewer/governance",
+    );
+    expect(within(list).getByText("the routine writes data")).toBeInTheDocument();
+  });
+});
+
 /* ---------------------------------------------------------------------------
    The merge itself.
 --------------------------------------------------------------------------- */
 
-describe("one console for three agents (R11-S10)", () => {
+describe("one console for every task agent (R11-S10)", () => {
   beforeEach(() => {
     fetchTaskAgentState.mockImplementation(async (org: string, kind: string) =>
       makeFixtureTaskAgentState(org, kind as never),
     );
   });
 
-  it("offers all three agents as tabs and marks the selected one", async () => {
+  it("offers every agent as a tab and marks the selected one", async () => {
     renderAgent("lineage");
 
     const tabs = screen.getByRole("tablist", { name: "Task agent" });
@@ -292,6 +329,7 @@ describe("one console for three agents (R11-S10)", () => {
       "Steward",
       "Lineage",
       "Quality",
+      "Tools",
     ]);
     expect(within(tabs).getByRole("tab", { name: "Lineage" })).toHaveAttribute(
       "aria-selected",
