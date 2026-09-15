@@ -233,8 +233,10 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "slug": "resolve_entity",
         "description": (
-            "Resolve a human asset name to governed table or dbt-resource identifiers using "
-            "bounded, deterministic fuzzy matching inside one authorized datasource."
+            "Resolve a human asset name to governed table, dbt-resource or routine (stored "
+            "procedure/function) identifiers using bounded, deterministic fuzzy matching "
+            "inside one authorized datasource. A routine's entity_id is accepted by "
+            "get_transformation_detail."
         ),
         "inputSchema": {
             "type": "object",
@@ -243,7 +245,7 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "query": {"type": "string", "description": "Asset name or qualified name"},
                 "entity_type": {
                     "type": "string",
-                    "enum": ["ALL", "TABLE", "DBT_RESOURCE"],
+                    "enum": ["ALL", "TABLE", "DBT_RESOURCE", "ROUTINE"],
                     "description": "Optional entity-kind filter",
                 },
                 "limit": {"type": "integer", "description": "Maximum candidates, 1-20"},
@@ -1018,6 +1020,41 @@ async def _resolve_governed_entities(
                         "score": score,
                     }
                 )
+    if entity_type in {"ALL", "ROUTINE"}:
+        # R11-FP11: stored procedures and functions, so "which routine refreshes the
+        # revenue totals" resolves to an id `get_transformation_detail` accepts.
+        routine_rows = (
+            await session.execute(
+                select(MetadataRoutine, MetadataSchema, MetadataCatalog)
+                .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+                .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+                .where(
+                    MetadataRoutine.datasource_id == datasource.id,
+                    MetadataRoutine.organization_id == datasource.organization_id,
+                    MetadataRoutine.status == "ACTIVE",
+                )
+                .order_by(MetadataCatalog.name, MetadataSchema.name, MetadataRoutine.name)
+                .limit(500)
+            )
+        ).all()
+        for routine, schema, catalog in routine_rows:
+            qualified_name = f"{catalog.name}.{schema.name}.{routine.name}"
+            score = max(
+                _entity_match_score(query, routine.name),
+                _entity_match_score(query, qualified_name),
+            )
+            if score >= 0.35:
+                candidates.append(
+                    {
+                        "entity_id": str(routine.id),
+                        "entity_type": "ROUTINE",
+                        "routine_type": routine.routine_type,
+                        "signature": routine.signature,
+                        "name": routine.name,
+                        "qualified_name": qualified_name,
+                        "score": score,
+                    }
+                )
     if entity_type in {"ALL", "DBT_RESOURCE"}:
         dbt_rows = (
             await session.scalars(
@@ -1590,7 +1627,7 @@ async def _handle_native_lineage_tool_call(
                     "content": [{"type": "text", "text": "query must contain 2-200 characters."}],
                 }
             entity_type = str(arguments.get("entity_type") or "ALL").upper()
-            if entity_type not in {"ALL", "TABLE", "DBT_RESOURCE"}:
+            if entity_type not in {"ALL", "TABLE", "DBT_RESOURCE", "ROUTINE"}:
                 return {
                     "isError": True,
                     "content": [{"type": "text", "text": "entity_type is invalid."}],

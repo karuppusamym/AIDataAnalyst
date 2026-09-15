@@ -11,7 +11,8 @@ Architecture
 Stage 1: Candidate fetch
   Pull up to agent_retrieval_scan_limit rows from each object type (tables,
   columns, tools, business annotations, dbt resources, published semantic
-  metrics, and glossary terms bound to a semantic object) using the existing
+  metrics, glossary terms bound to a semantic object, and -- R11-FP11 --
+  stored procedures and functions) using the existing
   org/datasource scope filters. SM-2: an ACTIVE glossary-term<->semantic-object
   binding folds the term's definition/synonyms into the metric's candidate
   text (and the metric's identity into the term's hit metadata), so the
@@ -75,6 +76,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
 from aida.config import Settings
+from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataRoutineParameter
+from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
     BusinessDomain,
     BusinessEntity,
@@ -88,14 +91,17 @@ from aida.models import (
     GovernedToolVersion,
     MetadataBusinessAnnotation,
     MetadataColumn,
+    MetadataSchema,
     MetadataTable,
     QueryExecution,
     SemanticMetric,
     SemanticMetricVersion,
     TermSemanticBinding,
 )
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.quality_coupling import resolve_table_ids
 from aida.retrieval_metrics import RETRIEVAL_SECONDS
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 if TYPE_CHECKING:
     # Annotation-only (this module defers the real import to call time, to
@@ -682,6 +688,102 @@ async def hybrid_retrieve(
                         },
                     )
                 )
+
+    # 8. Stored procedures and functions (R11-FP11). A routine is found by the
+    # words in its name, its parameter names and the source's own description --
+    # never by its body, which is evidence to read on request (MCP
+    # `get_transformation_detail`), not text to rank. What it stands on comes only
+    # from ACTIVE procedure-lineage edges: an agent's PROPOSED edge nobody has
+    # decided does not steer an answer. No boost -- a routine is context for a
+    # question, never a governed tool, and must not outrank one.
+    routine_filters = [func.lower(MetadataRoutine.name).contains(t) for t in query_tokens[:10]]
+    routine_rows = (
+        await session.execute(
+            select(MetadataRoutine, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+            .where(
+                MetadataRoutine.datasource_id == datasource.id,
+                MetadataRoutine.organization_id == datasource.organization_id,
+                MetadataRoutine.status == "ACTIVE",
+                or_(*routine_filters) if routine_filters else true(),
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+    routine_ids = [routine.id for routine, _schema_name in routine_rows]
+    parameter_names: dict[UUID, list[str]] = {}
+    reads_by_routine: dict[UUID, set[str]] = {}
+    writes_by_routine: dict[UUID, set[str]] = {}
+    if routine_ids:
+        parameter_rows = await session.execute(
+            select(MetadataRoutineParameter.routine_id, MetadataRoutineParameter.name).where(
+                MetadataRoutineParameter.routine_id.in_(routine_ids),
+                MetadataRoutineParameter.status == "ACTIVE",
+                MetadataRoutineParameter.name.is_not(None),
+            )
+        )
+        for routine_id, parameter_name in parameter_rows.all():
+            parameter_names.setdefault(routine_id, []).append(parameter_name)
+        edge_rows = await session.execute(
+            select(
+                DeepProcedureLineageEdge.routine_id,
+                DeepProcedureLineageEdge.source_table_id,
+                DeepProcedureLineageEdge.target_table_id,
+                DeepProcedureLineageEdge.is_write,
+            ).where(
+                DeepProcedureLineageEdge.routine_id.in_(routine_ids),
+                DeepProcedureLineageEdge.organization_id == datasource.organization_id,
+                DeepProcedureLineageEdge.review_status == "ACTIVE",
+                DeepProcedureLineageEdge.is_intermediate.is_(False),
+            )
+        )
+        for routine_id, source_table_id, target_table_id, is_write in edge_rows.all():
+            if source_table_id is not None:
+                reads_by_routine.setdefault(routine_id, set()).add(str(source_table_id))
+            if target_table_id is not None and is_write:
+                writes_by_routine.setdefault(routine_id, set()).add(str(target_table_id))
+
+    for routine, schema_name in routine_rows:
+        candidate_text = " ".join(
+            filter(
+                None,
+                [routine.name, routine.source_description, *parameter_names.get(routine.id, [])],
+            )
+        )
+        bm25 = _bm25_score(query_tokens, candidate_text)
+        exact = _exact_phrase_bonus(question, candidate_text)
+        score = round(min(1.0, bm25 + exact), 4)
+        if score <= 0:
+            continue
+        hit_id = f"ROUTINE:{routine.id}"
+        if hit_id in seen_ids:
+            continue
+        seen_ids.add(hit_id)
+        hits.append(
+            HybridRetrievalHit(
+                object_type="ROUTINE",
+                object_id=str(routine.id),
+                display_name=f"{schema_name}.{routine.name}",
+                score=score,
+                reason_codes=["BM25_ROUTINE_NAME"],
+                metadata={
+                    "routine_id": str(routine.id),
+                    "datasource_id": str(datasource.id),
+                    "routine_type": routine.routine_type,
+                    "signature": routine.signature,
+                    "language": routine.language,
+                    "reads_table_ids": sorted(reads_by_routine.get(routine.id, set())),
+                    "writes_table_ids": sorted(writes_by_routine.get(routine.id, set())),
+                    # Whether MCP `get_transformation_detail` would release the body:
+                    # the same gate a person's parse applies.
+                    "body_available": (
+                        routine.availability == AVAILABLE
+                        and routine.redaction_status in VALUE_FREE_REDACTION_STATUSES
+                        and is_eligible_for_model_context(routine.screening_status)
+                    ),
+                },
+            )
+        )
 
     # ------------------------------------------------------------------
     # Sort by score desc, cap at retrieval_limit

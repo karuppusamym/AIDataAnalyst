@@ -581,6 +581,12 @@ class GovernedAgentOrchestrator:
             table_id = hit.metadata.get("table_id") or hit.metadata.get("source_table_id")
             if table_id:
                 table_ids.add(UUID(str(table_id)))
+            # R11-FP11: a routine that matches the question is context, not something
+            # to call -- the tables its reviewed lineage reads and writes are what the
+            # model may query. The routine itself is never offered as a callable.
+            for key in ("reads_table_ids", "writes_table_ids"):
+                for raw in hit.metadata.get(key) or []:
+                    table_ids.add(UUID(str(raw)))
         bounded_ids = list(sorted(table_ids, key=str))[:25]
         if not bounded_ids:
             return {"dialect": datasource.dialect, "tables": [], "constraints": []}

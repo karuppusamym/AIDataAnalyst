@@ -72,11 +72,12 @@ class _ScalarResult:
 
 class _RetrievalSession:
     """Answers hybrid_retrieve's sequential fetches in call order: three
-    `scalars()` calls (tables, columns, dbt project ids) and four `execute()`
+    `scalars()` calls (tables, columns, dbt project ids) and five `execute()`
     calls (governed tool versions, business annotations, SM-2 semantic-metric
-    term bindings, SM-2 glossary-term semantic bindings). Leaving
-    dbt_project_ids empty (the default) short-circuits the dbt-resource branch,
-    which otherwise issues two further fetches.
+    term bindings, SM-2 glossary-term semantic bindings, R11-FP11 routines).
+    Leaving dbt_project_ids empty (the default) short-circuits the dbt-resource
+    branch, which otherwise issues two further fetches; leaving routine_rows
+    empty skips the routine parameter and lineage fetches the same way.
     """
 
     def __init__(
@@ -89,6 +90,7 @@ class _RetrievalSession:
         dbt_project_ids: list[object] | None = None,
         metric_term_rows: list[tuple[object, ...]] | None = None,
         term_binding_rows: list[tuple[object, ...]] | None = None,
+        routine_rows: list[tuple[object, ...]] | None = None,
     ) -> None:
         self._scalars_queue: list[list[object]] = [
             table_rows or [],
@@ -100,6 +102,7 @@ class _RetrievalSession:
             biz_rows or [],
             metric_term_rows or [],
             term_binding_rows or [],
+            routine_rows or [],
         ]
 
     async def scalars(self, _statement: object) -> _ScalarResult:

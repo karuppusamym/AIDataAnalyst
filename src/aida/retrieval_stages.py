@@ -775,6 +775,49 @@ async def _build_knowledge_graph(
                         edge_type="TOOL_REFERENCES_TABLE",
                     )
                 )
+
+    # R11-FP11: a ROUTINE candidate's reviewed procedure lineage -- the tables it
+    # reads and the tables it writes -- becomes ROUTINE -> TABLE edges, exactly as
+    # a governed tool's declared tables do. "Which procedure rebuilds the revenue
+    # rollup" then reaches the rollup table even when no word of the question
+    # names it.
+    routine_hits = [hit for hit in authorized if hit.object_type == "ROUTINE"]
+    routine_table_ids = {
+        UUID(str(raw))
+        for hit in routine_hits
+        for key in ("reads_table_ids", "writes_table_ids")
+        for raw in hit.metadata.get(key) or []
+    }
+    if routine_table_ids:
+        routine_tables = {
+            table.id: table
+            for table in (
+                await session.scalars(
+                    select(MetadataTable).where(
+                        MetadataTable.id.in_(routine_table_ids),
+                        MetadataTable.datasource_id == datasource.id,
+                        MetadataTable.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        }
+        for hit in routine_hits:
+            routine_node_id = f"{hit.object_type}:{hit.object_id}"
+            for key, edge_type in (
+                ("reads_table_ids", "ROUTINE_READS_TABLE"),
+                ("writes_table_ids", "ROUTINE_WRITES_TABLE"),
+            ):
+                for raw in hit.metadata.get(key) or []:
+                    routine_table = routine_tables.get(UUID(str(raw)))
+                    if routine_table is None:
+                        continue
+                    kg.add_edge(
+                        GraphEdge(
+                            source_id=routine_node_id,
+                            target_id=ensure_table_node(routine_table.id, routine_table.name),
+                            edge_type=edge_type,
+                        )
+                    )
     return kg
 
 
@@ -912,6 +955,10 @@ def _candidate_table_ids(pool: CandidatePool) -> tuple[dict[str, set[UUID]], set
             for field_name in ("table_id", "source_table_id"):
                 raw = candidate.metadata.get(field_name)
                 if raw:
+                    table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
+            # R11-FP11: a routine stands on the tables its reviewed lineage reads and writes.
+            for field_name in ("reads_table_ids", "writes_table_ids"):
+                for raw in candidate.metadata.get(field_name) or []:
                     table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
             if candidate.object_type == "GOVERNED_TOOL":
                 tool_name_pool.update(candidate.metadata.get("referenced_tables") or [])
