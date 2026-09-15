@@ -129,14 +129,18 @@ async def _seed_audit_events(session: AsyncSession, org: Organization, count: in
 
 
 async def _enforcing_workspace(
-    session: AsyncSession, org: Organization, *, grant_role: str | None = None
+    session: AsyncSession,
+    org: Organization,
+    *,
+    grant_role: str | None = None,
+    workspace_role: str = "workspace_owner",
 ) -> Workspace:
     """A workspace that actually enforces, optionally granting the caller membership.
 
-    `workspace_owner` because it is the only workspace role that permits
-    `EXPORT` (see `workspace_service._ROLE_ACTIONS`). Mapping an IdP `Auditor`
-    onto it is how a deployment grants extraction today, and the comment there
-    records why a narrower grant is not expressible yet.
+    `grant_role` is the IdP role a `WorkspaceAccessRule` maps onto
+    `workspace_role`. The two workspace roles that permit `EXPORT` are
+    `workspace_owner` and, since R11-B9 closed its residual gap, `auditor` --
+    which extracts without reading data (see `workspace_service._ROLE_ACTIONS`).
     """
     workspace = Workspace(
         organization_id=org.id,
@@ -153,7 +157,7 @@ async def _enforcing_workspace(
                 organization_id=org.id,
                 code=f"rule-{uuid4().hex[:6]}",
                 subject_role=grant_role,
-                workspace_role="workspace_owner",
+                workspace_role=workspace_role,
                 created_by="test",
             )
         )
@@ -437,3 +441,60 @@ async def test_the_filters_narrow_the_artifact(session: AsyncSession) -> None:
     response = await _export(session, org, correlation_id="corr-2")
 
     assert response.headers["X-Export-Row-Count"] == "1"  # type: ignore[attr-defined]
+
+
+# --- extraction without data access (R11-B9's residual gap) -------------------
+
+
+def test_the_auditor_role_extracts_and_touches_no_data() -> None:
+    """The role's whole grant, pinned: reading metadata and extracting, and nothing
+    that reads data, runs a tool, consumes context, proposes or approves. Widening
+    it becomes a change to this test rather than a quiet edit to a dictionary."""
+    from aida.workspace_service import _ROLE_ACTIONS
+
+    assert _ROLE_ACTIONS["auditor"] == frozenset({"READ_METADATA", "EXPORT"})
+    assert {role for role, actions in _ROLE_ACTIONS.items() if "EXPORT" in actions} == {
+        "auditor",
+        "workspace_owner",
+    }
+
+
+def test_a_membership_can_name_the_auditor_role() -> None:
+    """Grantable directly as well as through an access rule."""
+    from atlas.modules.identity_tenancy.schemas import WorkspaceMembershipCreate
+
+    assert WorkspaceMembershipCreate(principal_id="auditor-1", role="auditor").role == "auditor"
+
+
+async def test_an_auditor_exports_the_ledger_and_is_refused_its_data(
+    session: AsyncSession,
+) -> None:
+    """ "An auditor may extract but may not read", which no workspace role could
+    express before. Same caller, same workspace, and an ALLOW policy that matches
+    every action: the export succeeds, and reading data, running a tool and
+    approving are refused at the role ceiling -- before the policy is consulted,
+    so the policy cannot widen them."""
+    from aida.authorization_gate import AuthorizationDenied, gate
+
+    org = await _seed_organization(session)
+    await _seed_audit_events(session, org, count=3)
+    workspace = await _enforcing_workspace(
+        session, org, grant_role="Auditor", workspace_role="auditor"
+    )
+
+    response = await _export(session, org, workspace_id=workspace.id)
+
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    assert response.headers["X-Export-Row-Count"] == "3"  # type: ignore[attr-defined]
+    for action in ("READ_DATA", "EXECUTE_TOOL", "APPROVE"):
+        with pytest.raises(AuthorizationDenied) as refused:
+            await gate(
+                session,
+                _context(org),
+                settings=_settings(),
+                action=action,
+                resource_type="table",
+                resource_id=str(uuid4()),
+                workspace_id=workspace.id,
+            )
+        assert refused.value.reason_code == "ROLE_DOES_NOT_PERMIT_ACTION", action

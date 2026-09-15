@@ -5138,7 +5138,7 @@ export interface WorkspaceEntitlementRead {
 export interface WorkspaceMembershipCreate {
   principal_id: string;
   principal_kind?: "HUMAN" | "AGENT" | "SERVICE";
-  role: "viewer" | "analyst" | "steward" | "reviewer" | "workspace_owner";
+  role: "viewer" | "analyst" | "steward" | "reviewer" | "auditor" | "workspace_owner";
   expires_at?: string | null;
 }
 

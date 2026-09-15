@@ -178,6 +178,32 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
     expect(await screen.findByText(/Added "jordan.reyes"/)).toBeInTheDocument();
   });
 
+  it("offers the auditor role, which exports audit records without reading data (R11-B9)", async () => {
+    mockBaseSummary();
+    const created: WorkspaceMembershipRead = {
+      ...MEMBER, id: "member_auditor", principal_id: "casey.lin", role: "auditor",
+    };
+    addWorkspaceMember.mockResolvedValue(created);
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "casey.lin" } });
+    // A select ignores a value it has no option for, so this submits "auditor"
+    // only if the form actually offers it.
+    fireEvent.change(within(form).getByLabelText("Role"), { target: { value: "auditor" } });
+    fireEvent.submit(form);
+
+    await waitFor(() =>
+      expect(addWorkspaceMember).toHaveBeenCalledWith(
+        "ws_governed_analytics",
+        { principal_id: "casey.lin", principal_kind: "HUMAN", role: "auditor", expires_at: null },
+        undefined,
+      ),
+    );
+  });
+
   it("approves a pending binding with a rationale, calling the exact SourceBindingDecision payload", async () => {
     mockBaseSummary();
     const decided: SourceBindingRead = { ...PENDING_BINDING, status: "ACTIVE", approved_by: "local-ui-admin" };

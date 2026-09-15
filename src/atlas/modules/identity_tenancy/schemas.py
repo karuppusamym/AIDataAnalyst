@@ -170,7 +170,8 @@ class WorkspaceRead(ApiModel):
 class WorkspaceMembershipCreate(ApiModel):
     principal_id: str = Field(min_length=1, max_length=255)
     principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
-    role: Literal["viewer", "analyst", "steward", "reviewer", "workspace_owner"]
+    # `auditor` (R11-B9) extracts audit records and reads metadata, never data.
+    role: Literal["viewer", "analyst", "steward", "reviewer", "auditor", "workspace_owner"]
     expires_at: datetime | None = None
 
 

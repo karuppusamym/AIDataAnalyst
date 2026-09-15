@@ -36,6 +36,8 @@ const MEMBER_ROLES: WorkspaceMembershipCreate["role"][] = [
   "analyst",
   "steward",
   "reviewer",
+  // Extracts audit records and reads metadata; never reads data (R11-B9).
+  "auditor",
   "workspace_owner",
 ];
 const PRINCIPAL_KINDS: NonNullable<WorkspaceMembershipCreate["principal_kind"]>[] = [

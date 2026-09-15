@@ -30562,6 +30562,7 @@
               "analyst",
               "steward",
               "reviewer",
+              "auditor",
               "workspace_owner"
             ],
             "title": "Role",
