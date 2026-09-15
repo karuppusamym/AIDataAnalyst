@@ -491,7 +491,12 @@ async def _load_facts(
     columns = {
         column.id: column
         for column in (
-            await session.scalars(select(MetadataColumn).where(MetadataColumn.id.in_(column_ids)))
+            await session.scalars(
+                # R11-FP06: a retired column is as gone as a deleted one; a join cannot rest on it.
+                select(MetadataColumn).where(
+                    MetadataColumn.id.in_(column_ids), MetadataColumn.status == "ACTIVE"
+                )
+            )
         ).all()
     }
     missing = column_ids - set(columns)

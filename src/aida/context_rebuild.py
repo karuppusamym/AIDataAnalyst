@@ -38,6 +38,10 @@ For each organization:
    definition or columns; and no published context product pins a superseded tool reading
    it.
 
+Before these, approved joins a newer scan has read are re-validated
+(`aida.relationship_drift`): one whose evidence is gone is suspended back to review, and one
+whose evidence is back exactly as approved is restored.
+
 Nothing is drafted where a newer draft already waits for review. A rebuild that cannot be made (a
 view no longer eligible for a tool, a description below the evidence bar) is counted by its code
 and retried on the next pass; the hold stays. Each rebuild runs in its own savepoint. Value-free:
@@ -110,6 +114,7 @@ from aida.procedure_tool_blueprint import (
     resolve_procedure_tool_source,
 )
 from aida.query_gateway import catalog_columns
+from aida.relationship_drift import check_relationship_drift, relationship_drift_pending
 from aida.routine_lineage_edges import RoutineNotEligibleError
 from aida.schemas import GovernedToolVersionCreate
 from aida.security import SecurityContext
@@ -184,6 +189,8 @@ class _RebuildRefused(Exception):
 @dataclass(slots=True)
 class RebuildOutcome:
     lineage_edges_superseded: int = 0
+    joins_suspended: int = 0
+    joins_restored: int = 0
     tools_drafted: int = 0
     descriptions_drafted: int = 0
     sections_remapped: int = 0
@@ -206,6 +213,8 @@ class RebuildOutcome:
         return any(
             (
                 self.lineage_edges_superseded,
+                self.joins_suspended,
+                self.joins_restored,
                 self.tools_drafted,
                 self.descriptions_drafted,
                 self.sections_remapped,
@@ -221,6 +230,8 @@ class RebuildOutcome:
     def as_details(self) -> dict[str, Any]:
         return {
             "lineage_edges_superseded": self.lineage_edges_superseded,
+            "joins_suspended": self.joins_suspended,
+            "joins_restored": self.joins_restored,
             "tools_drafted": self.tools_drafted,
             "descriptions_drafted": self.descriptions_drafted,
             "sections_remapped": self.sections_remapped,
@@ -1447,7 +1458,10 @@ async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
         )
         .distinct()
     )
-    return sorted(set(held) | set(bound) | set(remapping) | set(meaning), key=str)
+    joins = await relationship_drift_pending(session)
+    return sorted(
+        set(held) | set(bound) | set(remapping) | set(meaning) | set(joins), key=str
+    )
 
 
 async def run_context_rebuild(
@@ -1461,6 +1475,10 @@ async def run_context_rebuild(
     effective_now = now or datetime.now(UTC)
     context = rebuild_context(organization_id)
     outcome = RebuildOutcome()
+    joins = await check_relationship_drift(session, organization_id, now=effective_now)
+    outcome.joins_suspended += joins.suspended
+    outcome.joins_restored += joins.restored
+    outcome.failed += joins.failed
     await _supersede_lineage(session, organization_id, outcome, effective_now)
     await _rebuild_tools(session, organization_id, context, settings, outcome)
     await _rebuild_descriptions(session, organization_id, context, outcome)
