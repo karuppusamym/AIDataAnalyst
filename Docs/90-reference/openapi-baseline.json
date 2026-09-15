@@ -11763,6 +11763,45 @@
         "title": "DataSourceUpdate",
         "type": "object"
       },
+      "DatasourceFootprintGapsRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "datasource_name": {
+            "title": "Datasource Name",
+            "type": "string"
+          },
+          "gaps": {
+            "items": {
+              "$ref": "#/components/schemas/FootprintGapRead"
+            },
+            "title": "Gaps",
+            "type": "array"
+          },
+          "oldest_pending_signal_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Pending Signal Minutes"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "datasource_name",
+          "gaps"
+        ],
+        "title": "DatasourceFootprintGapsRead",
+        "type": "object"
+      },
       "DbtArtifactImportRead": {
         "additionalProperties": false,
         "properties": {
@@ -13938,6 +13977,77 @@
           "generated_at"
         ],
         "title": "FleetSummaryRead",
+        "type": "object"
+      },
+      "FootprintGapRead": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "explanation": {
+            "title": "Explanation",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "resolution": {
+            "title": "Resolution",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "count",
+          "resolution",
+          "owner",
+          "explanation"
+        ],
+        "title": "FootprintGapRead",
+        "type": "object"
+      },
+      "FootprintGapsRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasources": {
+            "items": {
+              "$ref": "#/components/schemas/DatasourceFootprintGapsRead"
+            },
+            "title": "Datasources",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "totals": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Totals",
+            "type": "object"
+          }
+        },
+        "required": [
+          "organization_id",
+          "generated_at",
+          "datasources",
+          "totals"
+        ],
+        "title": "FootprintGapsRead",
         "type": "object"
       },
       "FreshnessConfigRead": {
@@ -71355,6 +71465,134 @@
           }
         },
         "summary": "Fleet Summary",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/footprint-gaps": {
+      "get": {
+        "operationId": "get_footprint_gaps_v1_organizations__organization_id__footprint_gaps_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FootprintGapsRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Footprint Gaps",
         "tags": [
           "operations"
         ]

@@ -1950,6 +1950,13 @@ export interface DataSourceUpdate {
   network_zone?: string | null;
 }
 
+export interface DatasourceFootprintGapsRead {
+  datasource_id: string;
+  datasource_name: string;
+  gaps: FootprintGapRead[];
+  oldest_pending_signal_minutes?: number | null;
+}
+
 export interface DbtArtifactImportRead {
   id: string;
   organization_id: string;
@@ -2340,6 +2347,21 @@ export interface FleetSummaryRead {
   pending_outbox_events: number;
   dead_letter_outbox_events: number;
   generated_at: string;
+}
+
+export interface FootprintGapRead {
+  kind: string;
+  count: number;
+  resolution: string;
+  owner: string;
+  explanation: string;
+}
+
+export interface FootprintGapsRead {
+  organization_id: string;
+  generated_at: string;
+  datasources: DatasourceFootprintGapsRead[];
+  totals: Record<string, number>;
 }
 
 export interface FreshnessConfigRead {

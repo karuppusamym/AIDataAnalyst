@@ -43,6 +43,7 @@ from aida.delegation_api import router as delegation_router
 from aida.description_withdrawal_api import router as description_withdrawal_router
 from aida.detokenization_api import router as detokenization_router
 from aida.document_ingestion_api import router as document_ingestion_router
+from aida.footprint_gaps_api import router as footprint_gaps_router
 from aida.glossary_api import router as glossary_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
@@ -469,6 +470,8 @@ app.include_router(tool_agent_router)
 app.include_router(ontology_router)
 # R11-FP15: which source objects changed since they were last read.
 app.include_router(change_signals_router)
+# R11-FP05/FP17: what Atlas does not know about each source yet, and who can close it.
+app.include_router(footprint_gaps_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

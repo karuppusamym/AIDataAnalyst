@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **478**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 425, SDK 1
+- Surfaces covered: **479**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 426, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -253,6 +253,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/enforcement-readiness` | REST | `atlas.modules.identity_tenancy.router.get_enforcement_readiness` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/fleet-health` | REST | `aida.operational_api.organization_fleet_health` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/fleet-summary` | REST | `aida.operational_api.fleet_summary` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/footprint-gaps` | REST | `aida.footprint_gaps_api.get_footprint_gaps` | Auditor, DataSteward, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/global-search` | REST | `aida.semantic_api.global_semantic_search` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | cooperative |
 | `GET /v1/organizations/{organization_id}/glossary-categories` | REST | `aida.stewardship_api.list_glossary_categories` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/glossary-conflicts` | REST | `aida.stewardship_api.list_glossary_conflicts` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |

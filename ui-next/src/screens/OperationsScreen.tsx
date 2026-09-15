@@ -13,6 +13,7 @@ import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker"
 import { VirtualList } from "../components/VirtualList";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
+import { FootprintGaps } from "./OperationsFootprintGaps";
 import "./OperationsScreen.css";
 
 import { useOrgId } from "../lib/org";
@@ -374,6 +375,8 @@ export function OperationsScreen() {
           <div className="ops__generated">as of {summary.generated_at.slice(0, 16).replace("T", " ")}</div>
         </div>
       ) : null}
+
+      <FootprintGaps organizationId={ORG} />
 
       <section className="ops__sec">
         <div className="ops__sechead">

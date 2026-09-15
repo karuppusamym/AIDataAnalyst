@@ -25,6 +25,11 @@ const fetchIngestionBatches = vi.fn<
   (datasourceId: string, opts: unknown, signal?: AbortSignal) => Promise<{ items: MetadataIngestionBatchRead[]; limit: number; offset: number; total: number }>
 >();
 
+const fetchFootprintGaps = vi.fn();
+vi.mock("../lib/api/footprintGaps", () => ({
+  fetchFootprintGaps: (...args: unknown[]) => fetchFootprintGaps(...args),
+}));
+
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
@@ -80,6 +85,26 @@ beforeEach(() => {
   requeueOutboxEvent.mockReset();
   fetchIngestionBatches.mockReset();
   fetchFleetSummary.mockResolvedValue(SUMMARY);
+  fetchFootprintGaps.mockReset();
+  fetchFootprintGaps.mockResolvedValue({
+    organization_id: ORG,
+    generated_at: "2026-09-15T12:00:00Z",
+    datasources: [
+      {
+        datasource_id: "ds_snowflake_prod",
+        datasource_name: "snowflake_prod",
+        oldest_pending_signal_minutes: 30,
+        gaps: [
+          {
+            kind: "CODE_WITHHELD", count: 3, resolution: "SOURCE_ACCESS", owner: "source administrator",
+            explanation: "The source withholds these view definitions or routine bodies.",
+          },
+        ],
+      },
+      { datasource_id: "ds_quiet", datasource_name: "quiet_source", oldest_pending_signal_minutes: null, gaps: [] },
+    ],
+    totals: { CODE_WITHHELD: 3 },
+  });
   fetchAnalysisRuns.mockResolvedValue({ items: [RUN], limit: 200, offset: 0, total: 1 });
   fetchOutboxEvents.mockResolvedValue({ items: [DEAD_LETTER_EVENT], limit: 100, offset: 0, total: 1 });
   vi.resetModules();
@@ -91,6 +116,19 @@ afterEach(() => {
 });
 
 describe("OperationsScreen against the real operational_api.py", () => {
+  it("lists each readable source's knowledge gaps with who closes them, and skips a source with none (R11-FP05)", async () => {
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+    expect(panel).toHaveTextContent("Code withheld by the source");
+    expect(panel).toHaveTextContent("source access");
+    expect(panel).toHaveTextContent("source administrator");
+    expect(panel).toHaveTextContent("waited 30 min");
+    expect(screen.queryByRole("article", { name: "Gaps in quiet_source" })).not.toBeInTheDocument();
+    expect(fetchFootprintGaps).toHaveBeenCalledWith(ORG, expect.anything());
+  });
+
   it("loads and renders fleet-summary tiles plus the analysis-runs list", async () => {
     const OperationsScreen = await loadScreen();
 
