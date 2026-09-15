@@ -1,0 +1,42 @@
+{
+  "description": "R11-FP13 footprint-enrichment corpus: the same cases are run twice through the real retrieval path (GovernedRetriever.retrieve -> hybrid_retrieve_enhanced) -- once over scripts/quality_benchmark.py::seed_catalog as seeded, once after enrich_footprint adds a routine with reviewed lineage, a routine whose lineage is only an undecided proposal, and a published ontology concept mapped to a table. No question shares a word with its target table's name or source description, so the target is reachable only through the enrichment: before enrichment every reachability case should miss, after it every one should land within bound. `expect_absent` cases are gaps: their only path is lineage nobody approved, and retrieving the target would mean an unreviewed proposal steered an answer, so they pass only when the target stays unreached. Object keys are the builder's fixed slugs, never production data (ADR-0014).",
+  "catalog": "core-warehouse",
+  "cases": [
+    {
+      "id": "concept-found-by-alias",
+      "question": "closing position",
+      "expected_object_type": "ONTOLOGY_CONCEPT",
+      "expected_object_key": "end_of_day_position",
+      "min_rank": 3
+    },
+    {
+      "id": "concept-alias-reaches-mapped-table",
+      "question": "closing position",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_account_balances",
+      "min_rank": 5
+    },
+    {
+      "id": "routine-found-by-name",
+      "question": "nightly settlement rollup",
+      "expected_object_type": "ROUTINE",
+      "expected_object_key": "nightly_settlement_rollup",
+      "min_rank": 3
+    },
+    {
+      "id": "routine-lineage-reaches-written-table",
+      "question": "nightly settlement rollup",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_account_balances",
+      "min_rank": 5
+    },
+    {
+      "id": "gap-proposed-lineage-steers-nothing",
+      "question": "quarterly fee accrual",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_fraud_alerts",
+      "min_rank": 25,
+      "expect_absent": true
+    }
+  ]
+}

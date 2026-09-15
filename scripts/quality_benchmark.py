@@ -307,7 +307,11 @@ async def _make_session() -> tuple[AsyncSession, object]:
     """A fresh in-memory sqlite database with every table registered -- the same
     pattern `test_rt7_quality_trust_ranking.py`'s `db` fixture uses. Returns the
     session and the engine (caller disposes the engine when done)."""
+    import aida.change_signal_models  # noqa: F401
+    import aida.envelope_models  # noqa: F401 -- routines: retrieval reads them (R11-FP11)
     import aida.models  # noqa: F401 -- registers every table on Base.metadata
+    import aida.ontology_models  # noqa: F401 -- published ontologies: retrieval reads them
+    import aida.procedure_lineage_models  # noqa: F401
     from aida.db import Base
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
@@ -329,6 +333,9 @@ class RetrievalCase:
     expected_object_type: str
     expected_object_key: str
     min_rank: int
+    #: R11-FP13: a gap case -- the expected object must NOT be retrieved, because the only path
+    #: to it is evidence nobody has approved. Passing means the gap was preserved.
+    expect_absent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +392,7 @@ def load_retrieval_corpus(path: Path) -> list[RetrievalCase]:
             expected_object_type=case["expected_object_type"],
             expected_object_key=case["expected_object_key"],
             min_rank=case["min_rank"],
+            expect_absent=bool(case.get("expect_absent", False)),
         )
         for case in data["cases"]
     ]
@@ -406,6 +414,12 @@ async def run_retrieval_benchmark(
             return str(catalog.table_ids[case.expected_object_key])
         if case.expected_object_type == "GOVERNED_TOOL":
             return str(catalog.tool_version_ids[case.expected_object_key])
+        # R11-FP13: derived the way `enrich_footprint` assigns them, so a case resolves (and
+        # honestly misses) against a catalog that was never enriched.
+        if case.expected_object_type == "ROUTINE":
+            return str(_fixed_id("routine", case.expected_object_key))
+        if case.expected_object_type == "ONTOLOGY_CONCEPT":
+            return str(uuid5(_fixed_id("ontology-version", "1"), case.expected_object_key))
         raise ValueError(f"unsupported expected_object_type: {case.expected_object_type!r}")
 
     retriever = GovernedRetriever(get_settings())
@@ -424,6 +438,177 @@ async def run_retrieval_benchmark(
         reciprocal_rank = 1.0 / rank if rank else 0.0
         results.append(RetrievalCaseResult(case=case, rank=rank, reciprocal_rank=reciprocal_rank))
     return RetrievalQualityReport(results=results)
+
+
+# ---------------------------------------------------------------------------
+# Footprint enrichment (R11-FP13)
+# ---------------------------------------------------------------------------
+
+#: (routine, table it reads, table it writes, review state of that lineage). The second
+#: routine's lineage is an undecided proposal: it must steer nothing.
+FOOTPRINT_ROUTINE_SEEDS: tuple[tuple[str, str, str, str], ...] = (
+    ("nightly_settlement_rollup", "fact_payments", "fact_account_balances", "ACTIVE"),
+    ("quarterly_fee_accrual", "fact_loan_applications", "fact_fraud_alerts", "PROPOSED"),
+)
+#: (concept key, name, aliases, the table its approved mapping names).
+FOOTPRINT_CONCEPT: tuple[str, str, tuple[str, ...], str] = (
+    "end_of_day_position",
+    "End of day position",
+    ("closing position",),
+    "fact_account_balances",
+)
+
+
+async def enrich_footprint(session: AsyncSession, catalog: SeededCatalog) -> None:
+    """Add what the database-footprint work taught Atlas to read: routines with reviewed and
+    undecided lineage (R11-FP11) and a published ontology concept mapped to a table (R11-FP09).
+    Deterministic ids, like `seed_catalog`, so the before/after runs compare exactly."""
+    from aida.envelope_models import MetadataRoutine
+    from aida.models import DataSource
+    from aida.ontology_models import OntologyHead, OntologyVersion
+    from aida.procedure_lineage_models import DeepProcedureLineageEdge
+
+    datasource = await session.get(DataSource, catalog.datasource_id)
+    if datasource is None:  # pragma: no cover - seed_catalog guarantees it
+        raise RuntimeError("seeded datasource missing")
+    organization_id = datasource.organization_id
+    for key, _reads, _writes, _review in FOOTPRINT_ROUTINE_SEEDS:
+        session.add(
+            MetadataRoutine(
+                id=_fixed_id("routine", key),
+                organization_id=organization_id,
+                datasource_id=datasource.id,
+                schema_id=_fixed_id("schema"),
+                name=key,
+                signature="()",
+                routine_type="PROCEDURE",
+                language="plpgsql",
+                body_sql_redacted="BEGIN NULL; END;",
+                redaction_status="LEXICAL",
+                screening_status="CLEAN",
+                status="ACTIVE",
+                fingerprint=f"fp-quality-benchmark-routine-{key}",
+            )
+        )
+    await session.flush()
+    for key, reads, writes, review_status in FOOTPRINT_ROUTINE_SEEDS:
+        session.add(
+            DeepProcedureLineageEdge(
+                id=_fixed_id("routine-edge", key),
+                organization_id=organization_id,
+                datasource_id=datasource.id,
+                routine_id=_fixed_id("routine", key),
+                statement_ordinal=1,
+                source_table=f"public.{reads}",
+                source_column="amount",
+                target_table=f"public.{writes}",
+                target_column="amount",
+                source_resolved=True,
+                source_table_id=catalog.table_ids[reads],
+                target_table_id=catalog.table_ids[writes],
+                transformation_type="DIRECT",
+                confidence="FULL",
+                dialect="postgres",
+                is_write=True,
+                is_intermediate=False,
+                sql_hash="quality-benchmark",
+                review_status=review_status,
+            )
+        )
+    head = OntologyHead(
+        id=_fixed_id("ontology"),
+        organization_id=organization_id,
+        ontology_key="banking",
+        last_version=1,
+        published_version=1,
+    )
+    session.add(head)
+    await session.flush()
+    concept_key, concept_name, aliases, table_key = FOOTPRINT_CONCEPT
+    session.add(
+        OntologyVersion(
+            id=_fixed_id("ontology-version", "1"),
+            organization_id=organization_id,
+            ontology_id=head.id,
+            version=1,
+            base_version=0,
+            status="APPROVED",
+            created_by="quality-benchmark",
+            approved_by="quality-benchmark-reviewer",
+            definition={
+                "name": "Banking",
+                "owner": "quality-benchmark",
+                "provenance": "benchmark fixture",
+                "lifecycle": "ACTIVE",
+                "concepts": [
+                    {
+                        "key": concept_key,
+                        "name": concept_name,
+                        "description": "The ledger position a day closes on.",
+                        "aliases": list(aliases),
+                        "deprecated": False,
+                    }
+                ],
+                "relations": [],
+                "mappings": [
+                    {
+                        "concept": concept_key,
+                        "subject_type": "TABLE",
+                        "subject_id": str(catalog.table_ids[table_key]),
+                    }
+                ],
+            },
+        )
+    )
+    await session.flush()
+
+
+@dataclass(frozen=True, slots=True)
+class FootprintReport:
+    """The same corpus against the same seeded catalog, before and after enrichment."""
+
+    before: RetrievalQualityReport
+    after: RetrievalQualityReport
+
+    @staticmethod
+    def _recall(report: RetrievalQualityReport) -> float:
+        return _rate(r.within_bound for r in report.results if not r.case.expect_absent)
+
+    @property
+    def recall_before(self) -> float:
+        return self._recall(self.before)
+
+    @property
+    def recall_after(self) -> float:
+        return self._recall(self.after)
+
+    @property
+    def reachability_case_count(self) -> int:
+        return sum(1 for r in self.after.results if not r.case.expect_absent)
+
+    @property
+    def gap_case_count(self) -> int:
+        return sum(1 for r in self.after.results if r.case.expect_absent)
+
+    @property
+    def gap_preservation_rate(self) -> float:
+        """Of the cases whose only path is unapproved evidence, how many stayed unreached."""
+        return _rate(r.rank is None for r in self.after.results if r.case.expect_absent)
+
+
+async def run_footprint_benchmark(cases: list[RetrievalCase]) -> FootprintReport:
+    reports: list[RetrievalQualityReport] = []
+    for enrich in (False, True):
+        session, engine = await _make_session()
+        try:
+            catalog = await seed_catalog(session)
+            if enrich:
+                await enrich_footprint(session, catalog)
+            reports.append(await run_retrieval_benchmark(session, catalog, cases))
+        finally:
+            await session.close()
+            await engine.dispose()  # type: ignore[attr-defined]
+    return FootprintReport(before=reports[0], after=reports[1])
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +783,9 @@ TRACKED_METRICS = (
     "retrieval_recall_within_bound_rate",
     "retrieval_mrr",
     "tool_selection_pass_rate",
+    # R11-FP13: measured after enrichment; the before figure is reported beside it.
+    "footprint_recall_within_bound_rate",
+    "footprint_gap_preservation_rate",
 )
 
 
@@ -669,6 +857,7 @@ def _write_report(
     current_metrics: dict[str, float],
     baseline_metrics: dict[str, float] | None,
     regressions: list[MetricRegression],
+    footprint: FootprintReport | None = None,
 ) -> None:
     lines: list[str] = []
     lines.append("# Quality benchmark results (AG-8)")
@@ -722,6 +911,51 @@ def _write_report(
         )
     )
     lines.append("")
+
+    if footprint is not None:
+        lines.append("## Footprint enrichment (R11-FP13)")
+        lines.append("")
+        lines.append(
+            "The same `footprint_enrichment_corpus.json` cases against the same seeded catalog, "
+            "run once as seeded and once after `enrich_footprint` adds routines with reviewed "
+            "and undecided lineage and a published ontology concept. Every question's wording "
+            "misses its target table's name and description, so only the enrichment can reach "
+            "it. Gap cases must stay unreached: their only path is lineage nobody approved."
+        )
+        lines.append("")
+        lines.append("| Measure | Before enrichment | After enrichment |")
+        lines.append("|---|---|---|")
+        lines.append(
+            f"| Recall within bound ({footprint.reachability_case_count} cases) | "
+            f"{footprint.recall_before:.4f} | {footprint.recall_after:.4f} |"
+        )
+        lines.append(
+            f"| Gap preservation ({footprint.gap_case_count} cases) | — | "
+            f"{footprint.gap_preservation_rate:.4f} |"
+        )
+        lines.append("")
+        lines.append("| Metric | Value | Baseline | Change |")
+        lines.append("|---|---|---|---|")
+        for name in ("footprint_recall_within_bound_rate", "footprint_gap_preservation_rate"):
+            lines.append(_metric_row(name, current_metrics, baseline_metrics))
+        lines.append("")
+        lines.append("| Case | Question | Expected | Rank before | Rank after |")
+        lines.append("|---|---|---|---|---|")
+        for before, after in zip(footprint.before.results, footprint.after.results, strict=True):
+            expected = f"{after.case.expected_object_type}:{after.case.expected_object_key}"
+            if after.case.expect_absent:
+                expected += " (must stay absent)"
+            lines.append(
+                f"| {after.case.id} | {after.case.question} | {expected} | "
+                f"{before.rank or 'not found'} | {after.rank or 'not found'} |"
+            )
+        lines.append("")
+        lines.append(
+            "Not measured here: whether answers over enriched context are *correct*. That is "
+            "`execution_match_benchmark.py` against a live model route (paid calls), and the "
+            "acceptance thresholds for both are for the domain owner to set before that run."
+        )
+        lines.append("")
 
     lines.append("## Tool / generation-path selection quality")
     lines.append("")
@@ -849,8 +1083,11 @@ async def _build_vector_index(session: AsyncSession, catalog: SeededCatalog) -> 
 
 
 async def _run(
-    *, retrieval_corpus_path: Path, tool_selection_corpus_path: Path
-) -> tuple[RetrievalQualityReport, ToolSelectionReport, ModelGenerationPosture]:
+    *,
+    retrieval_corpus_path: Path,
+    tool_selection_corpus_path: Path,
+    footprint_corpus_path: Path,
+) -> tuple[RetrievalQualityReport, ToolSelectionReport, ModelGenerationPosture, FootprintReport]:
     session, engine = await _make_session()
     try:
         catalog = await seed_catalog(session)
@@ -863,7 +1100,8 @@ async def _run(
     finally:
         await session.close()
         await engine.dispose()
-    return retrieval_report, tool_report, posture
+    footprint_report = await run_footprint_benchmark(load_retrieval_corpus(footprint_corpus_path))
+    return retrieval_report, tool_report, posture, footprint_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -882,6 +1120,11 @@ def main(argv: list[str] | None = None) -> int:
         default=CORPUS_DIR / "tool_selection_corpus.json",
     )
     parser.add_argument(
+        "--footprint-corpus",
+        type=Path,
+        default=CORPUS_DIR / "footprint_enrichment_corpus.json",
+    )
+    parser.add_argument(
         "--accept-baseline",
         action="store_true",
         help=(
@@ -898,10 +1141,11 @@ def main(argv: list[str] | None = None) -> int:
         print("Run `uv run python scripts/quality_benchmark.py --accept-baseline` to create one.")
         return 1
 
-    retrieval_report, tool_report, posture = asyncio.run(
+    retrieval_report, tool_report, posture, footprint_report = asyncio.run(
         _run(
             retrieval_corpus_path=args.retrieval_corpus,
             tool_selection_corpus_path=args.tool_selection_corpus,
+            footprint_corpus_path=args.footprint_corpus,
         )
     )
 
@@ -910,18 +1154,28 @@ def main(argv: list[str] | None = None) -> int:
         "retrieval_recall_within_bound_rate": retrieval_report.recall_within_bound_rate,
         "retrieval_mrr": retrieval_report.mrr,
         "tool_selection_pass_rate": tool_report.pass_rate,
+        "footprint_recall_within_bound_rate": footprint_report.recall_after,
+        "footprint_gap_preservation_rate": footprint_report.gap_preservation_rate,
     }
     case_counts = {
         "retrieval_hit_at_1_rate": retrieval_report.case_count,
         "retrieval_recall_within_bound_rate": retrieval_report.case_count,
         "retrieval_mrr": retrieval_report.case_count,
         "tool_selection_pass_rate": tool_report.case_count,
+        "footprint_recall_within_bound_rate": footprint_report.reachability_case_count,
+        "footprint_gap_preservation_rate": footprint_report.gap_case_count,
     }
 
     print("Retrieval quality:")
     print(f"  hit@1:                 {retrieval_report.hit_at_1_rate:.4f}")
     print(f"  recall (within bound): {retrieval_report.recall_within_bound_rate:.4f}")
     print(f"  MRR:                   {retrieval_report.mrr:.4f}")
+    print("Footprint enrichment (R11-FP13):")
+    print(
+        f"  recall before -> after: {footprint_report.recall_before:.4f} -> "
+        f"{footprint_report.recall_after:.4f}"
+    )
+    print(f"  gap preservation:      {footprint_report.gap_preservation_rate:.4f}")
     print("Tool/generation-path selection quality:")
     print(f"  pass rate:             {tool_report.pass_rate:.4f}")
     print("Model generation posture:")
@@ -946,6 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
                 current_metrics=current_metrics,
                 baseline_metrics=current_metrics,
                 regressions=[],
+                footprint=footprint_report,
             )
             print(f"Report written to {args.report}.")
         return 0
@@ -964,6 +1219,7 @@ def main(argv: list[str] | None = None) -> int:
             current_metrics=current_metrics,
             baseline_metrics=baseline_metrics,
             regressions=regressions,
+            footprint=footprint_report,
         )
         print(f"\nReport written to {args.report}.")
 

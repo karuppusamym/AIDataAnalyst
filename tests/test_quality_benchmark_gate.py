@@ -38,6 +38,7 @@ from scripts.quality_benchmark import (
     load_retrieval_corpus,
     load_tool_selection_corpus,
     main,
+    run_footprint_benchmark,
     run_retrieval_benchmark,
     run_tool_selection_benchmark,
     seed_catalog,
@@ -169,6 +170,27 @@ async def test_the_semantic_cases_are_present_and_measured() -> None:
         "corpus cannot measure what it fuses"
     )
     assert all(r.case.min_rank >= 1 for r in semantic)
+
+
+async def test_footprint_enrichment_is_measured_before_and_after_with_gaps_kept() -> None:
+    """R11-FP13: the corpus is built so only enrichment can reach each target. Before it,
+    every reachability case misses; after it, each lands within bound; and the target whose
+    only path is an undecided lineage proposal stays unreached in both runs."""
+    cases = load_retrieval_corpus(CORPUS_DIR / "footprint_enrichment_corpus.json")
+
+    report = await run_footprint_benchmark(cases)
+
+    before = {r.case.id: r for r in report.before.results}
+    after = {r.case.id: r for r in report.after.results}
+    reachability = [case.id for case in cases if not case.expect_absent]
+    assert reachability and all(before[case_id].rank is None for case_id in reachability)
+    assert all(after[case_id].within_bound for case_id in reachability)
+    assert after["gap-proposed-lineage-steers-nothing"].rank is None
+    assert (report.recall_before, report.recall_after, report.gap_preservation_rate) == (
+        0.0,
+        1.0,
+        1.0,
+    )
 
 
 async def test_tool_selection_benchmark_resolves_named_cases_as_calibrated() -> None:
@@ -329,6 +351,9 @@ def test_default_paths_live_under_docs_reference() -> None:
 def test_committed_corpus_files_exist_and_parse() -> None:
     retrieval_cases = load_retrieval_corpus(CORPUS_DIR / "retrieval_quality_corpus.json")
     tool_cases = load_tool_selection_corpus(CORPUS_DIR / "tool_selection_corpus.json")
+    footprint_cases = load_retrieval_corpus(CORPUS_DIR / "footprint_enrichment_corpus.json")
 
     assert len(retrieval_cases) > 0
     assert len(tool_cases) > 0
+    assert any(case.expect_absent for case in footprint_cases)
+    assert any(not case.expect_absent for case in footprint_cases)
