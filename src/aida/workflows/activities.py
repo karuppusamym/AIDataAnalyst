@@ -1343,10 +1343,18 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         # the run is in flight applies to the next run, not halfway through this one.
         selection = selection_for(datasource)
         excluded_by_kind: dict[str, int] = {}
+        # R11-FP01: where the connector can take it, the schema scope goes into the source's own
+        # metadata queries, so an excluded schema is never read. The selection is still applied
+        # to every batch below.
+        pushed_down = connector.scope_discovery(
+            include_schemas=list(selection.include_schemas),
+            exclude_schemas=list(selection.exclude_schemas),
+        )
         receipt = DiscoveryReceipt(
             mode=run_mode,
             selection_fingerprint=selection.fingerprint(),
             capabilities=asdict(connector.capabilities),
+            selection_pushed_down=pushed_down,
         )
         created_objects_total = 0
         changed_objects_total = 0

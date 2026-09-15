@@ -25,6 +25,7 @@ from aida.connectors.discovery import (
     build_routines,
     build_table_map_from_column_rows,
 )
+from aida.connectors.schema_scope import SchemaScope, schema_scope, scoped_sqlserver_query
 from aida.connectors.sql_execution import SqlExecutor
 
 _SHOWPLAN_NS = "{http://schemas.microsoft.com/sqlserver/2004/07/showplan}"
@@ -324,6 +325,7 @@ class SqlServerConnector(SqlExecutor):
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
         self._params = _parse_dsn(dsn)
         self._command_timeout = command_timeout
+        self._schema_scope = SchemaScope()
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
@@ -358,6 +360,18 @@ class SqlServerConnector(SqlExecutor):
         finally:
             connection.close()
 
+    def scope_discovery(self, *, include_schemas: list[str], exclude_schemas: list[str]) -> bool:
+        self._schema_scope = schema_scope(include_schemas, exclude_schemas)
+        return self._schema_scope.restricted
+
+    def _scoped_execute(self, cursor: Any, sql: str) -> None:
+        """A discovery query, restricted to the pushed-down schema scope if there is one."""
+        scoped, parameters = scoped_sqlserver_query(sql, self._schema_scope)
+        if parameters:
+            cursor.execute(scoped, parameters)
+        else:
+            cursor.execute(scoped)
+
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
         return await asyncio.to_thread(self._discover_sync)
 
@@ -366,11 +380,12 @@ class SqlServerConnector(SqlExecutor):
         try:
             cursor = connection.cursor()
             try:
-                cursor.execute("SELECT DB_NAME() AS catalog_name")
+                self._scoped_execute(cursor, "SELECT DB_NAME() AS catalog_name")
                 catalog_row = cursor.fetchone()
                 catalog_name = str(catalog_row["catalog_name"]) if catalog_row else ""
 
-                cursor.execute(
+                self._scoped_execute(
+                    cursor,
                     """
                     SELECT
                         c.TABLE_SCHEMA AS table_schema,
@@ -388,11 +403,12 @@ class SqlServerConnector(SqlExecutor):
                      AND t.TABLE_NAME = c.TABLE_NAME
                     WHERE c.TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
                     ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
-                    """
+                    """,
                 )
                 column_rows = cursor.fetchall()
 
-                cursor.execute(
+                self._scoped_execute(
+                    cursor,
                     """
                     SELECT
                         tc.TABLE_SCHEMA AS table_schema,
@@ -410,11 +426,12 @@ class SqlServerConnector(SqlExecutor):
                       AND tc.TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
                     ORDER BY tc.TABLE_SCHEMA, tc.TABLE_NAME, tc.CONSTRAINT_NAME,
                         kcu.ORDINAL_POSITION
-                    """
+                    """,
                 )
                 key_rows = cursor.fetchall()
 
-                cursor.execute(
+                self._scoped_execute(
+                    cursor,
                     """
                     SELECT
                         fk_tc.TABLE_SCHEMA AS table_schema,
@@ -442,25 +459,25 @@ class SqlServerConnector(SqlExecutor):
                     WHERE fk_tc.TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')
                     ORDER BY fk_tc.TABLE_SCHEMA, fk_tc.TABLE_NAME, rc.CONSTRAINT_NAME,
                         fk_kcu.ORDINAL_POSITION
-                    """
+                    """,
                 )
                 foreign_key_rows = cursor.fetchall()
 
-                cursor.execute(_VIEW_DEFINITION_SQL)
+                self._scoped_execute(cursor, _VIEW_DEFINITION_SQL)
                 view_rows = cursor.fetchall()
-                cursor.execute(_ROUTINE_SQL)
+                self._scoped_execute(cursor, _ROUTINE_SQL)
                 routine_rows = cursor.fetchall()
-                cursor.execute(_ROUTINE_PARAMETER_SQL)
+                self._scoped_execute(cursor, _ROUTINE_PARAMETER_SQL)
                 routine_parameter_rows = cursor.fetchall()
-                cursor.execute(_TABLE_COMMENT_SQL)
+                self._scoped_execute(cursor, _TABLE_COMMENT_SQL)
                 table_description_rows = cursor.fetchall()
-                cursor.execute(_COLUMN_COMMENT_SQL)
+                self._scoped_execute(cursor, _COLUMN_COMMENT_SQL)
                 column_description_rows = cursor.fetchall()
-                cursor.execute(_SCHEMA_COMMENT_SQL)
+                self._scoped_execute(cursor, _SCHEMA_COMMENT_SQL)
                 schema_description_rows = cursor.fetchall()
-                cursor.execute(_CATALOG_COMMENT_SQL)
+                self._scoped_execute(cursor, _CATALOG_COMMENT_SQL)
                 catalog_description_row = cursor.fetchone()
-                cursor.execute(_GRANT_SQL)
+                self._scoped_execute(cursor, _GRANT_SQL)
                 grant_rows = cursor.fetchall()
             finally:
                 cursor.close()

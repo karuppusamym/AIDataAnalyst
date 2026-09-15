@@ -337,6 +337,16 @@ class Connector(ABC):
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
         raise NotImplementedError
 
+    def scope_discovery(self, *, include_schemas: list[str], exclude_schemas: list[str]) -> bool:
+        """R11-FP01: take a selection's schema scope into the source's own metadata queries.
+
+        Returns whether this connector does. The default does not, and correctness never
+        depends on it: the selection is applied to whatever `discover` returns, before anything
+        is persisted (`aida.discovery_selection.apply_selection`). A connector that overrides
+        this reads less; it never reads differently (`aida.connectors.schema_scope`).
+        """
+        return False
+
     async def discover_streaming(
         self, *, batch_size: int = 500
     ) -> AsyncIterator[tuple[DiscoveredCatalog, ...]]:

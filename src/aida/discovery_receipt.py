@@ -60,6 +60,8 @@ class DiscoveryReceipt:
     reconciliation: dict[str, Any] | None = None
     #: R11-FP15: change signals this run recorded, by signal type.
     changes: dict[str, int] = field(default_factory=dict)
+    #: R11-FP01: whether the connector took the selection's schema scope into its own queries.
+    selection_pushed_down: bool = False
 
     def observe_batch(
         self, catalogs: Iterable[DiscoveredCatalog], excluded: Mapping[str, int]
@@ -117,6 +119,7 @@ class DiscoveryReceipt:
             "receipt_version": RECEIPT_VERSION,
             "mode": self.mode,
             "selection_fingerprint": self.selection_fingerprint,
+            "selection_pushed_down": self.selection_pushed_down,
             "stream": {"state": state, "batches": self.batches},
             "kinds": {
                 kind: {

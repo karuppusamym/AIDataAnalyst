@@ -25,6 +25,7 @@ from aida.connectors.discovery import (
     build_routines,
     build_table_map_from_column_rows,
 )
+from aida.connectors.schema_scope import SchemaScope, schema_scope, scoped_postgres_query
 from aida.connectors.sql_execution import SqlExecutor
 
 
@@ -638,6 +639,7 @@ class PostgresConnector(SqlExecutor):
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
         self._dsn = dsn
         self._command_timeout = command_timeout
+        self._schema_scope = SchemaScope()
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
@@ -650,11 +652,21 @@ class PostgresConnector(SqlExecutor):
         finally:
             await connection.close()
 
+    def scope_discovery(self, *, include_schemas: list[str], exclude_schemas: list[str]) -> bool:
+        self._schema_scope = schema_scope(include_schemas, exclude_schemas)
+        return self._schema_scope.restricted
+
+    async def _fetch(self, connection: Any, sql: str, *arguments: Any) -> list[Any]:
+        """A discovery query, restricted to the pushed-down schema scope if there is one."""
+        scoped, bound = scoped_postgres_query(sql, self._schema_scope, arguments)
+        return list(await connection.fetch(scoped, *bound))
+
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
         connection = await asyncpg.connect(self._dsn, command_timeout=self._command_timeout)
         try:
             catalog_name = await connection.fetchval("SELECT current_database()")
-            rows = await connection.fetch(
+            rows = await self._fetch(
+                connection,
                 """
                 SELECT
                     c.table_schema,
@@ -674,7 +686,8 @@ class PostgresConnector(SqlExecutor):
                 ORDER BY c.table_schema, c.table_name, c.ordinal_position
                 """
             )
-            constraint_rows = await connection.fetch(
+            constraint_rows = await self._fetch(
+                connection,
                 """
                 SELECT
                     ns.nspname AS table_schema,
@@ -718,20 +731,21 @@ class PostgresConnector(SqlExecutor):
                 ORDER BY ns.nspname, rel.relname, con.conname
                 """
             )
-            materialized_view_column_rows = await connection.fetch(
+            materialized_view_column_rows = await self._fetch(
+                connection,
                 _MATERIALIZED_VIEW_COLUMN_SQL
             )
-            view_rows = await connection.fetch(_VIEW_DEFINITION_SQL)
-            routine_rows = await connection.fetch(_ROUTINE_SQL)
-            routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
-            table_description_rows = await connection.fetch(_TABLE_COMMENT_SQL)
-            column_description_rows = await connection.fetch(_COLUMN_COMMENT_SQL)
-            schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
+            view_rows = await self._fetch(connection, _VIEW_DEFINITION_SQL)
+            routine_rows = await self._fetch(connection, _ROUTINE_SQL)
+            routine_parameter_rows = await self._fetch(connection, _ROUTINE_PARAMETER_SQL)
+            table_description_rows = await self._fetch(connection, _TABLE_COMMENT_SQL)
+            column_description_rows = await self._fetch(connection, _COLUMN_COMMENT_SQL)
+            schema_description_rows = await self._fetch(connection, _SCHEMA_COMMENT_SQL)
             catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
-            grant_rows = await connection.fetch(_GRANT_SQL)
-            index_rows = await connection.fetch(_INDEX_SQL)
-            partition_key_rows = await connection.fetch(_PARTITION_KEY_SQL)
-            partition_rows = await connection.fetch(_PARTITION_SQL)
+            grant_rows = await self._fetch(connection, _GRANT_SQL)
+            index_rows = await self._fetch(connection, _INDEX_SQL)
+            partition_key_rows = await self._fetch(connection, _PARTITION_KEY_SQL)
+            partition_rows = await self._fetch(connection, _PARTITION_SQL)
         finally:
             await connection.close()
 
@@ -818,8 +832,8 @@ class PostgresConnector(SqlExecutor):
             # One row per table (not per column), so this roster scan is cheap
             # even at 100K tables -- it exists only to compute page boundaries
             # before any of the heavier per-axis queries below ever runs.
-            roster_rows = await connection.fetch(_TABLE_ROSTER_SQL)
-            materialized_roster_rows = await connection.fetch(_MATERIALIZED_VIEW_ROSTER_SQL)
+            roster_rows = await self._fetch(connection, _TABLE_ROSTER_SQL)
+            materialized_roster_rows = await self._fetch(connection, _MATERIALIZED_VIEW_ROSTER_SQL)
             roster = sorted(
                 {
                     (str(row["table_schema"]), str(row["table_name"]))
@@ -830,9 +844,9 @@ class PostgresConnector(SqlExecutor):
                 yield (DiscoveredCatalog(name=catalog_name, schemas=()),)
                 return
 
-            routine_rows = await connection.fetch(_ROUTINE_SQL)
-            routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
-            schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
+            routine_rows = await self._fetch(connection, _ROUTINE_SQL)
+            routine_parameter_rows = await self._fetch(connection, _ROUTINE_PARAMETER_SQL)
+            schema_description_rows = await self._fetch(connection, _SCHEMA_COMMENT_SQL)
             catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
             routines = build_routines(routine_rows, routine_parameter_rows)
             schema_descriptions = {
@@ -848,28 +862,37 @@ class PostgresConnector(SqlExecutor):
                 schemas_arr = [schema for schema, _name in page]
                 names_arr = [name for _schema, name in page]
 
-                column_rows = await connection.fetch(_COLUMN_BATCH_SQL, schemas_arr, names_arr)
-                materialized_view_column_rows = await connection.fetch(
+                column_rows = await self._fetch(
+                    connection, _COLUMN_BATCH_SQL, schemas_arr, names_arr
+                )
+                materialized_view_column_rows = await self._fetch(
+                    connection,
                     _MATERIALIZED_VIEW_COLUMN_BATCH_SQL, schemas_arr, names_arr
                 )
-                constraint_rows = await connection.fetch(
+                constraint_rows = await self._fetch(
+                    connection,
                     _CONSTRAINT_BATCH_SQL, schemas_arr, names_arr
                 )
-                view_rows = await connection.fetch(
+                view_rows = await self._fetch(
+                    connection,
                     _VIEW_DEFINITION_BATCH_SQL, schemas_arr, names_arr
                 )
-                table_description_rows = await connection.fetch(
+                table_description_rows = await self._fetch(
+                    connection,
                     _TABLE_COMMENT_BATCH_SQL, schemas_arr, names_arr
                 )
-                column_description_rows = await connection.fetch(
+                column_description_rows = await self._fetch(
+                    connection,
                     _COLUMN_COMMENT_BATCH_SQL, schemas_arr, names_arr
                 )
-                grant_rows = await connection.fetch(_GRANT_BATCH_SQL, schemas_arr, names_arr)
-                index_rows = await connection.fetch(_INDEX_BATCH_SQL, schemas_arr, names_arr)
-                partition_key_rows = await connection.fetch(
+                grant_rows = await self._fetch(connection, _GRANT_BATCH_SQL, schemas_arr, names_arr)
+                index_rows = await self._fetch(connection, _INDEX_BATCH_SQL, schemas_arr, names_arr)
+                partition_key_rows = await self._fetch(
+                    connection,
                     _PARTITION_KEY_BATCH_SQL, schemas_arr, names_arr
                 )
-                partition_rows = await connection.fetch(
+                partition_rows = await self._fetch(
+                    connection,
                     _PARTITION_BATCH_SQL, schemas_arr, names_arr
                 )
 

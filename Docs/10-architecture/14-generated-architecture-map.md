@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-366 Python modules under `src/`, 2113 intra-`src` import edges.
+367 Python modules under `src/`, 2115 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -28,7 +28,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | atlas.modules.ingestion | `atlas.modules.ingestion.*` | 4 |
 | atlas.modules.observability_audit | `atlas.modules.observability_audit.*` | 4 |
 | atlas.modules.profiling | `atlas.modules.profiling.*` | 4 |
-| aida.connectors | `aida.connectors.*` | 12 |
+| aida.connectors | `aida.connectors.*` | 13 |
 | aida.workflows | `aida.workflows.*` | 7 |
 | aida.projectors | `aida.projectors.*` | 3 |
 | atlas.platform | `atlas.platform.*` | 5 |
@@ -56,7 +56,7 @@ graph LR
   ctx_ingestion["atlas.modules.ingestion<br/>4 modules"]
   ctx_observability_audit["atlas.modules.observability_audit<br/>4 modules"]
   ctx_profiling["atlas.modules.profiling<br/>4 modules"]
-  connectors["aida.connectors<br/>12 modules"]
+  connectors["aida.connectors<br/>13 modules"]
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
@@ -139,13 +139,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 339 |
-| `aida.workflows.worker` | Temporal worker | 118 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 175 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 340 |
+| `aida.workflows.worker` | Temporal worker | 119 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 176 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 360 of 366 modules.
+Union of all five: 361 of 367 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -161,7 +161,7 @@ Per group, how much of each group each process pulls in:
 | atlas.modules.ingestion | 4 | 3 | 3 | 3 | 2 | 4 |
 | atlas.modules.observability_audit | 4 | 3 | 3 | 3 | 2 | 4 |
 | atlas.modules.profiling | 3 | 3 | 3 | 3 | 2 | 4 |
-| aida.connectors | 12 | 11 | 12 | 0 | 0 | 12 |
+| aida.connectors | 13 | 12 | 13 | 0 | 0 | 13 |
 | aida.workflows | 5 | 6 | 4 | 0 | 0 | 7 |
 | aida.projectors | 0 | 0 | 2 | 2 | 2 | 3 |
 | atlas.platform | 5 | 5 | 5 | 5 | 4 | 5 |
@@ -173,9 +173,9 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>339 reached"])
-  aida_workflows_worker(["aida.workflows.worker<br/>118 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>175 reached"])
+  aida_main(["aida.main<br/>340 reached"])
+  aida_workflows_worker(["aida.workflows.worker<br/>119 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>176 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>64 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
