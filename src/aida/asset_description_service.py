@@ -17,6 +17,8 @@ are pure, deterministic functions of that evidence.
 """
 
 import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -268,6 +270,127 @@ def compose_draft_text(evidence: AssetEvidence) -> str:
 
 def text_fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# --- R11-FP10: a refused proposal does not come back unchanged ------------------------------
+
+#: The keys `evidence_payload` writes: the signals a table draft stands on. Who drafted it, the
+#: run, the rank and any edit history are not evidence, so they never make two otherwise
+#: identical proposals look different.
+TABLE_EVIDENCE_SIGNALS = frozenset(
+    {
+        "column_count",
+        "primary_key_columns",
+        "foreign_key_count",
+        "upstream_edge_ids",
+        "downstream_edge_ids",
+        "upstream_parsed_edges",
+        "downstream_parsed_edges",
+        "lineage_edge_count",
+        "dbt_description_present",
+        "dbt_documented_column_count",
+        "business_annotation_id",
+        "bound_term_ids",
+        "object_kind",
+        "definition_state",
+        "definition_digest",
+    }
+)
+#: This exact text -- or the machine text it was edited from -- was rejected.
+REFUSED_TEXT = "TEXT"
+#: A proposal standing on exactly this evidence was rejected, whatever its wording.
+REFUSED_EVIDENCE = "EVIDENCE"
+#: This exact text was approved once and then withdrawn (R11-C8).
+REFUSED_WITHDRAWN = "WITHDRAWN"
+
+
+def _canonical(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return sorted(
+            (_canonical(item) for item in value),
+            key=lambda item: json.dumps(item, sort_keys=True, default=str),
+        )
+    return value
+
+
+def signals_fingerprint(payload: Mapping[str, Any], signal_keys: Iterable[str]) -> str | None:
+    """A digest of the evidence signals only, independent of list order. `None` when the
+    payload carries none of them -- a draft recorded without evidence matches nothing."""
+    keys = set(signal_keys)
+    signals = {key: _canonical(payload[key]) for key in sorted(keys) if key in payload}
+    if not signals:
+        return None
+    canonical = json.dumps(signals, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def refusal_reason(
+    *,
+    drafted_text: str,
+    payload: Mapping[str, Any],
+    refused: Iterable[tuple[str, Mapping[str, Any] | None]],
+    signal_keys: Iterable[str],
+) -> str | None:
+    """Why a new proposal is one a reviewer already refused, or `None`.
+
+    Three ways a rejected proposal used to come back. Its text matched only on
+    `text_fingerprint`, which an edit rewrites, so rejecting an edited draft let the original
+    machine text return; the machine text's fingerprint is kept as `original_fingerprint`
+    and is now matched too. A change in wording alone -- a better sentence template, the same
+    facts -- produced a "new" draft; the evidence fingerprint catches that, so a refused
+    proposal returns only when what it stands on changes.
+    """
+    keys = frozenset(signal_keys)
+    text_digest = text_fingerprint(drafted_text)
+    evidence_digest = signals_fingerprint(payload, keys)
+    for refused_fingerprint, refused_evidence in refused:
+        evidence = refused_evidence or {}
+        if text_digest in (refused_fingerprint, evidence.get("original_fingerprint")):
+            return REFUSED_TEXT
+        if evidence_digest is not None and signals_fingerprint(evidence, keys) == evidence_digest:
+            return REFUSED_EVIDENCE
+    return None
+
+
+async def table_refusal(
+    session: AsyncSession, table_id: UUID, *, drafted_text: str, payload: Mapping[str, Any]
+) -> str | None:
+    """`refusal_reason` against this table's REJECTED drafts, then its WITHDRAWN descriptions."""
+    rejected = (
+        await session.execute(
+            select(AssetDescriptionDraft.text_fingerprint, AssetDescriptionDraft.evidence).where(
+                AssetDescriptionDraft.table_id == table_id,
+                AssetDescriptionDraft.status == "REJECTED",
+            )
+        )
+    ).all()
+    reason = refusal_reason(
+        drafted_text=drafted_text,
+        payload=payload,
+        refused=[(fingerprint, evidence) for fingerprint, evidence in rejected],
+        signal_keys=TABLE_EVIDENCE_SIGNALS,
+    )
+    if reason is not None:
+        return reason
+    withdrawn = (
+        await session.scalars(
+            select(AssetDocumentationVersion.readme)
+            .join(
+                AssetDocumentation,
+                AssetDocumentation.id == AssetDocumentationVersion.documentation_id,
+            )
+            .where(
+                AssetDocumentation.table_id == table_id,
+                AssetDocumentationVersion.status == "WITHDRAWN",
+            )
+        )
+    ).all()
+    digest = text_fingerprint(drafted_text)
+    if any(text_fingerprint(readme) == digest for readme in withdrawn):
+        return REFUSED_WITHDRAWN
+    return None
 
 
 def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:

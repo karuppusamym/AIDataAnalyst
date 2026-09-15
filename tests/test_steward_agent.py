@@ -41,7 +41,12 @@ import aida.semantic_api  # noqa: F401 -- registers the decision target adapters
 from aida import steward_agent, task_agent
 from aida.agent_budget import REASON_WALL_CLOCK_CAP
 from aida.agent_contracts import REASON_CONTRACT_MISSING, REASON_KILL_ENGAGED
-from aida.asset_description_service import compose_draft_text, gather_evidence, text_fingerprint
+from aida.asset_description_service import (
+    compose_draft_text,
+    evidence_payload,
+    gather_evidence,
+    text_fingerprint,
+)
 from aida.db import Base
 from aida.governance_decision_service import GovernanceDecisionRefused, decide_review
 from aida.model_gateway import GLOBAL_KILL_SWITCH_SCOPE
@@ -789,6 +794,37 @@ async def test_it_leaves_open_drafts_rejected_text_and_thin_evidence_alone(
     }
     assert await _count(session, GovernanceReview) == 0
     assert await _count(session, AssetDescriptionDraft) == 2
+
+
+async def test_a_rejected_proposal_does_not_return_in_new_words_on_unchanged_evidence(
+    session: AsyncSession,
+) -> None:
+    """R11-FP10: a template change rewords every draft; the facts a reviewer refused did not
+    change, so the refusal stands."""
+    org, datasource, schema = await _seed_estate(session)
+    table = await _seed_table(session, org, datasource, schema, name="reworded")
+    refused = _draft(
+        org,
+        table,
+        status="REJECTED",
+        created_by="agent:x",
+        text="An older template's wording of the same facts.",
+    )
+    refused.evidence = {
+        **evidence_payload(await gather_evidence(session, table)),
+        "origin": "METADATA",
+        "agent_run": "an-earlier-run",
+    }
+    session.add(refused)
+    await session.flush()
+    await _register(session, org)
+
+    outcome = await _run(session, org, capabilities=("TABLE_DESCRIPTION",))
+
+    assert [(item.subject_name, item.action, item.reason) for item in outcome.items] == [
+        ("reworded", ACTION_SKIPPED, SKIP_REJECTED_BEFORE)
+    ]
+    assert await _count(session, AssetDescriptionDraft) == 1
 
 
 async def test_configuration_clamps_the_limit_a_request_asks_for(session: AsyncSession) -> None:

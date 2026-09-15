@@ -44,10 +44,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_description_service import (
     MINIMUM_EVIDENCE_FOR_REVIEW,
+    REFUSED_WITHDRAWN,
     compose_draft_text,
     evidence_payload,
     gather_evidence,
     score_evidence,
+    table_refusal,
     text_fingerprint,
 )
 from aida.column_description_service import (
@@ -55,8 +57,10 @@ from aida.column_description_service import (
     ORIGIN_METADATA,
     ColumnEvidence,
     column_evidence_payload,
+    column_refusal,
     compose_column_draft_text,
     gather_table_column_evidence,
+    rejected_column_drafts,
     score_column_evidence,
 )
 from aida.column_description_service import OPEN_DRAFT_STATUSES as _COLUMN_OPEN_DRAFT_STATUSES
@@ -118,6 +122,8 @@ STEWARD_AGENT: Final = TaskAgentSpec(
 # Skips: one table or link the agent looked at and deliberately left alone.
 SKIP_OPEN_DRAFT: Final = "open_draft_exists"
 SKIP_REJECTED_BEFORE: Final = "identical_text_rejected"
+#: R11-FP10: the same words were approved once and then withdrawn by a steward.
+SKIP_WITHDRAWN_BEFORE: Final = "identical_text_withdrawn"
 SKIP_BELOW_EVIDENCE_BAR: Final = "below_evidence_bar"
 
 #: Tables examined per run, as a multiple of the proposal limit. Bounds the work
@@ -232,24 +238,18 @@ async def _draft_table_description(
     evidence = await gather_evidence(session, table)
     drafted_text = compose_draft_text(evidence)
     fingerprint = text_fingerprint(drafted_text)
-    # Negative knowledge: these words, for this table, were already put in front
-    # of a human, who said no.
-    rejected_before = await session.scalar(
-        select(AssetDescriptionDraft.id)
-        .where(
-            AssetDescriptionDraft.table_id == table_id,
-            AssetDescriptionDraft.status == "REJECTED",
-            AssetDescriptionDraft.text_fingerprint == fingerprint,
-        )
-        .limit(1)
+    # Negative knowledge: these words -- or the evidence they stand on -- were already put in
+    # front of a human, who said no; or they were approved once and withdrawn (R11-FP10).
+    refusal = await table_refusal(
+        session, table_id, drafted_text=drafted_text, payload=evidence_payload(evidence)
     )
-    if rejected_before is not None:
+    if refusal is not None:
         return run.item(
             capability,
             action=ACTION_SKIPPED,
             subject_id=table_id,
             subject_name=table_name,
-            reason=SKIP_REJECTED_BEFORE,
+            reason=SKIP_WITHDRAWN_BEFORE if refusal == REFUSED_WITHDRAWN else SKIP_REJECTED_BEFORE,
             rank=rank,
         )
     scores = score_evidence(evidence)
@@ -440,18 +440,13 @@ async def _draft_column_description(
     session = run.session
     drafted_text = compose_column_draft_text(evidence)
     fingerprint = text_fingerprint(drafted_text)
-    # Negative knowledge, as for tables: these words, for this column, were
-    # already put in front of a human, who said no.
-    rejected_before = await session.scalar(
-        select(ColumnDescriptionDraft.id)
-        .where(
-            ColumnDescriptionDraft.column_id == column_id,
-            ColumnDescriptionDraft.status == "REJECTED",
-            ColumnDescriptionDraft.text_fingerprint == fingerprint,
-        )
-        .limit(1)
-    )
-    if rejected_before is not None:
+    # Negative knowledge, as for tables: these words -- or the machine text they were edited
+    # from, or a proposal on exactly this evidence -- were already refused (R11-FP10).
+    refused = await rejected_column_drafts(session, [column_id])
+    if (
+        column_refusal(drafted_text, column_evidence_payload(evidence), refused.get(column_id, []))
+        is not None
+    ):
         return run.item(
             capability,
             action=ACTION_SKIPPED,

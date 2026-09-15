@@ -32,6 +32,7 @@ target). A type and a name alone never do.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -42,7 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from aida.asset_description_service import ConfidenceBreakdown
+from aida.asset_description_service import ConfidenceBreakdown, refusal_reason
 from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
@@ -419,6 +420,65 @@ def column_evidence_payload(evidence: ColumnEvidence) -> dict[str, Any]:
         "source_description_present": bool(evidence.source_description),
         "base_description_version": evidence.current_description_version,
     }
+
+
+#: R11-FP10: the keys `column_evidence_payload` writes. `origin` is one of them on purpose: a
+#: model's rewrite and a metadata draft over the same facts are different proposals, while a
+#: second metadata draft over the same facts is the same one in other words.
+COLUMN_EVIDENCE_SIGNALS = frozenset(
+    {
+        "column",
+        "origin",
+        "physical_type",
+        "nullable",
+        "classification",
+        "primary_key_width",
+        "references",
+        "related_to",
+        "relationship_candidate_ids",
+        "referenced_by",
+        "dbt_description_present",
+        "source_description_present",
+        "base_description_version",
+    }
+)
+
+
+async def rejected_column_drafts(
+    session: AsyncSession, column_ids: Iterable[UUID]
+) -> dict[UUID, list[tuple[str, Mapping[str, Any]]]]:
+    """(text fingerprint, evidence) of every REJECTED draft, per column, in one read."""
+    ids = list(column_ids)
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(
+            ColumnDescriptionDraft.column_id,
+            ColumnDescriptionDraft.text_fingerprint,
+            ColumnDescriptionDraft.evidence,
+        ).where(
+            ColumnDescriptionDraft.column_id.in_(ids),
+            ColumnDescriptionDraft.status == "REJECTED",
+        )
+    )
+    refused: dict[UUID, list[tuple[str, Mapping[str, Any]]]] = defaultdict(list)
+    for column_id, fingerprint, evidence in rows.all():
+        refused[column_id].append((fingerprint, evidence or {}))
+    return dict(refused)
+
+
+def column_refusal(
+    drafted_text: str,
+    payload: Mapping[str, Any],
+    refused: Iterable[tuple[str, Mapping[str, Any] | None]],
+) -> str | None:
+    """`asset_description_service.refusal_reason`, over column evidence."""
+    return refusal_reason(
+        drafted_text=drafted_text,
+        payload=payload,
+        refused=refused,
+        signal_keys=COLUMN_EVIDENCE_SIGNALS,
+    )
 
 
 def _version_label(version: int | None) -> str:

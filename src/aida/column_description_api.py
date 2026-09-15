@@ -46,8 +46,10 @@ from aida.column_description_service import (
     OPEN_DRAFT_STATUSES,
     ORIGIN_METADATA,
     column_evidence_payload,
+    column_refusal,
     compose_column_draft_text,
     gather_table_column_evidence,
+    rejected_column_drafts,
     score_column_evidence,
 )
 from aida.column_documentation import current_descriptions_by_column_id
@@ -407,20 +409,7 @@ async def generate_column_description_drafts(
             model_note = model_note or outcome.note
             model_stopped = outcome.stop
 
-        rejected = {
-            (row[0], row[1])
-            for row in (
-                await session.execute(
-                    select(
-                        ColumnDescriptionDraft.column_id,
-                        ColumnDescriptionDraft.text_fingerprint,
-                    ).where(
-                        ColumnDescriptionDraft.column_id.in_([column.id for column in plan.chosen]),
-                        ColumnDescriptionDraft.status == "REJECTED",
-                    )
-                )
-            ).all()
-        }
+        refused = await rejected_column_drafts(session, [column.id for column in plan.chosen])
 
         planned_drafts: list[_PlannedDraft] = []
         for column in plan.chosen:
@@ -447,9 +436,9 @@ async def generate_column_description_drafts(
                 overall = scores.overall
                 payload = column_evidence_payload(evidence)
             fingerprint = text_fingerprint(drafted_text)
-            if (column.id, fingerprint) in rejected:
-                # Negative knowledge: a reviewer already turned down exactly
-                # this text for this column.
+            if column_refusal(drafted_text, payload, refused.get(column.id, [])) is not None:
+                # Negative knowledge (R11-FP10): a reviewer already turned down this text, the
+                # machine text it was edited from, or a proposal on exactly this evidence.
                 skipped_duplicate += 1
                 continue
             planned_drafts.append(
