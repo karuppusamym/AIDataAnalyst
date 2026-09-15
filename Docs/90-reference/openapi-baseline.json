@@ -20174,7 +20174,9 @@
           "subject_type": {
             "enum": [
               "TABLE",
-              "COLUMN"
+              "VIEW",
+              "COLUMN",
+              "ROUTINE"
             ],
             "title": "Subject Type",
             "type": "string"
@@ -20186,6 +20188,66 @@
           "subject_id"
         ],
         "title": "OntologyMapping",
+        "type": "object"
+      },
+      "OntologyMappingValidityRead": {
+        "additionalProperties": false,
+        "properties": {
+          "concept": {
+            "title": "Concept",
+            "type": "string"
+          },
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "status": {
+            "enum": [
+              "VALID",
+              "TARGET_MISSING",
+              "TARGET_DEPRECATED",
+              "KIND_MISMATCH"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "subject_type": {
+            "title": "Subject Type",
+            "type": "string"
+          },
+          "superseded_by_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By Id"
+          }
+        },
+        "required": [
+          "concept",
+          "subject_type",
+          "subject_id",
+          "status"
+        ],
+        "title": "OntologyMappingValidityRead",
         "type": "object"
       },
       "OntologyRead": {
@@ -20229,6 +20291,13 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "mapping_validity": {
+            "items": {
+              "$ref": "#/components/schemas/OntologyMappingValidityRead"
+            },
+            "title": "Mapping Validity",
+            "type": "array"
           },
           "ontology_id": {
             "format": "uuid",

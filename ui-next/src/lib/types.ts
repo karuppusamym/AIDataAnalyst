@@ -3343,8 +3343,17 @@ export interface OntologyDefinition {
 
 export interface OntologyMapping {
   concept: string;
-  subject_type: "TABLE" | "COLUMN";
+  subject_type: "TABLE" | "VIEW" | "COLUMN" | "ROUTINE";
   subject_id: string;
+}
+
+export interface OntologyMappingValidityRead {
+  concept: string;
+  subject_type: string;
+  subject_id: string;
+  status: "VALID" | "TARGET_MISSING" | "TARGET_DEPRECATED" | "KIND_MISMATCH";
+  datasource_id?: string | null;
+  superseded_by_id?: string | null;
 }
 
 export interface OntologyRead {
@@ -3359,6 +3368,7 @@ export interface OntologyRead {
   created_by: string;
   approved_by?: string | null;
   governance_review_id?: string | null;
+  mapping_validity?: OntologyMappingValidityRead[];
 }
 
 export interface OntologyRelation {

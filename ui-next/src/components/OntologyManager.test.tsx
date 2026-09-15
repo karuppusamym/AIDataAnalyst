@@ -29,6 +29,18 @@ it("preserves the selected historical baseline instead of silently claiming the 
   fireEvent.click(await screen.findByRole("button", {name: "Use as new draft"}));
   expect(screen.getByLabelText("Published base version")).toHaveValue(1);
 });
+it("shows mapping drift on a version instead of hiding the history (R11-FP09)", async () => {
+  list.mockResolvedValue([{id: "v1", ontology_key: "customer", version: 1, base_version: 0, published_version: 1, status: "APPROVED", definition,
+    mapping_validity: [
+      {concept: "customer", subject_type: "TABLE", subject_id: "t1", status: "TARGET_DEPRECATED", datasource_id: "d1", superseded_by_id: "t2"},
+      {concept: "customer", subject_type: "ROUTINE", subject_id: "r1", status: "VALID", datasource_id: "d1", superseded_by_id: null},
+    ]}]);
+  render(<OntologyManager organizationId="org" onClose={vi.fn()} />);
+  expect(await screen.findByRole("note")).toHaveTextContent(
+    "Mapping drift: customer → table is deprecated in the catalog (renamed; map its successor in a new draft)",
+  );
+  expect(screen.getByRole("note")).not.toHaveTextContent("routine");
+});
 it("submits a draft explicitly and points to independent review", async () => {
   list.mockResolvedValue([{id: "v1", ontology_key: "customer", version: 1, base_version: 0, published_version: 0, status: "DRAFT", definition}]);
   submit.mockResolvedValue({id: "v1", status: "PENDING_APPROVAL"});

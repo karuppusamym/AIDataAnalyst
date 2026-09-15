@@ -16,6 +16,8 @@ from aida.authorization_gate import gate_read
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.discovery_selection import table_kind
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit
 from aida.governance_decision_contracts import TargetEffect
 from aida.models import GovernanceReview, MetadataColumn, MetadataTable
@@ -47,7 +49,10 @@ class OntologyRelation(ApiModel):
 
 class OntologyMapping(ApiModel):
     concept: str = Field(max_length=100)
-    subject_type: Literal["TABLE", "COLUMN"]
+    #: R11-FP09: VIEW (a view or materialized view) and ROUTINE (a stored procedure or function)
+    #: join TABLE and COLUMN. The kind must match the catalog object: a view written as TABLE
+    #: is refused on every write, because retrieval and context treat the two differently.
+    subject_type: Literal["TABLE", "VIEW", "COLUMN", "ROUTINE"]
     subject_id: UUID
 
 
@@ -92,6 +97,23 @@ class OntologyCreate(ApiModel):
     definition: OntologyDefinition
 
 
+#: R11-FP09: what a mapping's catalog target is now. Only VALID may be created, submitted or
+#: approved; a version already written keeps reading whatever its targets have since become.
+MappingValidity = Literal["VALID", "TARGET_MISSING", "TARGET_DEPRECATED", "KIND_MISMATCH"]
+_VIEW_KINDS = frozenset({"VIEW", "MATERIALIZED_VIEW"})
+
+
+class OntologyMappingValidityRead(ApiModel):
+    concept: str
+    subject_type: str
+    subject_id: UUID
+    status: MappingValidity
+    #: Where the target lives; absent when there is no target in this organization.
+    datasource_id: UUID | None = None
+    #: For a deprecated table that rename detection pointed forward: its successor.
+    superseded_by_id: UUID | None = None
+
+
 class OntologyRead(ApiModel):
     id: UUID
     ontology_key: str = ""
@@ -104,6 +126,122 @@ class OntologyRead(ApiModel):
     created_by: str
     approved_by: str | None = None
     governance_review_id: UUID | None = None
+    #: One entry per mapping, in definition order (R11-FP09).
+    mapping_validity: list[OntologyMappingValidityRead] = Field(default_factory=list)
+
+
+def _mapping_status(
+    mapping: OntologyMapping,
+    organization_id: UUID | None,
+    tables: dict[UUID, MetadataTable],
+    columns: dict[UUID, tuple[MetadataColumn, MetadataTable]],
+    routines: dict[UUID, MetadataRoutine],
+) -> tuple[MappingValidity, UUID | None, UUID | None]:
+    if mapping.subject_type == "ROUTINE":
+        routine = routines.get(mapping.subject_id)
+        if routine is None or routine.organization_id != organization_id:
+            return "TARGET_MISSING", None, None
+        status: MappingValidity = "VALID" if routine.status == "ACTIVE" else "TARGET_DEPRECATED"
+        return status, routine.datasource_id, None
+    if mapping.subject_type == "COLUMN":
+        pair = columns.get(mapping.subject_id)
+        if pair is None or pair[1].organization_id != organization_id:
+            return "TARGET_MISSING", None, None
+        column, parent = pair
+        active = column.status == "ACTIVE" and parent.status == "ACTIVE"
+        return ("VALID" if active else "TARGET_DEPRECATED"), parent.datasource_id, None
+    table = tables.get(mapping.subject_id)
+    if table is None or table.organization_id != organization_id:
+        return "TARGET_MISSING", None, None
+    if (table_kind(table.object_type) in _VIEW_KINDS) != (mapping.subject_type == "VIEW"):
+        return "KIND_MISMATCH", table.datasource_id, None
+    if table.status != "ACTIVE":
+        return "TARGET_DEPRECATED", table.datasource_id, table.superseded_by_table_id
+    return "VALID", table.datasource_id, None
+
+
+_Targets = tuple[
+    dict[UUID, MetadataTable],
+    dict[UUID, tuple[MetadataColumn, MetadataTable]],
+    dict[UUID, MetadataRoutine],
+]
+
+
+async def resolve_mapping_targets(
+    session: AsyncSession, definition: OntologyDefinition, organization_id: UUID | None
+) -> list[OntologyMappingValidityRead]:
+    """R11-FP09: every mapping's target as the catalog holds it now, in at most three reads.
+
+    Never raises for a missing or retired target. An approved ontology outlives the catalog
+    objects it was mapped to, and before this one deprecated table made the whole version
+    history answer 422. Another organization's object reads as TARGET_MISSING, exactly like
+    one that never existed.
+    """
+    return _validity(definition, organization_id, await _load_targets(session, definition))
+
+
+def _validity(
+    definition: OntologyDefinition, organization_id: UUID | None, targets: _Targets
+) -> list[OntologyMappingValidityRead]:
+    tables, columns, routines = targets
+    validity: list[OntologyMappingValidityRead] = []
+    for mapping in definition.mappings:
+        status, datasource_id, superseded_by_id = _mapping_status(
+            mapping, organization_id, tables, columns, routines
+        )
+        validity.append(
+            OntologyMappingValidityRead(
+                concept=mapping.concept,
+                subject_type=mapping.subject_type,
+                subject_id=mapping.subject_id,
+                status=status,
+                datasource_id=datasource_id,
+                superseded_by_id=superseded_by_id,
+            )
+        )
+    return validity
+
+
+async def _load_targets(session: AsyncSession, definition: OntologyDefinition) -> _Targets:
+    wanted: dict[str, set[UUID]] = {}
+    for mapping in definition.mappings:
+        wanted.setdefault(mapping.subject_type, set()).add(mapping.subject_id)
+    table_ids = wanted.get("TABLE", set()) | wanted.get("VIEW", set())
+    tables = (
+        {
+            table.id: table
+            for table in await session.scalars(
+                select(MetadataTable).where(MetadataTable.id.in_(table_ids))
+            )
+        }
+        if table_ids
+        else {}
+    )
+    columns = (
+        {
+            column.id: (column, parent)
+            for column, parent in (
+                await session.execute(
+                    select(MetadataColumn, MetadataTable)
+                    .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+                    .where(MetadataColumn.id.in_(wanted["COLUMN"]))
+                )
+            ).all()
+        }
+        if wanted.get("COLUMN")
+        else {}
+    )
+    routines = (
+        {
+            routine.id: routine
+            for routine in await session.scalars(
+                select(MetadataRoutine).where(MetadataRoutine.id.in_(wanted["ROUTINE"]))
+            )
+        }
+        if wanted.get("ROUTINE")
+        else {}
+    )
+    return tables, columns, routines
 
 
 async def validate_mappings(
@@ -112,32 +250,42 @@ async def validate_mappings(
     context: SecurityContext,
     settings: Settings,
 ) -> None:
-    for mapping in definition.mappings:
-        if mapping.subject_type == "COLUMN":
-            column = await session.get(MetadataColumn, mapping.subject_id)
-            table = (
-                await session.get(MetadataTable, column.table_id)
-                if column and column.status == "ACTIVE"
-                else None
-            )
+    """Every write -- create, submit, approve -- needs every mapping VALID and readable by the
+    caller. Tables, views and columns are authorized against their table, as before; a routine
+    against its datasource, the grain routine metadata is read at."""
+    targets = await _load_targets(session, definition)
+    validity = _validity(definition, context.organization_id, targets)
+    if any(entry.status == "KIND_MISMATCH" for entry in validity):
+        raise HTTPException(
+            status_code=422, detail="mapping subject_type does not match the catalog object's kind"
+        )
+    if any(entry.status != "VALID" for entry in validity):
+        raise HTTPException(
+            status_code=422, detail="mapping target is unavailable in this organization"
+        )
+    _, columns, _ = targets
+    authorized: set[tuple[str, str]] = set()
+    for mapping, entry in zip(definition.mappings, validity, strict=True):
+        datasource_id = entry.datasource_id
+        if datasource_id is None:
+            continue
+        if mapping.subject_type == "ROUTINE":
+            resource = ("datasource", str(datasource_id))
+        elif mapping.subject_type == "COLUMN":
+            resource = ("table", str(columns[mapping.subject_id][1].id))
         else:
-            table = await session.get(MetadataTable, mapping.subject_id)
-        if (
-            table is None
-            or table.status != "ACTIVE"
-            or table.organization_id != context.organization_id
-        ):
-            raise HTTPException(
-                status_code=422, detail="mapping target is unavailable in this organization"
-            )
+            resource = ("table", str(mapping.subject_id))
+        if resource in authorized:
+            continue
+        authorized.add(resource)
         await gate_read(
             session,
             context,
             settings,
             action="READ_METADATA",
-            resource_type="table",
-            resource_id=str(table.id),
-            datasource_id=table.datasource_id,
+            resource_type=resource[0],
+            resource_id=resource[1],
+            datasource_id=datasource_id,
         )
 
 
@@ -199,10 +347,14 @@ async def list_ontology_versions(
             .offset(offset)
         )
     )
-    for row in rows:
-        await validate_mappings(
-            session, OntologyDefinition.model_validate(row.definition), context, settings
+    # R11-FP09: report, never refuse. Writes still require every mapping VALID; a read of
+    # history must survive the catalog moving on underneath an approved version.
+    validity = {
+        row.id: await resolve_mapping_targets(
+            session, OntologyDefinition.model_validate(row.definition), organization_id
         )
+        for row in rows
+    }
     heads = {
         head.id: head
         for head in await session.scalars(
@@ -217,6 +369,7 @@ async def list_ontology_versions(
             update={
                 "ontology_key": heads[row.ontology_id].ontology_key,
                 "published_version": heads[row.ontology_id].published_version,
+                "mapping_validity": validity[row.id],
             }
         )
         for row in rows
