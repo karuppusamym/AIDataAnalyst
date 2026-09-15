@@ -818,6 +818,42 @@ async def _build_knowledge_graph(
                             edge_type=edge_type,
                         )
                     )
+
+    # R11-FP09: an ONTOLOGY_CONCEPT candidate's valid mappings become CONCEPT -> TABLE edges,
+    # so a question in the business's words reaches the table the approved ontology says
+    # carries that meaning, even when no word of it names the table.
+    concept_hits = [hit for hit in authorized if hit.object_type == "ONTOLOGY_CONCEPT"]
+    concept_table_ids = {
+        UUID(str(raw))
+        for hit in concept_hits
+        for raw in hit.metadata.get("mapped_table_ids") or []
+    }
+    if concept_table_ids:
+        concept_tables = {
+            table.id: table
+            for table in (
+                await session.scalars(
+                    select(MetadataTable).where(
+                        MetadataTable.id.in_(concept_table_ids),
+                        MetadataTable.datasource_id == datasource.id,
+                        MetadataTable.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        }
+        for hit in concept_hits:
+            concept_node_id = f"{hit.object_type}:{hit.object_id}"
+            for raw in hit.metadata.get("mapped_table_ids") or []:
+                concept_table = concept_tables.get(UUID(str(raw)))
+                if concept_table is None:
+                    continue
+                kg.add_edge(
+                    GraphEdge(
+                        source_id=concept_node_id,
+                        target_id=ensure_table_node(concept_table.id, concept_table.name),
+                        edge_type="ONTOLOGY_CONCEPT_MAPS_TABLE",
+                    )
+                )
     return kg
 
 
@@ -956,8 +992,9 @@ def _candidate_table_ids(pool: CandidatePool) -> tuple[dict[str, set[UUID]], set
                 raw = candidate.metadata.get(field_name)
                 if raw:
                     table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
-            # R11-FP11: a routine stands on the tables its reviewed lineage reads and writes.
-            for field_name in ("reads_table_ids", "writes_table_ids"):
+            # R11-FP11: a routine stands on the tables its reviewed lineage reads and writes;
+            # R11-FP09: an ontology concept on the tables its approved mappings name.
+            for field_name in ("reads_table_ids", "writes_table_ids", "mapped_table_ids"):
                 for raw in candidate.metadata.get(field_name) or []:
                     table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
             if candidate.object_type == "GOVERNED_TOOL":

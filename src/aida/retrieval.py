@@ -11,8 +11,9 @@ Architecture
 Stage 1: Candidate fetch
   Pull up to agent_retrieval_scan_limit rows from each object type (tables,
   columns, tools, business annotations, dbt resources, published semantic
-  metrics, glossary terms bound to a semantic object, and -- R11-FP11 --
-  stored procedures and functions) using the existing
+  metrics, glossary terms bound to a semantic object, -- R11-FP11 --
+  stored procedures and functions, and -- R11-FP09 -- concepts of each
+  ontology's published version with a valid mapping here) using the existing
   org/datasource scope filters. SM-2: an ACTIVE glossary-term<->semantic-object
   binding folds the term's definition/synonyms into the metric's candidate
   text (and the metric's identity into the term's hit metadata), so the
@@ -68,7 +69,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import structlog
 from sqlalchemy import func, or_, select, true
@@ -98,6 +99,8 @@ from aida.models import (
     SemanticMetricVersion,
     TermSemanticBinding,
 )
+from aida.ontology_kinds import table_mapping_kind
+from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.quality_coupling import resolve_table_ids
 from aida.retrieval_metrics import RETRIEVAL_SECONDS
@@ -253,6 +256,156 @@ async def _latest_dbt_artifact_import_ids(
 # ---------------------------------------------------------------------------
 # Public retrieval function
 # ---------------------------------------------------------------------------
+
+
+def _concept_mappings(definition: dict[str, Any], concept_key: str) -> list[tuple[str, UUID]]:
+    mappings: list[tuple[str, UUID]] = []
+    for mapping in definition.get("mappings") or []:
+        if not isinstance(mapping, dict) or mapping.get("concept") != concept_key:
+            continue
+        try:
+            subject_id = UUID(str(mapping.get("subject_id")))
+        except ValueError:
+            continue
+        mappings.append((str(mapping.get("subject_type")), subject_id))
+    return mappings
+
+
+async def _ontology_concept_hits(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    question: str,
+    query_tokens: list[str],
+    scan_limit: int,
+) -> list[HybridRetrievalHit]:
+    """R11-FP09: concepts of each ontology's *published* version that match the question.
+
+    A concept is found by its name, aliases and description. It stands on the catalog objects
+    it is mapped to that are still valid *in this datasource*: ACTIVE, and of the kind the
+    mapping names (`ontology_kinds.table_mapping_kind`, the rule the ontology routes enforce on
+    every write). A deprecated concept, a deprecated ontology, a draft, and a concept with
+    nothing valid here are not offered. No boost -- a concept is meaning, never an answer. The
+    approved version's id rides in the hit, so the grounding receipt built from the hits records
+    which ontology meaning an answer used.
+    """
+    rows = (
+        await session.execute(
+            select(OntologyVersion, OntologyHead.ontology_key)
+            .join(OntologyHead, OntologyHead.id == OntologyVersion.ontology_id)
+            .where(
+                OntologyHead.organization_id == datasource.organization_id,
+                OntologyVersion.organization_id == datasource.organization_id,
+                OntologyVersion.version == OntologyHead.published_version,
+                OntologyVersion.status == "APPROVED",
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+    matches: list[tuple[OntologyVersion, str, str, str, float]] = []
+    for version, ontology_key in rows:
+        definition = version.definition or {}
+        if definition.get("lifecycle") == "DEPRECATED":
+            continue
+        for concept in definition.get("concepts") or []:
+            if not isinstance(concept, dict) or concept.get("deprecated"):
+                continue
+            aliases = concept.get("aliases") or []
+            parts = (concept.get("name"), *aliases, concept.get("description"))
+            candidate_text = " ".join(str(part) for part in parts if part)
+            bm25 = _bm25_score(query_tokens, candidate_text)
+            score = round(min(1.0, bm25 + _exact_phrase_bonus(question, candidate_text)), 4)
+            if score > 0:
+                key = str(concept.get("key"))
+                matches.append((version, ontology_key, key, str(concept.get("name") or key), score))
+    if not matches:
+        return []
+
+    wanted: dict[str, set[UUID]] = {}
+    for version, _, concept_key, _, _ in matches:
+        for subject_type, subject_id in _concept_mappings(version.definition, concept_key):
+            wanted.setdefault(subject_type, set()).add(subject_id)
+    in_datasource = (
+        MetadataTable.datasource_id == datasource.id,
+        MetadataTable.organization_id == datasource.organization_id,
+        MetadataTable.status == "ACTIVE",
+    )
+    table_kinds: dict[UUID, str] = {}
+    table_ids = wanted.get("TABLE", set()) | wanted.get("VIEW", set())
+    if table_ids:
+        table_rows = await session.execute(
+            select(MetadataTable.id, MetadataTable.object_type).where(
+                MetadataTable.id.in_(table_ids), *in_datasource
+            )
+        )
+        table_kinds = {
+            table_id: table_mapping_kind(object_type) for table_id, object_type in table_rows.all()
+        }
+    column_tables: dict[UUID, UUID] = {}
+    if wanted.get("COLUMN"):
+        column_rows = await session.execute(
+            select(MetadataColumn.id, MetadataColumn.table_id)
+            .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+            .where(
+                MetadataColumn.id.in_(wanted["COLUMN"]),
+                MetadataColumn.status == "ACTIVE",
+                *in_datasource,
+            )
+        )
+        column_tables = {column_id: table_id for column_id, table_id in column_rows.all()}
+    routine_ids: set[UUID] = set()
+    if wanted.get("ROUTINE"):
+        routine_ids = set(
+            (
+                await session.scalars(
+                    select(MetadataRoutine.id).where(
+                        MetadataRoutine.id.in_(wanted["ROUTINE"]),
+                        MetadataRoutine.datasource_id == datasource.id,
+                        MetadataRoutine.organization_id == datasource.organization_id,
+                        MetadataRoutine.status == "ACTIVE",
+                    )
+                )
+            ).all()
+        )
+
+    concept_hits: list[HybridRetrievalHit] = []
+    for version, ontology_key, concept_key, concept_name, score in matches:
+        tables: set[str] = set()
+        columns: set[str] = set()
+        routines: set[str] = set()
+        for subject_type, subject_id in _concept_mappings(version.definition, concept_key):
+            if subject_type in ("TABLE", "VIEW"):
+                if table_kinds.get(subject_id) == subject_type:
+                    tables.add(str(subject_id))
+            elif subject_type == "COLUMN":
+                parent = column_tables.get(subject_id)
+                if parent is not None:
+                    columns.add(str(subject_id))
+                    tables.add(str(parent))
+            elif subject_type == "ROUTINE" and subject_id in routine_ids:
+                routines.add(str(subject_id))
+        if not tables and not routines:
+            continue
+        concept_hits.append(
+            HybridRetrievalHit(
+                object_type="ONTOLOGY_CONCEPT",
+                # A concept has no row of its own: its id is fixed by (approved version, key).
+                object_id=str(uuid5(version.id, concept_key)),
+                display_name=concept_name,
+                score=score,
+                reason_codes=["BM25_ONTOLOGY_CONCEPT", "ONTOLOGY_VERSION_APPROVED"],
+                metadata={
+                    "ontology_key": ontology_key,
+                    "ontology_version_id": str(version.id),
+                    "ontology_version": version.version,
+                    "concept_key": concept_key,
+                    "mapped_table_ids": sorted(tables),
+                    "mapped_column_ids": sorted(columns),
+                    "mapped_routine_ids": sorted(routines),
+                },
+            )
+        )
+    return concept_hits
 
 
 async def hybrid_retrieve(
@@ -784,6 +937,19 @@ async def hybrid_retrieve(
                 },
             )
         )
+
+    # 9. Ontology concepts (R11-FP09) -- see `_ontology_concept_hits`.
+    for concept_hit in await _ontology_concept_hits(
+        session,
+        datasource=datasource,
+        question=question,
+        query_tokens=query_tokens,
+        scan_limit=scan_limit,
+    ):
+        hit_id = f"{concept_hit.object_type}:{concept_hit.object_id}"
+        if hit_id not in seen_ids:
+            seen_ids.add(hit_id)
+            hits.append(concept_hit)
 
     # ------------------------------------------------------------------
     # Sort by score desc, cap at retrieval_limit

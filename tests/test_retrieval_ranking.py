@@ -72,12 +72,14 @@ class _ScalarResult:
 
 class _RetrievalSession:
     """Answers hybrid_retrieve's sequential fetches in call order: three
-    `scalars()` calls (tables, columns, dbt project ids) and five `execute()`
+    `scalars()` calls (tables, columns, dbt project ids) and six `execute()`
     calls (governed tool versions, business annotations, SM-2 semantic-metric
-    term bindings, SM-2 glossary-term semantic bindings, R11-FP11 routines).
-    Leaving dbt_project_ids empty (the default) short-circuits the dbt-resource
-    branch, which otherwise issues two further fetches; leaving routine_rows
-    empty skips the routine parameter and lineage fetches the same way.
+    term bindings, SM-2 glossary-term semantic bindings, R11-FP11 routines,
+    R11-FP09 published ontology versions). Leaving dbt_project_ids empty (the
+    default) short-circuits the dbt-resource branch, which otherwise issues two
+    further fetches; leaving routine_rows empty skips the routine parameter and
+    lineage fetches the same way, and ontology_rows empty skips the mapping
+    target fetches.
     """
 
     def __init__(
@@ -91,6 +93,7 @@ class _RetrievalSession:
         metric_term_rows: list[tuple[object, ...]] | None = None,
         term_binding_rows: list[tuple[object, ...]] | None = None,
         routine_rows: list[tuple[object, ...]] | None = None,
+        ontology_rows: list[tuple[object, ...]] | None = None,
     ) -> None:
         self._scalars_queue: list[list[object]] = [
             table_rows or [],
@@ -103,6 +106,7 @@ class _RetrievalSession:
             metric_term_rows or [],
             term_binding_rows or [],
             routine_rows or [],
+            ontology_rows or [],
         ]
 
     async def scalars(self, _statement: object) -> _ScalarResult:

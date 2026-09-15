@@ -16,11 +16,11 @@ from aida.authorization_gate import gate_read
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
-from aida.discovery_selection import table_kind
 from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit
 from aida.governance_decision_contracts import TargetEffect
 from aida.models import GovernanceReview, MetadataColumn, MetadataTable
+from aida.ontology_kinds import table_mapping_kind
 from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.schemas import ApiModel
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -100,7 +100,6 @@ class OntologyCreate(ApiModel):
 #: R11-FP09: what a mapping's catalog target is now. Only VALID may be created, submitted or
 #: approved; a version already written keeps reading whatever its targets have since become.
 MappingValidity = Literal["VALID", "TARGET_MISSING", "TARGET_DEPRECATED", "KIND_MISMATCH"]
-_VIEW_KINDS = frozenset({"VIEW", "MATERIALIZED_VIEW"})
 
 
 class OntologyMappingValidityRead(ApiModel):
@@ -153,7 +152,7 @@ def _mapping_status(
     table = tables.get(mapping.subject_id)
     if table is None or table.organization_id != organization_id:
         return "TARGET_MISSING", None, None
-    if (table_kind(table.object_type) in _VIEW_KINDS) != (mapping.subject_type == "VIEW"):
+    if table_mapping_kind(table.object_type) != mapping.subject_type:
         return "KIND_MISMATCH", table.datasource_id, None
     if table.status != "ACTIVE":
         return "TARGET_DEPRECATED", table.datasource_id, table.superseded_by_table_id
