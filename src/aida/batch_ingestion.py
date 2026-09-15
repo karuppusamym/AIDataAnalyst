@@ -209,6 +209,7 @@ async def _process_chunk(
             discovery,
             scope=envelope_scope,
             deprecate_missing=False,
+            analysis_run_id=run.id,
         )
         if record_changes and prior_status != "PROCESSED":
             chunk.change_counts = {
@@ -247,14 +248,16 @@ async def _complete_batch(
         changed = sum(int(chunk.change_counts.get("changed_objects", 0)) for chunk in chunks)
         deprecated = 0
         if batch.snapshot_type == "FULL":
-            deprecation_result = await deprecate_missing_snapshot(session, datasource, scope)
+            deprecation_result = await deprecate_missing_snapshot(
+                session, datasource, scope, analysis_run_id=run.id
+            )
             deprecated = deprecation_result.total
             # Gated on the declared version as well as on FULL: a 1.0 batch is
             # authoritative for the 1.0 inventory only and says nothing about the
             # 1.1 axes, so reconciling its silence would retire them.
             if batch.envelope_version != "1.0":
                 deprecated += await deprecate_missing_envelope_extensions(
-                    session, datasource, envelope_scope
+                    session, datasource, envelope_scope, analysis_run_id=run.id
                 )
             # CT-4: same-run tombstone-plus-create pairing, exactly as in the
             # unchunked pull path (`persist_discovery_snapshot`) -- `scope` here

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # `ProcedureToolGenerationRecord`, ADR-0029's `QualityRuleProposal`, same pattern
 # envelope_models already used) so autogenerate/create_all see them.
 from aida import (  # noqa: F401
+    change_signal_models,
     envelope_models,
     graph_store,
     models,

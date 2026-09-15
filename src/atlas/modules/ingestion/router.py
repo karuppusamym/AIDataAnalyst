@@ -310,6 +310,7 @@ async def ingest_metadata_envelope(
         datasource,
         discovery,
         deprecate_missing=body.snapshot_type == "FULL" and body.envelope_version != "1.0",
+        analysis_run_id=run.id,
     )
     run.status = "COMPLETED"
     ingestion.status = "COMPLETED"

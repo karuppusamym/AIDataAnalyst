@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import gate_read
+from aida.change_signals import SIGNAL_MEANING_PUBLISHED, ChangeSignal, record_change_signals
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -558,6 +559,14 @@ async def decide_ontology(
             )
         version.status = "APPROVED"
         version.approved_by = context.principal_id
+        # R11-FP15: a meaning signal -- context built on the previous version may now be stale.
+        record_change_signals(
+            session,
+            organization_id=version.organization_id,
+            datasource_id=None,
+            analysis_run_id=None,
+            signals=[ChangeSignal("ONTOLOGY", version.ontology_id, SIGNAL_MEANING_PUBLISHED)],
+        )
     else:
         version.status = "REJECTED"
     return version

@@ -24,6 +24,14 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.change_signals import (
+    SIGNAL_DEPRECATED,
+    SIGNAL_PERMISSION_CHANGED,
+    ChangeSignal,
+    CodeState,
+    code_change_signal,
+    record_change_signals,
+)
 from aida.connectors.base import (
     DiscoveredCatalog,
     DiscoveredColumn,
@@ -447,6 +455,8 @@ class _ExtensionTracker:
     created: int = 0
     changed: int = 0
     deprecated: int = 0
+    # R11-FP15: which objects changed, not just how many.
+    signals: list[ChangeSignal] = field(default_factory=list)
 
     def observe(self, existing: Any | None, new_fingerprint: str) -> None:
         if existing is None:
@@ -574,6 +584,16 @@ async def _upsert_view_definition(
     )
     row_fingerprint = _fingerprint(asdict(discovered))
     tracker.observe(existing, row_fingerprint)
+    before = (
+        CodeState(
+            existing.status,
+            existing.availability,
+            existing.definition_fingerprint,
+            existing.definition_sql_redacted,
+        )
+        if existing is not None
+        else None
+    )
     availability, default_reason = _availability(discovered.definition_sql)
     # The CHECK constraint ties availability to the *stored* column. Redaction almost
     # always yields text -- a lexical scrub needs no parser -- so this only fires when
@@ -609,6 +629,19 @@ async def _upsert_view_definition(
     existing.availability = availability
     existing.unavailable_reason = reason
     existing.fingerprint = row_fingerprint
+    signal = code_change_signal(
+        "VIEW",
+        table.id,
+        before,
+        CodeState(
+            existing.status,
+            existing.availability,
+            existing.definition_fingerprint,
+            existing.definition_sql_redacted,
+        ),
+    )
+    if signal is not None:
+        tracker.signals.append(signal)
     return existing
 
 
@@ -629,6 +662,16 @@ async def _upsert_routine(
     )
     row_fingerprint = _fingerprint(asdict(discovered))
     tracker.observe(existing, row_fingerprint)
+    before = (
+        CodeState(
+            existing.status,
+            existing.availability,
+            existing.body_fingerprint,
+            existing.body_sql_redacted,
+        )
+        if existing is not None
+        else None
+    )
     availability, default_reason = _availability(discovered.body_sql)
     _prepared_body = redact_for_storage(discovered.body_sql, dialect=datasource.dialect)
     if _prepared_body is not None and _prepared_body.redacted is None:
@@ -668,6 +711,19 @@ async def _upsert_routine(
     existing.unavailable_reason = reason
     existing.attributes = dict(discovered.attributes)
     existing.fingerprint = row_fingerprint
+    signal = code_change_signal(
+        "ROUTINE",
+        existing.id,
+        before,
+        CodeState(
+            existing.status,
+            existing.availability,
+            existing.body_fingerprint,
+            existing.body_sql_redacted,
+        ),
+    )
+    if signal is not None:
+        tracker.signals.append(signal)
     return existing
 
 
@@ -722,6 +778,11 @@ async def _upsert_grant(
     )
     row_fingerprint = _fingerprint(asdict(discovered))
     tracker.observe(existing, row_fingerprint)
+    if existing is not None and (
+        existing.fingerprint != row_fingerprint or existing.status != "ACTIVE"
+    ):
+        # A grant that changed or came back after a revoke: who can read the object moved.
+        tracker.signals.append(ChangeSignal("GRANT", existing.id, SIGNAL_PERMISSION_CHANGED))
     if existing is None:
         existing = MetadataSourceGrant(
             organization_id=datasource.organization_id,
@@ -745,7 +806,11 @@ async def _upsert_grant(
 
 
 async def deprecate_missing_envelope_extensions(
-    session: AsyncSession, datasource: DataSource, scope: EnvelopeScope
+    session: AsyncSession,
+    datasource: DataSource,
+    scope: EnvelopeScope,
+    *,
+    analysis_run_id: UUID | None = None,
 ) -> int:
     """Soft-deprecate 1.1 rows absent from an authoritative full snapshot.
 
@@ -757,6 +822,7 @@ async def deprecate_missing_envelope_extensions(
     """
     now = datetime.now(UTC)
     deprecated = 0
+    signals: list[ChangeSignal] = []
     for model, observed in (
         (MetadataViewDefinition, scope.view_definition_ids),
         (MetadataRoutine, scope.routine_ids),
@@ -775,12 +841,44 @@ async def deprecate_missing_envelope_extensions(
         missing = existing - observed
         if not missing:
             continue
+        # R11-FP15: name what is about to retire, before the bulk update forgets it.
+        if model is MetadataViewDefinition:
+            retiring_views = await session.scalars(
+                select(MetadataViewDefinition.table_id).where(
+                    MetadataViewDefinition.id.in_(missing),
+                    MetadataViewDefinition.status == "ACTIVE",
+                )
+            )
+            signals.extend(
+                ChangeSignal("VIEW", table_id, SIGNAL_DEPRECATED) for table_id in retiring_views
+            )
+        elif model is MetadataRoutine or model is MetadataSourceGrant:
+            retiring = await session.scalars(
+                select(model.id).where(model.id.in_(missing), model.status == "ACTIVE")
+            )
+            if model is MetadataRoutine:
+                signals.extend(
+                    ChangeSignal("ROUTINE", routine_id, SIGNAL_DEPRECATED)
+                    for routine_id in retiring
+                )
+            else:
+                signals.extend(
+                    ChangeSignal("GRANT", grant_id, SIGNAL_PERMISSION_CHANGED)
+                    for grant_id in retiring
+                )
         result = await session.execute(
             update(model)
             .where(model.id.in_(missing), model.status == "ACTIVE")
             .values(status="DEPRECATED", deprecated_at=now, updated_at=now)
         )
         deprecated += cast(CursorResult[Any], result).rowcount
+    record_change_signals(
+        session,
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        analysis_run_id=analysis_run_id,
+        signals=signals,
+    )
     return deprecated
 
 
@@ -791,6 +889,7 @@ async def persist_envelope_extensions(
     *,
     scope: EnvelopeScope | None = None,
     deprecate_missing: bool = False,
+    analysis_run_id: UUID | None = None,
 ) -> dict[str, int]:
     """Persist the envelope-1.1 axes for an already-persisted 1.0 snapshot.
 
@@ -904,9 +1003,16 @@ async def persist_envelope_extensions(
                     working_scope.view_definition_ids.add(view.id)
                     counts["views"] += 1
 
+    record_change_signals(
+        session,
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        analysis_run_id=analysis_run_id,
+        signals=tracker.signals,
+    )
     if deprecate_missing:
         tracker.deprecated = await deprecate_missing_envelope_extensions(
-            session, datasource, working_scope
+            session, datasource, working_scope, analysis_run_id=analysis_run_id
         )
     return {
         **counts,

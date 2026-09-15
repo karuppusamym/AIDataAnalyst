@@ -27,6 +27,7 @@ from aida.audit_archive_s3 import S3ArchiveStorage
 from aida.audit_export_api import router as audit_export_router
 from aida.authorization_posture import assert_startup_posture
 from aida.bi_api import router as bi_router
+from aida.change_signals_api import router as change_signals_router
 from aida.column_description_api import router as column_description_router
 from aida.column_documentation_api import router as column_documentation_router
 from aida.compliance_api import router as compliance_router
@@ -466,6 +467,8 @@ app.include_router(quality_agent_router)
 app.include_router(tool_agent_router)
 # Governed ontology v1: typed definitions, decided in the governance queue.
 app.include_router(ontology_router)
+# R11-FP15: which source objects changed since they were last read.
+app.include_router(change_signals_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

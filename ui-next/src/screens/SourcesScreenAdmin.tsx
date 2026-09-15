@@ -111,11 +111,19 @@ export function receiptWords(receipt: unknown): string | null {
   const body = receipt as {
     stream?: { state?: string; batches?: number };
     facets?: { view_definitions?: ReceiptCode; routine_bodies?: ReceiptCode };
+    changes?: Record<string, number>;
   };
   const parts = [
     codeWords("view code", body.facets?.view_definitions),
     codeWords("routine code", body.facets?.routine_bodies),
   ].filter((part): part is string => part !== null);
+  // R11-FP15: what this run found changed, by kind of change.
+  const changes = Object.entries(body.changes ?? {}).filter(([, count]) => count > 0);
+  if (changes.length > 0) {
+    const total = changes.reduce((sum, [, count]) => sum + count, 0);
+    const detail = changes.map(([type, count]) => `${count} ${type.toLowerCase().replace(/_/g, " ")}`);
+    parts.push(`${total} change signal(s): ${detail.join(", ")}`);
+  }
   const state = body.stream?.state;
   if (state && state !== "COMPLETE") {
     parts.push(`stream ${state.toLowerCase().replace(/_/g, " ")} after ${body.stream?.batches ?? 0} batch(es)`);

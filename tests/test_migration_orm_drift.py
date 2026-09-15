@@ -70,6 +70,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
+    change_signal_models,
     envelope_models,
     graph_store,
     models,

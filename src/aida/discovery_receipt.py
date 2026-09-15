@@ -58,6 +58,8 @@ class DiscoveryReceipt:
     view_definitions: Counter[str] = field(default_factory=Counter)
     routine_bodies: Counter[str] = field(default_factory=Counter)
     reconciliation: dict[str, Any] | None = None
+    #: R11-FP15: change signals this run recorded, by signal type.
+    changes: dict[str, int] = field(default_factory=dict)
 
     def observe_batch(
         self, catalogs: Iterable[DiscoveredCatalog], excluded: Mapping[str, int]
@@ -88,6 +90,9 @@ class DiscoveryReceipt:
             "deprecated": deprecated,
             "retained_out_of_scope": retained_out_of_scope,
         }
+
+    def record_changes(self, counts: Mapping[str, int]) -> None:
+        self.changes = {signal_type: counts[signal_type] for signal_type in sorted(counts)}
 
     def as_json(self, state: str) -> dict[str, Any]:
         def support(flag: str) -> str:
@@ -127,4 +132,5 @@ class DiscoveryReceipt:
                 **{facet: {"support": support(facet)} for facet in _FLAGGED_FACETS},
             },
             "reconciliation": reconciliation,
+            "changes": dict(self.changes),
         }

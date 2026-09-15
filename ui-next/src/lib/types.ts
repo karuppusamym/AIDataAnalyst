@@ -1088,6 +1088,18 @@ export interface CertificationRevokeRequest {
   column_id?: string | null;
 }
 
+export interface ChangeSignalRead {
+  id: string;
+  analysis_run_id: string | null;
+  subject_kind: string;
+  subject_id: string;
+  signal_type: string;
+  change_class: string | null;
+  status: string;
+  detected_at: string;
+  processed_at: string | null;
+}
+
 export interface ClassificationDecisionRead {
   classification: string;
   decision: string;

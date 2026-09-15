@@ -501,5 +501,8 @@ describe("run receipt (R11-FP02)", () => {
         facets: { view_definitions: { support: "SUPPORTED", captured: 4, withheld: 0, truncated: 0 } },
       }),
     ).toBe("view code: 4 captured");
+    expect(
+      receiptWords({ stream: { state: "COMPLETE", batches: 1 }, changes: { DEFINITION_CHANGED: 2, DEPRECATED: 1 } }),
+    ).toBe("3 change signal(s): 2 definition changed, 1 deprecated");
   });
 });

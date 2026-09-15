@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **477**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 424, SDK 1
+- Surfaces covered: **478**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 425, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -156,6 +156,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/data-products/{product_id}/contracts` | REST | `aida.product_marketplace_api.list_data_contracts` | Analyst, Auditor, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/business-annotations` | REST | `aida.semantic_intelligence_api.list_business_annotations` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/canonical-table/resolve` | REST | `aida.intelligence_api.resolve_canonical_table` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/change-signals` | REST | `aida.change_signals_api.list_change_signals` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/composite-key-candidates` | REST | `aida.composite_key_api.list_composite_key_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/connector-certifications` | REST | `atlas.modules.ingestion.router.list_connector_certifications` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/cross-source-object-resolution-candidates` | REST | `aida.intelligence_api.list_cross_source_object_resolution_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

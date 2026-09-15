@@ -21,6 +21,14 @@ from aida.analysis_tasks import (
     TASK_TYPE_PROFILE_DATASOURCE,
     TASK_TYPE_PROFILE_TABLE,
 )
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signals import (
+    SIGNAL_DEPRECATED,
+    SIGNAL_REACTIVATED,
+    SIGNAL_STRUCTURE_CHANGED,
+    ChangeSignal,
+    record_change_signals,
+)
 from aida.classification_feed import (
     CLASSIFICATION_SOURCE_EXTERNAL,
     CLASSIFICATION_SOURCE_RULE,
@@ -105,6 +113,11 @@ class ChangeTracker:
     created: int = 0
     changed: int = 0
     deprecated: int = 0
+    # R11-FP15: which tables changed, not just how many objects. A table created in this call
+    # is not a change to anything that could depend on it, so its columns signal nothing.
+    new_table_ids: set[UUID] = field(default_factory=set)
+    structure_changed_table_ids: set[UUID] = field(default_factory=set)
+    signals: list[ChangeSignal] = field(default_factory=list)
 
     def observe(self, existing: object | None, old_fingerprint: str | None, new: str) -> None:
         if existing is None:
@@ -301,9 +314,12 @@ async def _get_or_create_table(
         )
         session.add(table)
         await session.flush()
+        tracker.new_table_ids.add(table.id)
         if created_table_ids is not None:
             created_table_ids.add(table.id)
     else:
+        if table.status != "ACTIVE":
+            tracker.signals.append(ChangeSignal("TABLE", table.id, SIGNAL_REACTIVATED))
         table.status = "ACTIVE"
         table.deprecated_at = None
         table.object_type = discovered.object_type
@@ -327,6 +343,15 @@ async def _get_or_create_column(
     )
     column_fingerprint = fingerprint(asdict(discovered))
     tracker.observe(column, column.fingerprint if column else None, column_fingerprint)
+    # R11-FP15: a column added to, returned to or retyped in an existing table changes the
+    # table's shape. A description edit does not, so only type and nullability are compared.
+    if table.id not in tracker.new_table_ids and (
+        column is None
+        or column.status != "ACTIVE"
+        or column.physical_type != discovered.physical_type
+        or column.nullable != discovered.nullable
+    ):
+        tracker.structure_changed_table_ids.add(table.id)
     rule_result = classify_column_name_with_evidence(discovered.name)
     if column is None:
         column = MetadataColumn(
@@ -508,6 +533,7 @@ async def _deprecate_missing(
     seen_constraint_ids: set[UUID],
     seen_index_ids: set[UUID],
     seen_partition_ids: set[UUID],
+    analysis_run_id: UUID | None = None,
 ) -> DeprecationResult:
     now = datetime.now(UTC)
     catalog_ids = set(
@@ -579,6 +605,37 @@ async def _deprecate_missing(
         if missing.table_ids
         else set()
     )
+    # R11-FP15: the same "about to flip" read for columns -- a table that stays but loses a
+    # column changed shape. Recorded in this transaction, before the updates below.
+    reshaped_table_ids: set[UUID] = (
+        set(
+            await session.scalars(
+                select(MetadataColumn.table_id).where(
+                    MetadataColumn.id.in_(missing.column_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+            )
+        )
+        - deprecated_table_ids
+        if missing.column_ids
+        else set()
+    )
+    record_change_signals(
+        session,
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        analysis_run_id=analysis_run_id,
+        signals=[
+            *(
+                ChangeSignal("TABLE", table_id, SIGNAL_DEPRECATED)
+                for table_id in sorted(deprecated_table_ids, key=str)
+            ),
+            *(
+                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED)
+                for table_id in sorted(reshaped_table_ids, key=str)
+            ),
+        ],
+    )
     statements = [
         update(model)
         .where(model.id.in_(object_ids), model.status == "ACTIVE")
@@ -605,6 +662,8 @@ async def deprecate_missing_snapshot(
     session: AsyncSession,
     datasource: DataSource,
     scope: SnapshotScope,
+    *,
+    analysis_run_id: UUID | None = None,
 ) -> DeprecationResult:
     return await _deprecate_missing(
         session,
@@ -616,6 +675,7 @@ async def deprecate_missing_snapshot(
         seen_constraint_ids=scope.constraint_ids,
         seen_index_ids=scope.index_ids,
         seen_partition_ids=scope.partition_ids,
+        analysis_run_id=analysis_run_id,
     )
 
 
@@ -992,8 +1052,23 @@ async def persist_discovery_snapshot(
                     snapshot_scope.constraint_ids.add(constraint.id)
                     counts["constraints"] += 1
 
+    record_change_signals(
+        session,
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        analysis_run_id=run.id,
+        signals=[
+            *tracker.signals,
+            *(
+                ChangeSignal("TABLE", table_id, SIGNAL_STRUCTURE_CHANGED)
+                for table_id in sorted(tracker.structure_changed_table_ids, key=str)
+            ),
+        ],
+    )
     if deprecate_missing:
-        deprecation_result = await deprecate_missing_snapshot(session, datasource, snapshot_scope)
+        deprecation_result = await deprecate_missing_snapshot(
+            session, datasource, snapshot_scope, analysis_run_id=run.id
+        )
         tracker.deprecated = deprecation_result.total
         # CT-4: same-run tombstone-plus-create pairing. Both sides are only known
         # for certain once deprecation for *this* run has actually happened --
@@ -1291,6 +1366,7 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                     catalogs,
                     scope=envelope_scope,
                     deprecate_missing=False,
+                    analysis_run_id=run.id,
                 )
                 created_objects_total += (
                     counts["created_objects"] + extension_counts["created_objects"]
@@ -1340,11 +1416,11 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                     reconcile_snapshot = union_snapshot_scopes(snapshot_scope, kept_snapshot)
                     reconcile_envelope = union_envelope_scopes(envelope_scope, kept_envelope)
                 deprecation_result = await deprecate_missing_snapshot(
-                    session, datasource, reconcile_snapshot
+                    session, datasource, reconcile_snapshot, analysis_run_id=run.id
                 )
                 deprecated_objects_total += deprecation_result.total
                 deprecated_objects_total += await deprecate_missing_envelope_extensions(
-                    session, datasource, reconcile_envelope
+                    session, datasource, reconcile_envelope, analysis_run_id=run.id
                 )
                 # CT-4: same-run tombstone-plus-create pairing, exactly as the
                 # unchunked path used before this change -- `snapshot_scope` here
@@ -1363,6 +1439,15 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                     deprecated=deprecated_objects_total,
                     retained_out_of_scope=retained_out_of_scope,
                 )
+            # R11-FP15: what kinds of change this run recorded, by count.
+            change_rows = await session.execute(
+                select(MetadataChangeSignal.signal_type, func.count())
+                .where(MetadataChangeSignal.analysis_run_id == run.id)
+                .group_by(MetadataChangeSignal.signal_type)
+            )
+            receipt.record_changes(
+                {signal_type: int(count) for signal_type, count in change_rows.all()}
+            )
             run.discovery_receipt = receipt.as_json(STREAM_COMPLETE)
             object_counts = {**snapshot_scope.object_counts(), **envelope_scope.object_counts()}
             run.discovered_catalogs = object_counts["catalogs"]
