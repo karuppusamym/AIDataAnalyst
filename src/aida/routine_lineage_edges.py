@@ -162,6 +162,7 @@ def routine_edge_row(
         control_flow_context=edge.control_flow_context,
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
+        via_routine=edge.via_routine,
         sql_hash=sql_hash,
         review_status=review_status,
         created_by=created_by,

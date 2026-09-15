@@ -2059,6 +2059,7 @@ export interface DeepProcedureLineageEdgeRead {
   control_flow_context?: string | null;
   unparsed_reason?: string | null;
   via_temp_table?: string | null;
+  via_routine?: string | null;
   review_status?: string | null;
 }
 

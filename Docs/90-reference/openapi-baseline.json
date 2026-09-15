@@ -12402,6 +12402,17 @@
             ],
             "title": "Unparsed Reason"
           },
+          "via_routine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Via Routine"
+          },
           "via_temp_table": {
             "anyOf": [
               {

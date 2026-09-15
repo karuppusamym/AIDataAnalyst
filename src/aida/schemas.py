@@ -2629,6 +2629,8 @@ class DeepProcedureLineageEdgeRead(ApiModel):
     control_flow_context: str | None = None
     unparsed_reason: str | None = None
     via_temp_table: str | None = None
+    #: R11-FP07: the called routine this edge was read from, if any.
+    via_routine: str | None = None
     #: The stored row's ADR-0026 review state, on a listed edge. A parse
     #: response reports what the parser found, and leaves it unset.
     review_status: str | None = None

@@ -70,6 +70,7 @@ from aida.procedure_lineage import (
     parse_procedure_lineage,
 )
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
     RoutineEdgeKey,
     persistable_table,
@@ -539,8 +540,12 @@ async def _propose_procedure_lineage(
             proposal_ref_id=routine_id,
         )
 
-    result = parse_procedure_lineage(
-        require_eligible_routine_body(routine), dialect=datasource.dialect
+    # R11-FP07: a call to a routine captured here is read through, not left as a gap.
+    result = await descend_routine_calls(
+        session,
+        datasource,
+        routine,
+        parse_procedure_lineage(require_eligible_routine_body(routine), dialect=datasource.dialect),
     )
     if any(error.startswith("unsupported dialect") for error in result.errors):
         return await decline(SKIP_UNSUPPORTED_DIALECT)

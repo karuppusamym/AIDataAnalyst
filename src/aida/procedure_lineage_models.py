@@ -129,6 +129,9 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
     # propagation): the intermediate name this source->target link was
     # resolved *through*. NULL for every direct, single-statement edge.
     via_temp_table: Mapped[str | None] = mapped_column(String(500))
+    # R11-FP07: the called routine an edge was read from (`aida.routine_call_descent`);
+    # NULL for an edge from the routine's own statements.
+    via_routine: Mapped[str | None] = mapped_column(String(500))
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # ADR-0026's review lifecycle: the same six columns the P1-05 edge tables
     # carry, added on 2026-09-11 (migration d81f5a2c9e47) so an edge here can

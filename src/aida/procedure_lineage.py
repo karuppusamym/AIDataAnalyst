@@ -180,6 +180,9 @@ class ProcedureLineageEdgeRecord:
     # *through*, so a consumer can always tell a direct hop from a
     # multi-statement derivation rather than the two looking identical.
     via_temp_table: str | None = None
+    # R11-FP07: set only on an edge read from a routine this one calls -- that callee's
+    # qualified name (`aida.routine_call_descent`).
+    via_routine: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -31,6 +31,7 @@ from aida.procedure_capability_matrix import build_capability_matrix
 from aida.procedure_lineage import ProcedureLineageEdgeRecord, parse_procedure_lineage
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.resource_scope import load_datasource_in_scope
+from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
     RoutineNotEligibleError,
     persist_routine_edges,
@@ -83,6 +84,7 @@ def _edge_read(edge: ProcedureLineageEdgeRecord) -> DeepProcedureLineageEdgeRead
         control_flow_context=edge.control_flow_context,
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
+        via_routine=edge.via_routine,
     )
 
 
@@ -109,7 +111,10 @@ async def parse_deep_procedure_lineage_endpoint(
     except RoutineNotEligibleError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    result = parse_procedure_lineage(body, dialect=datasource.dialect)
+    # R11-FP07: calls to routines captured here are read through.
+    result = await descend_routine_calls(
+        session, datasource, routine, parse_procedure_lineage(body, dialect=datasource.dialect)
+    )
     settings = get_settings()
     persisted = await persist_routine_edges(
         session,
