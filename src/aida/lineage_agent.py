@@ -75,6 +75,7 @@ from aida.routine_lineage_edges import (
 )
 from aida.security import SecurityContext
 from aida.sql_lineage_parser import parse_view_lineage
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 from aida.task_agent import (
     ACTION_PROPOSED,
     ACTION_WOULD_PROPOSE,
@@ -435,7 +436,7 @@ async def _procedure_lineage(run: TaskAgentRun) -> None:
         # to each routine before its body is read.
         MetadataRoutine.status == "ACTIVE",
         MetadataRoutine.availability == AVAILABLE,
-        MetadataRoutine.redaction_status == "PARSED",
+        MetadataRoutine.redaction_status.in_(sorted(VALUE_FREE_REDACTION_STATUSES)),
         MetadataRoutine.screening_status == CLEAN,
         ~already_parsed,
         ~already_examined,

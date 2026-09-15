@@ -29,12 +29,14 @@ from aida.lineage_table_resolution import resolve_lineage_table_ids
 from aida.models import DataSource
 from aida.parsed_lineage_review_service import resolve_review_status_for_new_edge
 from aida.procedure_lineage import (
+    PROCEDURE_LOCAL_TARGET,
     UNPARSED_TRANSFORMATION_TYPE,
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
 )
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 #: The table's natural key within one routine: statement ordinal, source,
 #: target, transformation, and the temp table a transitive edge runs through.
@@ -62,9 +64,13 @@ def require_eligible_routine_body(routine: MetadataRoutine | None) -> str:
         raise RoutineNotEligibleError(
             f"routine body is UNAVAILABLE ({routine.unavailable_reason or 'no reason recorded'})"
         )
-    if routine.redaction_status != "PARSED":
+    # `LEXICAL` text is as value-free as `PARSED` text; it is the tier that exists so
+    # procedure bodies sqlglot cannot read as one statement -- every PL/pgSQL routine,
+    # every Snowflake script -- stay parseable for lineage. Only `UNPARSED` stores nothing.
+    if routine.redaction_status not in VALUE_FREE_REDACTION_STATUSES:
         raise RoutineNotEligibleError(
-            f"routine body redaction status is {routine.redaction_status}, not PARSED"
+            f"routine body redaction status is {routine.redaction_status}, "
+            "not PARSED or LEXICAL"
         )
     if not is_eligible_for_model_context(routine.screening_status):
         raise RoutineNotEligibleError(
@@ -78,8 +84,8 @@ def require_eligible_routine_body(routine: MetadataRoutine | None) -> str:
 
 def persistable_table(name: str, resolved: bool) -> str | None:
     """`name`, if it can be a catalog table: resolved, and not the parser's
-    placeholder for a statement's result set."""
-    if not resolved or name == PROCEDURE_RESULT_TARGET:
+    placeholder for a statement's result set or for routine-local state."""
+    if not resolved or name in (PROCEDURE_RESULT_TARGET, PROCEDURE_LOCAL_TARGET):
         return None
     return name
 

@@ -119,6 +119,48 @@
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._NO_LINEAGE_KEYWORDS_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
       "view_parser_status": "N/A"
+    },
+    {
+      "construct": "EXCEPTION WHEN ... THEN handler (PL/SQL, PL/pgSQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._EXCEPTION_WHEN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "EXECUTE <expression> (PL/pgSQL dynamic SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLPGSQL_EXECUTE_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "RETURN QUERY <query> (PL/pgSQL result set)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLPGSQL_RETURN_QUERY_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "PERFORM <query> (PL/pgSQL; PERFORM fn(...) is a nested-call gap)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLPGSQL_PERFORM_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "variable := <query> / SELECT ... INTO variable (PL/pgSQL local state)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLPGSQL_ASSIGNMENT_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PG_TEMP_ON_COMMIT_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._FOR_IN_QUERY_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
     }
   ],
   "dialects": [
@@ -128,7 +170,7 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-02T15:48:45.619696+00:00",
+  "generated_at": "2026-09-15T04:33:19.753038+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",

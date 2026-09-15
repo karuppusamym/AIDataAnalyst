@@ -89,7 +89,22 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     "EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL)": "_DYNAMIC_SQL_RE",
     "EXEC/CALL <procedure_name> (nested procedure call)": "_NESTED_CALL_RE",
     "DECLARE/SET/OPEN/FETCH/CLOSE/RAISERROR/... (no table lineage)": "_NO_LINEAGE_KEYWORDS_RE",
+    "EXCEPTION WHEN ... THEN handler (PL/SQL, PL/pgSQL)": "_EXCEPTION_WHEN_RE",
+    "EXECUTE <expression> (PL/pgSQL dynamic SQL)": "_PLPGSQL_EXECUTE_RE",
+    "RETURN QUERY <query> (PL/pgSQL result set)": "_PLPGSQL_RETURN_QUERY_RE",
+    "PERFORM <query> (PL/pgSQL; PERFORM fn(...) is a nested-call gap)": "_PLPGSQL_PERFORM_RE",
+    "variable := <query> / SELECT ... INTO variable (PL/pgSQL local state)": (
+        "_PLPGSQL_ASSIGNMENT_RE"
+    ),
+    "CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL)": "_PG_TEMP_ON_COMMIT_RE",
+    "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query)": "_FOR_IN_QUERY_LOOP_RE",
 }
+
+# Regex-recognised constructs that end in an explicit UNPARSED marker rather than
+# extracted lineage.
+_EXPLICIT_UNPARSED_REGEXES: Final[frozenset[str]] = frozenset(
+    {"_DYNAMIC_SQL_RE", "_NESTED_CALL_RE", "_PLPGSQL_EXECUTE_RE"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +253,7 @@ def build_capability_matrix() -> CapabilityMatrix:
 
     for construct, regex_name in _CONSTRUCT_REGEX_NAMES.items():
         status = (
-            "EXPLICIT_UNPARSED" if regex_name in ("_DYNAMIC_SQL_RE", "_NESTED_CALL_RE")
+            "EXPLICIT_UNPARSED" if regex_name in _EXPLICIT_UNPARSED_REGEXES
             else "RECOGNISED_NO_LINEAGE" if regex_name == "_NO_LINEAGE_KEYWORDS_RE"
             else "SUPPORTED"
         )

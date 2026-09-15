@@ -128,6 +128,7 @@ from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_
 from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 from aida.sql_validation_api import SQL_VALIDATION_ROLES
 from aida.tool_usage import get_tool_usage_counts
 from aida.unified_lineage_api import (
@@ -1248,9 +1249,10 @@ async def _routine_transformation_detail(
     It is what a routine-backed `PROCEDURE_DEFINITION` edge names in
     `evidence.transformation_reference` (`unified_lineage_builder`), so the
     edge and this read describe the same row. The body is released under the
-    gate a person's parse applies to it -- literal-redacted (`PARSED`) and
-    screened clean (`is_eligible_for_model_context`). Otherwise it is
-    withheld, and the statuses still say why.
+    gate a person's parse applies to it -- literal-redacted (`PARSED` or
+    `LEXICAL`, both value-free) and screened clean
+    (`is_eligible_for_model_context`). Otherwise it is withheld, and the
+    statuses still say why.
     """
     routine = await session.get(MetadataRoutine, entity_id)
     if (
@@ -1260,8 +1262,9 @@ async def _routine_transformation_detail(
     ):
         return None
     body = routine.body_sql_redacted
-    if routine.redaction_status != "PARSED" or not is_eligible_for_model_context(
-        routine.screening_status
+    if (
+        routine.redaction_status not in VALUE_FREE_REDACTION_STATUSES
+        or not is_eligible_for_model_context(routine.screening_status)
     ):
         body = None
     return {

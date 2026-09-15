@@ -8,6 +8,7 @@ from sqlglot import exp, parse
 from sqlglot.errors import ParseError
 
 from aida.artifact_parsing import optional_text, parse_generated_at
+from aida.sql_redaction import contains_value_shaped_text
 
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_RESOURCES = 25_000
@@ -98,7 +99,12 @@ def _redact_compiled_sql(sql: str | None, dialect: str) -> tuple[str | None, str
             safe_statement = statement.transform(
                 lambda node: exp.Placeholder() if isinstance(node, exp.Literal) else node
             )
-            redacted.append(safe_statement.sql(dialect=dialect, comments=False, pretty=True))
+            rendered = safe_statement.sql(dialect=dialect, comments=False, pretty=True)
+            # A statement sqlglot keeps as an opaque `Command` (or any node that is not an
+            # `exp.Literal`) renders its values back verbatim; store nothing rather than that.
+            if contains_value_shaped_text(rendered, dialect=dialect):
+                return fingerprint, None, "UNPARSEABLE"
+            redacted.append(rendered)
         return fingerprint, ";\n\n".join(redacted), "PARSED"
     except (ParseError, ValueError):
         return fingerprint, None, "UNPARSEABLE"

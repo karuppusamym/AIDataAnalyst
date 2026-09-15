@@ -1,6 +1,6 @@
 # Procedure lineage parser capability matrix
 
-Generated 2026-09-02T15:48:45.619696+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
+Generated 2026-09-15T04:33:19.753038+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
 
 ## Dialects attempted
 
@@ -30,6 +30,13 @@ Generated 2026-09-02T15:48:45.619696+00:00 by `scripts/generate_procedure_capabi
 | EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL) | N/A | EXPLICIT_UNPARSED |
 | EXEC/CALL <procedure_name> (nested procedure call) | N/A | EXPLICIT_UNPARSED |
 | DECLARE/SET/OPEN/FETCH/CLOSE/RAISERROR/... (no table lineage) | N/A | RECOGNISED_NO_LINEAGE |
+| EXCEPTION WHEN ... THEN handler (PL/SQL, PL/pgSQL) | N/A | SUPPORTED |
+| EXECUTE <expression> (PL/pgSQL dynamic SQL) | N/A | EXPLICIT_UNPARSED |
+| RETURN QUERY <query> (PL/pgSQL result set) | N/A | SUPPORTED |
+| PERFORM <query> (PL/pgSQL; PERFORM fn(...) is a nested-call gap) | N/A | SUPPORTED |
+| variable := <query> / SELECT ... INTO variable (PL/pgSQL local state) | N/A | SUPPORTED |
+| CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL) | N/A | SUPPORTED |
+| FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query) | N/A | SUPPORTED |
 
 `SUPPORTED` -- real column/table-level lineage extracted.
 `EXPLICIT_UNPARSED` -- recognised, but this parser cannot safely resolve it: an explicit `UNPARSED` marker edge is produced instead (INV-9/AT-C4), never a silent drop.

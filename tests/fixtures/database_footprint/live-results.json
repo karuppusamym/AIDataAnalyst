@@ -1,0 +1,16 @@
+{
+  "postgres": {
+    "engine_version": "17.10",
+    "verified_at": "2026-09-15T03:50:34.502562+00:00",
+    "native_assertions": "PASSED",
+    "rollback_verified": true,
+    "scope": "Synthetic native SQL in local sample container; no Atlas ingestion"
+  },
+  "sqlserver": {
+    "engine_version": "16.0.4265.3",
+    "verified_at": "2026-09-15T03:50:34.871598+00:00",
+    "native_assertions": "PASSED",
+    "rollback_verified": true,
+    "scope": "Synthetic native SQL in local sample container; no Atlas ingestion"
+  }
+}
