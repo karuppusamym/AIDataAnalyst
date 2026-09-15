@@ -118,7 +118,7 @@ def _redact_precisely(sql: str, *, dialect: str) -> str | None:
     return redacted
 
 
-def _has_quoted_routine_body(statement: exp.Expression | None) -> bool:
+def _has_quoted_routine_body(statement: exp.Expr | None) -> bool:
     if not isinstance(statement, exp.Create):
         return False
     kind = str(statement.args.get("kind") or "").upper()

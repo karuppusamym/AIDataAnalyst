@@ -920,7 +920,7 @@ def _matching_paren(text: str, open_index: int) -> int | None:
 
 
 def _local_statement(
-    ordinal: int, node: object, dialect: str, context: str | None
+    ordinal: int, node: exp.Expr, dialect: str, context: str | None
 ) -> ParsedStatement:
     """A query whose rows stay inside the routine. Its reads are real
     dependencies, so its edges are kept -- into `PROCEDURE_LOCAL_TARGET`, marked
