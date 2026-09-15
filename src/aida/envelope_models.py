@@ -159,7 +159,9 @@ class MetadataRoutine(Base, TimestampMixin):
 
     __tablename__ = "metadata_routine"
     __table_args__ = (
-        UniqueConstraint("schema_id", "name", "signature"),
+        # R11-FP03: `package_name` joins the identity, so a standalone `SCORE(NUMBER)` and the
+        # packaged `RISK_PKG.SCORE(NUMBER)` are two routines rather than one overwriting the other.
+        UniqueConstraint("schema_id", "package_name", "name", "signature"),
         CheckConstraint(
             "availability IN ('AVAILABLE', 'UNAVAILABLE')",
             name="availability_state",
@@ -183,7 +185,14 @@ class MetadataRoutine(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     signature: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
+    #: R11-FP03: the package a member subprogram belongs to; empty for a standalone routine.
+    package_name: Mapped[str] = mapped_column(
+        String(255), default="", server_default="", nullable=False
+    )
     routine_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    #: The engine's finer kind beside the portable `routine_type`: SQL Server SCALAR,
+    #: INLINE_TABLE or MULTI_STATEMENT_TABLE; BigQuery SCALAR_FUNCTION. NULL where none exists.
+    native_subtype: Mapped[str | None] = mapped_column(String(30))
     language: Mapped[str | None] = mapped_column(String(50))
     # See the note on MetadataViewDefinition.definition_sql_redacted. A procedure body is
     # the richest literal-bearing text a source hands over, and the largest

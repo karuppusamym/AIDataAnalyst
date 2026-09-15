@@ -24,6 +24,8 @@ from aida.connectors.base import (
     DiscoveredRoutine,
     DiscoveredSchema,
 )
+from aida.connectors.discovery import build_routines
+from aida.connectors.oracle import _envelope_routines, _OracleEnvelopeRows
 from aida.db import Base
 from aida.discovery_selection import DiscoverySelection, apply_selection, kind_capabilities
 from aida.envelope_models import MetadataRoutine, MetadataRoutineDefinitionVersion
@@ -123,6 +125,122 @@ def test_package_capability_is_not_applicable_where_the_engine_has_none() -> Non
     }
     assert by_connector["oracle"]["PACKAGE"].inventory == "SUPPORTED"
     assert by_connector["sqlserver"]["PACKAGE"].inventory == "NOT_APPLICABLE"
+
+
+def test_an_oracle_packages_members_are_routines_with_their_own_parameters_and_overloads() -> None:
+    def argument(member: str, subprogram: int, position: int, name: str | None, data_type: str):
+        return {
+            "OWNER": "RETAIL",
+            "OBJECT_NAME": member,
+            "PACKAGE_NAME": "RISK_PKG",
+            "SUBPROGRAM_ID": subprogram,
+            "ARGUMENT_NAME": name,
+            "POSITION": position,
+            "DATA_TYPE": data_type,
+            "IN_OUT": "IN" if position else "OUT",
+        }
+
+    envelope = _OracleEnvelopeRows(
+        routines=(
+            {"OWNER": "RETAIL", "OBJECT_NAME": "RISK_PKG", "OBJECT_TYPE": "PACKAGE"},
+            {"OWNER": "RETAIL", "OBJECT_NAME": "SCORE", "OBJECT_TYPE": "FUNCTION"},
+        ),
+        package_members=(
+            {"OWNER": "RETAIL", "OBJECT_NAME": "RISK_PKG", "PROCEDURE_NAME": "SCORE",
+             "SUBPROGRAM_ID": 1, "OVERLOAD": "1"},
+            {"OWNER": "RETAIL", "OBJECT_NAME": "RISK_PKG", "PROCEDURE_NAME": "SCORE",
+             "SUBPROGRAM_ID": 2, "OVERLOAD": "2"},
+            {"OWNER": "RETAIL", "OBJECT_NAME": "RISK_PKG", "PROCEDURE_NAME": "REFRESH",
+             "SUBPROGRAM_ID": 3, "OVERLOAD": None},
+        ),
+        arguments=(
+            argument("SCORE", 1, 0, None, "NUMBER"),
+            argument("SCORE", 1, 1, "P_ID", "NUMBER"),
+            argument("SCORE", 2, 0, None, "NUMBER"),
+            argument("SCORE", 2, 1, "P_CODE", "VARCHAR2"),
+        ),
+    )
+
+    routines = _envelope_routines(envelope)["RETAIL"]
+
+    members = [r for r in routines if r.attributes.get("package_name") == "RISK_PKG"]
+    assert sorted((m.name, m.routine_type, m.attributes.get("overload")) for m in members) == [
+        ("REFRESH", "PROCEDURE", None),
+        ("SCORE", "FUNCTION", "1"),
+        ("SCORE", "FUNCTION", "2"),
+    ]
+    by_overload = {m.attributes.get("overload"): m for m in members}
+    assert [p.physical_type for p in by_overload["1"].parameters] == ["NUMBER"]
+    assert [p.physical_type for p in by_overload["2"].parameters] == ["VARCHAR2"]
+    assert all(m.body_sql is None and "RISK_PKG" in (m.unavailable_reason or "") for m in members)
+    # The standalone SCORE is untouched and carries no package.
+    standalone = [r for r in routines if r.name == "SCORE" and "package_name" not in r.attributes]
+    assert len(standalone) == 1
+
+
+async def test_a_member_and_a_standalone_routine_of_the_same_name_are_two_identities(
+    session: AsyncSession,
+) -> None:
+    datasource = await _datasource(session)
+    standalone = {**_routine(BODY), "name": "score"}
+    member = {
+        **_routine(BODY),
+        "name": "score",
+        "body_sql": None,
+        "unavailable_reason": "a member subprogram of package risk_pkg",
+        "attributes": {"package_name": "risk_pkg"},
+    }
+
+    await _scan(session, datasource, _envelope(routines=[standalone, member]))
+
+    rows = list(
+        await session.scalars(select(MetadataRoutine).order_by(MetadataRoutine.package_name))
+    )
+    assert [(row.name, row.package_name, row.availability) for row in rows] == [
+        ("score", "", "AVAILABLE"),
+        ("score", "risk_pkg", "UNAVAILABLE"),
+    ]
+
+
+def test_native_function_kinds_become_functions_with_a_subtype() -> None:
+    routines = build_routines(
+        [
+            {"routine_schema": "s", "routine_name": "fx", "routine_type": "SCALAR_FUNCTION"},
+            {
+                "routine_schema": "s",
+                "routine_name": "tvf",
+                "routine_type": "FUNCTION",
+                "native_subtype": "INLINE_TABLE",
+            },
+            {"routine_schema": "s", "routine_name": "p", "routine_type": "PROCEDURE"},
+        ]
+    )["s"]
+
+    by_name = {routine.name: routine for routine in routines}
+    assert (by_name["fx"].routine_type, by_name["fx"].attributes) == (
+        "FUNCTION",
+        {"native_subtype": "SCALAR_FUNCTION"},
+    )
+    assert by_name["tvf"].attributes == {"native_subtype": "INLINE_TABLE"}
+    assert by_name["p"].attributes == {}
+
+
+async def test_the_native_subtype_is_stored_beside_the_portable_type(session: AsyncSession) -> None:
+    datasource = await _datasource(session)
+    await _scan(
+        session,
+        datasource,
+        _envelope(
+            routines=[
+                {**_routine(BODY), "routine_type": "FUNCTION",
+                 "attributes": {"native_subtype": "INLINE_TABLE"}}
+            ]
+        ),
+    )
+
+    routine = await session.scalar(select(MetadataRoutine))
+    assert routine is not None
+    assert (routine.routine_type, routine.native_subtype) == ("FUNCTION", "INLINE_TABLE")
 
 
 async def test_a_package_never_reaches_tool_generation(session: AsyncSession) -> None:

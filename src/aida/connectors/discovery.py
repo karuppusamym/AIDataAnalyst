@@ -408,10 +408,19 @@ def build_routines(
             reason = reason or "source returned no routine body"
         else:
             reason = None
+        # R11-FP03: a native function kind (BigQuery's SCALAR_FUNCTION) is a FUNCTION with a
+        # subtype, and a connector's own finer kind (SQL Server's INLINE_TABLE) is kept beside
+        # it. Carried in `attributes` so a routine without one fingerprints as it always did.
+        routine_type = normalize_object_type(str(row["routine_type"]))
+        subtype = _coerce_optional_str(row.get("native_subtype"))
+        if routine_type.endswith("_FUNCTION"):
+            subtype = subtype or routine_type
+            routine_type = "FUNCTION"
+        attributes: dict[str, Any] = {"native_subtype": subtype} if subtype else {}
         routines.setdefault(schema_name, []).append(
             DiscoveredRoutine(
                 name=routine_name,
-                routine_type=normalize_object_type(str(row["routine_type"])),
+                routine_type=routine_type,
                 language=_coerce_optional_str(row.get("language")),
                 body_sql=body,
                 parameters=tuple(grouped_parameters.get((schema_name, specific_name), ())),
@@ -421,6 +430,7 @@ def build_routines(
                 source_description=_coerce_optional_str(row.get("description")),
                 truncated=bool(row.get("truncated", False)),
                 unavailable_reason=reason,
+                attributes=attributes,
             )
         )
     return routines

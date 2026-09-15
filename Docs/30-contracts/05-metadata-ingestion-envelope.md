@@ -156,6 +156,8 @@ The axes exist because four questions could not be answered from a 1.0 snapshot:
 | `view_definition.unavailable_reason` | | Conditional | **Required when `definition_sql` is `null`; forbidden otherwise** |
 | `routines[]` | schema | No | Stored procedures and functions. ≤ 10,000 per schema, ≤ 50,000 per envelope |
 | `routines[].routine_type` | | Yes | `FUNCTION` \| `PROCEDURE` \| `PACKAGE` (R11-FP03; a package is never presented as a callable function) |
+| `routines[].attributes.package_name` | | No | R11-FP03: the package a member subprogram belongs to. Part of the routine's identity, so a member and a standalone routine of the same name and signature are two routines. A member's `body_sql` is null with a reason: its source is the package's |
+| `routines[].attributes.native_subtype` | | No | R11-FP03: the engine's finer kind beside `routine_type`, for example SQL Server `SCALAR`, `INLINE_TABLE`, `MULTI_STATEMENT_TABLE` or BigQuery `SCALAR_FUNCTION` (at most 30 characters) |
 | `routines[].body_sql` | | No | The body, verbatim. `null` means **unavailable**, never empty |
 | `routines[].unavailable_reason` | | Conditional | **Required when `body_sql` is `null`; forbidden otherwise** |
 | `routines[].security_mode` | | No | `DEFINER` \| `INVOKER` |

@@ -622,7 +622,9 @@ async def test_a_routine_round_trips_with_its_parameters_and_description() -> No
 
     schema = catalogs[0].schemas[0]
     routine = next(r for r in schema.routines if r.name == "risk_score")
-    assert routine.routine_type == "SCALAR_FUNCTION"
+    # R11-FP03: a function, with BigQuery's own kind kept as its subtype.
+    assert routine.routine_type == "FUNCTION"
+    assert routine.attributes["native_subtype"] == "SCALAR_FUNCTION"
     assert routine.language == "SQL"
     assert routine.body_sql == "SELECT balance * 0.1"
     assert routine.return_type == "FLOAT64"

@@ -659,9 +659,12 @@ async def _upsert_routine(
     tracker: _ExtensionTracker,
 ) -> MetadataRoutine:
     signature = routine_signature(discovered.parameters)
+    # R11-FP03: a member subprogram's identity includes its package.
+    package_name = str(discovered.attributes.get("package_name") or "")
     existing = await session.scalar(
         select(MetadataRoutine).where(
             MetadataRoutine.schema_id == schema.id,
+            MetadataRoutine.package_name == package_name,
             MetadataRoutine.name == discovered.name,
             MetadataRoutine.signature == signature,
         )
@@ -692,6 +695,7 @@ async def _upsert_routine(
             schema_id=schema.id,
             name=discovered.name,
             signature=signature,
+            package_name=package_name,
             routine_type=discovered.routine_type,
             fingerprint=row_fingerprint,
         )
@@ -699,6 +703,8 @@ async def _upsert_routine(
     existing.status = "ACTIVE"
     existing.deprecated_at = None
     existing.routine_type = discovered.routine_type
+    subtype = discovered.attributes.get("native_subtype")
+    existing.native_subtype = str(subtype)[:30] if subtype else None
     existing.language = discovered.language
     (
         existing.body_sql_redacted,

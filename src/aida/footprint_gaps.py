@@ -183,6 +183,9 @@ def _code_counts(
             MetadataRoutine.organization_id == organization_id,
             MetadataRoutine.datasource_id.in_(scope),
             MetadataRoutine.status == "ACTIVE",
+            # A package member has no body of its own -- its source is the package's -- which
+            # is not the source withholding anything (R11-FP03).
+            MetadataRoutine.package_name == "",
             *[clause(MetadataRoutine) for clause in condition],
         )
         .group_by(MetadataRoutine.datasource_id)

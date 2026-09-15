@@ -301,6 +301,8 @@ class _OracleEnvelopeRows:
     routines: tuple[dict[str, Any], ...] = ()
     routine_source: tuple[dict[str, Any], ...] = ()
     arguments: tuple[dict[str, Any], ...] = ()
+    #: R11-FP03: ALL_PROCEDURES rows for subprograms declared inside a package.
+    package_members: tuple[dict[str, Any], ...] = ()
     table_comments: tuple[dict[str, Any], ...] = ()
     column_comments: tuple[dict[str, Any], ...] = ()
     grants: tuple[dict[str, Any], ...] = ()
@@ -377,7 +379,8 @@ def _envelope_routines(envelope: _OracleEnvelopeRows) -> dict[str, list[Discover
         if object_type == "PACKAGE":
             attributes["packaged_subprogram_parameters"] = (
                 "ALL_ARGUMENTS records arguments against each packaged subprogram, "
-                "not against the package object, so this routine carries none"
+                "not against the package object, so this routine carries none; each member "
+                "subprogram is reported as its own routine with them"
             )
         deterministic = _optional_text(row.get("DETERMINISTIC"))
         routines.setdefault(owner, []).append(
@@ -400,7 +403,86 @@ def _envelope_routines(envelope: _OracleEnvelopeRows) -> dict[str, list[Discover
                 attributes=attributes,
             )
         )
+    _append_package_members(envelope, routines)
     return routines
+
+
+_MemberKey = tuple[str, str, str, int]
+
+
+def _envelope_member_parameters(
+    envelope: _OracleEnvelopeRows,
+) -> tuple[dict[_MemberKey, list[DiscoveredRoutineParameter]], dict[_MemberKey, str]]:
+    """ALL_ARGUMENTS rows of packaged subprograms, keyed (owner, package, member, subprogram id)
+    -- the key two overloads of one member do not share. Oracle writes a single argument-less row
+    for a subprogram with no parameters; that placeholder is not a parameter."""
+    parameters: dict[_MemberKey, list[DiscoveredRoutineParameter]] = {}
+    return_types: dict[_MemberKey, str] = {}
+    for row in envelope.arguments:
+        package = row.get("PACKAGE_NAME")
+        if package is None:
+            continue
+        key = (
+            str(row["OWNER"]),
+            str(package),
+            str(row["OBJECT_NAME"]),
+            _optional_int(row.get("SUBPROGRAM_ID")) or 0,
+        )
+        position = _optional_int(row.get("POSITION")) or 0
+        data_type = _optional_text(row.get("DATA_TYPE"))
+        if position == 0:
+            if data_type is not None:
+                return_types[key] = data_type
+            continue
+        if data_type is None and _optional_text(row.get("ARGUMENT_NAME")) is None:
+            continue
+        parameters.setdefault(key, []).append(
+            DiscoveredRoutineParameter(
+                name=_optional_text(row.get("ARGUMENT_NAME")),
+                ordinal_position=position,
+                mode=_normalize_argument_mode(row.get("IN_OUT")),
+                physical_type=data_type or "",
+            )
+        )
+    return parameters, return_types
+
+
+def _append_package_members(
+    envelope: _OracleEnvelopeRows, routines: dict[str, list[DiscoveredRoutine]]
+) -> None:
+    """R11-FP03: each subprogram a package declares, as its own routine under its package.
+
+    A member has no source of its own -- ALL_SOURCE holds the package spec and body -- so its
+    body is absent with that reason, never an invented slice of the package text. Its identity
+    carries the package (`attributes["package_name"]`), so it cannot collide with a standalone
+    routine of the same name, and its overload number when Oracle gives one.
+    """
+    parameters, return_types = _envelope_member_parameters(envelope)
+    for row in envelope.package_members:
+        owner = str(row["OWNER"])
+        package = str(row["OBJECT_NAME"])
+        member = str(row["PROCEDURE_NAME"])
+        key = (owner, package, member, _optional_int(row.get("SUBPROGRAM_ID")) or 0)
+        return_type = return_types.get(key)
+        attributes: dict[str, Any] = {"package_name": package}
+        overload = _optional_text(row.get("OVERLOAD"))
+        if overload is not None:
+            attributes["overload"] = overload
+        routines.setdefault(owner, []).append(
+            DiscoveredRoutine(
+                name=member,
+                routine_type="FUNCTION" if return_type is not None else "PROCEDURE",
+                language=None,
+                body_sql=None,
+                parameters=tuple(parameters.get(key, ())),
+                return_type=return_type,
+                unavailable_reason=(
+                    f"a member subprogram of package {owner}.{package}; its source is the "
+                    "package's own"
+                ),
+                attributes=attributes,
+            )
+        )
 
 
 def _table_description_rows(envelope: _OracleEnvelopeRows) -> list[dict[str, Any]]:
@@ -578,10 +660,24 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
     arguments = await _collect(
         "arguments",
         f"""
-        SELECT owner, object_name, package_name, argument_name, position, data_type, in_out
+        SELECT owner, object_name, package_name, subprogram_id, argument_name, position,
+               data_type, in_out
         FROM ALL_ARGUMENTS
         WHERE data_level = 0 AND {owner_clause}
-        ORDER BY owner, object_name, position
+        ORDER BY owner, object_name, subprogram_id, position
+        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    # R11-FP03: the subprograms a package declares. SUBPROGRAM_ID keys their arguments, and
+    # OVERLOAD tells two same-named members apart.
+    package_members = await _collect(
+        "package_members",
+        f"""
+        SELECT owner, object_name, procedure_name, subprogram_id, overload
+        FROM ALL_PROCEDURES
+        WHERE procedure_name IS NOT NULL
+          AND object_type = 'PACKAGE'
+          AND {owner_clause}
+        ORDER BY owner, object_name, subprogram_id
         """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
     )
     table_comments = await _collect(
@@ -626,6 +722,7 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
         routines=routines,
         routine_source=routine_source,
         arguments=arguments,
+        package_members=package_members,
         table_comments=table_comments,
         column_comments=column_comments,
         grants=grants,

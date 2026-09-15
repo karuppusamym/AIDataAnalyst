@@ -307,9 +307,14 @@ def _build_routine(
     attributes: dict[str, Any] = {}
     if routine_body is not None:
         attributes["routine_body"] = routine_body
+    # R11-FP03: SCALAR_FUNCTION and TABLE_FUNCTION are functions; the native kind is a subtype.
+    routine_type = str(row.get("routine_type") or "PROCEDURE").strip().upper()
+    if routine_type.endswith("_FUNCTION"):
+        attributes["native_subtype"] = routine_type
+        routine_type = "FUNCTION"
     return DiscoveredRoutine(
         name=name,
-        routine_type=str(row.get("routine_type") or "PROCEDURE"),
+        routine_type=routine_type,
         language=external_language or ("SQL" if routine_body == "SQL" else None),
         body_sql=body_sql,
         parameters=parameters,

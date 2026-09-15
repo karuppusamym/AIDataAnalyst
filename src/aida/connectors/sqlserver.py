@@ -71,6 +71,11 @@ _ROUTINE_SQL = """
         o.name AS routine_name,
         CAST(o.object_id AS varchar(30)) AS specific_name,
         CASE o.type WHEN 'P' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type,
+        CASE o.type
+            WHEN 'FN' THEN 'SCALAR'
+            WHEN 'IF' THEN 'INLINE_TABLE'
+            WHEN 'TF' THEN 'MULTI_STATEMENT_TABLE'
+        END AS native_subtype,
         'SQL' AS language,
         m.definition AS body,
         TYPE_NAME(ret.user_type_id) AS return_type,
