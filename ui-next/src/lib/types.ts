@@ -1095,6 +1095,7 @@ export interface ChangeSignalRead {
   subject_id: string;
   signal_type: string;
   change_class: string | null;
+  related_subject_id: string | null;
   status: string;
   detected_at: string;
   processed_at: string | null;

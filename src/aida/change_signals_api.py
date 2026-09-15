@@ -43,6 +43,7 @@ class ChangeSignalRead(ApiModel):
     subject_id: UUID
     signal_type: str
     change_class: str | None
+    related_subject_id: UUID | None
     status: str
     detected_at: datetime
     processed_at: datetime | None

@@ -25,7 +25,11 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.change_signals import (
+    CHANGE_GRANT_ADDED,
+    CHANGE_GRANT_MODIFIED,
+    CHANGE_GRANT_REVOKED,
     CHANGE_LITERAL_ONLY,
+    CHANGE_SIGNATURE_CHANGED,
     CHANGE_STRUCTURAL,
     SIGNAL_DEPRECATED,
     SIGNAL_PERMISSION_CHANGED,
@@ -58,6 +62,7 @@ from aida.envelope_models import (
 )
 from aida.ingest_screening import CLEAN, SCREENING_VERSION, screen_text
 from aida.models import (
+    AnalysisRun,
     DataSource,
     MetadataCatalog,
     MetadataSchema,
@@ -463,12 +468,32 @@ class _ExtensionTracker:
     # R11-FP03: routines whose definition is new or moved, with the change class (None when
     # first captured) -- each becomes an immutable definition version.
     routine_versions: list[tuple[MetadataRoutine, str | None]] = field(default_factory=list)
+    # R11-FP15: when the run writing this delivery began (None: not known). A schema created
+    # before it was read by an earlier run, so a grant new to it is an addition, not a first read.
+    run_started_at: datetime | None = None
 
     def observe(self, existing: Any | None, new_fingerprint: str) -> None:
         if existing is None:
             self.created += 1
         elif existing.fingerprint != new_fingerprint or existing.status != "ACTIVE":
             self.changed += 1
+
+    def read_before(self, created_at: datetime | None) -> bool:
+        if self.run_started_at is None or created_at is None:
+            return False
+        return _aware(created_at) < self.run_started_at
+
+
+def _aware(moment: datetime) -> datetime:
+    """SQLite hands timestamps back without a zone; every one written here is UTC."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+async def _run_started_at(session: AsyncSession, analysis_run_id: UUID | None) -> datetime | None:
+    if analysis_run_id is None:
+        return None
+    run = await session.get(AnalysisRun, analysis_run_id)
+    return _aware(run.created_at) if run is not None and run.created_at is not None else None
 
 
 def _availability(text: str | None) -> tuple[str, str | None]:
@@ -800,11 +825,16 @@ async def _upsert_grant(
     )
     row_fingerprint = _fingerprint(asdict(discovered))
     tracker.observe(existing, row_fingerprint)
-    if existing is not None and (
-        existing.fingerprint != row_fingerprint or existing.status != "ACTIVE"
-    ):
-        # A grant that changed or came back after a revoke: who can read the object moved.
-        tracker.signals.append(ChangeSignal("GRANT", existing.id, SIGNAL_PERMISSION_CHANGED))
+    # R11-FP15: who can read the object moved. A grant back after a revoke, or new to a schema an
+    # earlier run already read, is an addition; a changed one (now grantable, say) is a
+    # modification. A schema read for the first time records nothing: nothing depended on it yet.
+    change_class: str | None = None
+    if existing is None:
+        change_class = CHANGE_GRANT_ADDED if tracker.read_before(schema.created_at) else None
+    elif existing.status != "ACTIVE":
+        change_class = CHANGE_GRANT_ADDED
+    elif existing.fingerprint != row_fingerprint:
+        change_class = CHANGE_GRANT_MODIFIED
     if existing is None:
         existing = MetadataSourceGrant(
             organization_id=datasource.organization_id,
@@ -824,7 +854,50 @@ async def _upsert_grant(
     existing.schema_name = discovered.schema_name
     existing.is_grantable = discovered.is_grantable
     existing.fingerprint = row_fingerprint
+    if change_class is not None:
+        await session.flush()
+        tracker.signals.append(
+            ChangeSignal("GRANT", existing.id, SIGNAL_PERMISSION_CHANGED, change_class)
+        )
     return existing
+
+
+async def _signature_successors(
+    session: AsyncSession, retiring: list[MetadataRoutine], analysis_run_id: UUID | None
+) -> dict[UUID, UUID]:
+    """R11-FP15: pair each retiring routine with the routine that replaced its signature.
+
+    Only an unambiguous replacement pairs: exactly one signature of a (schema, package, name)
+    retires, and exactly one signature of it first appeared in this run. An overload added beside
+    one that stays pairs nothing, and neither do two signatures swapped for two -- a guess would
+    point a consumer at the wrong routine.
+    """
+    started = await _run_started_at(session, analysis_run_id)
+    if started is None or not retiring:
+        return {}
+    retiring_by_name: dict[tuple[UUID, str, str], list[MetadataRoutine]] = {}
+    for routine in retiring:
+        key = (routine.schema_id, routine.package_name, routine.name)
+        retiring_by_name.setdefault(key, []).append(routine)
+    successors: dict[UUID, UUID] = {}
+    for (schema_id, package_name, name), gone in retiring_by_name.items():
+        if len(gone) != 1:
+            continue
+        appeared = [
+            routine
+            for routine in await session.scalars(
+                select(MetadataRoutine).where(
+                    MetadataRoutine.schema_id == schema_id,
+                    MetadataRoutine.package_name == package_name,
+                    MetadataRoutine.name == name,
+                    MetadataRoutine.status == "ACTIVE",
+                )
+            )
+            if routine.created_at is not None and _aware(routine.created_at) >= started
+        ]
+        if len(appeared) == 1:
+            successors[gone[0].id] = appeared[0].id
+    return successors
 
 
 async def deprecate_missing_envelope_extensions(
@@ -874,20 +947,37 @@ async def deprecate_missing_envelope_extensions(
             signals.extend(
                 ChangeSignal("VIEW", table_id, SIGNAL_DEPRECATED) for table_id in retiring_views
             )
-        elif model is MetadataRoutine or model is MetadataSourceGrant:
-            retiring = await session.scalars(
-                select(model.id).where(model.id.in_(missing), model.status == "ACTIVE")
+        elif model is MetadataRoutine:
+            retiring_routines = list(
+                await session.scalars(
+                    select(MetadataRoutine).where(
+                        MetadataRoutine.id.in_(missing), MetadataRoutine.status == "ACTIVE"
+                    )
+                )
             )
-            if model is MetadataRoutine:
-                signals.extend(
-                    ChangeSignal("ROUTINE", routine_id, SIGNAL_DEPRECATED)
-                    for routine_id in retiring
+            successors = await _signature_successors(
+                session, retiring_routines, analysis_run_id
+            )
+            signals.extend(
+                ChangeSignal(
+                    "ROUTINE",
+                    routine.id,
+                    SIGNAL_DEPRECATED,
+                    CHANGE_SIGNATURE_CHANGED if routine.id in successors else None,
+                    related_subject_id=successors.get(routine.id),
                 )
-            else:
-                signals.extend(
-                    ChangeSignal("GRANT", grant_id, SIGNAL_PERMISSION_CHANGED)
-                    for grant_id in retiring
+                for routine in retiring_routines
+            )
+        elif model is MetadataSourceGrant:
+            retiring_grants = await session.scalars(
+                select(MetadataSourceGrant.id).where(
+                    MetadataSourceGrant.id.in_(missing), MetadataSourceGrant.status == "ACTIVE"
                 )
+            )
+            signals.extend(
+                ChangeSignal("GRANT", grant_id, SIGNAL_PERMISSION_CHANGED, CHANGE_GRANT_REVOKED)
+                for grant_id in retiring_grants
+            )
         result = await session.execute(
             update(model)
             .where(model.id.in_(missing), model.status == "ACTIVE")
@@ -970,7 +1060,7 @@ async def persist_envelope_extensions(
     parent would put a view definition under a table that does not exist.
     """
     working_scope = scope if scope is not None else EnvelopeScope()
-    tracker = _ExtensionTracker()
+    tracker = _ExtensionTracker(run_started_at=await _run_started_at(session, analysis_run_id))
     counts = {
         "views": 0,
         "routines": 0,

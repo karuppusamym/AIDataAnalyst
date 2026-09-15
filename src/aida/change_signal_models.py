@@ -38,7 +38,8 @@ class MetadataChangeSignal(Base):
             name="signal_type",
         ),
         CheckConstraint(
-            "change_class IS NULL OR change_class IN ('LITERAL_ONLY', 'STRUCTURAL')",
+            "change_class IS NULL OR change_class IN ('LITERAL_ONLY', 'STRUCTURAL', "
+            "'GRANT_ADDED', 'GRANT_MODIFIED', 'GRANT_REVOKED', 'SIGNATURE_CHANGED')",
             name="change_class",
         ),
         CheckConstraint("status IN ('PENDING', 'PROCESSED')", name="status"),
@@ -60,8 +61,13 @@ class MetadataChangeSignal(Base):
     subject_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     subject_id: Mapped[UUID] = mapped_column(nullable=False)
     signal_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    # For DEFINITION_CHANGED only: whether anything but literals changed.
+    # DEFINITION_CHANGED: whether anything but literals changed. PERMISSION_CHANGED: whether the
+    # grant was added, modified or revoked. A retired routine: SIGNATURE_CHANGED when one new
+    # signature replaced it.
     change_class: Mapped[str | None] = mapped_column(String(20))
+    # The routine that replaced a SIGNATURE_CHANGED one. No foreign key: a subject id points into
+    # whichever table its kind names.
+    related_subject_id: Mapped[UUID | None] = mapped_column()
     status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False

@@ -6617,6 +6617,18 @@
             ],
             "title": "Processed At"
           },
+          "related_subject_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Related Subject Id"
+          },
           "signal_type": {
             "title": "Signal Type",
             "type": "string"
@@ -6642,6 +6654,7 @@
           "subject_id",
           "signal_type",
           "change_class",
+          "related_subject_id",
           "status",
           "detected_at",
           "processed_at"

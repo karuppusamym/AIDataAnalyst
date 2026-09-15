@@ -10,7 +10,10 @@ seen, inside the same transaction as the write that makes it:
   the stored, value-free text did not) or anything else did (`STRUCTURAL`). Lineage parsed from
   the structure is still right after a literal-only change; a tool's result may not be.
 * `DEPRECATED` / `REACTIVATED` for a table, view or routine leaving or returning to a snapshot.
-* `PERMISSION_CHANGED` for a source grant that changed, returned or was revoked.
+  A routine retired because one new signature replaced its one old signature is classed
+  `SIGNATURE_CHANGED`, and `related_subject_id` names the routine that replaced it.
+* `PERMISSION_CHANGED` for a source grant, classed `GRANT_ADDED` (new to a schema an earlier run
+  already read, or back after a revoke), `GRANT_MODIFIED` or `GRANT_REVOKED`.
 * `MEANING_PUBLISHED` when an ontology version is approved.
 
 **Idempotent without a key.** A change is detected by comparing the stored fingerprint with the
@@ -18,7 +21,8 @@ incoming one. A retried batch whose first attempt committed finds them already e
 nothing; one whose first attempt rolled back rolled its signals back with it.
 
 **New objects are not signals.** Nothing can depend on an object that did not exist, and a first
-scan would otherwise emit one signal per object in the estate.
+scan would otherwise emit one signal per object in the estate. The one exception is a grant new
+to a schema an earlier run read: the objects it opens existed, and who can read them moved.
 """
 
 from __future__ import annotations
@@ -41,6 +45,10 @@ SIGNAL_PERMISSION_CHANGED: Final = "PERMISSION_CHANGED"
 SIGNAL_MEANING_PUBLISHED: Final = "MEANING_PUBLISHED"
 CHANGE_LITERAL_ONLY: Final = "LITERAL_ONLY"
 CHANGE_STRUCTURAL: Final = "STRUCTURAL"
+CHANGE_GRANT_ADDED: Final = "GRANT_ADDED"
+CHANGE_GRANT_MODIFIED: Final = "GRANT_MODIFIED"
+CHANGE_GRANT_REVOKED: Final = "GRANT_REVOKED"
+CHANGE_SIGNATURE_CHANGED: Final = "SIGNATURE_CHANGED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +57,7 @@ class ChangeSignal:
     subject_id: UUID
     signal_type: str
     change_class: str | None = None
+    related_subject_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +111,7 @@ def record_change_signals(
                 subject_id=signal.subject_id,
                 signal_type=signal.signal_type,
                 change_class=signal.change_class,
+                related_subject_id=signal.related_subject_id,
                 detected_at=detected_at,
             )
         )
