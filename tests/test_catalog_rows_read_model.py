@@ -61,7 +61,12 @@ from tests.support.doubles import security_context
 pytestmark = pytest.mark.asyncio
 
 _SETTINGS = Settings()
-_NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+# Anchored to the wall clock, not to a fixed date. `list_catalog_rows` composes
+# against `datetime.now(UTC)`, so a pinned date ages out: a "passing" observation
+# seeded a day before 2026-08-31 read as STALE once real time passed the 14-day
+# window, and a certification seeded to expire 30 days after it would have read
+# as expired from 2026-09-30. Every date below is relative to this instant.
+_NOW = datetime.now(UTC).replace(microsecond=0)
 
 
 @pytest.fixture
