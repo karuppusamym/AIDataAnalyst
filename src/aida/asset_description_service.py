@@ -738,6 +738,54 @@ async def publish_asset_documentation_version(
     return version
 
 
+#: R11-FP08: a view's definition moved after its description was drafted.
+DEFINITION_MOVED = "DEFINITION_MOVED"
+
+
+class RefusalDetail(dict[str, Any]):
+    """A structured 409 body whose `str()` is the sentence a person reads.
+
+    The bulk and agent decision paths report a refused item as `str(exc.detail)`.
+    """
+
+    def __str__(self) -> str:
+        return str(self.get("message", ""))
+
+
+async def definition_moved(
+    session: AsyncSession, draft: AssetDescriptionDraft
+) -> RefusalDetail | None:
+    """Why a view's draft no longer describes the view as it is, or `None`.
+
+    A view's draft records the state and digest of the definition it was written against
+    (`evidence_payload`). A table's draft records neither and is never refused here.
+    """
+    evidence = draft.evidence or {}
+    if "definition_state" not in evidence:
+        return None
+    state, digest = _definition_facts(
+        await session.scalar(
+            select(MetadataViewDefinition).where(
+                MetadataViewDefinition.table_id == draft.table_id,
+                MetadataViewDefinition.status == "ACTIVE",
+            )
+        )
+    )
+    drafted = (evidence.get("definition_state"), evidence.get("definition_digest"))
+    if drafted == (state, digest):
+        return None
+    return RefusalDetail(
+        code=DEFINITION_MOVED,
+        message=(
+            "The view's definition changed after this description was drafted, so the draft "
+            "may describe a view that no longer exists. Reject it and draft again from the "
+            "current definition."
+        ),
+        drafted_definition_state=drafted[0],
+        current_definition_state=state,
+    )
+
+
 async def apply_asset_description_draft(
     session: AsyncSession,
     draft: AssetDescriptionDraft,
@@ -754,6 +802,10 @@ async def apply_asset_description_draft(
     """
     if draft.status != "PENDING_APPROVAL":
         raise HTTPException(status_code=409, detail="draft is no longer pending review")
+    # R11-FP08: a view's draft is published only while the definition it describes stands.
+    moved = await definition_moved(session, draft)
+    if moved is not None:
+        raise HTTPException(status_code=409, detail=moved)
     version = await publish_asset_documentation_version(
         session,
         organization_id=draft.organization_id,
