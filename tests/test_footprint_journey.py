@@ -1,25 +1,31 @@
-"""R11-FP16 milestone: the database footprint journey against a real PostgreSQL source.
+"""R11-FP16 milestone: the database footprint journey against real PostgreSQL and SQL Server.
 
 Discover the source; investigate it (the lineage agent reads the view, a reviewer decides each
 edge); review its meaning (a description drafted from evidence, approved by someone else); publish
 context (a governed tool over the view, and a context product pinning it); ask a question through
 Ask, which chooses the governed tool and reads the source through the query gateway. Then change
-the source's logic, read it again, and
-watch the platform hold what the change can have broken, rebuild each affected artifact into its
-review queue, release the hold once reviewers approve the rebuilt context, and answer correctly
-again.
+the source's logic, read it again, and watch the platform hold what the change can have broken,
+rebuild each affected artifact into its review queue, release the hold once reviewers approve the
+rebuilt context, and answer correctly again.
 
-The source is a private database created on the configured PostgreSQL server from the footprint
-sample pack (`tests/fixtures/database_footprint/postgres`) and dropped afterwards. The platform runs
-on in-memory SQLite. Skipped when no PostgreSQL server is reachable.
+Each engine's source is a private database built from the footprint sample pack
+(`tests/fixtures/database_footprint/<engine>`) and dropped afterwards. PostgreSQL is created on the
+configured server. SQL Server is created inside the local sample container with the credentials
+already there (never read or printed here), and the platform reads it through a login made for the
+run that can only select, read definitions and show plans. The platform runs on in-memory SQLite.
+An engine is skipped when its server is not reachable.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import AsyncIterator
-from dataclasses import replace
+import secrets
+import subprocess
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID
 
 import asyncpg
@@ -38,7 +44,9 @@ from aida.asset_description_api import (
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE, process_change_signals
 from aida.config import Settings, get_settings
+from aida.connectors.base import Connector
 from aida.connectors.postgres import PostgresConnector
+from aida.connectors.sqlserver import SqlServerConnector
 from aida.context_product_api import create_context_product, submit_context_product_version
 from aida.context_rebuild import CONTEXT_REBUILD_PRINCIPAL, run_context_rebuild
 from aida.envelope_models import MetadataViewDefinition
@@ -86,20 +94,46 @@ from tests.support.task_agents import (
 )
 
 SCHEMA = "footprint_context_sample"
-FIXTURES = Path(__file__).parent / "fixtures" / "database_footprint" / "postgres"
+FIXTURES = Path(__file__).parent / "fixtures" / "database_footprint"
 #: The question an analyst asks, before and after the change.
 QUESTION = "What is the customer revenue for customer 1?"
 #: The source's new logic: revenue no longer nets off discounts.
-REDEFINED_VIEW = (
-    "CREATE OR REPLACE VIEW footprint_context_sample.customer_revenue AS "
+_REDEFINED_SELECT = (
     "SELECT c.customer_id, c.region, SUM(o.amount) AS net_revenue "
     "FROM footprint_context_sample.customers c "
     "JOIN footprint_context_sample.orders o ON o.customer_id = c.customer_id "
     "GROUP BY c.customer_id, c.region"
 )
+#: The local sample SQL Server container (compose service `sample-mssql-source`).
+MSSQL_CONTAINER = "aida-platform-sample-mssql-source-1"
+MSSQL_HOST_PORT = 14330
+#: sqlcmd as the container's administrator, against the database named by $1; SQL on stdin.
+_SQLCMD = (
+    'export SQLCMDPASSWORD="${MSSQL_SA_PASSWORD:-$SA_PASSWORD}"; '
+    "if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then s=/opt/mssql-tools18/bin/sqlcmd; "
+    "else s=/opt/mssql-tools/bin/sqlcmd; fi; "
+    'exec "$s" -S localhost -U sa -d "$1" -C -b'
+)
+CONNECTORS: dict[str, Callable[[str], Connector]] = {
+    "postgres": PostgresConnector,
+    "sqlserver": SqlServerConnector,
+}
 
 
-async def _execute(url: URL, sql: str) -> None:
+@dataclass(frozen=True, slots=True)
+class JourneySource:
+    """One engine's private sample database, as the journey needs it."""
+
+    connector_type: str
+    dialect: str
+    #: What the datasource's credential reference resolves to.
+    dsn: str
+    #: Run DDL on the source as its owner.
+    execute: Callable[[str], Awaitable[None]]
+    redefine_view: str
+
+
+async def _pg_execute(url: URL, sql: str) -> None:
     conn = await asyncpg.connect(
         user=url.username,
         password=url.password,
@@ -113,33 +147,106 @@ async def _execute(url: URL, sql: str) -> None:
         await conn.close()
 
 
+def _sqlcmd(database: str, sql: str) -> None:
+    result = subprocess.run(  # noqa: S603 -- a fixed local docker command; SQL goes on stdin
+        ["docker", "exec", "-i", MSSQL_CONTAINER, "sh", "-c", _SQLCMD, "sqlcmd", database],  # noqa: S607
+        input=f"{sql}\nGO\n",
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"sqlcmd failed:\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
+
+
+async def _mssql_execute(database: str, sql: str) -> None:
+    await asyncio.to_thread(_sqlcmd, database, sql)
+
+
 @pytest_asyncio.fixture
-async def source() -> AsyncIterator[URL]:
-    """A private PostgreSQL database holding the footprint sample, dropped afterwards."""
+async def _postgres() -> AsyncIterator[JourneySource]:
     server = make_url(get_settings().database_url)
     maintenance = server.set(database="postgres")
     name = f"aida_footprint_journey_{os.getpid()}"
     try:
-        await _execute(maintenance, f"DROP DATABASE IF EXISTS {name}")
+        await _pg_execute(maintenance, f"DROP DATABASE IF EXISTS {name}")
     except (OSError, asyncpg.PostgresError) as exc:
         pytest.skip(f"no reachable PostgreSQL server for the journey: {type(exc).__name__}")
-    await _execute(maintenance, f"CREATE DATABASE {name}")
+    await _pg_execute(maintenance, f"CREATE DATABASE {name}")
     database = server.set(database=name)
     try:
         for fixture in ("setup.sql", "view.sql"):
-            await _execute(database, (FIXTURES / fixture).read_text(encoding="utf-8"))
-        yield database
+            await _pg_execute(database, (FIXTURES / "postgres" / fixture).read_text("utf-8"))
+        yield JourneySource(
+            connector_type="postgres",
+            dialect="postgres",
+            dsn=database.set(drivername="postgresql").render_as_string(hide_password=False),
+            execute=lambda sql: _pg_execute(database, sql),
+            redefine_view=(
+                f"CREATE OR REPLACE VIEW footprint_context_sample.customer_revenue AS "
+                f"{_REDEFINED_SELECT}"
+            ),
+        )
     finally:
-        await _execute(maintenance, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+        await _pg_execute(maintenance, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
 
 
-def _dsn(url: URL) -> str:
-    return url.set(drivername="postgresql").render_as_string(hide_password=False)
+@pytest_asyncio.fixture
+async def _sqlserver() -> AsyncIterator[JourneySource]:
+    name = f"aida_footprint_journey_{os.getpid()}"
+    login = f"aida_journey_reader_{os.getpid()}"
+    drop = (
+        f"IF DB_ID(N'{name}') IS NOT NULL BEGIN "
+        f"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
+        f"DROP DATABASE [{name}]; END;\n"
+        f"IF SUSER_ID(N'{login}') IS NOT NULL DROP LOGIN [{login}];"
+    )
+    try:
+        await _mssql_execute("master", drop)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"no reachable SQL Server sample container: {type(exc).__name__}")
+    password = f"Jr1!{secrets.token_hex(16)}"
+    try:
+        await _mssql_execute(
+            "master",
+            f"CREATE DATABASE [{name}];\nGO\n"
+            f"CREATE LOGIN [{login}] WITH PASSWORD = N'{password}', CHECK_POLICY = OFF;",
+        )
+        for fixture in ("setup.sql", "view.sql"):
+            await _mssql_execute(name, (FIXTURES / "sqlserver" / fixture).read_text("utf-8"))
+        # The platform's login may read rows and definitions, and estimate plans; nothing else.
+        await _mssql_execute(
+            name,
+            f"CREATE USER [{login}] FOR LOGIN [{login}];\n"
+            f"GRANT SELECT ON SCHEMA::footprint_context_sample TO [{login}];\n"
+            f"GRANT VIEW DEFINITION TO [{login}];\n"
+            f"GRANT SHOWPLAN TO [{login}];",
+        )
+        yield JourneySource(
+            connector_type="sqlserver",
+            dialect="tsql",
+            dsn=f"mssql://{login}:{quote(password, safe='')}@localhost:{MSSQL_HOST_PORT}/{name}",
+            execute=lambda sql: _mssql_execute(name, sql),
+            redefine_view=(
+                f"ALTER VIEW footprint_context_sample.customer_revenue AS {_REDEFINED_SELECT}"
+            ),
+        )
+    finally:
+        await _mssql_execute("master", drop)
 
 
-async def _scan(session: AsyncSession, datasource: DataSource, source: URL) -> AnalysisRun:
+@pytest.fixture(params=["postgres", "sqlserver"])
+def source(request: pytest.FixtureRequest) -> JourneySource:
+    """The engine's private sample source; its fixture skips when the server is unreachable."""
+    return request.getfixturevalue(f"_{request.param}")  # type: ignore[no-any-return]
+
+
+async def _scan(
+    session: AsyncSession, datasource: DataSource, source: JourneySource
+) -> AnalysisRun:
     """One full discovery of the sample schema, persisted through the real ingestion halves."""
-    catalogs = await PostgresConnector(_dsn(source)).discover()
+    catalogs = await CONNECTORS[source.connector_type](source.dsn).discover()
     selected = tuple(
         replace(catalog, schemas=tuple(s for s in catalog.schemas if s.name == SCHEMA))
         for catalog in catalogs
@@ -285,13 +392,15 @@ async def _hold(session: AsyncSession, view: MetadataTable) -> DataQualityIncide
     )
 
 
-async def test_the_footprint_journey_on_postgres(
-    source: URL, monkeypatch: pytest.MonkeyPatch
+async def test_the_footprint_journey(
+    source: JourneySource, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("TEST_DSN", _dsn(source))
+    monkeypatch.setenv("TEST_DSN", source.dsn)
     settings = agent_settings()
     async with task_agent_session() as session:
-        org, datasource, _ = await seed_estate(session)
+        org, datasource, _ = await seed_estate(session, dialect=source.dialect)
+        datasource.connector_type = source.connector_type
+        await session.flush()
         project = await session.get(Project, datasource.project_id)
         assert project is not None
         steward = human(org, "steward-1", frozenset({"DataSteward", "MetadataAdmin"}))
@@ -397,7 +506,7 @@ async def test_the_footprint_journey_on_postgres(
         assert await _ask(session, datasource, analyst, settings) == (str(first_tool.id), 150.0)
 
         # 6. Change the source's logic, and read the source again.
-        await _execute(source, REDEFINED_VIEW)
+        await source.execute(source.redefine_view)
         rescan = await _scan(session, datasource, source)
         signals = list(
             await session.scalars(

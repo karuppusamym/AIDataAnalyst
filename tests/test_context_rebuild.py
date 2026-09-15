@@ -1,6 +1,6 @@
 """R11-FP16: rebuild what a source change made stale, into review queues, and release the hold.
 
-The same chain `test_footprint_journey_postgres` walks against a live source, driven here on
+The same chain `test_footprint_journey` walks against live sources, driven here on
 in-memory SQLite through the real draft, review and decision routes, so it runs without a server:
 
 * a redefined view's tool, description and context product are rebuilt as drafts in their review
