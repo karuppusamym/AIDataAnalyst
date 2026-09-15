@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   AnalysisRunRead,
   DataSourceRead,
+  DiscoverySelectionRead,
   MeRead,
   ScanPolicyRead,
   ScanPolicyUpsert,
@@ -59,11 +60,18 @@ const resumeAnalysisRun = vi.fn<(...args: PolicyArgs) => Promise<AnalysisRunRead
 const createAnalysisRun = vi.fn<(...args: ScanArgs) => Promise<AnalysisRunRead>>();
 const fetchDatasourceAnalysisRuns =
   vi.fn<(...args: RunsArgs) => Promise<PageOf<AnalysisRunRead>>>();
+/* The discovery-scope block (R11-FP01) is exercised in its own test file; here
+   it only needs an answer so this panel's assertions are about this panel. */
+const UNRESTRICTED_SCOPE: DiscoverySelectionRead = {
+  datasource_id: "ds_snowflake_prod", selection: {}, restricted: false, fingerprint: null,
+  capabilities: [], capability_source: "CONNECTOR_DEFAULT",
+};
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
+    fetchDiscoverySelection: () => Promise.resolve(UNRESTRICTED_SCOPE),
     fetchScanPolicy: (...args: PolicyArgs) => fetchScanPolicy(...args),
     upsertScanPolicy: (...args: [string, ScanPolicyUpsert, (AbortSignal | undefined)?]) =>
       upsertScanPolicy(...args),

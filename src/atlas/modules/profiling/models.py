@@ -214,6 +214,12 @@ class AnalysisRun(Base, TimestampMixin):
     created_objects: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     changed_objects: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     deprecated_objects: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # R11-FP01: the discovery selection this run applied (NULL: unrestricted) and how many
+    # objects the source returned that it left out -- the run's own scope receipt.
+    discovery_selection_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    excluded_objects: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     profiled_tables: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     profiled_columns: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_class: Mapped[str | None] = mapped_column(String(100))

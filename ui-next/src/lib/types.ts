@@ -520,6 +520,8 @@ export interface AnalysisRunRead {
   created_objects: number;
   changed_objects: number;
   deprecated_objects: number;
+  discovery_selection_fingerprint?: string | null;
+  excluded_objects?: number;
   profiled_tables: number;
   profiled_columns: number;
   error_class: string | null;
@@ -2117,6 +2119,37 @@ export interface DisagreementReportRead {
   resolution: AuditResolutionTimeRead;
 }
 
+/** What discovery takes in. Every list empty means unrestricted. */
+export interface DiscoverySelection {
+  object_kinds?: ("TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION")[];
+  include_schemas?: string[];
+  exclude_schemas?: string[];
+  include_objects?: string[];
+  exclude_objects?: string[];
+}
+
+export interface DiscoverySelectionPreviewRead {
+  datasource_id: string;
+  restricted: boolean;
+  fingerprint: string | null;
+  basis?: "LAST_SCAN";
+  schemas: SelectionCountRead;
+  kinds: SelectionCountRead[];
+  unmatched_include_patterns: string[];
+  truncated: boolean;
+  capabilities: ObjectKindCapabilityRead[];
+  capability_source: "CONNECTION_TEST" | "CONNECTOR_DEFAULT";
+}
+
+export interface DiscoverySelectionRead {
+  datasource_id: string;
+  selection: DiscoverySelection;
+  restricted: boolean;
+  fingerprint: string | null;
+  capabilities: ObjectKindCapabilityRead[];
+  capability_source: "CONNECTION_TEST" | "CONNECTOR_DEFAULT";
+}
+
 export interface DocumentCreate {
   filename: string;
   content: string;
@@ -3270,6 +3303,12 @@ export interface NotificationTestResult {
   outcomes: Record<string, string>;
 }
 
+export interface ObjectKindCapabilityRead {
+  kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION";
+  inventory: "SUPPORTED" | "UNSUPPORTED" | "NOT_APPLICABLE";
+  definition: "SUPPORTED" | "UNSUPPORTED" | "NOT_APPLICABLE";
+}
+
 export interface OntologyCreate {
   ontology_key: string;
   base_version?: number;
@@ -4240,6 +4279,12 @@ export interface SearchSuggestion {
   display_name: string;
   qualified_name?: string | null;
   score: number;
+}
+
+export interface SelectionCountRead {
+  kind: string;
+  in_scope: number;
+  excluded: number;
 }
 
 /** One field-level difference, as returned to a reviewer. */

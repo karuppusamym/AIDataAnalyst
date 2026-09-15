@@ -2921,6 +2921,17 @@
             "title": "Discovered Tables",
             "type": "integer"
           },
+          "discovery_selection_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discovery Selection Fingerprint"
+          },
           "error_class": {
             "anyOf": [
               {
@@ -2942,6 +2953,11 @@
               }
             ],
             "title": "Error Message"
+          },
+          "excluded_objects": {
+            "default": 0,
+            "title": "Excluded Objects",
+            "type": "integer"
           },
           "id": {
             "format": "uuid",
@@ -12669,6 +12685,202 @@
         "title": "DisagreementReportRead",
         "type": "object"
       },
+      "DiscoverySelection": {
+        "additionalProperties": false,
+        "description": "What discovery takes in. Every list empty means unrestricted.",
+        "properties": {
+          "exclude_objects": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Exclude Objects",
+            "type": "array"
+          },
+          "exclude_schemas": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Exclude Schemas",
+            "type": "array"
+          },
+          "include_objects": {
+            "description": "`schema.object` patterns, for example `sales.fact_*`.",
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Include Objects",
+            "type": "array"
+          },
+          "include_schemas": {
+            "items": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Include Schemas",
+            "type": "array"
+          },
+          "object_kinds": {
+            "description": "Kinds to discover; empty discovers every kind the connector reports.",
+            "items": {
+              "enum": [
+                "TABLE",
+                "VIEW",
+                "MATERIALIZED_VIEW",
+                "PROCEDURE",
+                "FUNCTION"
+              ],
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Object Kinds",
+            "type": "array"
+          }
+        },
+        "title": "DiscoverySelection",
+        "type": "object"
+      },
+      "DiscoverySelectionPreviewRead": {
+        "properties": {
+          "basis": {
+            "const": "LAST_SCAN",
+            "default": "LAST_SCAN",
+            "title": "Basis",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/ObjectKindCapabilityRead"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "capability_source": {
+            "enum": [
+              "CONNECTION_TEST",
+              "CONNECTOR_DEFAULT"
+            ],
+            "title": "Capability Source",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "kinds": {
+            "items": {
+              "$ref": "#/components/schemas/SelectionCountRead"
+            },
+            "title": "Kinds",
+            "type": "array"
+          },
+          "restricted": {
+            "title": "Restricted",
+            "type": "boolean"
+          },
+          "schemas": {
+            "$ref": "#/components/schemas/SelectionCountRead"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "unmatched_include_patterns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unmatched Include Patterns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "restricted",
+          "fingerprint",
+          "schemas",
+          "kinds",
+          "unmatched_include_patterns",
+          "truncated",
+          "capabilities",
+          "capability_source"
+        ],
+        "title": "DiscoverySelectionPreviewRead",
+        "type": "object"
+      },
+      "DiscoverySelectionRead": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/ObjectKindCapabilityRead"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "capability_source": {
+            "enum": [
+              "CONNECTION_TEST",
+              "CONNECTOR_DEFAULT"
+            ],
+            "title": "Capability Source",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "restricted": {
+            "title": "Restricted",
+            "type": "boolean"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/DiscoverySelection"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "selection",
+          "restricted",
+          "fingerprint",
+          "capabilities",
+          "capability_source"
+        ],
+        "title": "DiscoverySelectionRead",
+        "type": "object"
+      },
       "DocumentCreate": {
         "additionalProperties": false,
         "properties": {
@@ -19721,6 +19933,46 @@
         "title": "NotificationTestResult",
         "type": "object"
       },
+      "ObjectKindCapabilityRead": {
+        "properties": {
+          "definition": {
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "NOT_APPLICABLE"
+            ],
+            "title": "Definition",
+            "type": "string"
+          },
+          "inventory": {
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "NOT_APPLICABLE"
+            ],
+            "title": "Inventory",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "TABLE",
+              "VIEW",
+              "MATERIALIZED_VIEW",
+              "PROCEDURE",
+              "FUNCTION"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "inventory",
+          "definition"
+        ],
+        "title": "ObjectKindCapabilityRead",
+        "type": "object"
+      },
       "OntologyCreate": {
         "additionalProperties": false,
         "properties": {
@@ -25238,6 +25490,29 @@
           "score"
         ],
         "title": "SearchSuggestion",
+        "type": "object"
+      },
+      "SelectionCountRead": {
+        "properties": {
+          "excluded": {
+            "title": "Excluded",
+            "type": "integer"
+          },
+          "in_scope": {
+            "title": "In Scope",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "in_scope",
+          "excluded"
+        ],
+        "title": "SelectionCountRead",
         "type": "object"
       },
       "SemanticFieldDeltaRead": {
@@ -44787,6 +45062,402 @@
         "tags": [
           "intelligence-governance"
         ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/discovery-selection": {
+      "get": {
+        "description": "The selection a datasource's discovery applies, and what its connector can discover.",
+        "operationId": "get_discovery_selection_v1_datasources__datasource_id__discovery_selection_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoverySelectionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Discovery Selection"
+      },
+      "put": {
+        "description": "Replace the selection. An empty body removes it: discovery takes in everything again.\n\nIt applies from the next run. Narrowing it never retires what earlier runs found: a FULL\nrun reconciles only the objects the selection covers.",
+        "operationId": "put_discovery_selection_v1_datasources__datasource_id__discovery_selection_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverySelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoverySelectionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Discovery Selection"
+      }
+    },
+    "/v1/datasources/{datasource_id}/discovery-selection/preview": {
+      "post": {
+        "description": "What `body` would keep and leave out, counted over the last completed scan.\n\nReads the catalog only -- it neither stores the selection nor contacts the source.",
+        "operationId": "preview_discovery_selection_v1_datasources__datasource_id__discovery_selection_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiscoverySelection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoverySelectionPreviewRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Discovery Selection"
       }
     },
     "/v1/datasources/{datasource_id}/freshness": {

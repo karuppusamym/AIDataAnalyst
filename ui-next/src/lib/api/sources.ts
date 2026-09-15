@@ -20,6 +20,9 @@ import type {
   AnalysisRunRead,
   ConnectorHealthScoreRead,
   DataSourceRead,
+  DiscoverySelection,
+  DiscoverySelectionPreviewRead,
+  DiscoverySelectionRead,
   ProjectRead,
   ScanPolicyRead,
   ScanPolicyUpsert,
@@ -133,6 +136,59 @@ export function upsertScanPolicy(
 ): Promise<ScanPolicyRead> {
   if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
   return putJson<ScanPolicyRead>(`/v1/datasources/${datasourceId}/scan-policy`, body, signal);
+}
+
+/* Discovery scope (R11-FP01) -- which object kinds, schemas and names a scan
+   takes in. Three routes in `atlas.modules.connectivity.router`, logic in
+   `aida.discovery_selection`. Same fixture refusal as the rest of this block:
+   a scope saved against a demo estate would change nothing real. */
+
+/** `GET /v1/datasources/{datasource_id}/discovery-selection` — the stored
+ *  selection (empty lists: unrestricted), its fingerprint, and per object kind
+ *  whether the connector inventories it and captures its code. `NOT_APPLICABLE`
+ *  (the engine has no such kind) and `UNSUPPORTED` (Atlas does not collect it)
+ *  are different answers. Roles add Viewer to the write's three. */
+export function fetchDiscoverySelection(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<DiscoverySelectionRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return get<DiscoverySelectionRead>(`/v1/datasources/${datasourceId}/discovery-selection`, signal);
+}
+
+/** `POST /v1/datasources/{datasource_id}/discovery-selection/preview` — what a
+ *  selection would keep and leave out, **counted over the last completed scan**
+ *  (`basis: LAST_SCAN`): it neither stores the selection nor contacts the source,
+ *  so an object Atlas has never discovered is not in the counts. Names include
+ *  patterns that matched nothing, the likeliest typo. */
+export function previewDiscoverySelection(
+  datasourceId: string,
+  body: DiscoverySelection,
+  signal?: AbortSignal,
+): Promise<DiscoverySelectionPreviewRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return postJson<DiscoverySelectionPreviewRead>(
+    `/v1/datasources/${datasourceId}/discovery-selection/preview`,
+    body,
+    signal,
+  );
+}
+
+/** `PUT /v1/datasources/{datasource_id}/discovery-selection` — replace the
+ *  selection; an all-empty body removes it. Applies from the next run. Narrowing
+ *  it never retires what earlier runs found: a FULL run reconciles only objects
+ *  the selection covers. Roles: PlatformAdmin / MetadataAdmin / DataAdmin. */
+export function putDiscoverySelection(
+  datasourceId: string,
+  body: DiscoverySelection,
+  signal?: AbortSignal,
+): Promise<DiscoverySelectionRead> {
+  if (USE_FIXTURES) return Promise.reject(new Error(ADMIN_FIXTURE_NOTICE));
+  return putJson<DiscoverySelectionRead>(
+    `/v1/datasources/${datasourceId}/discovery-selection`,
+    body,
+    signal,
+  );
 }
 
 /** `POST /v1/analysis-runs/{run_id}/resume` (`aida.api.resume_analysis_run`, 202)

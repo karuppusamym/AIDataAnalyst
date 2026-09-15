@@ -40,6 +40,21 @@ from aida.connectors.base import (
 )
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
+from aida.discovery_selection import (
+    DiscoverySelection,
+    apply_selection,
+    grant_in_scope,
+    routine_kind,
+    selection_for,
+    table_kind,
+)
+from aida.envelope_models import (
+    MetadataObjectDescription,
+    MetadataRoutine,
+    MetadataRoutineParameter,
+    MetadataSourceGrant,
+    MetadataViewDefinition,
+)
 from aida.events import record_audit, record_outbox
 from aida.identity_resolution import IdentityMatch, score_table_rename
 from aida.ingestion import (
@@ -598,6 +613,127 @@ async def deprecate_missing_snapshot(
     )
 
 
+def union_snapshot_scopes(left: SnapshotScope, right: SnapshotScope) -> SnapshotScope:
+    return SnapshotScope(
+        catalog_ids=left.catalog_ids | right.catalog_ids,
+        schema_ids=left.schema_ids | right.schema_ids,
+        table_ids=left.table_ids | right.table_ids,
+        column_ids=left.column_ids | right.column_ids,
+        constraint_ids=left.constraint_ids | right.constraint_ids,
+        created_table_ids=set(left.created_table_ids),
+        index_ids=left.index_ids | right.index_ids,
+        partition_ids=left.partition_ids | right.partition_ids,
+    )
+
+
+def union_envelope_scopes(left: EnvelopeScope, right: EnvelopeScope) -> EnvelopeScope:
+    return EnvelopeScope(
+        view_definition_ids=left.view_definition_ids | right.view_definition_ids,
+        routine_ids=left.routine_ids | right.routine_ids,
+        routine_parameter_ids=left.routine_parameter_ids | right.routine_parameter_ids,
+        object_description_ids=left.object_description_ids | right.object_description_ids,
+        grant_ids=left.grant_ids | right.grant_ids,
+    )
+
+
+_ID_CHUNK = 1000
+
+
+def _id_chunks(ids: set[UUID]) -> list[list[UUID]]:
+    ordered = sorted(ids, key=str)
+    return [ordered[start : start + _ID_CHUNK] for start in range(0, len(ordered), _ID_CHUNK)]
+
+
+async def out_of_scope_existing(
+    session: AsyncSession, datasource: DataSource, selection: DiscoverySelection
+) -> tuple[SnapshotScope, EnvelopeScope]:
+    """R11-FP01: existing objects a discovery selection does not cover.
+
+    A FULL run counts them as seen, because they were never looked for: retiring them would
+    turn "narrow the scan" into "delete what earlier scans found". Children follow their
+    parent -- the columns of an excluded table, the parameters of an excluded routine.
+    """
+    snapshot, envelope = SnapshotScope(), EnvelopeScope()
+    schema_rows = (
+        await session.execute(
+            select(MetadataSchema.id, MetadataSchema.name, MetadataSchema.catalog_id)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(MetadataCatalog.datasource_id == datasource.id)
+        )
+    ).all()
+    schema_names = {schema_id: name for schema_id, name, _ in schema_rows}
+    for schema_id, name, catalog_id in schema_rows:
+        if not selection.schema_in_scope(name):
+            snapshot.schema_ids.add(schema_id)
+            snapshot.catalog_ids.add(catalog_id)
+
+    table_rows = await session.execute(
+        select(
+            MetadataTable.id, MetadataTable.name, MetadataTable.object_type, MetadataTable.schema_id
+        ).where(MetadataTable.datasource_id == datasource.id)
+    )
+    for table_id, name, object_type, schema_id in table_rows.all():
+        schema = schema_names.get(schema_id)
+        if schema is not None and not selection.object_in_scope(
+            schema, name, table_kind(object_type)
+        ):
+            snapshot.table_ids.add(table_id)
+    for chunk in _id_chunks(snapshot.table_ids):
+        for target, model in (
+            (snapshot.column_ids, MetadataColumn),
+            (snapshot.constraint_ids, MetadataConstraint),
+            (snapshot.index_ids, MetadataIndex),
+            (snapshot.partition_ids, MetadataPartition),
+            (envelope.view_definition_ids, MetadataViewDefinition),
+        ):
+            target.update(await session.scalars(select(model.id).where(model.table_id.in_(chunk))))
+
+    routine_rows = await session.execute(
+        select(
+            MetadataRoutine.id,
+            MetadataRoutine.name,
+            MetadataRoutine.routine_type,
+            MetadataRoutine.schema_id,
+        ).where(MetadataRoutine.datasource_id == datasource.id)
+    )
+    for routine_id, name, routine_type, schema_id in routine_rows.all():
+        schema = schema_names.get(schema_id)
+        if schema is not None and not selection.object_in_scope(
+            schema, name, routine_kind(routine_type)
+        ):
+            envelope.routine_ids.add(routine_id)
+    for chunk in _id_chunks(envelope.routine_ids):
+        envelope.routine_parameter_ids.update(
+            await session.scalars(
+                select(MetadataRoutineParameter.id).where(
+                    MetadataRoutineParameter.routine_id.in_(chunk)
+                )
+            )
+        )
+    for chunk in _id_chunks(snapshot.schema_ids):
+        envelope.object_description_ids.update(
+            await session.scalars(
+                select(MetadataObjectDescription.id).where(
+                    MetadataObjectDescription.schema_id.in_(chunk)
+                )
+            )
+        )
+    grant_rows = await session.execute(
+        select(
+            MetadataSourceGrant.id,
+            MetadataSourceGrant.schema_id,
+            MetadataSourceGrant.object_type,
+            MetadataSourceGrant.object_name,
+            MetadataSourceGrant.schema_name,
+        ).where(MetadataSourceGrant.datasource_id == datasource.id)
+    )
+    for grant_id, schema_id, object_type, object_name, schema_name in grant_rows.all():
+        schema = schema_name or schema_names.get(schema_id)
+        if schema is not None and not grant_in_scope(selection, schema, object_type, object_name):
+            envelope.grant_ids.add(grant_id)
+    return snapshot, envelope
+
+
 async def detect_rename_candidates(
     session: AsyncSession,
     *,
@@ -1085,6 +1221,10 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         settings = get_settings()
         snapshot_scope = SnapshotScope()
         envelope_scope = EnvelopeScope()
+        # R11-FP01: the selection as it stood when the run started; an edit made while
+        # the run is in flight applies to the next run, not halfway through this one.
+        selection = selection_for(datasource)
+        excluded_by_kind: dict[str, int] = {}
         created_objects_total = 0
         changed_objects_total = 0
         batch_index = 0
@@ -1094,6 +1234,10 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             if activity.is_cancelled():
                 raise asyncio.CancelledError
             batch_index += 1
+            outcome = apply_selection(catalogs, selection)
+            catalogs = outcome.catalogs
+            for kind, count in outcome.excluded.items():
+                excluded_by_kind[kind] = excluded_by_kind.get(kind, 0) + count
             async with session_factory() as session:
                 run = await session.get(AnalysisRun, run_uuid)
                 datasource = await session.get(DataSource, run.datasource_id) if run else None
@@ -1152,13 +1296,26 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             if run is None or datasource is None:
                 raise ValueError("analysis run or datasource disappeared during discovery")
             deprecated_objects_total = 0
+            retained_out_of_scope = 0
             if run.mode == "FULL":
+                # R11-FP01: an existing object the selection does not cover was never
+                # looked for, so it is reconciled as seen -- never retired as missing.
+                reconcile_snapshot, reconcile_envelope = snapshot_scope, envelope_scope
+                if selection.restricted:
+                    kept_snapshot, kept_envelope = await out_of_scope_existing(
+                        session, datasource, selection
+                    )
+                    retained_out_of_scope = len(kept_snapshot.table_ids) + len(
+                        kept_envelope.routine_ids
+                    )
+                    reconcile_snapshot = union_snapshot_scopes(snapshot_scope, kept_snapshot)
+                    reconcile_envelope = union_envelope_scopes(envelope_scope, kept_envelope)
                 deprecation_result = await deprecate_missing_snapshot(
-                    session, datasource, snapshot_scope
+                    session, datasource, reconcile_snapshot
                 )
                 deprecated_objects_total += deprecation_result.total
                 deprecated_objects_total += await deprecate_missing_envelope_extensions(
-                    session, datasource, envelope_scope
+                    session, datasource, reconcile_envelope
                 )
                 # CT-4: same-run tombstone-plus-create pairing, exactly as the
                 # unchunked path used before this change -- `snapshot_scope` here
@@ -1184,6 +1341,8 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             run.created_objects = created_objects_total
             run.changed_objects = changed_objects_total
             run.deprecated_objects = deprecated_objects_total
+            run.discovery_selection_fingerprint = selection.fingerprint()
+            run.excluded_objects = sum(excluded_by_kind.values())
             run.status = "PROFILING"
             datasource.status = "ACTIVE"
             final_counts = {
@@ -1206,7 +1365,12 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 resource_id=str(run.id),
                 outcome="SUCCESS",
                 correlation_id=str(run.id),
-                details=final_counts,
+                details={
+                    **final_counts,
+                    "selection_fingerprint": run.discovery_selection_fingerprint,
+                    "excluded_by_kind": excluded_by_kind,
+                    "retained_out_of_scope": retained_out_of_scope,
+                },
             )
             record_outbox(
                 session,
@@ -1228,7 +1392,12 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             table_id=None,
             outcome="SUCCESS",
         )
-        return {"run_id": run_id, "status": "COMPLETED", **final_counts}
+        return {
+            "run_id": run_id,
+            "status": "COMPLETED",
+            **final_counts,
+            "excluded_objects": sum(excluded_by_kind.values()),
+        }
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
         await finish_task(

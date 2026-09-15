@@ -79,6 +79,9 @@ class DataSource(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="REGISTERED", nullable=False)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # R11-FP01: which object kinds, schemas and names discovery takes in
+    # (`aida.discovery_selection.DiscoverySelection`). NULL is unrestricted.
+    discovery_selection: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # P1-05: when `AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE=require_review`,
     # connector-pushed lineage (OpenLineage, dbt manifests) from a datasource
     # flagged trusted_for_lineage lands ACTIVE without an approval step --

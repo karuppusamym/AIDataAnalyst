@@ -14,6 +14,7 @@ import { useSession } from "../lib/session";
 import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { LoadingPanel, useAsyncResource, useSubmitAction } from "../components/screenState";
+import { DiscoveryScope } from "./SourcesScreenDiscoveryScope";
 
 /* ---------------------------------------------------------------------------
    Source administration — operating a source that ALREADY EXISTS (R11-B7).
@@ -552,6 +553,9 @@ export function SourceAdministration({
         )}
       </div>
 
+      {/* ------------------------------------------------ discovery scope --- */}
+      <DiscoveryScope source={source} mayEdit={mayScan} />
+
       {/* ------------------------------------------------ runs -------------- */}
       <div className="srcadmin__block">
         <div className="srcadmin__blockhead">
@@ -612,6 +616,7 @@ export function SourceAdministration({
                 <div className="srcadmin__runmeta">
                   {run.discovered_tables} tables discovered · {run.created_objects} created ·{" "}
                   {run.changed_objects} changed
+                  {run.excluded_objects ? ` · ${run.excluded_objects} left out by the discovery scope` : ""}
                   {run.resumed_from_run_id ? ` · resumed from ${run.resumed_from_run_id.slice(0, 8)}` : ""}
                 </div>
                 {run.error_message ? (

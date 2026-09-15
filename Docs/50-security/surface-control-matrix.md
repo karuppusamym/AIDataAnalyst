@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **471**
-- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 419, SDK 1
+- Surfaces covered: **474**
+- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 422, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -158,6 +158,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/composite-key-candidates` | REST | `aida.composite_key_api.list_composite_key_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/connector-certifications` | REST | `atlas.modules.ingestion.router.list_connector_certifications` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/cross-source-object-resolution-candidates` | REST | `aida.intelligence_api.list_cross_source_object_resolution_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/discovery-selection` | REST | `atlas.modules.connectivity.router.get_discovery_selection` | DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/freshness/{table_id}` | REST | `aida.quality_api.get_freshness_status` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/freshness` | REST | `aida.quality_api.list_freshness_configs` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/graph-summary` | REST | `aida.api.get_graph_summary` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -371,6 +372,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/agent-retrieval-preview` | REST | `aida.api.preview_agent_retrieval` | AgentDeveloper, Analyst, PlatformAdmin, Viewer | yes | yes | mutating verb, no write found | no | cooperative |
 | `POST /v1/datasources/{datasource_id}/classification-feed/ingest` | REST | `aida.api.ingest_datasource_classification_feed` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/connector-certifications` | REST | `atlas.modules.ingestion.router.certify_datasource_connector` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/datasources/{datasource_id}/discovery-selection/preview` | REST | `atlas.modules.connectivity.router.preview_discovery_selection` | DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | mutating verb, no write found | no | not cancellable |
 | `POST /v1/datasources/{datasource_id}/freshness-config/{table_id}/approve` | REST | `aida.quality_api.approve_freshness_config` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/metadata-ingestion-batches` | REST | `atlas.modules.ingestion.router.create_metadata_ingestion_batch` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.ingest_metadata_envelope` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -522,6 +524,7 @@ graph. Nothing here is hand-maintained.
 | `PUT /v1/context-product-versions/{version_id}` | REST | `aida.context_product_api.update_context_product_version` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/context-products/{product_id}/bindings/{consumer_principal_id}` | REST | `aida.context_product_api.set_context_product_consumer_binding` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/data-product-versions/{version_id}` | REST | `aida.product_marketplace_api.update_data_product_version` | DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `PUT /v1/datasources/{datasource_id}/discovery-selection` | REST | `atlas.modules.connectivity.router.put_discovery_selection` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/datasources/{datasource_id}/freshness-config/{table_id}` | REST | `aida.quality_api.upsert_freshness_config` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/datasources/{datasource_id}/quality-policies` | REST | `aida.quality_api.upsert_quality_policy` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/datasources/{datasource_id}/scan-policy` | REST | `atlas.modules.connectivity.router.upsert_scan_policy` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |

@@ -76,6 +76,21 @@
 .srcadmin__runmeta{margin-top:6px;font-family:var(--mono);font-size:10.5px;line-height:1.5;color:var(--ink-3)}
 .srcadmin__runerr{margin-top:6px;padding:6px 7px;border-left:2px solid var(--bad);background:var(--sunk);font-size:11px;line-height:1.45;color:var(--ink-2)}
 
+/* Discovery scope (R11-FP01) — per-kind capability and preview counts are
+   tables, because each row is compared across the same columns. */
+.srcscope__tablewrap{margin-top:9px;overflow-x:auto}
+.srcscope__table{width:100%;border-collapse:collapse;font-size:11.5px}
+.srcscope__table th,.srcscope__table td{padding:4px 6px;border-bottom:1px solid var(--line-soft);text-align:left;font-weight:400;color:var(--ink-2)}
+.srcscope__table thead th{font-size:10.5px;color:var(--ink-3)}
+.srcscope__table tbody th{color:var(--ink)}
+.srcscope__table td{font-variant-numeric:tabular-nums}
+.srcscope__kinds{display:flex;flex-wrap:wrap;gap:0 14px;margin:0;padding:0;border:0}
+.srcscope__kinds legend{flex-basis:100%;margin-bottom:2px}
+.srcscope__kinds .srcadmin__check{margin-top:5px}
+.srcscope__patterns{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:9px;margin-top:9px}
+.srcscope__patterns textarea{width:100%;box-sizing:border-box;font-family:var(--mono);font-size:11px;resize:vertical}
+.srcscope__preview{margin-top:10px;padding-top:9px;border-top:1px solid var(--line-soft)}
+
 /* Keep the hint on its own row in this action-heavy pane. */
 .srcscreen__main .evp__hint{margin-left:0;flex-basis:100%}
 

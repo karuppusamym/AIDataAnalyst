@@ -73,6 +73,8 @@ class AnalysisRunRead(ApiModel):
     created_objects: int
     changed_objects: int
     deprecated_objects: int
+    discovery_selection_fingerprint: str | None = None
+    excluded_objects: int = 0
     profiled_tables: int
     profiled_columns: int
     error_class: str | None
