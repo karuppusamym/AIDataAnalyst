@@ -1225,9 +1225,13 @@ export interface CompositeKeyCandidateRead {
   organization_id: string;
   datasource_id: string;
   table_id: string;
+  table_profile_id: string | null;
   column_ids: string[];
+  column_names: string[];
+  column_count: number;
   detection_rule: string;
   confidence: number;
+  estimated_distinctness_ratio: number;
   evidence: Record<string, unknown>;
   status: string;
   created_by: string;
@@ -4159,6 +4163,66 @@ export interface RelationshipCandidateReviewQueueRead {
   scanned_count: number;
   total_pending_count: number;
   truncated: boolean;
+}
+
+export interface RelationshipEvidenceClassRead {
+  name: string;
+  corroborating: boolean;
+  detail: string;
+  sample_bounded: boolean;
+}
+
+export interface RelationshipObservationBoundsRead {
+  table_profile_id: string;
+  profiled_at: string;
+  sampled_row_count: number;
+  row_count_estimate: number | null;
+  scope: "FULL" | "SAMPLE" | "UNKNOWN";
+}
+
+export interface RelationshipOptionalityColumnRead {
+  column_name: string;
+  declared_nullable: boolean;
+  observed_null_count: number | null;
+  observed_non_null_count: number | null;
+}
+
+export interface RelationshipSideUniquenessRead {
+  unique: boolean;
+  basis: "DECLARED_KEY" | "UNIQUE_INDEX" | "DECLARED_FOREIGN_KEY" | "APPROVED_KEY" | "PROFILED" | null;
+  sample_bounded: boolean;
+}
+
+/** R11-FP06: what supports a proposed join, derived from the catalog as it is now. */
+export interface RelationshipValidationRead {
+  subject_type: "RELATIONSHIP_CANDIDATE" | "COMPOSITE_RELATIONSHIP_CANDIDATE";
+  subject_id: string;
+  status: string;
+  validation_version: string;
+  outcome: "CORROBORATED" | "NAME_MATCH_ONLY";
+  approvable: boolean;
+  evidence_classes: RelationshipEvidenceClassRead[];
+  source_key_columns: string[];
+  target_key_columns: string[];
+  join_condition: string;
+  cardinality: "ONE_TO_ONE" | "MANY_TO_ONE" | "ONE_TO_MANY" | "UNKNOWN";
+  direction: "SOURCE_REFERENCES_TARGET" | "TARGET_REFERENCES_SOURCE" | "EITHER" | "UNDETERMINED";
+  source_uniqueness: RelationshipSideUniquenessRead;
+  target_uniqueness: RelationshipSideUniquenessRead;
+  referencing_side: "SOURCE" | "TARGET";
+  optionality: "MANDATORY" | "OPTIONAL" | "NULLABLE_NONE_OBSERVED" | "UNKNOWN";
+  optionality_columns: RelationshipOptionalityColumnRead[];
+  source_observation: RelationshipObservationBoundsRead | null;
+  target_observation: RelationshipObservationBoundsRead | null;
+  inclusion_check_status: "NOT_RUN";
+  inclusion_check_reason: string;
+  grain_warnings: string[];
+  source_queries_executed: number;
+  values_inspected: boolean;
+  fingerprint: string;
+  recorded_fingerprint: string | null;
+  recorded_at: string | null;
+  drift: "NOT_RECORDED" | "UNCHANGED" | "CHANGED" | "CORROBORATION_LOST";
 }
 
 export interface RenameCandidateDecision {

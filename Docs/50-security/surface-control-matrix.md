@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **479**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 426, SDK 1
+- Surfaces covered: **481**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 428, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -143,6 +143,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/business-nodes/{node_id}/rollup` | REST | `atlas.modules.identity_tenancy.router.get_rollup` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
 | `GET /v1/compliance/packs/{pack_id}` | REST | `aida.compliance_api.get_compliance_pack` | ComplianceOfficer, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/compliance/packs` | REST | `aida.compliance_api.list_compliance_packs` | ComplianceOfficer, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/composite-relationship-candidates/{group_id}/validation` | REST | `aida.relationship_validation_api.get_composite_relationship_candidate_validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/connectors/capability-matrix` | REST | `atlas.modules.ingestion.router.connector_capability_matrix` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/compile` | REST | `aida.context_compiler_api.compile_context_product_version` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/scope` | REST | `aida.context_product_api.get_context_product_version_scope` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
@@ -307,6 +308,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/quality-rule-packs/{rule_pack_id}/rules` | REST | `aida.quality_api.list_rules` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/query-executions/{execution_id}/lineage` | REST | `aida.api.get_query_lineage` | AgentDeveloper, Analyst, Auditor, MetadataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/relationship-candidates/confidence-calibration` | REST | `aida.intelligence_api.get_relationship_candidate_confidence_calibration` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/relationship-candidates/{candidate_id}/validation` | REST | `aida.relationship_validation_api.get_relationship_candidate_validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/schemas/{schema_id}/table-family-candidates` | REST | `aida.table_family_api.list_table_family_candidates_for_schema` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/search/suggest` | REST | `aida.search_api.search_suggest` | Analyst, DataAdmin, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/search` | REST | `aida.search_api.global_search` | Analyst, DataAdmin, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

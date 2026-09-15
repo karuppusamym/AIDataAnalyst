@@ -66,6 +66,13 @@ from aida.relationship_intelligence import (
     score_relationship_candidate_signals,
 )
 from aida.relationship_naming import canonical_column_name, physical_type_family
+from aida.relationship_validation import (
+    RelationshipColumnsMissingError,
+    refusal_detail,
+    validate_composite_relationship_candidate,
+    validate_relationship_candidate,
+    with_recorded_validation,
+)
 from aida.schemas import (
     RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
     CanonicalTableMappingRead,
@@ -1326,10 +1333,21 @@ async def decide_relationship_candidate(
         raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
     if candidate.status != "PENDING":
         raise HTTPException(status_code=409, detail="relationship candidate is already decided")
+    decided_at = datetime.now(UTC)
+    if body.decision == "APPROVE":
+        # R11-FP06: an approval is checked against the catalog as it is now, and the
+        # validation it rested on is kept with the candidate.
+        try:
+            validation = await validate_relationship_candidate(session, candidate)
+        except RelationshipColumnsMissingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not validation.approvable:
+            raise HTTPException(status_code=409, detail=refusal_detail(validation))
+        candidate.evidence = with_recorded_validation(candidate.evidence, validation, decided_at)
     candidate.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     candidate.reviewed_by = context.principal_id
     candidate.review_reason = body.reason
-    candidate.reviewed_at = datetime.now(UTC)
+    candidate.reviewed_at = decided_at
     if candidate.status == "REJECTED":
         # N4: the real EE.3/N16 negative-knowledge write, so this rejection
         # becomes queryable "known not true" and suppresses re-proposal --
@@ -1937,6 +1955,28 @@ async def bulk_decide_relationship_candidates(
                 )
             )
             continue
+        if new_status == "APPROVED":
+            # R11-FP06: the single decision's evidence gate, reported per item.
+            try:
+                validation = await validate_relationship_candidate(session, candidate)
+            except RelationshipColumnsMissingError as exc:
+                results.append(
+                    RelationshipCandidateBulkDecisionItemRead(
+                        candidate_id=str(candidate_id), status="FAILED", reason=str(exc)
+                    )
+                )
+                continue
+            if not validation.approvable:
+                refusal = refusal_detail(validation)
+                results.append(
+                    RelationshipCandidateBulkDecisionItemRead(
+                        candidate_id=str(candidate_id),
+                        status="FAILED",
+                        reason=f"{refusal['code']}: {refusal['message']}",
+                    )
+                )
+                continue
+            candidate.evidence = with_recorded_validation(candidate.evidence, validation, now)
         candidate.status = new_status
         candidate.reviewed_by = context.principal_id
         candidate.review_reason = body.reason
@@ -2715,10 +2755,20 @@ async def decide_composite_relationship_candidate(
         raise HTTPException(
             status_code=409, detail="composite relationship candidate is already decided"
         )
+    decided_at = datetime.now(UTC)
+    if body.decision == "APPROVE":
+        # R11-FP06: the same evidence gate as a single-column join, over every column pair.
+        try:
+            validation = await validate_composite_relationship_candidate(session, group)
+        except RelationshipColumnsMissingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not validation.approvable:
+            raise HTTPException(status_code=409, detail=refusal_detail(validation))
+        group.evidence = with_recorded_validation(group.evidence, validation, decided_at)
     group.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     group.reviewed_by = context.principal_id
     group.review_reason = body.reason
-    group.reviewed_at = datetime.now(UTC)
+    group.reviewed_at = decided_at
     record_audit(
         session,
         replace(context, organization_id=group.organization_id),

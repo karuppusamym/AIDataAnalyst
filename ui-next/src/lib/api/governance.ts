@@ -27,6 +27,7 @@ import type {
   RelationshipCandidateDecision,
   RelationshipCandidateRead,
   RelationshipCandidateReviewQueueRead,
+  RelationshipValidationRead,
   ReviewQueueRead,
 } from "../types";
 import type { AuditEventRead, PageOf } from "../ui-types";
@@ -198,6 +199,25 @@ export function bulkDecideRelationshipCandidates(
         signal,
       );
     },
+  );
+}
+
+/** `GET /v1/relationship-candidates/{candidateId}/validation` (R11-FP06) — what
+ *  supports this join, derived from the catalog as it is now: evidence classes,
+ *  key columns, cardinality, direction, optionality and the profile each
+ *  statistic came from. `approvable: false` is the same refusal the decision
+ *  endpoint answers an approval with. Read-only, and it runs no source query. */
+export function fetchRelationshipCandidateValidation(
+  candidateId: string,
+  signal?: AbortSignal,
+): Promise<RelationshipValidationRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureRelationshipCandidateValidation(candidateId),
+    async () =>
+      get<RelationshipValidationRead>(
+        `/v1/relationship-candidates/${encodeURIComponent(candidateId)}/validation`,
+        signal,
+      ),
   );
 }
 

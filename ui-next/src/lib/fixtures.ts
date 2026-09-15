@@ -2907,6 +2907,65 @@ export async function makeFixtureRelationshipCandidateCalibration(
   };
 }
 
+/** `GET /v1/relationship-candidates/{id}/validation` (R11-FP06). Every fixture
+ *  candidate points at a declared key, so each validates as corroborated; the
+ *  inclusion check is reported as not run, exactly as the real endpoint does. */
+export async function makeFixtureRelationshipCandidateValidation(
+  candidateId: string,
+): Promise<import("./types").RelationshipValidationRead> {
+  await wait(60);
+  const f = RELATIONSHIP_CANDIDATE_FIXTURES.find((x) => x.candidate.id === candidateId);
+  if (!f) throw new Error(`fixture: no such relationship candidate ${candidateId}`);
+  return {
+    subject_type: "RELATIONSHIP_CANDIDATE",
+    subject_id: candidateId,
+    status: f.candidate.status,
+    validation_version: "relationship-validation-v1",
+    outcome: "CORROBORATED",
+    approvable: true,
+    evidence_classes: [
+      {
+        name: "DECLARED_KEY",
+        corroborating: true,
+        detail: "The target columns are unique by a declared primary or unique key.",
+        sample_bounded: false,
+      },
+      { name: "NAME_MATCH", corroborating: false, detail: "Column names match exactly.", sample_bounded: false },
+      { name: "TYPE_MATCH", corroborating: false, detail: "Physical types match exactly.", sample_bounded: false },
+    ],
+    source_key_columns: [f.sourceColumn],
+    target_key_columns: [f.targetColumn],
+    join_condition: `source.${f.sourceColumn} = target.${f.targetColumn}`,
+    cardinality: "MANY_TO_ONE",
+    direction: "SOURCE_REFERENCES_TARGET",
+    source_uniqueness: { unique: false, basis: null, sample_bounded: false },
+    target_uniqueness: { unique: true, basis: "DECLARED_KEY", sample_bounded: false },
+    referencing_side: "SOURCE",
+    optionality: "MANDATORY",
+    optionality_columns: [
+      { column_name: f.sourceColumn, declared_nullable: false, observed_null_count: 0, observed_non_null_count: 48210 },
+    ],
+    source_observation: {
+      table_profile_id: "tp_fixture_source",
+      profiled_at: "2026-09-14T06:00:00Z",
+      sampled_row_count: 48210,
+      row_count_estimate: 48210,
+      scope: "FULL",
+    },
+    target_observation: null,
+    inclusion_check_status: "NOT_RUN",
+    inclusion_check_reason:
+      "Checking that every referencing value exists on the key side needs a query against the source, and validation runs none.",
+    grain_warnings: [],
+    source_queries_executed: 0,
+    values_inspected: false,
+    fingerprint: "fixture",
+    recorded_fingerprint: null,
+    recorded_at: null,
+    drift: "NOT_RECORDED",
+  };
+}
+
 /* ---------------------------------------------------------------------------
    UX-16: audit ledger fixtures, standing in for the real, already-merged
    `GET /v1/organizations/{id}/audit-events` (`list_audit_events`,

@@ -694,6 +694,76 @@ class RelationshipCandidateDecision(ApiModel):
         return self
 
 
+class RelationshipEvidenceClassRead(ApiModel):
+    name: str
+    corroborating: bool
+    detail: str
+    sample_bounded: bool
+
+
+class RelationshipSideUniquenessRead(ApiModel):
+    unique: bool
+    basis: (
+        Literal["DECLARED_KEY", "UNIQUE_INDEX", "DECLARED_FOREIGN_KEY", "APPROVED_KEY", "PROFILED"]
+        | None
+    )
+    sample_bounded: bool
+
+
+class RelationshipObservationBoundsRead(ApiModel):
+    table_profile_id: UUID
+    profiled_at: datetime
+    sampled_row_count: int
+    row_count_estimate: int | None
+    scope: Literal["FULL", "SAMPLE", "UNKNOWN"]
+
+
+class RelationshipOptionalityColumnRead(ApiModel):
+    column_name: str
+    declared_nullable: bool
+    observed_null_count: int | None
+    observed_non_null_count: int | None
+
+
+class RelationshipValidationRead(ApiModel):
+    """R11-FP06: what supports a proposed join, derived from the catalog as it is now.
+
+    ``recorded_*`` and ``drift`` compare it with the validation stored when the join was
+    approved, so a key that has since gone, or nulls that have since appeared, show.
+    """
+
+    subject_type: Literal["RELATIONSHIP_CANDIDATE", "COMPOSITE_RELATIONSHIP_CANDIDATE"]
+    subject_id: UUID
+    status: str
+    validation_version: str
+    outcome: Literal["CORROBORATED", "NAME_MATCH_ONLY"]
+    approvable: bool
+    evidence_classes: list[RelationshipEvidenceClassRead]
+    source_key_columns: list[str]
+    target_key_columns: list[str]
+    join_condition: str
+    cardinality: Literal["ONE_TO_ONE", "MANY_TO_ONE", "ONE_TO_MANY", "UNKNOWN"]
+    direction: Literal[
+        "SOURCE_REFERENCES_TARGET", "TARGET_REFERENCES_SOURCE", "EITHER", "UNDETERMINED"
+    ]
+    source_uniqueness: RelationshipSideUniquenessRead
+    target_uniqueness: RelationshipSideUniquenessRead
+    referencing_side: Literal["SOURCE", "TARGET"]
+    optionality: Literal["MANDATORY", "OPTIONAL", "NULLABLE_NONE_OBSERVED", "UNKNOWN"]
+    optionality_columns: list[RelationshipOptionalityColumnRead]
+    source_observation: RelationshipObservationBoundsRead | None
+    target_observation: RelationshipObservationBoundsRead | None
+    inclusion_check_status: Literal["NOT_RUN"]
+    inclusion_check_reason: str
+    grain_warnings: list[str]
+    source_queries_executed: int
+    values_inspected: bool
+    fingerprint: str
+    recorded_fingerprint: str | None
+    recorded_at: datetime | None
+    drift: Literal["NOT_RECORDED", "UNCHANGED", "CHANGED", "CORROBORATION_LOST"]
+
+
 class TableRef(ApiModel):
     """A resolved table reference; the return type of ``resolve_canonical``."""
 
@@ -773,9 +843,13 @@ class CompositeKeyCandidateRead(ApiModel):
     organization_id: UUID
     datasource_id: UUID
     table_id: UUID
+    table_profile_id: UUID | None
     column_ids: list[UUID]
+    column_names: list[str]
+    column_count: int
     detection_rule: str
     confidence: float
+    estimated_distinctness_ratio: float
     evidence: dict[str, Any]
     status: str
     created_by: str

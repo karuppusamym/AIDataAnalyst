@@ -86,6 +86,7 @@ from aida.readiness import (
     evaluate_readiness,
     probe_workspace_authorization_posture,
 )
+from aida.relationship_validation_api import router as relationship_validation_router
 from aida.retrieval_ops_api import router as retrieval_ops_router
 from aida.review_queue_api import router as review_queue_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
@@ -472,6 +473,8 @@ app.include_router(ontology_router)
 app.include_router(change_signals_router)
 # R11-FP05/FP17: what Atlas does not know about each source yet, and who can close it.
 app.include_router(footprint_gaps_router)
+# R11-FP06: what supports a proposed join, before and after it is decided.
+app.include_router(relationship_validation_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
 app.include_router(procedure_tool_router)

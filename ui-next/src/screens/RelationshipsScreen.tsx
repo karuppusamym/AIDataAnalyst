@@ -4,6 +4,7 @@ import type {
   RelationshipCandidateRead,
   RelationshipCandidateReviewItemRead,
   RelationshipCandidateReviewQueueRead,
+  RelationshipValidationRead,
 } from "../lib/types";
 import {
   ApiError,
@@ -12,6 +13,7 @@ import {
   fetchRelationshipCandidateCalibration,
   fetchRelationshipCandidates,
   fetchRelationshipCandidateReviewQueue,
+  fetchRelationshipCandidateValidation,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
@@ -45,6 +47,22 @@ import "./RelationshipsScreen.css";
 
 import { useOrgId } from "../lib/org";
 const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+/** A server code (`MANY_TO_ONE`, `FAN_OUT_POSSIBLE`) as words. */
+function words(code: string): string {
+  return code.toLowerCase().replace(/_/g, " ");
+}
+
+/** Which profile a validation statistic came from, and how much of the table it saw. */
+function observationWords(side: string, o: RelationshipValidationRead["source_observation"]): string {
+  if (!o) return `${side}: not profiled`;
+  if (o.scope === "FULL") return `${side}: profiled in full (${o.sampled_row_count} rows)`;
+  const estimate =
+    o.row_count_estimate === null || o.row_count_estimate === undefined
+      ? "an unknown number of"
+      : `~${o.row_count_estimate}`;
+  return `${side}: sampled ${o.sampled_row_count} of ${estimate} rows`;
+}
 
 interface ConfidenceSignal {
   name: string;
@@ -198,6 +216,23 @@ export function RelationshipsScreen() {
   const [decided, setDecided] = useState<RelationshipCandidateRead[] | null>(null);
   const [decidedLoading, setDecidedLoading] = useState(false);
   const [decidedError, setDecidedError] = useState<string | null>(null);
+  // R11-FP06: the focused candidate's join validation, read when the panel opens.
+  const [validation, setValidation] = useState<RelationshipValidationRead | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setValidation(null);
+    setValidationError(null);
+    if (!focusedId) return;
+    const ac = new AbortController();
+    fetchRelationshipCandidateValidation(focusedId, ac.signal)
+      .then((v) => setValidation(v))
+      .catch((e) => {
+        if ((e as Error)?.name === "AbortError") return;
+        setValidationError(e instanceof ApiError ? e.detail : (e as Error).message);
+      });
+    return () => ac.abort();
+  }, [focusedId]);
 
   // One in-flight review-queue request at a time — same reason CatalogScreen
   // aborts the previous one: a slow first fetch must not overwrite the
@@ -557,6 +592,68 @@ export function RelationshipsScreen() {
             </button>
           </header>
           <div className="evp__body">
+            {/* R11-FP06: what supports this join, read from the catalog as it is now. An
+                approval the server would refuse says so here, before the reviewer tries. */}
+            <section className="rel__validation" aria-label="Join validation">
+              {validationError ? (
+                <p className="evp__error" role="alert">
+                  Join validation could not be read: {validationError}
+                </p>
+              ) : !validation ? (
+                <p className="rel__load" role="status">
+                  Validating the join…
+                </p>
+              ) : (
+                <>
+                  <div className="rcard__badges">
+                    <Pill tone={validation.approvable ? "ok" : "bad"}>
+                      {validation.approvable ? "corroborated" : "name match only"}
+                    </Pill>
+                    <Pill tone="info">{words(validation.cardinality)}</Pill>
+                    <Pill tone="mute">{words(validation.optionality)}</Pill>
+                    {validation.drift === "CHANGED" || validation.drift === "CORROBORATION_LOST" ? (
+                      <Pill tone="warn">{words(validation.drift)} since approval</Pill>
+                    ) : null}
+                  </div>
+                  {!validation.approvable ? (
+                    <p className="evp__error" role="status">
+                      Approval will be refused: nothing but matching names and types supports this join.
+                    </p>
+                  ) : null}
+                  <div className="dl">
+                    <span className="dl__t">
+                      <b>join</b> = {validation.join_condition}
+                    </span>
+                  </div>
+                  <div className="dl">
+                    <span className="dl__t">
+                      <b>direction</b> = {words(validation.direction)}
+                    </span>
+                  </div>
+                  <ol className="evl">
+                    {validation.evidence_classes.map((c, i) => (
+                      <li key={`${c.name}-${i}`} className={`evi ${c.corroborating ? "evi--ok" : "evi--info"}`}>
+                        <div className="evi__label">
+                          {words(c.name)}
+                          {c.sample_bounded ? " · sample-bounded" : ""}
+                        </div>
+                        <div className="evi__value">{c.detail}</div>
+                      </li>
+                    ))}
+                  </ol>
+                  <p className="evi__source">
+                    {observationWords("Source", validation.source_observation)} ·{" "}
+                    {observationWords("Target", validation.target_observation)}
+                  </p>
+                  {validation.grain_warnings.length > 0 ? (
+                    <p className="evi__source">Warnings: {validation.grain_warnings.map(words).join(", ")}</p>
+                  ) : null}
+                  <p className="evi__source">
+                    Referential inclusion not checked: {validation.inclusion_check_reason}
+                  </p>
+                </>
+              )}
+            </section>
             <div className="rel__diff" role="group" aria-label="Proposed edge">
               {focused.diff
                 .filter((e) => e.field !== "confidence_signals")

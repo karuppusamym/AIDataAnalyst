@@ -226,6 +226,25 @@ async def _seed_edge(
     confidence: float = 0.9,
     created_by: str = "maker",
 ) -> RelationshipCandidate:
+    # R11-FP06: the rule name claims a declared key on the target, and an approval now
+    # checks the catalog for it.
+    key_name = f"pk_{target_table.name}"
+    if not await session.scalar(
+        select(MetadataConstraint.id).where(
+            MetadataConstraint.table_id == target_table.id, MetadataConstraint.name == key_name
+        )
+    ):
+        session.add(
+            MetadataConstraint(
+                organization_id=org.id,
+                datasource_id=datasource.id,
+                table_id=target_table.id,
+                name=key_name,
+                constraint_type="PRIMARY_KEY",
+                columns=[target_column.name],
+                fingerprint="f" * 8,
+            )
+        )
     candidate = RelationshipCandidate(
         organization_id=org.id,
         datasource_id=datasource.id,

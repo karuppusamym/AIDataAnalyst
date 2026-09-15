@@ -7314,12 +7314,23 @@
       "CompositeKeyCandidateRead": {
         "additionalProperties": false,
         "properties": {
+          "column_count": {
+            "title": "Column Count",
+            "type": "integer"
+          },
           "column_ids": {
             "items": {
               "format": "uuid",
               "type": "string"
             },
             "title": "Column Ids",
+            "type": "array"
+          },
+          "column_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Column Names",
             "type": "array"
           },
           "confidence": {
@@ -7343,6 +7354,10 @@
           "detection_rule": {
             "title": "Detection Rule",
             "type": "string"
+          },
+          "estimated_distinctness_ratio": {
+            "title": "Estimated Distinctness Ratio",
+            "type": "number"
           },
           "evidence": {
             "additionalProperties": true,
@@ -7402,6 +7417,18 @@
             "title": "Table Id",
             "type": "string"
           },
+          "table_profile_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Profile Id"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -7413,9 +7440,13 @@
           "organization_id",
           "datasource_id",
           "table_id",
+          "table_profile_id",
           "column_ids",
+          "column_names",
+          "column_count",
           "detection_rule",
           "confidence",
+          "estimated_distinctness_ratio",
           "evidence",
           "status",
           "created_by",
@@ -24785,6 +24816,392 @@
         "title": "RelationshipCandidateReviewQueueRead",
         "type": "object"
       },
+      "RelationshipEvidenceClassRead": {
+        "additionalProperties": false,
+        "properties": {
+          "corroborating": {
+            "title": "Corroborating",
+            "type": "boolean"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "sample_bounded": {
+            "title": "Sample Bounded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "corroborating",
+          "detail",
+          "sample_bounded"
+        ],
+        "title": "RelationshipEvidenceClassRead",
+        "type": "object"
+      },
+      "RelationshipObservationBoundsRead": {
+        "additionalProperties": false,
+        "properties": {
+          "profiled_at": {
+            "format": "date-time",
+            "title": "Profiled At",
+            "type": "string"
+          },
+          "row_count_estimate": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Count Estimate"
+          },
+          "sampled_row_count": {
+            "title": "Sampled Row Count",
+            "type": "integer"
+          },
+          "scope": {
+            "enum": [
+              "FULL",
+              "SAMPLE",
+              "UNKNOWN"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "table_profile_id": {
+            "format": "uuid",
+            "title": "Table Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table_profile_id",
+          "profiled_at",
+          "sampled_row_count",
+          "row_count_estimate",
+          "scope"
+        ],
+        "title": "RelationshipObservationBoundsRead",
+        "type": "object"
+      },
+      "RelationshipOptionalityColumnRead": {
+        "additionalProperties": false,
+        "properties": {
+          "column_name": {
+            "title": "Column Name",
+            "type": "string"
+          },
+          "declared_nullable": {
+            "title": "Declared Nullable",
+            "type": "boolean"
+          },
+          "observed_non_null_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Non Null Count"
+          },
+          "observed_null_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Null Count"
+          }
+        },
+        "required": [
+          "column_name",
+          "declared_nullable",
+          "observed_null_count",
+          "observed_non_null_count"
+        ],
+        "title": "RelationshipOptionalityColumnRead",
+        "type": "object"
+      },
+      "RelationshipSideUniquenessRead": {
+        "additionalProperties": false,
+        "properties": {
+          "basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "DECLARED_KEY",
+                  "UNIQUE_INDEX",
+                  "DECLARED_FOREIGN_KEY",
+                  "APPROVED_KEY",
+                  "PROFILED"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis"
+          },
+          "sample_bounded": {
+            "title": "Sample Bounded",
+            "type": "boolean"
+          },
+          "unique": {
+            "title": "Unique",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "unique",
+          "basis",
+          "sample_bounded"
+        ],
+        "title": "RelationshipSideUniquenessRead",
+        "type": "object"
+      },
+      "RelationshipValidationRead": {
+        "additionalProperties": false,
+        "description": "R11-FP06: what supports a proposed join, derived from the catalog as it is now.\n\n``recorded_*`` and ``drift`` compare it with the validation stored when the join was\napproved, so a key that has since gone, or nulls that have since appeared, show.",
+        "properties": {
+          "approvable": {
+            "title": "Approvable",
+            "type": "boolean"
+          },
+          "cardinality": {
+            "enum": [
+              "ONE_TO_ONE",
+              "MANY_TO_ONE",
+              "ONE_TO_MANY",
+              "UNKNOWN"
+            ],
+            "title": "Cardinality",
+            "type": "string"
+          },
+          "direction": {
+            "enum": [
+              "SOURCE_REFERENCES_TARGET",
+              "TARGET_REFERENCES_SOURCE",
+              "EITHER",
+              "UNDETERMINED"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "drift": {
+            "enum": [
+              "NOT_RECORDED",
+              "UNCHANGED",
+              "CHANGED",
+              "CORROBORATION_LOST"
+            ],
+            "title": "Drift",
+            "type": "string"
+          },
+          "evidence_classes": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipEvidenceClassRead"
+            },
+            "title": "Evidence Classes",
+            "type": "array"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "grain_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Grain Warnings",
+            "type": "array"
+          },
+          "inclusion_check_reason": {
+            "title": "Inclusion Check Reason",
+            "type": "string"
+          },
+          "inclusion_check_status": {
+            "const": "NOT_RUN",
+            "title": "Inclusion Check Status",
+            "type": "string"
+          },
+          "join_condition": {
+            "title": "Join Condition",
+            "type": "string"
+          },
+          "optionality": {
+            "enum": [
+              "MANDATORY",
+              "OPTIONAL",
+              "NULLABLE_NONE_OBSERVED",
+              "UNKNOWN"
+            ],
+            "title": "Optionality",
+            "type": "string"
+          },
+          "optionality_columns": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipOptionalityColumnRead"
+            },
+            "title": "Optionality Columns",
+            "type": "array"
+          },
+          "outcome": {
+            "enum": [
+              "CORROBORATED",
+              "NAME_MATCH_ONLY"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded At"
+          },
+          "recorded_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded Fingerprint"
+          },
+          "referencing_side": {
+            "enum": [
+              "SOURCE",
+              "TARGET"
+            ],
+            "title": "Referencing Side",
+            "type": "string"
+          },
+          "source_key_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Key Columns",
+            "type": "array"
+          },
+          "source_observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RelationshipObservationBoundsRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_queries_executed": {
+            "title": "Source Queries Executed",
+            "type": "integer"
+          },
+          "source_uniqueness": {
+            "$ref": "#/components/schemas/RelationshipSideUniquenessRead"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "subject_type": {
+            "enum": [
+              "RELATIONSHIP_CANDIDATE",
+              "COMPOSITE_RELATIONSHIP_CANDIDATE"
+            ],
+            "title": "Subject Type",
+            "type": "string"
+          },
+          "target_key_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Key Columns",
+            "type": "array"
+          },
+          "target_observation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RelationshipObservationBoundsRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_uniqueness": {
+            "$ref": "#/components/schemas/RelationshipSideUniquenessRead"
+          },
+          "validation_version": {
+            "title": "Validation Version",
+            "type": "string"
+          },
+          "values_inspected": {
+            "title": "Values Inspected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id",
+          "status",
+          "validation_version",
+          "outcome",
+          "approvable",
+          "evidence_classes",
+          "source_key_columns",
+          "target_key_columns",
+          "join_condition",
+          "cardinality",
+          "direction",
+          "source_uniqueness",
+          "target_uniqueness",
+          "referencing_side",
+          "optionality",
+          "optionality_columns",
+          "source_observation",
+          "target_observation",
+          "inclusion_check_status",
+          "inclusion_check_reason",
+          "grain_warnings",
+          "source_queries_executed",
+          "values_inspected",
+          "fingerprint",
+          "recorded_fingerprint",
+          "recorded_at",
+          "drift"
+        ],
+        "title": "RelationshipValidationRead",
+        "type": "object"
+      },
       "RenameCandidateDecision": {
         "additionalProperties": false,
         "properties": {
@@ -39159,6 +39576,134 @@
         "summary": "Decide Composite Relationship Candidate",
         "tags": [
           "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/composite-relationship-candidates/{group_id}/validation": {
+      "get": {
+        "operationId": "get_composite_relationship_candidate_validation_v1_composite_relationship_candidates__group_id__validation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Group Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipValidationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Composite Relationship Candidate Validation",
+        "tags": [
+          "relationship-validation"
         ]
       }
     },
@@ -88295,6 +88840,134 @@
         "summary": "Decide Relationship Candidate",
         "tags": [
           "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/relationship-candidates/{candidate_id}/validation": {
+      "get": {
+        "operationId": "get_relationship_candidate_validation_v1_relationship_candidates__candidate_id__validation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "candidate_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Candidate Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipValidationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Relationship Candidate Validation",
+        "tags": [
+          "relationship-validation"
         ]
       }
     },
