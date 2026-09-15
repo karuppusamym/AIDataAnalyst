@@ -479,3 +479,27 @@ describe("policy form helpers", () => {
     expect(policyToForm(null).priority).toBe("50");
   });
 });
+
+describe("run receipt (R11-FP02)", () => {
+  it("keeps withheld code and an unfinished stream visible, and says nothing for a run before receipts", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    expect(receiptWords(null)).toBeNull();
+    expect(
+      receiptWords({
+        stream: { state: "INTERRUPTED", batches: 1 },
+        facets: {
+          view_definitions: { support: "SUPPORTED", captured: 2, withheld: 1, truncated: 1 },
+          routine_bodies: { support: "UNSUPPORTED", captured: 0, withheld: 2, truncated: 0 },
+        },
+      }),
+    ).toBe(
+      "view code: 2 captured, 1 withheld, 1 truncated · routine code: not collected by this connector · stream interrupted after 1 batch(es)",
+    );
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 3 },
+        facets: { view_definitions: { support: "SUPPORTED", captured: 4, withheld: 0, truncated: 0 } },
+      }),
+    ).toBe("view code: 4 captured");
+  });
+});

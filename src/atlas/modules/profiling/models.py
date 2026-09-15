@@ -220,6 +220,8 @@ class AnalysisRun(Base, TimestampMixin):
     excluded_objects: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )
+    # R11-FP02: value-free scope receipt (`aida.discovery_receipt`); NULL for a run before it.
+    discovery_receipt: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     profiled_tables: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     profiled_columns: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_class: Mapped[str | None] = mapped_column(String(100))

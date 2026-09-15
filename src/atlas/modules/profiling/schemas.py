@@ -75,6 +75,8 @@ class AnalysisRunRead(ApiModel):
     deprecated_objects: int
     discovery_selection_fingerprint: str | None = None
     excluded_objects: int = 0
+    #: R11-FP02: per kind and per facet, what the run took in and how completely.
+    discovery_receipt: dict[str, Any] | None = None
     profiled_tables: int
     profiled_columns: int
     error_class: str | None

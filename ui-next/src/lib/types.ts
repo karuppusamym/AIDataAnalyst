@@ -522,6 +522,7 @@ export interface AnalysisRunRead {
   deprecated_objects: number;
   discovery_selection_fingerprint?: string | null;
   excluded_objects?: number;
+  discovery_receipt?: Record<string, unknown> | null;
   profiled_tables: number;
   profiled_columns: number;
   error_class: string | null;

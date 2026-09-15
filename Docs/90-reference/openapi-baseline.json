@@ -2921,6 +2921,18 @@
             "title": "Discovered Tables",
             "type": "integer"
           },
+          "discovery_receipt": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Discovery Receipt"
+          },
           "discovery_selection_fingerprint": {
             "anyOf": [
               {

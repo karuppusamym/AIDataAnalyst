@@ -88,6 +88,41 @@ function intervalWords(minutes: number): string {
   return `every ${minutes}m`;
 }
 
+interface ReceiptCode {
+  support?: string;
+  captured?: number;
+  withheld?: number;
+  truncated?: number;
+}
+
+function codeWords(label: string, facet: ReceiptCode | undefined): string | null {
+  if (!facet) return null;
+  if (facet.support === "UNSUPPORTED") return `${label}: not collected by this connector`;
+  const parts = [`${facet.captured ?? 0} captured`];
+  if (facet.withheld) parts.push(`${facet.withheld} withheld`);
+  if (facet.truncated) parts.push(`${facet.truncated} truncated`);
+  return `${label}: ${parts.join(", ")}`;
+}
+
+/** R11-FP02: the run's receipt in one line -- how completely it took in code, and whether its
+ *  stream finished. `null` for a run from before receipts, which is not "found nothing". */
+export function receiptWords(receipt: unknown): string | null {
+  if (!receipt || typeof receipt !== "object") return null;
+  const body = receipt as {
+    stream?: { state?: string; batches?: number };
+    facets?: { view_definitions?: ReceiptCode; routine_bodies?: ReceiptCode };
+  };
+  const parts = [
+    codeWords("view code", body.facets?.view_definitions),
+    codeWords("routine code", body.facets?.routine_bodies),
+  ].filter((part): part is string => part !== null);
+  const state = body.stream?.state;
+  if (state && state !== "COMPLETE") {
+    parts.push(`stream ${state.toLowerCase().replace(/_/g, " ")} after ${body.stream?.batches ?? 0} batch(es)`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function windowWords(start: number | null, end: number | null): string {
   if (start === null || end === null) return "any time of day";
   const pad = (h: number) => `${String(h).padStart(2, "0")}:00`;
@@ -619,6 +654,9 @@ export function SourceAdministration({
                   {run.excluded_objects ? ` · ${run.excluded_objects} left out by the discovery scope` : ""}
                   {run.resumed_from_run_id ? ` · resumed from ${run.resumed_from_run_id.slice(0, 8)}` : ""}
                 </div>
+                {receiptWords(run.discovery_receipt) ? (
+                  <div className="srcadmin__runmeta">{receiptWords(run.discovery_receipt)}</div>
+                ) : null}
                 {run.error_message ? (
                   <div className="srcadmin__runerr" role="alert">
                     {run.error_class ? <b>{run.error_class}: </b> : null}

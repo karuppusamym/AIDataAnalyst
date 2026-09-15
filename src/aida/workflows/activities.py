@@ -40,6 +40,12 @@ from aida.connectors.base import (
 )
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
+from aida.discovery_receipt import (
+    STREAM_COMPLETE,
+    STREAM_IN_PROGRESS,
+    STREAM_INTERRUPTED,
+    DiscoveryReceipt,
+)
 from aida.discovery_selection import (
     DiscoverySelection,
     apply_selection,
@@ -1142,6 +1148,16 @@ async def _mark_run_cancelled(run_uuid: UUID) -> None:
         await session.commit()
 
 
+async def _interrupt_receipt(run_uuid: UUID, receipt: DiscoveryReceipt) -> None:
+    """R11-FP02: a cancelled run keeps the batches its receipt already counted, marked as
+    not finished -- never left looking like a stream still running."""
+    async with session_factory() as session:
+        run = await session.get(AnalysisRun, run_uuid)
+        if run is not None:
+            run.discovery_receipt = receipt.as_json(STREAM_INTERRUPTED)
+            await session.commit()
+
+
 @activity.defn(name="discover_datasource")
 async def discover_datasource(run_id: str) -> dict[str, Any]:
     run_uuid = UUID(run_id)
@@ -1172,8 +1188,12 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
         run.status = "RUNNING"
+        run_mode = run.mode
         await session.commit()
 
+    # R11-FP02: created once the connector has answered, so its capability flags are known;
+    # declared here so a failure after that point can still mark it INTERRUPTED.
+    receipt: DiscoveryReceipt | None = None
     activity.heartbeat({"stage": "connecting"})
     await heartbeat_task(
         analysis_run_id=run_uuid,
@@ -1225,6 +1245,11 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         # the run is in flight applies to the next run, not halfway through this one.
         selection = selection_for(datasource)
         excluded_by_kind: dict[str, int] = {}
+        receipt = DiscoveryReceipt(
+            mode=run_mode,
+            selection_fingerprint=selection.fingerprint(),
+            capabilities=asdict(connector.capabilities),
+        )
         created_objects_total = 0
         changed_objects_total = 0
         batch_index = 0
@@ -1238,6 +1263,7 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             catalogs = outcome.catalogs
             for kind, count in outcome.excluded.items():
                 excluded_by_kind[kind] = excluded_by_kind.get(kind, 0) + count
+            receipt.observe_batch(catalogs, outcome.excluded)
             async with session_factory() as session:
                 run = await session.get(AnalysisRun, run_uuid)
                 datasource = await session.get(DataSource, run.datasource_id) if run else None
@@ -1272,6 +1298,9 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 changed_objects_total += (
                     counts["changed_objects"] + extension_counts["changed_objects"]
                 )
+                # Written with the batch it describes, so the receipt never claims a batch
+                # the catalog does not hold.
+                run.discovery_receipt = receipt.as_json(STREAM_IN_PROGRESS)
                 await session.commit()
             batch_progress = {
                 "stage": "discovering",
@@ -1330,6 +1359,11 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                     created_table_ids=snapshot_scope.created_table_ids,
                     deprecated_table_ids=deprecation_result.deprecated_table_ids,
                 )
+                receipt.record_reconciliation(
+                    deprecated=deprecated_objects_total,
+                    retained_out_of_scope=retained_out_of_scope,
+                )
+            run.discovery_receipt = receipt.as_json(STREAM_COMPLETE)
             object_counts = {**snapshot_scope.object_counts(), **envelope_scope.object_counts()}
             run.discovered_catalogs = object_counts["catalogs"]
             run.discovered_schemas = object_counts["schemas"]
@@ -1400,6 +1434,8 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         }
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
+        if receipt is not None:
+            await _interrupt_receipt(run_uuid, receipt)
         await finish_task(
             analysis_run_id=run_uuid,
             task_type=TASK_TYPE_DISCOVER_DATASOURCE,
@@ -1415,6 +1451,8 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             run = await session.get(AnalysisRun, run_uuid)
             if run is not None:
                 run.status = "FAILED"
+                if receipt is not None:
+                    run.discovery_receipt = receipt.as_json(STREAM_INTERRUPTED)
                 run.error_class = type(exc).__name__
                 # INV-6 / ADR-0014: never persist str(exc) here -- it can carry
                 # source-connector-returned row data, SQL fragments, or
