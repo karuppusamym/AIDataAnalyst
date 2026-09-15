@@ -2,8 +2,9 @@
 
 Discover the source; investigate it (the lineage agent reads the view, a reviewer decides each
 edge); review its meaning (a description drafted from evidence, approved by someone else); publish
-context (a governed tool over the view, and a context product pinning it); answer a question
-through the query gateway against the source. Then change the source's logic, read it again, and
+context (a governed tool over the view, and a context product pinning it); ask a question through
+Ask, which chooses the governed tool and reads the source through the query gateway. Then change
+the source's logic, read it again, and
 watch the platform hold what the change can have broken, rebuild each affected artifact into its
 review queue, release the hold once reviewers approve the rebuilt context, and answer correctly
 again.
@@ -29,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.api import run_agent_analysis
 from aida.asset_description_api import (
     generate_asset_description_drafts,
     submit_asset_description_draft,
@@ -58,6 +60,7 @@ from aida.models import (
 )
 from aida.parsed_lineage_review_api import decide_parsed_lineage_edge
 from aida.schemas import (
+    AgentAnalysisRequest,
     AssetDescriptionDraftGenerate,
     ContextProductCreate,
     GovernanceDecisionRequest,
@@ -84,6 +87,8 @@ from tests.support.task_agents import (
 
 SCHEMA = "footprint_context_sample"
 FIXTURES = Path(__file__).parent / "fixtures" / "database_footprint" / "postgres"
+#: The question an analyst asks, before and after the change.
+QUESTION = "What is the customer revenue for customer 1?"
 #: The source's new logic: revenue no longer nets off discounts.
 REDEFINED_VIEW = (
     "CREATE OR REPLACE VIEW footprint_context_sample.customer_revenue AS "
@@ -249,6 +254,26 @@ async def _revenue(
     return float(rows[0]["net_revenue"])
 
 
+async def _ask(
+    session: AsyncSession,
+    datasource: DataSource,
+    analyst: SecurityContext,
+    settings: Settings,
+) -> tuple[str, float]:
+    """Ask the question through Ask; answer with the tool it chose and the revenue it read."""
+    response = await run_agent_analysis(
+        datasource.id,
+        AgentAnalysisRequest(question=QUESTION, tool_parameters={"customer_id": 1}),
+        context=analyst,
+        session=session,
+        settings=settings,
+    )
+    assert response.generation_source == "GOVERNED_TOOL", response.plan_evidence
+    rows = response.execution.rows
+    assert len(rows) == 1, rows
+    return str(response.plan_evidence["selected_tool_version_id"]), float(rows[0]["net_revenue"])
+
+
 async def _hold(session: AsyncSession, view: MetadataTable) -> DataQualityIncident | None:
     return await session.scalar(
         select(DataQualityIncident)
@@ -368,8 +393,8 @@ async def test_the_footprint_journey_on_postgres(
         )
         await _approve(session, product_review.id, reviewer)
 
-        # 5. Answer: customer 1's orders are 100 - 10 and 60 - 0.
-        assert await _revenue(session, first_tool.id, analyst, settings) == 150.0
+        # 5. Answer a question through Ask: customer 1's orders are 100 - 10 and 60 - 0.
+        assert await _ask(session, datasource, analyst, settings) == (str(first_tool.id), 150.0)
 
         # 6. Change the source's logic, and read the source again.
         await _execute(source, REDEFINED_VIEW)
@@ -396,6 +421,10 @@ async def test_the_footprint_journey_on_postgres(
         with pytest.raises(HTTPException) as held:
             await _revenue(session, first_tool.id, analyst, settings)
         assert held.value.status_code == 409
+        with pytest.raises(HTTPException) as asked:
+            await _ask(session, datasource, analyst, settings)
+        assert asked.value.status_code == 422
+        assert "has been redefined, retired or removed" in str(asked.value.detail)
 
         # 8. Rebuild. The lineage agent reads the new definition; the rebuild retires the edge
         # it no longer produces and drafts a regenerated tool and description into review.
@@ -455,6 +484,6 @@ async def test_the_footprint_journey_on_postgres(
         )
         assert current_product is not None
         assert current_product.eligible_tool_version_ids == [str(rebuilt_tool.id)]
-        assert await _revenue(session, rebuilt_tool.id, analyst, settings) == 160.0
+        assert await _ask(session, datasource, analyst, settings) == (str(rebuilt_tool.id), 160.0)
         with pytest.raises(HTTPException):
             await _revenue(session, first_tool.id, analyst, settings)
