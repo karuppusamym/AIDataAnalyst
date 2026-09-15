@@ -70,6 +70,7 @@ from aida.models import (
     Project,
     ViewLineageEdge,
 )
+from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.procedure_tool_api import ProcedureToolBlueprintRequest, create_procedure_tool_blueprint
 from aida.schemas import (
     AssetDescriptionDraftGenerate,
@@ -895,3 +896,80 @@ async def test_a_proposed_document_is_mapped_again_after_a_scan_and_new_matches_
     assert claim is not None and claim.status == "APPROVED"
     assert not (await _rebuild(estate)).acted
     assert estate.org.id not in await organizations_needing_rebuild(session)
+
+
+async def test_a_context_product_pinning_an_earlier_ontology_version_is_re_pinned_through_review(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    head = OntologyHead(
+        organization_id=estate.org.id, ontology_key="commerce", last_version=1, published_version=1
+    )
+    session.add(head)
+    await session.flush()
+    first = OntologyVersion(
+        organization_id=estate.org.id,
+        ontology_id=head.id,
+        version=1,
+        base_version=0,
+        status="APPROVED",
+        definition={"name": "Commerce", "concepts": []},
+        created_by="author",
+    )
+    session.add(first)
+    await session.flush()
+    await create_context_product(
+        estate.project.id,
+        ContextProductCreate(
+            product_key="orders-meaning",
+            name="Orders",
+            description="Orders, read in the commerce ontology's terms.",
+            purpose="Answer order questions in the commerce ontology's terms.",
+            owner_type="INDIVIDUAL",
+            owner_principal="steward-1",
+            table_ids=[estate.orders.id],
+            ontology_version_ids=[first.id],
+            allowed_consumer_roles=["Analyst"],
+        ),
+        context=estate.steward,
+        session=session,
+    )
+    product = await session.scalar(
+        select(ContextProductVersion)
+        .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+        .where(ContextProduct.product_key == "orders-meaning")
+    )
+    assert product is not None
+    review = await submit_context_product_version(
+        product.id, context=estate.steward, session=session
+    )
+    await _approve(estate, review.id)
+    assert not (await _rebuild(estate)).acted
+
+    # The ontology publishes a second version; the product still pins the first.
+    second = OntologyVersion(
+        organization_id=estate.org.id,
+        ontology_id=head.id,
+        version=2,
+        base_version=1,
+        status="APPROVED",
+        definition={"name": "Commerce", "concepts": []},
+        created_by="author",
+    )
+    session.add(second)
+    head.last_version = 2
+    head.published_version = 2
+    await session.commit()
+    assert estate.org.id in await organizations_needing_rebuild(session)
+
+    outcome = await _rebuild(estate)
+    assert outcome.products_drafted == 1, outcome.as_details()
+    assert await _approve_rebuilt(estate, "CONTEXT_PRODUCT_VERSION") == 1
+    current = await session.scalar(
+        select(ContextProductVersion).where(
+            ContextProductVersion.product_id == product.product_id,
+            ContextProductVersion.status == "PUBLISHED",
+        )
+    )
+    assert current is not None and current.ontology_version_ids == [str(second.id)]
+    assert not (await _rebuild(estate)).acted

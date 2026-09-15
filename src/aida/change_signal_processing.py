@@ -16,7 +16,10 @@ time, and routes each through machinery that already exists rather than a second
   a WARNING: tools still run, and say why they might be wrong.
 * **A view or routine redefined, retired or returning** is left to the lineage agent, which
   re-examines any definition changed structurally since its newest edge (`lineage_agent`).
-* Permission and meaning signals are recorded as seen; nothing downstream consumes them yet.
+* Permission and meaning signals are recorded as seen. A newly published ontology reaches the
+  context products pinning an earlier version through `context_rebuild`, which re-pins from
+  the pins themselves. A source grant authorizes nothing in Atlas (INV-5), so a permission
+  change places no hold.
 
 Every signal ends PROCESSED with the action taken in `outcome` -- the per-signal watermark. Each is
 applied in its own savepoint, so one failure leaves the rest of the batch intact and the failed

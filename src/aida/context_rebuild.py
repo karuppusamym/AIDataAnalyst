@@ -26,7 +26,8 @@ For each organization:
 6. **Context products.** A PUBLISHED context product version that pins a tool version since
    superseded gets a version re-pinned to that tool's published version; one that includes a
    held table the source no longer has, or pins a tool reading it, gets a version without
-   them. Each is submitted for review.
+   them; one pinning an ontology version its ontology has since published past gets a
+   version pinned to the published one. Each is submitted for review.
 7. **Holds.** A source-change hold is resolved once nothing standing on its table is stale,
    and its change signals are processed. For a table the source no longer has: no published
    tool reads it, and no published context product includes it or pins a tool reading it.
@@ -101,6 +102,7 @@ from aida.models import (
     Project,
     ViewLineageEdge,
 )
+from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.procedure_tool_blueprint import (
     ProcedureNotEligibleError,
     ProcedureToolBlueprintError,
@@ -1103,6 +1105,34 @@ async def _repin(
     return replacements, dropped, None
 
 
+async def _meaning_replacements(session: AsyncSession, pinned: list[str]) -> dict[str, str]:
+    """Pinned ontology versions their ontology has published past, mapped to the published one.
+
+    An earlier version stays APPROVED when a later one is published, so the pin still validates;
+    only the ontology's head says which meaning is current.
+    """
+    if not pinned:
+        return {}
+    replacements: dict[str, str] = {}
+    versions = await session.scalars(
+        select(OntologyVersion).where(OntologyVersion.id.in_([UUID(value) for value in pinned]))
+    )
+    for version in versions:
+        head = await session.get(OntologyHead, version.ontology_id)
+        if head is None or head.published_version <= version.version:
+            continue
+        current = await session.scalar(
+            select(OntologyVersion.id).where(
+                OntologyVersion.ontology_id == version.ontology_id,
+                OntologyVersion.version == head.published_version,
+                OntologyVersion.status == "APPROVED",
+            )
+        )
+        if current is not None:
+            replacements[str(version.id)] = str(current)
+    return replacements
+
+
 async def _draft_product_version(
     session: AsyncSession,
     organization_id: UUID,
@@ -1111,6 +1141,7 @@ async def _draft_product_version(
     replacements: dict[str, str],
     dropped_versions: set[str],
     dropped_tables: set[UUID],
+    meanings: dict[str, str],
 ) -> None:
     product = await session.get(ContextProduct, previous.product_id)
     if product is None or product.lifecycle_status != "ACTIVE":
@@ -1125,8 +1156,16 @@ async def _draft_product_version(
         if str(version_id) not in dropped_versions
     ]
     tables = [table_id for table_id in definition.table_ids if table_id not in dropped_tables]
+    ontology = [
+        UUID(meanings.get(str(version_id), str(version_id)))
+        for version_id in definition.ontology_version_ids
+    ]
     definition = definition.model_copy(
-        update={"eligible_tool_version_ids": repinned, "table_ids": tables}
+        update={
+            "eligible_tool_version_ids": repinned,
+            "table_ids": tables,
+            "ontology_version_ids": ontology,
+        }
     )
     try:
         await validate_context_product_references(session, project, definition)
@@ -1162,6 +1201,7 @@ async def _draft_product_version(
             "repinned_tool_versions": len(replacements),
             "dropped_tool_versions": len(dropped_versions),
             "dropped_tables": len(dropped_tables),
+            "repinned_ontology_versions": len(meanings),
         },
     )
 
@@ -1185,7 +1225,10 @@ async def _rebuild_products(
             outcome.block(blocked)
             continue
         dropped_tables = {UUID(value) for value in previous.table_ids} & retired
-        if not (replacements or dropped or dropped_tables):
+        meanings = await _meaning_replacements(
+            session, list(previous.ontology_version_ids or [])
+        )
+        if not (replacements or dropped or dropped_tables or meanings):
             continue
         waiting = await session.scalar(
             select(ContextProductVersion.id)
@@ -1207,6 +1250,7 @@ async def _rebuild_products(
                     replacements,
                     dropped,
                     dropped_tables,
+                    meanings,
                 )
         except _RebuildRefused as refused:
             outcome.block(refused.code)
@@ -1368,7 +1412,8 @@ async def _release_holds(
 
 async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
     """Organizations with a source-change hold open, a published source-bound tool, or a
-    proposed document a scan has read since it was mapped."""
+    proposed document a scan has read since it was mapped, or a published context product
+    in an organization where an ontology has published past an earlier version."""
     held = await session.scalars(
         select(DataQualityIncident.organization_id)
         .where(
@@ -1391,7 +1436,18 @@ async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
     remapping = await session.scalars(
         select(Document.organization_id).where(_document_needs_remap()).distinct()
     )
-    return sorted(set(held) | set(bound) | set(remapping), key=str)
+    meaning = await session.scalars(
+        select(ContextProductVersion.organization_id)
+        .join(OntologyHead, OntologyHead.organization_id == ContextProductVersion.organization_id)
+        .join(OntologyVersion, OntologyVersion.ontology_id == OntologyHead.id)
+        .where(
+            ContextProductVersion.status == "PUBLISHED",
+            OntologyVersion.status == "APPROVED",
+            OntologyVersion.version < OntologyHead.published_version,
+        )
+        .distinct()
+    )
+    return sorted(set(held) | set(bound) | set(remapping) | set(meaning), key=str)
 
 
 async def run_context_rebuild(
