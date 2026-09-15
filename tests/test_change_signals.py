@@ -130,7 +130,9 @@ def _view(definition_sql: str = _VIEW_SQL) -> dict[str, Any]:
     }
 
 
-def _routine(body_sql: str = "BEGIN UPDATE customer.account SET closed_on = now(); END;"):
+def _routine(
+    body_sql: str = "BEGIN UPDATE customer.account SET closed_on = now(); END;",
+) -> dict[str, Any]:
     return {
         "name": "close_account",
         "routine_type": "PROCEDURE",

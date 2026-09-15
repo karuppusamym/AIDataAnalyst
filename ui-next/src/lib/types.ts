@@ -2153,7 +2153,7 @@ export interface DisagreementReportRead {
 
 /** What discovery takes in. Every list empty means unrestricted. */
 export interface DiscoverySelection {
-  object_kinds?: ("TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION")[];
+  object_kinds?: ("TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE")[];
   include_schemas?: string[];
   exclude_schemas?: string[];
   include_objects?: string[];
@@ -3003,7 +3003,7 @@ export interface MetadataGrantEnvelope {
   grantee: string;
   grantee_type?: "USER" | "ROLE" | "GROUP" | "PUBLIC";
   privilege: string;
-  object_type?: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SCHEMA" | "SEQUENCE";
+  object_type?: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "SCHEMA" | "SEQUENCE";
   object_name: string;
   schema_name?: string | null;
   is_grantable?: boolean;
@@ -3101,7 +3101,7 @@ export interface MetadataIngestionRead {
 /** A stored procedure or function, with its body when the source exposes it. */
 export interface MetadataRoutineEnvelope {
   name: string;
-  routine_type: "FUNCTION" | "PROCEDURE";
+  routine_type: "FUNCTION" | "PROCEDURE" | "PACKAGE";
   language?: string | null;
   body_sql?: string | null;
   parameters?: MetadataRoutineParameterEnvelope[];
@@ -3336,7 +3336,7 @@ export interface NotificationTestResult {
 }
 
 export interface ObjectKindCapabilityRead {
-  kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION";
+  kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE";
   inventory: "SUPPORTED" | "UNSUPPORTED" | "NOT_APPLICABLE";
   definition: "SUPPORTED" | "UNSUPPORTED" | "NOT_APPLICABLE";
 }

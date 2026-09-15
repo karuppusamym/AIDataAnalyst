@@ -155,7 +155,7 @@ The axes exist because four questions could not be answered from a 1.0 snapshot:
 | `view_definition.truncated` | | No | `true` if the source returned a prefix. Default `false` |
 | `view_definition.unavailable_reason` | | Conditional | **Required when `definition_sql` is `null`; forbidden otherwise** |
 | `routines[]` | schema | No | Stored procedures and functions. ≤ 10,000 per schema, ≤ 50,000 per envelope |
-| `routines[].routine_type` | | Yes | `FUNCTION` \| `PROCEDURE` |
+| `routines[].routine_type` | | Yes | `FUNCTION` \| `PROCEDURE` \| `PACKAGE` (R11-FP03; a package is never presented as a callable function) |
 | `routines[].body_sql` | | No | The body, verbatim. `null` means **unavailable**, never empty |
 | `routines[].unavailable_reason` | | Conditional | **Required when `body_sql` is `null`; forbidden otherwise** |
 | `routines[].security_mode` | | No | `DEFINER` \| `INVOKER` |
@@ -163,7 +163,7 @@ The axes exist because four questions could not be answered from a 1.0 snapshot:
 | `routines[].attributes` | | No | Same bounds and same value-free screening as every other attribute bag (§7) |
 | `grants[]` | schema | No | Source-side privileges. ≤ 100,000 per schema |
 | `grants[].grantee_type` | | No | `USER` \| `ROLE` \| `GROUP` \| `PUBLIC`. Default `ROLE` |
-| `grants[].object_type` | | No | `TABLE` \| `VIEW` \| `PROCEDURE` \| `FUNCTION` \| `SCHEMA` \| `SEQUENCE`. Default `TABLE` |
+| `grants[].object_type` | | No | `TABLE` \| `VIEW` \| `PROCEDURE` \| `FUNCTION` \| `PACKAGE` \| `SCHEMA` \| `SEQUENCE`. Default `TABLE` |
 | `grants[].is_grantable` | | No | `WITH GRANT OPTION`. Default `false` |
 
 ### Unavailable is not empty

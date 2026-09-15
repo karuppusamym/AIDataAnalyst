@@ -60,6 +60,7 @@ const UNRESTRICTED: DiscoverySelectionRead = {
     { kind: "MATERIALIZED_VIEW", inventory: "NOT_APPLICABLE", definition: "NOT_APPLICABLE" },
     { kind: "PROCEDURE", inventory: "SUPPORTED", definition: "UNSUPPORTED" },
     { kind: "FUNCTION", inventory: "SUPPORTED", definition: "SUPPORTED" },
+    { kind: "PACKAGE", inventory: "NOT_APPLICABLE", definition: "NOT_APPLICABLE" },
   ],
   capability_source: "CONNECTOR_DEFAULT",
 };
@@ -96,7 +97,7 @@ async function openAndNarrow() {
 }
 
 const NARROWED_BODY: DiscoverySelection = {
-  object_kinds: ["TABLE", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"],
+  object_kinds: ["TABLE", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE"],
   include_schemas: [],
   exclude_schemas: ["scratch"],
   include_objects: ["retail.*", "retial.*"],
@@ -201,7 +202,7 @@ describe("DiscoveryScope — saving", () => {
   it("refuses a scope with no kind ticked before any request", async () => {
     await mount();
     fireEvent.click(screen.getByRole("button", { name: "Edit discovery scope" }));
-    for (const label of ["Tables", "Views", "Materialized views", "Procedures", "Functions"]) {
+    for (const label of ["Tables", "Views", "Materialized views", "Procedures", "Functions", "Packages"]) {
       fireEvent.click(screen.getByLabelText(label));
     }
 

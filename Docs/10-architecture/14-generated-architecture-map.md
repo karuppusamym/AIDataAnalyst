@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-358 Python modules under `src/`, 2029 intra-`src` import edges.
+358 Python modules under `src/`, 2032 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -580,11 +580,11 @@ a package's fan-in measures nothing but the size of the package.
 | `aida.config` | aida domain modules | 85 |
 | `aida.context` | aida domain modules | 67 |
 | `atlas.platform.config` | atlas.platform | 25 |
+| `aida.envelope_models` | aida domain modules | 16 |
 | `aida.connectors.base` | aida.connectors | 15 |
-| `aida.envelope_models` | aida domain modules | 15 |
 | `aida.authorization_gate` | aida domain modules | 14 |
+| `aida.ingest_screening` | aida domain modules | 12 |
 | `aida.task_agent` | aida domain modules | 12 |
-| `aida.ingest_screening` | aida domain modules | 11 |
 | `aida.secrets` | aida domain modules | 11 |
 | `aida.agent_contracts` | aida domain modules | 10 |
 

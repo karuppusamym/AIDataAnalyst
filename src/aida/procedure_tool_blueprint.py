@@ -299,6 +299,13 @@ async def resolve_procedure_tool_source(
         or routine.organization_id != organization_id
     ):
         raise ProcedureToolBlueprintError("unknown routine id for this datasource")
+    # R11-FP03: a package is a namespace of subprograms, not one callable thing -- its body is
+    # a spec and a body joined, and no tool can stand for it. Refused before the body is read.
+    if routine.routine_type.strip().upper() == "PACKAGE":
+        raise ProcedureNotEligibleError(
+            "a package is not a callable routine; only its member subprograms are",
+            code="PACKAGE_NOT_CALLABLE",
+        )
 
     body = require_eligible_routine_body(routine)
     node, result = find_single_read_only_result_statement(body, dialect)

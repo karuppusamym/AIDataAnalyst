@@ -20,11 +20,13 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.change_signals import (
+    CHANGE_LITERAL_ONLY,
+    CHANGE_STRUCTURAL,
     SIGNAL_DEPRECATED,
     SIGNAL_PERMISSION_CHANGED,
     ChangeSignal,
@@ -49,6 +51,7 @@ from aida.envelope_models import (
     UNAVAILABLE,
     MetadataObjectDescription,
     MetadataRoutine,
+    MetadataRoutineDefinitionVersion,
     MetadataRoutineParameter,
     MetadataSourceGrant,
     MetadataViewDefinition,
@@ -457,6 +460,9 @@ class _ExtensionTracker:
     deprecated: int = 0
     # R11-FP15: which objects changed, not just how many.
     signals: list[ChangeSignal] = field(default_factory=list)
+    # R11-FP03: routines whose definition is new or moved, with the change class (None when
+    # first captured) -- each becomes an immutable definition version.
+    routine_versions: list[tuple[MetadataRoutine, str | None]] = field(default_factory=list)
 
     def observe(self, existing: Any | None, new_fingerprint: str) -> None:
         if existing is None:
@@ -711,19 +717,29 @@ async def _upsert_routine(
     existing.unavailable_reason = reason
     existing.attributes = dict(discovered.attributes)
     existing.fingerprint = row_fingerprint
-    signal = code_change_signal(
-        "ROUTINE",
-        existing.id,
-        before,
-        CodeState(
-            existing.status,
-            existing.availability,
-            existing.body_fingerprint,
-            existing.body_sql_redacted,
-        ),
+    after = CodeState(
+        existing.status,
+        existing.availability,
+        existing.body_fingerprint,
+        existing.body_sql_redacted,
     )
+    signal = code_change_signal("ROUTINE", existing.id, before, after)
     if signal is not None:
         tracker.signals.append(signal)
+    # R11-FP03: keep the definition instead of only overwriting it -- on first capture, and
+    # whenever the raw text or its availability moved.
+    if before is None or (before.availability, before.raw_fingerprint) != (
+        after.availability,
+        after.raw_fingerprint,
+    ):
+        change_class: str | None = None
+        if before is not None:
+            literal_only = (
+                before.availability == after.availability
+                and before.stored_text == after.stored_text
+            )
+            change_class = CHANGE_LITERAL_ONLY if literal_only else CHANGE_STRUCTURAL
+        tracker.routine_versions.append((existing, change_class))
     return existing
 
 
@@ -882,6 +898,50 @@ async def deprecate_missing_envelope_extensions(
     return deprecated
 
 
+async def _record_routine_definition_versions(
+    session: AsyncSession,
+    datasource: DataSource,
+    analysis_run_id: UUID | None,
+    versions: list[tuple[MetadataRoutine, str | None]],
+) -> None:
+    """R11-FP03: append one immutable definition version per new or moved routine body, in
+    the caller's transaction -- so a retried batch that rolled back took its versions with it,
+    and one that committed finds the fingerprints current and appends nothing."""
+    if not versions:
+        return
+    captured_at = datetime.now(UTC)
+    latest_rows = await session.execute(
+        select(
+            MetadataRoutineDefinitionVersion.routine_id,
+            func.max(MetadataRoutineDefinitionVersion.version_number),
+        )
+        .where(MetadataRoutineDefinitionVersion.routine_id.in_([r.id for r, _ in versions]))
+        .group_by(MetadataRoutineDefinitionVersion.routine_id)
+    )
+    latest: dict[UUID, int] = {routine_id: int(number) for routine_id, number in latest_rows.all()}
+    for routine, change_class in versions:
+        version_number = latest.get(routine.id, 0) + 1
+        latest[routine.id] = version_number
+        session.add(
+            MetadataRoutineDefinitionVersion(
+                organization_id=datasource.organization_id,
+                datasource_id=datasource.id,
+                routine_id=routine.id,
+                version_number=version_number,
+                body_sql_redacted=routine.body_sql_redacted,
+                body_fingerprint=routine.body_fingerprint,
+                availability=routine.availability,
+                unavailable_reason=routine.unavailable_reason,
+                truncated=routine.truncated,
+                redaction_status=routine.redaction_status,
+                screening_status=routine.screening_status,
+                change_class=change_class,
+                analysis_run_id=analysis_run_id,
+                captured_at=captured_at,
+            )
+        )
+
+
 async def persist_envelope_extensions(
     session: AsyncSession,
     datasource: DataSource,
@@ -1003,6 +1063,9 @@ async def persist_envelope_extensions(
                     working_scope.view_definition_ids.add(view.id)
                     counts["views"] += 1
 
+    await _record_routine_definition_versions(
+        session, datasource, analysis_run_id, tracker.routine_versions
+    )
     record_change_signals(
         session,
         organization_id=datasource.organization_id,

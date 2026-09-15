@@ -44,13 +44,15 @@ from aida.connectors.registry import connector_registry
 from aida.envelope_models import MetadataRoutine
 from aida.models import DataSource, MetadataCatalog, MetadataSchema, MetadataTable
 
-ObjectKind = Literal["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"]
+ObjectKind = Literal["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE"]
 OBJECT_KINDS: tuple[ObjectKind, ...] = (
     "TABLE",
     "VIEW",
     "MATERIALIZED_VIEW",
     "PROCEDURE",
     "FUNCTION",
+    # R11-FP03: an Oracle package is its own kind, never a function in disguise.
+    "PACKAGE",
 )
 CapabilityStatus = Literal["SUPPORTED", "UNSUPPORTED", "NOT_APPLICABLE"]
 
@@ -67,6 +69,9 @@ Pattern = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, 
 _MATERIALIZED_VIEW_CONNECTORS = frozenset({"postgres", "snowflake", "bigquery"})
 _NO_MATERIALIZED_VIEW_KIND = frozenset({"sqlserver"})
 _CONTAINER_GRANT_TYPES = frozenset({"SCHEMA", "DATABASE", "CATALOG"})
+_ROUTINE_GRANT_TYPES = frozenset({"PROCEDURE", "FUNCTION", "PACKAGE"})
+#: Engines with a package object. Everywhere else a PACKAGE kind is NOT_APPLICABLE.
+_PACKAGE_CONNECTORS = frozenset({"oracle"})
 
 
 class DiscoverySelection(BaseModel):
@@ -156,9 +161,14 @@ def table_kind(object_type: str) -> str:
 
 
 def routine_kind(routine_type: str) -> str:
-    """PROCEDURE or FUNCTION; any other native type (an Oracle PACKAGE) keeps its own name,
-    so a selection that lists kinds excludes it rather than miscounting it as a function."""
-    return routine_type.strip().upper()
+    """PROCEDURE, FUNCTION or PACKAGE. A native function subtype -- BigQuery's
+    `SCALAR_FUNCTION`, `TABLE_FUNCTION` -- is a FUNCTION (R11-FP03): kept as its raw name it
+    matched no selectable kind, so any restricted selection silently dropped it. Anything
+    else keeps its own name and is excluded rather than miscounted."""
+    normalized = routine_type.strip().replace(" ", "_").upper()
+    if normalized.endswith("_FUNCTION"):
+        return "FUNCTION"
+    return normalized
 
 
 def grant_in_scope(
@@ -168,7 +178,9 @@ def grant_in_scope(
     normalized = object_type.strip().replace(" ", "_").upper()
     if normalized in _CONTAINER_GRANT_TYPES:
         return selection.schema_in_scope(schema)
-    kind = routine_kind(normalized) if normalized in {"PROCEDURE", "FUNCTION"} else table_kind(
+    # R11-FP03: a grant on a package follows the package -- read as a table kind, it was
+    # scoped as TABLE and kept or dropped with the tables.
+    kind = routine_kind(normalized) if normalized in _ROUTINE_GRANT_TYPES else table_kind(
         normalized
     )
     return selection.object_in_scope(schema, object_name, kind)
@@ -302,6 +314,11 @@ def kind_capabilities(
         ),
         ObjectKindCapabilityRead(kind="PROCEDURE", inventory=routines, definition=routines),
         ObjectKindCapabilityRead(kind="FUNCTION", inventory=routines, definition=routines),
+        ObjectKindCapabilityRead(
+            kind="PACKAGE",
+            inventory=routines if connector_type in _PACKAGE_CONNECTORS else "NOT_APPLICABLE",
+            definition=routines if connector_type in _PACKAGE_CONNECTORS else "NOT_APPLICABLE",
+        ),
     ]
 
 

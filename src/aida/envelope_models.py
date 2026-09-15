@@ -208,6 +208,58 @@ class MetadataRoutine(Base, TimestampMixin):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class MetadataRoutineDefinitionVersion(Base):
+    """R11-FP03: one captured definition of a routine, immutable once written.
+
+    `MetadataRoutine` holds the *current* body and overwrites it on every rescan, so the
+    definition a lineage edge, a generated tool or an approved description was built from was
+    gone the moment the source changed. A version is written when a routine is first captured
+    and again whenever its raw-text fingerprint or availability moves -- the same detection that
+    records a change signal -- with `change_class` saying whether only literals changed. An
+    identical rescan writes nothing. Nothing updates a version; a later definition is a later
+    row. Value-free: the stored text is the redacted form, as on the routine itself.
+    """
+
+    __tablename__ = "metadata_routine_definition_version"
+    __table_args__ = (
+        UniqueConstraint("routine_id", "version_number"),
+        CheckConstraint(
+            "availability IN ('AVAILABLE', 'UNAVAILABLE')",
+            name="availability_state",
+        ),
+        CheckConstraint(
+            "change_class IS NULL OR change_class IN ('LITERAL_ONLY', 'STRUCTURAL')",
+            name="change_class",
+        ),
+        CheckConstraint("version_number > 0", name="version_positive"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body_sql_redacted: Mapped[str | None] = mapped_column(Text)
+    body_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    availability: Mapped[str] = mapped_column(String(20), nullable=False)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(500))
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    redaction_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: NULL for the first captured version; otherwise what kind of change produced this one.
+    change_class: Mapped[str | None] = mapped_column(String(20))
+    analysis_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("analysis_run.id", ondelete="SET NULL"), index=True
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MetadataRoutineParameter(Base, TimestampMixin):
     """One parameter of one routine, ordered.
 

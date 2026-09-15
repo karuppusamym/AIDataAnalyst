@@ -118,7 +118,9 @@ class MetadataRoutineEnvelope(ApiModel):
     """
 
     name: str = Field(min_length=1, max_length=255)
-    routine_type: Literal["FUNCTION", "PROCEDURE"]
+    #: R11-FP03: PACKAGE is accepted -- the Oracle pull path already stores one, and a producer
+    #: pushing the same estate was refused with 422.
+    routine_type: Literal["FUNCTION", "PROCEDURE", "PACKAGE"]
     language: str | None = Field(default=None, max_length=50)
     body_sql: str | None = Field(default=None, max_length=1_000_000)
     parameters: list[MetadataRoutineParameterEnvelope] = Field(
@@ -159,7 +161,9 @@ class MetadataGrantEnvelope(ApiModel):
     grantee: str = Field(min_length=1, max_length=255)
     grantee_type: Literal["USER", "ROLE", "GROUP", "PUBLIC"] = "ROLE"
     privilege: str = Field(pattern=r"^[A-Z][A-Z0-9_ ]{0,49}$")
-    object_type: Literal["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SCHEMA", "SEQUENCE"] = "TABLE"
+    object_type: Literal[
+        "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "SCHEMA", "SEQUENCE"
+    ] = "TABLE"
     object_name: str = Field(min_length=1, max_length=255)
     schema_name: str | None = Field(default=None, max_length=255)
     is_grantable: bool = False

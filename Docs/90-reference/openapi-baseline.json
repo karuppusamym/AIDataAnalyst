@@ -12949,11 +12949,12 @@
                 "VIEW",
                 "MATERIALIZED_VIEW",
                 "PROCEDURE",
-                "FUNCTION"
+                "FUNCTION",
+                "PACKAGE"
               ],
               "type": "string"
             },
-            "maxItems": 5,
+            "maxItems": 6,
             "title": "Object Kinds",
             "type": "array"
           }
@@ -17993,6 +17994,7 @@
               "VIEW",
               "PROCEDURE",
               "FUNCTION",
+              "PACKAGE",
               "SCHEMA",
               "SEQUENCE"
             ],
@@ -18674,7 +18676,8 @@
           "routine_type": {
             "enum": [
               "FUNCTION",
-              "PROCEDURE"
+              "PROCEDURE",
+              "PACKAGE"
             ],
             "title": "Routine Type",
             "type": "string"
@@ -20170,7 +20173,8 @@
               "VIEW",
               "MATERIALIZED_VIEW",
               "PROCEDURE",
-              "FUNCTION"
+              "FUNCTION",
+              "PACKAGE"
             ],
             "title": "Kind",
             "type": "string"
