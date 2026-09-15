@@ -68,10 +68,11 @@ _ROLE_ACTIONS: dict[str, frozenset[str]] = {
     # extraction of a governed corpus is an elevated act, and widening it to
     # `analyst` or `steward` would hand every member of every migrated
     # workspace the ability to walk out with the audit ledger -- a decision
-    # nobody has made. A deployment that wants extraction without data access
-    # maps its identity provider's auditors onto `auditor` with a
-    # `WorkspaceAccessRule`; no rule does that by default, because which IdP
-    # role may extract is each deployment's decision.
+    # nobody has made. Identity-provider auditors reach `auditor` through the
+    # organization-wide `WorkspaceAccessRule` migration `b7e3d1f9a254` seeds,
+    # by the principle every seeded rule follows: an IdP role maps onto the
+    # workspace role matching what it could already do, so the rule grants
+    # nothing new. Revoking that rule revokes it.
     "workspace_owner": frozenset(
         {
             "READ_METADATA",
