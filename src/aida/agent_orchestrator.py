@@ -114,7 +114,6 @@ from aida.query_memory import (
     find_query_memory_matches,
     retrieved_table_ids_from_hits,
 )
-from aida.routine_tool_hold import SOURCE_ROUTINE_CHANGED_MESSAGE, fetch_source_routine_holds
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
 from aida.semantic_inference import (
@@ -123,6 +122,7 @@ from aida.semantic_inference import (
 )
 from aida.signing import sign_value
 from aida.tool_rendering import ToolParameterError, render_tool_sql
+from aida.tool_source_binding import SOURCE_CHANGED_MESSAGE, fetch_source_binding_holds
 from aida.trust_scoring import AssetContext, compute_trust_score
 
 
@@ -1227,15 +1227,15 @@ class GovernedAgentOrchestrator:
             datasource=request.datasource,
             table_ids=list(dependency_table_ids.values()),
         )
-        # R11-FP16: the same source-routine hold `tool_api.execute_tool_version` applies.
-        routine_asset_ids, routine_holds = await fetch_source_routine_holds(session, version)
+        # R11-FP16: the same source-definition hold `tool_api.execute_tool_version` applies.
+        source_asset_ids, source_holds = await fetch_source_binding_holds(session, version)
         tool_quality_gate = check_tool_gate(
             tool_id=str(version.tool_id),
             dependency_asset_ids=[
                 *(str(t) for t in dependency_table_ids.values()),
-                *routine_asset_ids,
+                *source_asset_ids,
             ],
-            incidents=[*dependency_incidents, *routine_holds],
+            incidents=[*dependency_incidents, *source_holds],
         )
         if tool_quality_gate.action == "BLOCK":
             await self._persist_rejection(
@@ -1245,8 +1245,8 @@ class GovernedAgentOrchestrator:
                 f"QUALITY_INCIDENT_BLOCK:{','.join(tool_quality_gate.affected_assets)}",
             )
             raise AgentPolicyRejected(
-                f"{tool_quality_gate.message} {SOURCE_ROUTINE_CHANGED_MESSAGE}"
-                if routine_holds
+                f"{tool_quality_gate.message} {SOURCE_CHANGED_MESSAGE}"
+                if source_holds
                 else tool_quality_gate.message
             )
         if tool_quality_gate.action == "WARN":

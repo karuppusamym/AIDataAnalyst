@@ -448,6 +448,12 @@ class Settings(BaseSettings):
     #: Signals one pass processes per organization before it stops; the rest
     #: wait for the next pass, so a burst of changes stays a bounded pass.
     change_signal_processing_batch_size: int = Field(default=200, ge=1, le=5_000)
+    # R11-FP16: rebuild what a source change made stale -- regenerated tool versions,
+    # descriptions and context product versions drafted into their review queues -- and resolve
+    # a source-change hold once nothing standing on the view is stale (`aida.context_rebuild`).
+    # Off by default: it drafts into review queues, so an estate opts in after change-signal
+    # processing.
+    context_rebuild_interval_minutes: int = Field(default=0, ge=0, le=10_080)
 
     # --- ADR-0029: the lineage agent -------------------------------------
     # The same registration rules as the steward agent's: nothing until an

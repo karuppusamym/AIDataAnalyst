@@ -15,6 +15,7 @@ from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import process_change_signals
 from aida.classification_propagation import propagate_for_datasource
 from aida.config import Settings, get_settings
+from aida.context_rebuild import organizations_needing_rebuild, run_context_rebuild
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
 from aida.delivery_intents import run_delivery_worker_pass
@@ -816,6 +817,41 @@ def due_scan_policies_statement(settings: Settings, now: datetime) -> Select[tup
     )
 
 
+_context_rebuild_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_context_rebuild_pass(settings: Settings, *, now: datetime | None = None) -> int:
+    """R11-FP16: rebuild what source changes made stale, per organization, into review queues.
+
+    Off by default (`context_rebuild_interval_minutes` is 0): it drafts regenerated tools,
+    descriptions and context product versions for review and resolves source-change holds, so an
+    estate opts in once change-signal processing runs. Opens no session while off.
+    """
+    interval = settings.context_rebuild_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        organization_ids = await organizations_needing_rebuild(session)
+    swept = 0
+    for organization_id in organization_ids:
+        previous = _context_rebuild_last_run_at.get(organization_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await run_context_rebuild(
+                    session, organization_id, settings=settings, now=effective_now
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one organization must not stop the pass
+            logger.exception("context_rebuild_failed", organization_id=str(organization_id))
+            continue
+        _context_rebuild_last_run_at[organization_id] = effective_now
+        swept += 1
+    return swept
+
+
 async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await reconcile_cancellation_requests(client, settings)
     now = datetime.now(UTC)
@@ -852,6 +888,9 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # R11-FP16: change signals into holds in the same incident sink. Off by default
     # (`change_signal_processing_interval_minutes`), and no session is opened when off.
     await run_change_signal_processing_pass(settings, now=now)
+    # R11-FP16: carry those changes down the dependency chain into review queues, and release
+    # a hold once nothing standing on the view is stale. Off by default, like the pass above.
+    await run_context_rebuild_pass(settings, now=now)
     await run_due_playbooks_pass(now=now)
     # ADR-0029: scheduled task-agent runs. Off by default -- every
     # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening

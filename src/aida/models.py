@@ -787,11 +787,14 @@ class GovernedToolVersion(Base, TimestampMixin):
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # R11-FP16: the routine a procedure tool's SQL was extracted from, so a change to that
-    # routine holds this version (`aida.routine_tool_hold`). No foreign key: the routine table
+    # routine holds this version (`aida.tool_source_binding`). No foreign key: the routine table
     # lives in `envelope_models`, and a retired routine is kept rather than deleted.
     source_routine_id: Mapped[UUID | None] = mapped_column(index=True)
-    # The fingerprint of the routine definition the SQL was copied from. Approval and execution
-    # compare it with the routine as it is now; when a version was approved proves nothing about
+    # The view (its `MetadataTable` id) a view tool's SQL was generated from. At most one of this
+    # and `source_routine_id` is set (`aida.tool_source_binding`).
+    source_view_table_id: Mapped[UUID | None] = mapped_column(index=True)
+    # The fingerprint of the source definition the SQL was generated from. Approval and execution
+    # compare it with the source as it is now; when a version was approved proves nothing about
     # which definition it came from.
     source_definition_fingerprint: Mapped[str | None] = mapped_column(String(64))
 

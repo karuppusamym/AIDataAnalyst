@@ -417,6 +417,8 @@ class GovernedToolVersionRead(ApiModel):
     # R11-FP16: the routine a procedure tool's SQL was extracted from; a change to it holds
     # this version until a version generated from the new definition is approved.
     source_routine_id: UUID | None = None
+    # The view a view tool's SQL was generated from, bound the same way.
+    source_view_table_id: UUID | None = None
     # TL-4: completed-execution count for this tool (all versions, bounded
     # lookback window) -- the usage signal `list_tools` and MCP `tools/list`
     # rank by. Always 0 for a brand-new draft; never populated by

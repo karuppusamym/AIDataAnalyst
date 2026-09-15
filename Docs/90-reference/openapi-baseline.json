@@ -15830,6 +15830,18 @@
             ],
             "title": "Source Routine Id"
           },
+          "source_view_table_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source View Table Id"
+          },
           "sql_template": {
             "title": "Sql Template",
             "type": "string"

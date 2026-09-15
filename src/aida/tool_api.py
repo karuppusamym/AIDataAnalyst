@@ -20,7 +20,7 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.edition_entitlements import evaluate_entitlement
-from aida.envelope_models import MetadataRoutine
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import (
@@ -45,7 +45,6 @@ from aida.multi_table_blueprint import (
 from aida.quality_coupling import check_tool_gate, fetch_open_incidents, resolve_table_ids
 from aida.query_execution_view import query_execution_response
 from aida.query_gateway import QueryExecutionGateway, QueryRejected
-from aida.routine_tool_hold import SOURCE_ROUTINE_CHANGED_MESSAGE, fetch_source_routine_holds
 from aida.schemas import (
     ApiModel,
     GovernanceReviewRead,
@@ -76,6 +75,7 @@ from aida.tool_certification import (
 from aida.tool_drafts import ToolDraftRefused, stage_tool_version_draft
 from aida.tool_impact import DeprecationImpact, compute_deprecation_impact
 from aida.tool_rendering import ToolParameterError, render_tool_sql
+from aida.tool_source_binding import SOURCE_CHANGED_MESSAGE, fetch_source_binding_holds
 from aida.tool_usage import DEFAULT_USAGE_LOOKBACK_DAYS
 from aida.view_tool_blueprint import (
     ViewNotEligibleError,
@@ -128,6 +128,7 @@ def _tool_read(
         created_at=version.created_at,
         updated_at=version.updated_at,
         source_routine_id=version.source_routine_id,
+        source_view_table_id=version.source_view_table_id,
         usage_count=usage_count,
     )
 
@@ -200,6 +201,7 @@ async def _persist_tool_version_draft(
     session: AsyncSession,
     settings: Settings,
     source_routine: MetadataRoutine | None = None,
+    source_view: MetadataViewDefinition | None = None,
 ) -> GovernedToolVersionRead:
     """The shared draft-creation tail: validate `body.sql_template` the same
     way regardless of whether it was hand-authored (`create_tool_version`)
@@ -221,6 +223,7 @@ async def _persist_tool_version_draft(
             audit_context=context,
             settings=settings,
             source_routine=source_routine,
+            source_view=source_view,
         )
     except ToolDraftRefused as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
@@ -498,6 +501,13 @@ async def create_view_tool_blueprint(
     except ViewToolBlueprintError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # R11-FP16: bind the draft to the view definition its SQL was generated from.
+    view_definition = await session.scalar(
+        select(MetadataViewDefinition).where(
+            MetadataViewDefinition.table_id == view_source.table_id
+        )
+    )
+
     create_body = GovernedToolVersionCreate(
         slug=body.slug,
         name=body.name,
@@ -509,7 +519,13 @@ async def create_view_tool_blueprint(
         allowed_roles=body.allowed_roles,
     )
     return await _persist_tool_version_draft(
-        project, datasource, create_body, context=context, session=session, settings=settings
+        project,
+        datasource,
+        create_body,
+        context=context,
+        session=session,
+        settings=settings,
+        source_view=view_definition,
     )
 
 
@@ -996,20 +1012,20 @@ async def execute_tool_version(
     dependency_incidents = await fetch_open_incidents(
         session, datasource=datasource, table_ids=list(dependency_table_ids.values())
     )
-    # R11-FP16: a tool extracted from a routine also depends on that routine's definition.
-    routine_asset_ids, routine_holds = await fetch_source_routine_holds(session, version)
+    # R11-FP16: a tool generated from a view or routine also depends on that source's definition.
+    source_asset_ids, source_holds = await fetch_source_binding_holds(session, version)
     quality_gate = check_tool_gate(
         tool_id=str(tool.id),
         dependency_asset_ids=[
             *(str(table_id) for table_id in dependency_table_ids.values()),
-            *routine_asset_ids,
+            *source_asset_ids,
         ],
-        incidents=[*dependency_incidents, *routine_holds],
+        incidents=[*dependency_incidents, *source_holds],
     )
     if quality_gate.action == "BLOCK":
         message = (
-            f"{quality_gate.message} {SOURCE_ROUTINE_CHANGED_MESSAGE}"
-            if routine_holds
+            f"{quality_gate.message} {SOURCE_CHANGED_MESSAGE}"
+            if source_holds
             else quality_gate.message
         )
         record_audit(
@@ -1024,7 +1040,7 @@ async def execute_tool_version(
                 "reason": "QUALITY_INCIDENT_BLOCK",
                 "message": message,
                 "affected_assets": quality_gate.affected_assets,
-                "source_routine_changed": bool(routine_holds),
+                "source_definition_changed": bool(source_holds),
             },
         )
         await session.commit()

@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**259 settings.** 0 are read nowhere. 53 more ship switched off, empty or zero.
+**260 settings.** 0 are read nowhere. 54 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -67,6 +67,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `classification_propagation_interval_minutes` | `int` | `0` | 1 | Opt-in: files proposals for human review on a cadence; an estate opts into that review load |
 | `freshness_evaluation_interval_minutes` | `int` | `0` | 1 | Opt-in: an open CRITICAL freshness incident fails governed tools closed, so an estate opts in after approving its contracts (R11-B8) |
 | `change_signal_processing_interval_minutes` | `int` | `0` | 1 | Opt-in: a redefined view or retired table opens a CRITICAL incident that holds the governed tools over it, so an estate opts into those holds (R11-FP16) |
+| `context_rebuild_interval_minutes` | `int` | `0` | 1 | Opt-in: drafts regenerated tools, descriptions and context product versions into review queues and releases source-change holds once they are approved, so an estate turns it on after change-signal processing (R11-FP16) |
 | `lineage_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
 | `quality_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
 | `tool_agent_interval_minutes` | `int` | `0` | dynamic | Opt-in: each run is a governed agent run under an approved contract; an estate schedules it once that contract exists |
@@ -222,6 +223,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `freshness_evaluation_max_tables` | `int` | `500` | 2 |
 | `change_signal_processing_interval_minutes` | `int` | `0` | 1 |
 | `change_signal_processing_batch_size` | `int` | `200` | 1 |
+| `context_rebuild_interval_minutes` | `int` | `0` | 1 |
 | `lineage_agent_principal_id` | `str` | `'agent:lineage'` | dynamic |
 | `lineage_agent_max_proposals_per_run` | `int` | `25` | dynamic |
 | `lineage_agent_max_pending_proposals` | `int` | `500` | dynamic |

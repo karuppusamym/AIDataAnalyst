@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-364 Python modules under `src/`, 2078 intra-`src` import edges.
+365 Python modules under `src/`, 2100 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 67 |
-| aida domain modules | everything else flat in `aida.*` | 234 |
+| aida domain modules | everything else flat in `aida.*` | 235 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>67 modules"]
-  domain["aida domain modules<br/>234 modules"]
+  domain["aida domain modules<br/>235 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -62,15 +62,15 @@ graph LR
   platform["atlas.platform<br/>5 modules"]
   routers -->|570| domain
   app -->|66| routers
-  workflows -->|52| domain
+  workflows -->|53| domain
   domain -->|47| platform
   ctx_catalog -->|19| domain
   ctx_identity_tenancy -->|18| domain
   app -->|14| domain
   domain -->|12| connectors
+  domain -->|12| routers
   routers -->|12| platform
   ctx_connectivity -->|11| domain
-  domain -->|11| routers
   projectors -->|10| domain
   ctx_ingestion -->|9| domain
   domain -->|9| ctx_catalog
@@ -109,12 +109,13 @@ Splitting the flat package into *routers* and *domain modules* is only useful if
 the dependency runs one way. It mostly does — and where it does not, the
 exceptions are named here rather than hidden by the aggregation.
 
-11 import(s) run the wrong way (a domain, platform or connector
+12 import(s) run the wrong way (a domain, platform or connector
 module importing a router):
 
 | Importer | Router imported |
 |---|---|
 | `aida.answer_provenance` | `aida.unified_lineage_api` |
+| `aida.context_rebuild` | `aida.context_product_api` |
 | `aida.lineage_evidence_export` | `aida.unified_lineage_api` |
 | `aida.marketplace_discovery` | `aida.product_marketplace_api` |
 | `aida.mcp_server` | `aida.product_marketplace_api` |
@@ -140,11 +141,11 @@ whether code can run in it at all — not whether it does.
 |---|---|---:|
 | `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 339 |
 | `aida.workflows.worker` | Temporal worker | 118 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 167 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 171 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 358 of 364 modules.
+Union of all five: 359 of 365 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -152,8 +153,8 @@ Per group, how much of each group each process pulls in:
 |---|---:|---:|---:|---:|---:|---:|
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
-| aida routers (*_api) | 67 | 0 | 2 | 1 | 0 | 67 |
-| aida domain modules | 219 | 73 | 119 | 33 | 6 | 234 |
+| aida routers (*_api) | 67 | 0 | 3 | 1 | 0 | 67 |
+| aida domain modules | 219 | 73 | 122 | 33 | 6 | 235 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -174,17 +175,17 @@ graph LR
   shared["shared substrate<br/>25 modules"]
   aida_main(["aida.main<br/>339 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>118 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>167 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>171 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>64 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>173 modules"]
+  only_aida_main["only this process<br/>170 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
   aida_workflows_worker --> only_aida_workflows_worker
   aida_workflows_scheduler --> shared
-  only_aida_workflows_scheduler["only this process<br/>11 modules"]
+  only_aida_workflows_scheduler["only this process<br/>12 modules"]
   aida_workflows_scheduler --> only_aida_workflows_scheduler
   aida_projectors_graph_projector --> shared
   aida_projectors_outbox_publisher --> shared
@@ -572,21 +573,21 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 198 |
-| `aida.security` | aida domain modules | 115 |
+| `aida.models` | aida domain modules | 199 |
+| `aida.security` | aida domain modules | 116 |
 | `aida.db` | aida domain modules | 102 |
-| `aida.schemas` | aida domain modules | 100 |
-| `aida.config` | aida domain modules | 88 |
-| `aida.events` | aida domain modules | 86 |
+| `aida.schemas` | aida domain modules | 101 |
+| `aida.config` | aida domain modules | 89 |
+| `aida.events` | aida domain modules | 87 |
 | `aida.context` | aida domain modules | 67 |
 | `atlas.platform.config` | atlas.platform | 25 |
-| `aida.envelope_models` | aida domain modules | 20 |
+| `aida.envelope_models` | aida domain modules | 21 |
 | `aida.authorization_gate` | aida domain modules | 16 |
 | `aida.connectors.base` | aida.connectors | 15 |
-| `aida.ingest_screening` | aida domain modules | 13 |
+| `aida.ingest_screening` | aida domain modules | 14 |
 | `aida.task_agent` | aida domain modules | 12 |
 | `aida.secrets` | aida domain modules | 11 |
-| `aida.agent_contracts` | aida domain modules | 10 |
+| `aida.sql_redaction` | aida domain modules | 11 |
 
 ## What this map cannot tell you
 

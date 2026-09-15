@@ -87,6 +87,12 @@ DECISIONS: dict[str, tuple[str, str]] = {
         "the user-defined functions a deployment has reviewed for effects; empty refuses "
         "every function the SQL guard does not recognise as a built-in (R11-FP14)",
     ),
+    "context_rebuild_interval_minutes": (
+        OPT_IN,
+        "drafts regenerated tools, descriptions and context product versions into review "
+        "queues and releases source-change holds once they are approved, so an estate turns "
+        "it on after change-signal processing (R11-FP16)",
+    ),
     "change_signal_processing_interval_minutes": (
         OPT_IN,
         "a redefined view or retired table opens a CRITICAL incident that holds the governed "

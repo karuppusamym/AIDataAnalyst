@@ -1,4 +1,4 @@
-"""R11-FP16: a governed tool extracted from a routine stands only while that routine does.
+"""R11-FP16: a governed tool generated from a routine stands only while that routine does.
 
 * The procedure-tool route binds a draft to its routine and to the fingerprint of the definition
   its SQL was copied from.
@@ -31,18 +31,18 @@ from aida.envelope_models import MetadataRoutine
 from aida.models import AuditEvent, GovernanceReview, GovernedToolVersion, ToolExecution
 from aida.procedure_tool_api import ProcedureToolBlueprintRequest, create_procedure_tool_blueprint
 from aida.query_gateway import QueryExecutionGateway
-from aida.routine_tool_hold import (
-    REASON_CHANGED_SINCE_GENERATION,
-    REASON_DEFINITION_CHANGED,
-    REASON_ROUTINE_RETIRED,
-    SOURCE_ROUTINE_CHANGED_MESSAGE,
-    SOURCE_ROUTINE_MOVED,
-    fetch_source_routine_holds,
-    source_routine_drift,
-)
 from aida.schemas import GovernedToolVersionRead, ToolExecutionRequest
 from aida.semantic_api import _decide_governed_tool_version
 from aida.tool_api import execute_tool
+from aida.tool_source_binding import (
+    REASON_CHANGED_SINCE_GENERATION,
+    REASON_DEFINITION_CHANGED,
+    REASON_SOURCE_RETIRED,
+    SOURCE_CHANGED_MESSAGE,
+    SOURCE_DEFINITION_MOVED,
+    fetch_source_binding_holds,
+    source_binding_drift,
+)
 from tests.support.doubles import security_context
 from tests.test_procedure_tool_blueprint import _Scenario as ProcedureScenario
 from tests.test_quality_runtime_coupling import _fake_execute
@@ -170,8 +170,11 @@ async def test_a_draft_generated_before_its_routine_changed_is_refused_at_approv
 
     detail = refused.value.detail
     assert refused.value.status_code == 409
-    assert (detail["code"], detail["reason"]) == (SOURCE_ROUTINE_MOVED, REASON_DEFINITION_CHANGED)
-    assert str(detail) == SOURCE_ROUTINE_CHANGED_MESSAGE
+    assert (detail["code"], detail["reason"]) == (
+        SOURCE_DEFINITION_MOVED,
+        REASON_DEFINITION_CHANGED,
+    )
+    assert str(detail) == SOURCE_CHANGED_MESSAGE
     draft = await db.get(GovernedToolVersion, stale.id)
     assert draft is not None and (draft.status, draft.approved_at) == ("DRAFT", None)
 
@@ -211,7 +214,7 @@ async def test_a_published_version_stands_only_while_its_routine_matches_the_bin
     with pytest.raises(HTTPException) as redefined:
         await run()
     assert redefined.value.status_code == 409
-    assert SOURCE_ROUTINE_CHANGED_MESSAGE in redefined.value.detail
+    assert SOURCE_CHANGED_MESSAGE in redefined.value.detail
 
     routine.body_fingerprint = DEFINITION_A
     await db.flush()
@@ -219,14 +222,14 @@ async def test_a_published_version_stands_only_while_its_routine_matches_the_bin
 
     routine.status = "DEPRECATED"
     await db.flush()
-    assert await source_routine_drift(db, version) == REASON_ROUTINE_RETIRED
+    assert await source_binding_drift(db, version) == REASON_SOURCE_RETIRED
     with pytest.raises(HTTPException):
         await run()
 
     assert len((await db.scalars(select(ToolExecution))).all()) == 2
     denied = (await db.scalars(select(AuditEvent).where(AuditEvent.outcome == "DENIED"))).all()
     assert len(denied) == 2
-    assert all(event.details["source_routine_changed"] is True for event in denied)
+    assert all(event.details["source_definition_changed"] is True for event in denied)
 
 
 async def test_a_version_without_a_bound_definition_is_held_by_changes_after_generation(
@@ -241,7 +244,7 @@ async def test_a_version_without_a_bound_definition_is_held_by_changes_after_gen
     # Approved after the change: approval time must not hide it.
     version.approved_at = generated_at + timedelta(days=2)
     await db.flush()
-    assert await source_routine_drift(db, version) is None
+    assert await source_binding_drift(db, version) is None
 
     db.add(
         MetadataChangeSignal(
@@ -256,8 +259,8 @@ async def test_a_version_without_a_bound_definition_is_held_by_changes_after_gen
     )
     await db.flush()
 
-    assert await source_routine_drift(db, version) == REASON_CHANGED_SINCE_GENERATION
-    assets, holds = await fetch_source_routine_holds(db, version)
+    assert await source_binding_drift(db, version) == REASON_CHANGED_SINCE_GENERATION
+    assets, holds = await fetch_source_binding_holds(db, version)
     assert assets == [str(routine.id)]
     assert [(hold.severity, hold.status) for hold in holds] == [("CRITICAL", "OPEN")]
 
@@ -268,4 +271,4 @@ async def test_a_tool_not_extracted_from_a_routine_has_no_routine_dependency(
     scenario = await CouplingScenario(db).build()
     version = await scenario.tool_version()
 
-    assert await fetch_source_routine_holds(db, version) == ([], [])
+    assert await fetch_source_binding_holds(db, version) == ([], [])

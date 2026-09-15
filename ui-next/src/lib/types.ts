@@ -2652,6 +2652,7 @@ export interface GovernedToolVersionRead {
   created_at: string;
   updated_at: string;
   source_routine_id?: string | null;
+  source_view_table_id?: string | null;
   usage_count?: number;
 }
 

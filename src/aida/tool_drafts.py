@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
 from aida.context import get_correlation_id
-from aida.envelope_models import MetadataRoutine
+from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit, record_outbox
 from aida.models import DataSource, GovernedTool, GovernedToolVersion, Project
 from aida.query_gateway import QueryExecutionGateway
@@ -58,12 +58,16 @@ async def stage_tool_version_draft(
     audit_context: SecurityContext,
     settings: Settings,
     source_routine: MetadataRoutine | None = None,
+    source_view: MetadataViewDefinition | None = None,
 ) -> tuple[GovernedTool, GovernedToolVersion]:
     """Validate `body` and stage a new DRAFT version of the project's tool with its slug.
 
-    `source_routine` is the routine a procedure tool's SQL was extracted from. The version is
-    bound to it and to the fingerprint of its definition as read now, so a later change to
-    the routine refuses approval and holds execution (R11-FP16, `routine_tool_hold`)."""
+    `source_routine` or `source_view` is the routine or view definition the tool's SQL was
+    generated from. The version is bound to that source and to its definition's fingerprint as
+    read now, so a later change to the source refuses approval and holds execution (R11-FP16,
+    `tool_source_binding`)."""
+    if source_routine is not None and source_view is not None:
+        raise ValueError("a tool version is generated from one source, not two")
     definitions = body.parameters
     declared = {definition.name for definition in definitions}
     try:
@@ -146,8 +150,13 @@ async def stage_tool_version_draft(
         fingerprint=fingerprint,
         created_by=audit_context.principal_id,
         source_routine_id=source_routine.id if source_routine is not None else None,
+        source_view_table_id=source_view.table_id if source_view is not None else None,
         source_definition_fingerprint=(
-            source_routine.body_fingerprint if source_routine is not None else None
+            source_routine.body_fingerprint
+            if source_routine is not None
+            else source_view.definition_fingerprint
+            if source_view is not None
+            else None
         ),
     )
     session.add(version)

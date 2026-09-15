@@ -369,6 +369,7 @@ class _Proposal:
         details: dict[str, Any],
         *,
         source_routine: MetadataRoutine | None = None,
+        source_view: MetadataViewDefinition | None = None,
     ) -> TaskAgentItem:
         run = self.run
         if not run.proposing:
@@ -387,6 +388,7 @@ class _Proposal:
                 audit_context=run.agent_context,
                 settings=run.settings,
                 source_routine=source_routine,
+                source_view=source_view,
             )
         except ToolDraftRefused as exc:
             return await self.decline(exc.code)
@@ -461,6 +463,11 @@ async def _propose_view_tool(run: TaskAgentRun, candidate: _Candidate) -> TaskAg
         datasource,
         body,
         {"source_kind": "VIEW", "table_id": str(candidate.subject_id)},
+        source_view=await run.session.scalar(
+            select(MetadataViewDefinition).where(
+                MetadataViewDefinition.table_id == candidate.subject_id
+            )
+        ),
     )
 
 
