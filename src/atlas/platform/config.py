@@ -433,6 +433,17 @@ class Settings(BaseSettings):
     #: the first N contracts", never an unbounded scan.
     freshness_evaluation_max_tables: int = Field(default=500, ge=1, le=50_000)
 
+    # --- R11-FP16: acting on change signals -------------------------------
+    #: How often the scheduler processes PENDING change signals (R11-FP15), in
+    #: minutes. 0, the default, means never, for the freshness pass's reason:
+    #: this OPENS incidents, and an open CRITICAL incident fails governed tools
+    #: closed. An estate turns it on deliberately. Signals keep accumulating
+    #: while it is off, and are processed oldest first once it is on.
+    change_signal_processing_interval_minutes: int = Field(default=0, ge=0, le=10_080)
+    #: Signals one pass processes per organization before it stops; the rest
+    #: wait for the next pass, so a burst of changes stays a bounded pass.
+    change_signal_processing_batch_size: int = Field(default=200, ge=1, le=5_000)
+
     # --- ADR-0029: the lineage agent -------------------------------------
     # The same registration rules as the steward agent's: nothing until an
     # approved AGENT-kind version carries a contract for this principal.

@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import REASON_CONTRACT_MISSING
+from aida.change_signal_models import MetadataChangeSignal
 from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.lineage_agent import (
     CAPABILITY_PROCEDURE_LINEAGE,
@@ -585,6 +586,59 @@ async def test_a_routine_with_any_lineage_is_left_alone_even_rejected_lineage(
 
     assert outcome.items == []
     assert await count_rows(session, DeepProcedureLineageEdge) == 1
+
+
+@pytest.mark.parametrize(
+    ("change_class", "examined_again"), [("STRUCTURAL", True), ("LITERAL_ONLY", False)]
+)
+async def test_a_routine_redefined_structurally_since_its_lineage_is_examined_again(
+    session: AsyncSession, change_class: str, examined_again: bool
+) -> None:
+    """R11-FP16: existing lineage stops blocking a re-parse once the source redefined the body
+    structurally after the newest edge was written. A literal-only change does not count."""
+    org, datasource, schema, _orders, _totals = await _procedure_estate(session)
+    routine = await _routine(session, org, datasource, schema)
+    parsed_at = datetime.now(UTC) - timedelta(days=1)
+    session.add(
+        DeepProcedureLineageEdge(
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            routine_id=routine.id,
+            statement_ordinal=1,
+            source_table="public.orders",
+            source_column="amount",
+            target_table="public.order_totals",
+            target_column="total",
+            transformation_type="DERIVED",
+            confidence="PARTIAL",
+            dialect="tsql",
+            sql_hash="h" * 64,
+            review_status="ACTIVE",
+            created_by="steward-2",
+            created_at=parsed_at,
+            updated_at=parsed_at,
+        )
+    )
+    session.add(
+        MetadataChangeSignal(
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            subject_kind="ROUTINE",
+            subject_id=routine.id,
+            signal_type="DEFINITION_CHANGED",
+            change_class=change_class,
+            detected_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    await register_agent(session, org, principal=AGENT)
+
+    outcome = await _run(session, org)
+
+    if examined_again:
+        assert [item.action for item in outcome.items] == [ACTION_PROPOSED]
+    else:
+        assert outcome.items == []
 
 
 @pytest.mark.parametrize(

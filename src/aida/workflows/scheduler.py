@@ -11,6 +11,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from aida.business_graph import run_rollup_rebuild_pass
 from aida.certification_expiry_warning import run_certification_expiry_warning_pass
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signal_processing import process_change_signals
 from aida.classification_propagation import propagate_for_datasource
 from aida.config import Settings, get_settings
 from aida.custom_quality_rules import run_due_rule_packs
@@ -649,6 +651,58 @@ async def run_freshness_evaluation_pass(
     return swept
 
 
+#: R11-FP16: last change-signal sweep per organization, in process memory -- the
+#: same tradeoff as the passes above. A restart costs at most one early sweep,
+#: and a sweep is idempotent: a PROCESSED signal is never read again.
+_change_signal_processing_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_change_signal_processing_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Process PENDING change signals into holds and re-examination, per organization.
+
+    Off unless an operator sets an interval: like the freshness pass above, this
+    opens incidents, and an open CRITICAL incident fails governed tools closed.
+    `process_change_signals` owns what each signal does. Returns how many
+    organizations were swept; one organization's failure is logged and skipped.
+    """
+    interval = settings.change_signal_processing_interval_minutes
+    if interval <= 0:
+        return 0
+    effective_now = now or datetime.now(UTC)
+    async with session_factory() as session:
+        organization_ids = (
+            await session.scalars(
+                select(MetadataChangeSignal.organization_id)
+                .where(MetadataChangeSignal.status == "PENDING")
+                .distinct()
+            )
+        ).all()
+    swept = 0
+    for organization_id in organization_ids:
+        previous = _change_signal_processing_last_run_at.get(organization_id)
+        if previous is not None and effective_now - previous < timedelta(minutes=interval):
+            continue
+        try:
+            async with session_factory() as session:
+                await process_change_signals(
+                    session,
+                    organization_id=organization_id,
+                    limit=settings.change_signal_processing_batch_size,
+                    now=effective_now,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 -- one organization must not stop the sweep
+            logger.exception(
+                "change_signal_processing_failed", organization_id=str(organization_id)
+            )
+            continue
+        _change_signal_processing_last_run_at[organization_id] = effective_now
+        swept += 1
+    return swept
+
+
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
     try:
         await client.start_workflow(
@@ -795,6 +849,9 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # above. Violations and recoveries both land in the shared quality
     # incident sink, so nothing downstream of DQ-3 needed a second consumer.
     await run_freshness_evaluation_pass(settings, now=now)
+    # R11-FP16: change signals into holds in the same incident sink. Off by default
+    # (`change_signal_processing_interval_minutes`), and no session is opened when off.
+    await run_change_signal_processing_pass(settings, now=now)
     await run_due_playbooks_pass(now=now)
     # ADR-0029: scheduled task-agent runs. Off by default -- every
     # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening

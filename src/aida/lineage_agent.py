@@ -35,7 +35,10 @@ Both:
   reviewer of its own edge. An edge whose source the parser could not resolve
   is not proposed.
 * **Negative knowledge.** An object with any lineage edge -- including one a
-  reviewer rejected -- is not re-parsed by the agent. A definition or body it
+  reviewer rejected -- is not re-parsed by the agent, unless (R11-FP16) the source
+  redefined it structurally or it returned after its newest edge was written: that
+  lineage describes a definition that no longer exists. A literal-only change does
+  not count, because lineage does not depend on literals. A definition or body it
   could not turn into lineage is recorded once, so the same dead end is not
   re-examined on every run until it changes.
 
@@ -50,9 +53,11 @@ from functools import partial
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import ColumnElement, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signals import CHANGE_STRUCTURAL, SIGNAL_DEFINITION_CHANGED, SIGNAL_REACTIVATED
 from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
 from aida.ingest_screening import CLEAN
 from aida.lineage_table_resolution import resolve_lineage_table_ids
@@ -110,6 +115,19 @@ SKIP_LINEAGE_KNOWN: Final = "lineage_already_known"
 
 #: Objects examined per run, as a multiple of the proposal limit.
 _EXAMINE_FACTOR: Final = 4
+
+
+def _reparse_signal() -> ColumnElement[bool]:
+    """R11-FP16: the change signals after which existing lineage no longer describes the
+    definition -- a structural redefinition, or the object returning. Literal-only changes do
+    not count: lineage does not depend on literals."""
+    return or_(
+        and_(
+            MetadataChangeSignal.signal_type == SIGNAL_DEFINITION_CHANGED,
+            MetadataChangeSignal.change_class == CHANGE_STRUCTURAL,
+        ),
+        MetadataChangeSignal.signal_type == SIGNAL_REACTIVATED,
+    )
 
 #: The edge tables the agent writes, by the object type its outcomes name.
 _EDGE_TABLES: Final[tuple[tuple[str, Any], ...]] = (
@@ -218,6 +236,17 @@ def _inputs(definition: MetadataViewDefinition) -> dict[str, Any]:
 async def _view_lineage(run: TaskAgentRun) -> None:
     session = run.session
     already_parsed = exists().where(ViewLineageEdge.target_table_id == MetadataTable.id)
+    # R11-FP16: ...unless the source redefined the view structurally, or it returned, after
+    # its newest edge was written -- that lineage describes a definition that no longer exists.
+    redefined_since_parsed = exists().where(
+        MetadataChangeSignal.subject_kind == "VIEW",
+        MetadataChangeSignal.subject_id == MetadataTable.id,
+        _reparse_signal(),
+        ~exists().where(
+            ViewLineageEdge.target_table_id == MetadataTable.id,
+            ViewLineageEdge.created_at >= MetadataChangeSignal.detected_at,
+        ),
+    )
     # A definition examined since it last changed -- proposed from, or declined.
     already_examined = exists().where(
         AgentTask.organization_id == run.organization_id,
@@ -234,7 +263,7 @@ async def _view_lineage(run: TaskAgentRun) -> None:
         # `ingest_screening.is_eligible_for_model_context`, as a predicate.
         MetadataViewDefinition.screening_status == CLEAN,
         MetadataTable.status == "ACTIVE",
-        ~already_parsed,
+        or_(~already_parsed, redefined_since_parsed),
         ~already_examined,
     ]
     if run.datasource_id is not None:
@@ -422,6 +451,17 @@ def proposable_procedure_edges(result: ProcedureParseResult) -> list[ProcedureLi
 async def _procedure_lineage(run: TaskAgentRun) -> None:
     session = run.session
     already_parsed = exists().where(DeepProcedureLineageEdge.routine_id == MetadataRoutine.id)
+    # R11-FP16: ...unless the body was redefined structurally, or the routine returned, after
+    # its newest edge was written.
+    redefined_since_parsed = exists().where(
+        MetadataChangeSignal.subject_kind == "ROUTINE",
+        MetadataChangeSignal.subject_id == MetadataRoutine.id,
+        _reparse_signal(),
+        ~exists().where(
+            DeepProcedureLineageEdge.routine_id == MetadataRoutine.id,
+            DeepProcedureLineageEdge.created_at >= MetadataChangeSignal.detected_at,
+        ),
+    )
     # A body examined since it last changed -- proposed from, or declined.
     already_examined = exists().where(
         AgentTask.organization_id == run.organization_id,
@@ -438,7 +478,7 @@ async def _procedure_lineage(run: TaskAgentRun) -> None:
         MetadataRoutine.availability == AVAILABLE,
         MetadataRoutine.redaction_status.in_(sorted(VALUE_FREE_REDACTION_STATUSES)),
         MetadataRoutine.screening_status == CLEAN,
-        ~already_parsed,
+        or_(~already_parsed, redefined_since_parsed),
         ~already_examined,
     ]
     if run.datasource_id is not None:

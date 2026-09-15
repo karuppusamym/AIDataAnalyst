@@ -82,6 +82,11 @@ DECISIONS: dict[str, tuple[str, str]] = {
         "an open CRITICAL freshness incident fails governed tools closed, so an estate opts "
         "in after approving its contracts (R11-B8)",
     ),
+    "change_signal_processing_interval_minutes": (
+        OPT_IN,
+        "a redefined view or retired table opens a CRITICAL incident that holds the governed "
+        "tools over it, so an estate opts into those holds (R11-FP16)",
+    ),
     "governance_notifications_enabled": (
         OPT_IN,
         "needs a Slack or Teams destination to deliver to (R11-I1, R11-B10)",
