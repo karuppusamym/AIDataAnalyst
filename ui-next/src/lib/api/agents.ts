@@ -39,6 +39,7 @@ import type {
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
+  SampleDownstreamImpactRead,
   TaskAgentRunRead,
   TaskAgentStateRead,
 } from "../types";
@@ -774,6 +775,26 @@ export function fetchReviewerAgentSamples(
       params.set("offset", String(query.offset ?? 0));
       return get<PageOf<ReviewAuditSampleRead>>(
         `/v1/organizations/${organizationId}/reviewer-agent/samples?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `GET .../reviewer-agent/samples/{id}/downstream-impact` — R11-C8: the agent
+ *  runs that cited or consulted what a sampled decision changed, while that
+ *  change stood. Identifiers and match bases only; no question or answer text
+ *  is stored to return. */
+export function fetchSampleDownstreamImpact(
+  organizationId: string,
+  sampleId: string,
+  signal?: AbortSignal,
+): Promise<SampleDownstreamImpactRead> {
+  return demoOr(
+    async (fixtures) => fixtures.makeFixtureSampleDownstreamImpact(sampleId),
+    async () => {
+      return get<SampleDownstreamImpactRead>(
+        `/v1/organizations/${organizationId}/reviewer-agent/samples/${sampleId}/downstream-impact`,
         signal,
       );
     },

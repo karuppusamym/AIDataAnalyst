@@ -50,6 +50,13 @@
 }
 .revagent__muted { color: var(--ink-3); }
 
+/* R11-C8: the answers a disputed decision reached while it stood. */
+.revagent__impact { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-2); }
+.revagent__impact > button { align-self: flex-start; }
+.revagent__impactlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.revagent__impactlist li { display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.revagent__impacterror { color: var(--bad); }
+
 .revagent__pagination { display: flex; align-items: center; justify-content: center; gap: 12px; }
 
 @media (max-width: 460px) {

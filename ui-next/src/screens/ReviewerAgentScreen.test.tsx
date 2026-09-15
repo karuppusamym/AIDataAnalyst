@@ -18,6 +18,7 @@ const resumeReviewerAgent = vi.fn();
 const fetchDisagreementRates = vi.fn();
 const fetchReviewerAgentSamples = vi.fn();
 const resolveAuditSample = vi.fn();
+const fetchSampleDownstreamImpact = vi.fn();
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -31,6 +32,7 @@ vi.mock("../lib/api", async () => {
     fetchDisagreementRates: (...args: unknown[]) => fetchDisagreementRates(...args),
     fetchReviewerAgentSamples: (...args: unknown[]) => fetchReviewerAgentSamples(...args),
     resolveAuditSample: (...args: unknown[]) => resolveAuditSample(...args),
+    fetchSampleDownstreamImpact: (...args: unknown[]) => fetchSampleDownstreamImpact(...args),
   };
 });
 
@@ -182,6 +184,29 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Agree" }).length).toBeGreaterThan(0));
     expect(screen.getAllByRole("button", { name: "Disagree" }).length).toBeGreaterThan(0);
+  });
+
+  /* R11-C8: a correction undoes the change; the answers it reached are listed
+     on the disputed sample, loaded only when asked for. */
+  it("lists the answers a disputed decision reached while it stood", async () => {
+    const { makeFixtureSampleDownstreamImpact } = await import("../lib/fixtures");
+    const sampleId = "ffffffff-4444-4444-4444-444444444444";
+    fetchReviewerAgentSamples.mockResolvedValue(
+      makeFixtureReviewerAgentSamples({ outcome: "DISAGREED" }),
+    );
+    fetchSampleDownstreamImpact.mockResolvedValue(makeFixtureSampleDownstreamImpact(sampleId));
+    render(<ReviewerAgentScreen />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Answers that relied on it" }));
+
+    expect(await screen.findByText("1 answer")).toBeInTheDocument();
+    expect(fetchSampleDownstreamImpact).toHaveBeenCalledWith(ORG, sampleId);
+    expect(screen.getByRole("link", { name: "Answer aaaaaaaa" })).toHaveAttribute(
+      "href",
+      "?run=aaaaaaaa-7777-7777-7777-777777777777#/analyst",
+    );
+    expect(screen.getByText(/cited the exact version/)).toBeInTheDocument();
+    expect(screen.getByText(/relied on it while it stood/)).toBeInTheDocument();
   });
 
   async function openAgreeDialog() {

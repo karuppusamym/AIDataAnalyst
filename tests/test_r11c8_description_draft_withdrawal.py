@@ -292,3 +292,31 @@ async def test_the_disputed_sample_stays_unresolved_until_the_withdrawal_is_deci
     )
 
     assert await unresolved_audit_samples(session, org.id) == 0
+
+
+async def test_answers_that_consulted_the_described_table_are_found(
+    session: AsyncSession,
+) -> None:
+    """The row's last clause, for a description: a run that consulted the table
+    while the agent's description stood is listed, and one on another table is
+    not. See `tests/test_r11c8_downstream_impact.py` for the window and bounds."""
+    from aida.correction_impact import ASSET_IN_CONTEXT, downstream_impact
+    from tests.test_r11c8_downstream_impact import hit, make_agent_run
+
+    org, subject, _version, sample = await _agent_decided(session, "ASSET_DESCRIPTION_DRAFT")
+    review = await session.get(GovernanceReview, sample.governance_review_id)
+    assert review is not None
+    review.decided_at = ar11.NOW
+    consulted = make_agent_run(
+        org.id, created_at=ar11.NOW + timedelta(hours=1), retrieval=[hit("TABLE", subject.id)]
+    )
+    unrelated = make_agent_run(
+        org.id, created_at=ar11.NOW + timedelta(hours=1), retrieval=[hit("TABLE", uuid4())]
+    )
+    session.add_all([consulted, unrelated])
+    await session.commit()
+
+    impact = await downstream_impact(session, sample)
+
+    assert [run.agent_run_id for run in impact.affected_runs] == [consulted.id]
+    assert impact.affected_runs[0].bases == (ASSET_IN_CONTEXT,)

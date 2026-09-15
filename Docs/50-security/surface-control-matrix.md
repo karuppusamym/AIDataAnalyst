@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **470**
-- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 418, SDK 1
+- Surfaces covered: **471**
+- By family: BULK 11, EXPORT 6, JOB 25, MCP 9, REST 419, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -274,6 +274,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/quality-agent` | REST | `aida.quality_agent_api.get_quality_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/retrieval/vector-index` | REST | `aida.retrieval_ops_api.get_vector_index_status` | Analyst, Auditor, DataSteward, MetadataAdmin, Operations, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent/disagreement-rates` | REST | `aida.agent_contract_api.get_disagreement_rates` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/downstream-impact` | REST | `aida.agent_contract_api.get_sample_downstream_impact` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent/samples` | REST | `aida.agent_contract_api.list_audit_samples` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent` | REST | `aida.agent_contract_api.get_reviewer_agent_state` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/steward-agent` | REST | `aida.steward_agent_api.get_steward_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |

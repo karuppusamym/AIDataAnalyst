@@ -194,6 +194,59 @@
         "title": "AccessPolicyRead",
         "type": "object"
       },
+      "AffectedRunRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_run_id": {
+            "format": "uuid",
+            "title": "Agent Run Id",
+            "type": "string"
+          },
+          "bases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Bases",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "matched_object_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched Object Ids",
+            "type": "array"
+          },
+          "principal_id": {
+            "title": "Principal Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_run_id",
+          "created_at",
+          "datasource_id",
+          "principal_id",
+          "status",
+          "bases",
+          "matched_object_ids"
+        ],
+        "title": "AffectedRunRead",
+        "type": "object"
+      },
       "AgentAnalysisRequest": {
         "additionalProperties": false,
         "properties": {
@@ -9109,6 +9162,44 @@
         "title": "ContractQualityRuleDefinition",
         "type": "object"
       },
+      "CorrectionStateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "correction_id": {
+            "format": "uuid",
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "effective_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective At"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "correction_id",
+          "status",
+          "effective_at"
+        ],
+        "title": "CorrectionStateRead",
+        "type": "object"
+      },
       "CostShowbackRead": {
         "additionalProperties": false,
         "properties": {
@@ -15652,6 +15743,36 @@
           "downstream_object_count"
         ],
         "title": "ImpactAnalysisRead",
+        "type": "object"
+      },
+      "ImpactSubjectRead": {
+        "additionalProperties": false,
+        "properties": {
+          "annotation_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotation Version Id"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_type",
+          "object_id"
+        ],
+        "title": "ImpactSubjectRead",
         "type": "object"
       },
       "InboxAgent": {
@@ -24768,6 +24889,93 @@
           "sufficient_sample"
         ],
         "title": "RiskTierDisagreementRateRead",
+        "type": "object"
+      },
+      "SampleDownstreamImpactRead": {
+        "additionalProperties": false,
+        "description": "R11-C8: the answers that relied on a sampled decision while it stood.",
+        "properties": {
+          "affected_runs": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedRunRead"
+            },
+            "title": "Affected Runs",
+            "type": "array"
+          },
+          "correction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CorrectionStateRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "human_outcome": {
+            "title": "Human Outcome",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "reaches_answers": {
+            "title": "Reaches Answers",
+            "type": "boolean"
+          },
+          "sample_id": {
+            "format": "uuid",
+            "title": "Sample Id",
+            "type": "string"
+          },
+          "scanned_runs": {
+            "title": "Scanned Runs",
+            "type": "integer"
+          },
+          "subjects": {
+            "items": {
+              "$ref": "#/components/schemas/ImpactSubjectRead"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "window_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window End"
+          },
+          "window_start": {
+            "format": "date-time",
+            "title": "Window Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sample_id",
+          "object_type",
+          "human_outcome",
+          "window_start",
+          "window_end",
+          "correction",
+          "reaches_answers",
+          "subjects",
+          "scanned_runs",
+          "truncated",
+          "affected_runs"
+        ],
+        "title": "SampleDownstreamImpactRead",
         "type": "object"
       },
       "ScanPolicyRead": {
@@ -77075,6 +77283,145 @@
           }
         },
         "summary": "List Audit Samples",
+        "tags": [
+          "agent-workforce"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/downstream-impact": {
+      "get": {
+        "description": "R11-C8: the answers produced while a sampled decision's change stood.\n\nA correction undoes the catalog change; this finds what it cannot undo --\nthe agent runs that cited or consulted what the decision changed, between\nthe decision and the moment its correction took effect. Read by the same\npopulation that reads the sample queue, and value-free: identifiers,\ntimestamps and match bases, never a question or an answer. Deciding what to\ndo about each answer is the owner's step in the oversight runbook (section\n4); see `aida.correction_impact` for how a match is made and what it proves.",
+        "operationId": "get_sample_downstream_impact_v1_organizations__organization_id__reviewer_agent_samples__sample_id__downstream_impact_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sample_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Sample Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SampleDownstreamImpactRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Sample Downstream Impact",
         "tags": [
           "agent-workforce"
         ]

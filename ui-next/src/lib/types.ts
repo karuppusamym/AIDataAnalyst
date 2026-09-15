@@ -53,6 +53,16 @@ export interface AccessPolicyRead {
   updated_at: string;
 }
 
+export interface AffectedRunRead {
+  agent_run_id: string;
+  created_at: string;
+  datasource_id: string;
+  principal_id: string;
+  status: string;
+  bases: string[];
+  matched_object_ids: string[];
+}
+
 export interface AgentAnalysisRequest {
   question: string;
   candidate_sql?: string | null;
@@ -1528,6 +1538,13 @@ export interface ContractQualityRuleDefinition {
   parameters?: Record<string, unknown>;
 }
 
+export interface CorrectionStateRead {
+  kind: string;
+  correction_id: string;
+  status: string;
+  effective_at: string | null;
+}
+
 export interface CostShowbackRead {
   organization_id: string;
   period_start: string;
@@ -2627,6 +2644,12 @@ export interface ImpactAnalysisRead {
   approved_relationship_candidate_ids: string[];
   dbt_resource_ids?: string[];
   downstream_object_count: number;
+}
+
+export interface ImpactSubjectRead {
+  object_type: string;
+  object_id: string;
+  annotation_version_id?: string | null;
 }
 
 export interface InboxAgent {
@@ -4160,6 +4183,21 @@ export interface RiskTierDisagreementRateRead {
   pending: number;
   disagreement_rate: number | null;
   sufficient_sample: boolean;
+}
+
+/** R11-C8: the answers that relied on a sampled decision while it stood. */
+export interface SampleDownstreamImpactRead {
+  sample_id: string;
+  object_type: string;
+  human_outcome: string;
+  window_start: string;
+  window_end: string | null;
+  correction: CorrectionStateRead | null;
+  reaches_answers: boolean;
+  subjects: ImpactSubjectRead[];
+  scanned_runs: number;
+  truncated: boolean;
+  affected_runs: AffectedRunRead[];
 }
 
 export interface ScanPolicyRead {

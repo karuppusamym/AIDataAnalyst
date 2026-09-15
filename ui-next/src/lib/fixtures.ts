@@ -6748,6 +6748,50 @@ export interface ReviewerAgentSamplesQuery {
   offset?: number;
 }
 
+/** `GET .../reviewer-agent/samples/{id}/downstream-impact` fixture (R11-C8):
+ *  one answer that cited the exact annotation version, one that consulted the
+ *  changed table, and a correction that has taken effect. */
+export function makeFixtureSampleDownstreamImpact(
+  sampleId: string,
+): import("./types").SampleDownstreamImpactRead {
+  const now = Date.now();
+  const iso = (hoursAgo: number) => new Date(now - hoursAgo * 3_600_000).toISOString();
+  return {
+    sample_id: sampleId,
+    object_type: "METADATA_ENRICHMENT_PROPOSAL",
+    human_outcome: "DISAGREED",
+    window_start: iso(72),
+    window_end: iso(2),
+    correction: {
+      kind: "DESCRIPTION_WITHDRAWAL",
+      correction_id: "eeeeeeee-1111-1111-1111-111111111111",
+      status: "APPLIED",
+      effective_at: iso(2),
+    },
+    reaches_answers: true,
+    subjects: [
+      {
+        object_type: "BUSINESS_ANNOTATION",
+        object_id: "dddddddd-1111-1111-1111-111111111111",
+        annotation_version_id: "dddddddd-2222-2222-2222-222222222222",
+      },
+    ],
+    scanned_runs: 41,
+    truncated: false,
+    affected_runs: [
+      {
+        agent_run_id: "aaaaaaaa-7777-7777-7777-777777777777",
+        created_at: iso(30),
+        datasource_id: "cccccccc-1111-1111-1111-111111111111",
+        principal_id: "jordan.analyst",
+        status: "COMPLETED",
+        bases: ["EXACT_VERSION"],
+        matched_object_ids: ["dddddddd-1111-1111-1111-111111111111"],
+      },
+    ],
+  };
+}
+
 /** `GET .../reviewer-agent/samples` fixture. Filters by `outcome` the same
  *  way the real route does, so the screen's outcome picker has something
  *  visible to switch between. */

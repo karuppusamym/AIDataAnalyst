@@ -5,11 +5,13 @@ import type {
   ReviewAuditSampleRead,
   ReviewerAgentStateRead,
   RiskTierDisagreementRateRead,
+  SampleDownstreamImpactRead,
 } from "../lib/types";
 import {
   ApiError,
   fetchDisagreementRates,
   fetchReviewerAgentSamples,
+  fetchSampleDownstreamImpact,
   fetchReviewerAgentState,
   resolveAuditSample,
   resumeReviewerAgent,
@@ -137,6 +139,85 @@ function TierRow({ row }: { row: RiskTierDisagreementRateRead }) {
   );
 }
 
+const BASIS_LABEL: Record<string, string> = {
+  EXACT_VERSION: "cited the exact version",
+  ASSET_IN_CONTEXT: "consulted the asset",
+};
+const IMPACT_SHOWN = 10;
+
+/* R11-C8: a correction undoes the catalog change; this is where an owner sees
+   the answers it cannot undo -- the runs that cited or consulted what the
+   disputed decision changed while it stood. Loaded on request, not with the
+   queue: it scans runs, and most samples are never disputed. */
+function SampleImpact({ sampleId }: { sampleId: string }) {
+  const organizationId = useOrgId();
+  const [impact, setImpact] = useState<SampleDownstreamImpactRead | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setImpact(await fetchSampleDownstreamImpact(organizationId, sampleId));
+    } catch (err: unknown) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [organizationId, sampleId]);
+
+  if (impact === null) {
+    return (
+      <span className="revagent__impact">
+        <Button disabled={busy} onClick={() => void load()}>
+          {busy ? "Checking answers…" : "Answers that relied on it"}
+        </Button>
+        {error && (
+          <span className="revagent__impacterror" role="alert">
+            {error}
+          </span>
+        )}
+      </span>
+    );
+  }
+  if (!impact.reaches_answers) {
+    return (
+      <span className="revagent__impact" role="status">
+        This change cannot reach an answer: nothing an answer consults carries ownership.
+      </span>
+    );
+  }
+  const count = impact.affected_runs.length;
+  return (
+    <span className="revagent__impact" role="status">
+      <span>
+        <b>
+          {count} {count === 1 ? "answer" : "answers"}
+        </b>{" "}
+        {impact.window_end ? "relied on it while it stood" : "relied on it so far — the change still stands"} ·{" "}
+        {impact.scanned_runs} scanned{impact.truncated ? ", later runs not scanned" : ""}
+      </span>
+      {count > 0 && (
+        <ul className="revagent__impactlist">
+          {impact.affected_runs.slice(0, IMPACT_SHOWN).map((run) => (
+            <li key={run.agent_run_id}>
+              <a href={`?run=${encodeURIComponent(run.agent_run_id)}#/analyst`}>
+                Answer {run.agent_run_id.slice(0, 8)}
+              </a>
+              <span className="revagent__muted">
+                {run.principal_id} · {relative(run.created_at)} ·{" "}
+                {run.bases.map((basis) => BASIS_LABEL[basis] ?? basis.toLowerCase()).join(", ")}
+              </span>
+            </li>
+          ))}
+          {count > IMPACT_SHOWN && <li className="revagent__muted">and {count - IMPACT_SHOWN} more</li>}
+        </ul>
+      )}
+    </span>
+  );
+}
+
 function SampleRow({
   sample,
   onResolve,
@@ -160,6 +241,7 @@ function SampleRow({
         </a>
         {sample.human_rationale && <span className="revagent__muted">{sample.human_rationale}</span>}
       </span>
+      {sample.human_outcome === "DISAGREED" && <SampleImpact sampleId={sample.sample_id} />}
       {sample.human_outcome === "PENDING" && (
         <span className="revagent__actions">
           <Button onClick={() => onResolve(sample, "AGREED")}>Agree</Button>

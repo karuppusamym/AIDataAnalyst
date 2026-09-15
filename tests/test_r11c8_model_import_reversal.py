@@ -453,3 +453,54 @@ async def test_the_disputed_sample_stays_unresolved_until_the_reversal_is_decide
     await _decide(session, reversal.governance_review_id, applied.org_id, "steward-c", "REJECT")
 
     assert await unresolved_audit_samples(session, applied.org_id) == 0
+
+
+# --- the answers it reached ---------------------------------------------------
+
+
+async def test_answers_that_cited_what_the_import_published_are_found(
+    session: AsyncSession,
+) -> None:
+    """A run citing the annotation version the import published is listed by that
+    exact version; a run citing the version it replaced is not, because that
+    content was not the import's; a run that hydrated the changed table is listed
+    as having consulted it."""
+    from aida.correction_impact import ASSET_IN_CONTEXT, EXACT_VERSION, downstream_impact
+    from aida.models import MetadataBusinessAnnotationVersion
+    from tests.test_r11c8_downstream_impact import hit, make_agent_run
+
+    applied = await _agent_applied_import(session)
+    published = (await _business_annotations(session, [applied.table.id]))[applied.table.id]
+    replaced = await session.scalar(
+        select(MetadataBusinessAnnotationVersion).where(
+            MetadataBusinessAnnotationVersion.annotation_id == published.annotation_id,
+            MetadataBusinessAnnotationVersion.version == 1,
+        )
+    )
+    assert replaced is not None
+
+    def cites(version: MetadataBusinessAnnotationVersion) -> dict[str, str]:
+        return {
+            "object_type": "BUSINESS_ANNOTATION",
+            "object_id": str(published.annotation_id),
+            "fragment_digest": "sha256:x",
+            "annotation_version_id": str(version.id),
+        }
+
+    soon = datetime.now(UTC) + timedelta(minutes=5)
+    cited_import = make_agent_run(applied.org_id, created_at=soon, grounding=[cites(published)])
+    cited_replaced = make_agent_run(applied.org_id, created_at=soon, grounding=[cites(replaced)])
+    hydrated = make_agent_run(
+        applied.org_id,
+        created_at=soon,
+        retrieval=[hit("COLUMN", applied.undescribed.id, table_id=applied.table.id)],
+    )
+    session.add_all([cited_import, cited_replaced, hydrated])
+    await session.commit()
+
+    impact = await downstream_impact(session, applied.sample)
+
+    assert {run.agent_run_id: run.bases for run in impact.affected_runs} == {
+        cited_import.id: (EXACT_VERSION,),
+        hydrated.id: (ASSET_IN_CONTEXT,),
+    }

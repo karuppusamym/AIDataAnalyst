@@ -36,6 +36,7 @@ from aida.agent_contracts import (
 )
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
+from aida.correction_impact import downstream_impact
 from aida.db import get_session
 from aida.description_withdrawal import (
     current_description_version,
@@ -309,6 +310,53 @@ class ResolveSampleRequest(ApiModel):
     #: was wrong may still think the change should stand while a human
     #: authors a better one.
     reverse_applied_changes: bool = False
+
+
+class ImpactSubjectRead(ApiModel):
+    object_type: str
+    object_id: str
+    annotation_version_id: str | None = None
+
+
+class AffectedRunRead(ApiModel):
+    agent_run_id: UUID
+    created_at: datetime
+    datasource_id: UUID
+    principal_id: str
+    status: str
+    #: `EXACT_VERSION` (the run cited the very annotation version the decision
+    #: published) and/or `ASSET_IN_CONTEXT` (it retrieved, or hydrated into
+    #: model context, an asset the decision changed).
+    bases: list[str]
+    matched_object_ids: list[str]
+
+
+class CorrectionStateRead(ApiModel):
+    #: BULK_REVERSAL, DESCRIPTION_WITHDRAWAL or IMPORT_REVERSAL.
+    kind: str
+    correction_id: UUID
+    #: PENDING, APPLIED or REJECTED.
+    status: str
+    effective_at: datetime | None
+
+
+class SampleDownstreamImpactRead(ApiModel):
+    """R11-C8: the answers that relied on a sampled decision while it stood."""
+
+    sample_id: UUID
+    object_type: str
+    human_outcome: str
+    window_start: datetime
+    #: `None` while the change still stands.
+    window_end: datetime | None
+    correction: CorrectionStateRead | None
+    #: False when nothing the decision changed can reach an answer (ownership).
+    reaches_answers: bool
+    subjects: list[ImpactSubjectRead]
+    scanned_runs: int
+    #: True when the window held more runs than one read scans.
+    truncated: bool
+    affected_runs: list[AffectedRunRead]
 
 
 class ReviewerAgentStateRead(ApiModel):
@@ -1931,6 +1979,73 @@ async def list_audit_samples(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get(
+    "/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/downstream-impact",
+    response_model=SampleDownstreamImpactRead,
+)
+async def get_sample_downstream_impact(
+    organization_id: UUID,
+    sample_id: UUID,
+    context: SecurityContext = Depends(require_roles(*CONTRACT_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> SampleDownstreamImpactRead:
+    """R11-C8: the answers produced while a sampled decision's change stood.
+
+    A correction undoes the catalog change; this finds what it cannot undo --
+    the agent runs that cited or consulted what the decision changed, between
+    the decision and the moment its correction took effect. Read by the same
+    population that reads the sample queue, and value-free: identifiers,
+    timestamps and match bases, never a question or an answer. Deciding what to
+    do about each answer is the owner's step in the oversight runbook (section
+    4); see `aida.correction_impact` for how a match is made and what it proves.
+    """
+    enforce_organization(context, organization_id)
+    sample = await session.get(ReviewAuditSample, sample_id)
+    if sample is None or sample.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="audit sample not found")
+    impact = await downstream_impact(session, sample)
+    return SampleDownstreamImpactRead(
+        sample_id=sample.id,
+        object_type=sample.object_type,
+        human_outcome=sample.human_outcome,
+        window_start=impact.window_start,
+        window_end=impact.window_end,
+        correction=(
+            CorrectionStateRead(
+                kind=impact.correction.kind,
+                correction_id=impact.correction.correction_id,
+                status=impact.correction.status,
+                effective_at=impact.correction.effective_at,
+            )
+            if impact.correction is not None
+            else None
+        ),
+        reaches_answers=impact.reaches_answers,
+        subjects=[
+            ImpactSubjectRead(
+                object_type=subject.object_type,
+                object_id=subject.object_id,
+                annotation_version_id=subject.annotation_version_id,
+            )
+            for subject in impact.subjects
+        ],
+        scanned_runs=impact.scanned_runs,
+        truncated=impact.truncated,
+        affected_runs=[
+            AffectedRunRead(
+                agent_run_id=run.agent_run_id,
+                created_at=run.created_at,
+                datasource_id=run.datasource_id,
+                principal_id=run.principal_id,
+                status=run.status,
+                bases=list(run.bases),
+                matched_object_ids=list(run.matched_object_ids),
+            )
+            for run in impact.affected_runs
+        ],
     )
 
 

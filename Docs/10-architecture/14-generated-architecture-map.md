@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-346 Python modules under `src/`, 1919 intra-`src` import edges.
+347 Python modules under `src/`, 1922 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 63 |
-| aida domain modules | everything else flat in `aida.*` | 220 |
+| aida domain modules | everything else flat in `aida.*` | 221 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>63 modules"]
-  domain["aida domain modules<br/>220 modules"]
+  domain["aida domain modules<br/>221 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -60,7 +60,7 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|534| domain
+  routers -->|535| domain
   app -->|62| routers
   domain -->|45| platform
   workflows -->|45| domain
@@ -138,13 +138,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 321 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 322 |
 | `aida.workflows.worker` | Temporal worker | 113 |
 | `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 156 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 64 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 340 of 346 modules.
+Union of all five: 341 of 347 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -153,7 +153,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 63 | 0 | 2 | 1 | 0 | 63 |
-| aida domain modules | 205 | 68 | 108 | 33 | 6 | 220 |
+| aida domain modules | 206 | 68 | 108 | 33 | 6 | 221 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -172,13 +172,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>321 reached"])
+  aida_main(["aida.main<br/>322 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>113 reached"])
   aida_workflows_scheduler(["aida.workflows.scheduler<br/>156 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>64 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>168 modules"]
+  only_aida_main["only this process<br/>169 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
@@ -499,7 +499,7 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 188 |
+| `aida.models` | aida domain modules | 189 |
 | `aida.security` | aida domain modules | 107 |
 | `aida.db` | aida domain modules | 97 |
 | `aida.schemas` | aida domain modules | 94 |

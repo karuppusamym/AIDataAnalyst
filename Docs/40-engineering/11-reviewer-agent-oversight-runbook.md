@@ -82,7 +82,7 @@ Steps:
 
 1. The reviewer records the disagreement with its rationale.
 2. The notification reaches the channel the object's owner watches. It is value-free: it carries the object type, the review id and the tier, never the text.
-3. The owner corrects the object through the path in the table. Recommended: the same working day for T1, and within three working days for T0.
+3. The owner corrects the object through the path in the table. Recommended: the same working day for T1, and within three working days for T0. Then they check *Answers that relied on it* on the sample, which lists the answers that cited or consulted the change while it stood (see §6 for what a listing proves), and decide for each whether its recipient needs telling.
 4. If a type's disagreements repeat, go to §5. A pattern is not a string of individual mistakes to correct one by one.
 
 ## 5. When a rate breaches
@@ -97,7 +97,7 @@ The metric reports and never acts; a person acts.
 
 These are recorded here so that nobody assumes they exist:
 
-- **Downstream harm is not measured.** Nothing links a disputed decision to the answers, tools or context products that consumed its output in the meantime. A reversal undoes the catalog change; it does not find or re-issue an answer that cited the wrong term link while it stood.
+- **Downstream harm is found, not repaired, and only in answers.** Since 2026-09-14, *Answers that relied on it* on a disputed sample (`GET /v1/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/downstream-impact`) lists the agent runs that cited or consulted what the decision changed, between the decision and the moment its correction took effect. A run is listed because its grounding cites the exact annotation version the decision published, or -- deliberately over-inclusively -- because it retrieved, or hydrated into model context, an asset the decision changed. No answer text is stored, so a listing proves the change was in reach of the answer, not that it shaped it. Governed tools and context products that consumed the change are not searched; ownership changes are reported as unable to reach an answer; one read scans at most 5,000 runs and says when it stopped; and re-issuing or retracting an answer stays a person's call.
 - **An overwriting bulk operation is reversible only if it recorded a before-image.** Every bulk operation type now has a compensating action. `LINK_TERM` and `CERTIFY_ASSET` add rows, so undoing them needs only the rows they added; the five that overwrite a value (`TAG`, `CLASSIFY`, `ASSIGN_OWNERSHIP`, `DEPRECATE_TERM`, `REASSIGN_LEAVER`) are undone from a record of what they replaced, taken when they applied. One applied before that record existed is refused rather than restored from a guess. A reversal also restores only what is still as the operation left it, so a later human change survives it -- and so does anything else that moved on in between, such as term links the reaper removed after a deprecation.
 - **Only operations applied since 2026-09-12 can be reversed at all.** `applied_subject_ids` was added then and was deliberately not backfilled: for an older row the empty list means "not recorded", not "changed nothing", and guessing from `subject_ids` would let a reversal remove links and certifications that predated the operation. Those are refused.
 - **A withdrawn business annotation is not reinstated.** Withdrawing the version an agent approved leaves the table with no approved annotation; the better annotation is a new proposal, not a revival of the withdrawn one.
