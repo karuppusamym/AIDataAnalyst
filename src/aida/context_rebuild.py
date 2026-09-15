@@ -26,8 +26,9 @@ For each organization:
 6. **Context products.** A PUBLISHED context product version that pins a tool version since
    superseded gets a version re-pinned to that tool's published version; one that includes a
    held table the source no longer has, or pins a tool reading it, gets a version without
-   them; one pinning an ontology version its ontology has since published past gets a
-   version pinned to the published one. Each is submitted for review.
+   them; one pinning an ontology version its ontology has since published past, or a
+   semantic model or glossary term version since superseded, gets a version pinned to the
+   current one. Each is submitted for review.
 7. **Holds.** A source-change hold is resolved once nothing standing on its table is stale,
    and its change signals are processed. For a table the source no longer has: no published
    tool reads it, and no published context product includes it or pins a tool reading it.
@@ -97,6 +98,7 @@ from aida.models import (
     Document,
     DocumentClaim,
     DocumentSection,
+    GlossaryTermVersion,
     GovernanceReview,
     GovernedTool,
     GovernedToolVersion,
@@ -104,6 +106,7 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     Project,
+    SemanticModelVersion,
     ViewLineageEdge,
 )
 from aida.ontology_models import OntologyHead, OntologyVersion
@@ -1144,6 +1147,56 @@ async def _meaning_replacements(session: AsyncSession, pinned: list[str]) -> dic
     return replacements
 
 
+async def _current_meaning_replacements(
+    session: AsyncSession, semantic_pins: list[str], glossary_pins: list[str]
+) -> dict[str, str]:
+    """Pinned semantic model and glossary term versions since superseded, mapped to the current one.
+
+    A project publishes one semantic model at a time and a term keeps one approved definition, so
+    a pin no longer PUBLISHED or APPROVED names meaning its project or term has moved past -- and
+    product validation accepts only the current versions, so no re-pin of the product could pass
+    while it stays. A pin with no current successor is left for the validation to refuse.
+    """
+    replacements: dict[str, str] = {}
+    if semantic_pins:
+        models = await session.scalars(
+            select(SemanticModelVersion).where(
+                SemanticModelVersion.id.in_([UUID(value) for value in semantic_pins]),
+                SemanticModelVersion.status != "PUBLISHED",
+            )
+        )
+        for model in models:
+            current = await session.scalar(
+                select(SemanticModelVersion.id)
+                .where(
+                    SemanticModelVersion.project_id == model.project_id,
+                    SemanticModelVersion.status == "PUBLISHED",
+                )
+                .limit(1)
+            )
+            if current is not None:
+                replacements[str(model.id)] = str(current)
+    if glossary_pins:
+        terms = await session.scalars(
+            select(GlossaryTermVersion).where(
+                GlossaryTermVersion.id.in_([UUID(value) for value in glossary_pins]),
+                GlossaryTermVersion.status != "APPROVED",
+            )
+        )
+        for term in terms:
+            current = await session.scalar(
+                select(GlossaryTermVersion.id)
+                .where(
+                    GlossaryTermVersion.term_id == term.term_id,
+                    GlossaryTermVersion.status == "APPROVED",
+                )
+                .limit(1)
+            )
+            if current is not None:
+                replacements[str(term.id)] = str(current)
+    return replacements
+
+
 async def _draft_product_version(
     session: AsyncSession,
     organization_id: UUID,
@@ -1167,15 +1220,22 @@ async def _draft_product_version(
         if str(version_id) not in dropped_versions
     ]
     tables = [table_id for table_id in definition.table_ids if table_id not in dropped_tables]
-    ontology = [
-        UUID(meanings.get(str(version_id), str(version_id)))
-        for version_id in definition.ontology_version_ids
-    ]
+    # Meaning pins are keyed by version id, unique across the three groups.
     definition = definition.model_copy(
         update={
             "eligible_tool_version_ids": repinned,
             "table_ids": tables,
-            "ontology_version_ids": ontology,
+            **{
+                group: [
+                    UUID(meanings.get(str(version_id), str(version_id)))
+                    for version_id in getattr(definition, group)
+                ]
+                for group in (
+                    "ontology_version_ids",
+                    "semantic_model_version_ids",
+                    "glossary_term_version_ids",
+                )
+            },
         }
     )
     try:
@@ -1212,7 +1272,7 @@ async def _draft_product_version(
             "repinned_tool_versions": len(replacements),
             "dropped_tool_versions": len(dropped_versions),
             "dropped_tables": len(dropped_tables),
-            "repinned_ontology_versions": len(meanings),
+            "repinned_meaning_versions": len(meanings),
         },
     )
 
@@ -1236,9 +1296,14 @@ async def _rebuild_products(
             outcome.block(blocked)
             continue
         dropped_tables = {UUID(value) for value in previous.table_ids} & retired
-        meanings = await _meaning_replacements(
-            session, list(previous.ontology_version_ids or [])
-        )
+        meanings = {
+            **await _meaning_replacements(session, list(previous.ontology_version_ids or [])),
+            **await _current_meaning_replacements(
+                session,
+                list(previous.semantic_model_version_ids),
+                list(previous.glossary_term_version_ids),
+            ),
+        }
         if not (replacements or dropped or dropped_tables or meanings):
             continue
         waiting = await session.scalar(
@@ -1458,9 +1523,36 @@ async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
         )
         .distinct()
     )
+    superseded_meaning = await session.scalars(
+        select(ContextProductVersion.organization_id)
+        .where(
+            ContextProductVersion.status == "PUBLISHED",
+            or_(
+                select(SemanticModelVersion.id)
+                .where(
+                    SemanticModelVersion.organization_id == ContextProductVersion.organization_id,
+                    SemanticModelVersion.status == "SUPERSEDED",
+                )
+                .exists(),
+                select(GlossaryTermVersion.id)
+                .where(
+                    GlossaryTermVersion.organization_id == ContextProductVersion.organization_id,
+                    GlossaryTermVersion.status == "SUPERSEDED",
+                )
+                .exists(),
+            ),
+        )
+        .distinct()
+    )
     joins = await relationship_drift_pending(session)
     return sorted(
-        set(held) | set(bound) | set(remapping) | set(meaning) | set(joins), key=str
+        set(held)
+        | set(bound)
+        | set(remapping)
+        | set(meaning)
+        | set(superseded_meaning)
+        | set(joins),
+        key=str,
     )
 
 

@@ -60,6 +60,8 @@ from aida.models import (
     DataQualityIncident,
     DataSource,
     DocumentClaim,
+    GlossaryTerm,
+    GlossaryTermVersion,
     GovernanceReview,
     GovernedToolVersion,
     MetadataColumn,
@@ -68,6 +70,7 @@ from aida.models import (
     Organization,
     OutboxEvent,
     Project,
+    SemanticModelVersion,
     ViewLineageEdge,
 )
 from aida.ontology_models import OntologyHead, OntologyVersion
@@ -972,4 +975,95 @@ async def test_a_context_product_pinning_an_earlier_ontology_version_is_re_pinne
         )
     )
     assert current is not None and current.ontology_version_ids == [str(second.id)]
+    assert not (await _rebuild(estate)).acted
+
+
+async def test_a_product_pinning_superseded_semantic_and_glossary_versions_is_re_pinned(
+    session: AsyncSession,
+) -> None:
+    """A product pinning a superseded semantic model or glossary term version serves meaning its
+    project and term have moved past, and no re-pin draft of it could pass validation, which
+    accepts only the current versions. The rebuild drafts one version pinned to both."""
+    estate = await _estate(session)
+    term = GlossaryTerm(
+        organization_id=estate.org.id, term_key="net_revenue", lifecycle_status="ACTIVE"
+    )
+    session.add(term)
+    await session.flush()
+
+    def model(version: int, status: str) -> SemanticModelVersion:
+        return SemanticModelVersion(
+            organization_id=estate.org.id,
+            project_id=estate.project.id,
+            version=version,
+            name="Revenue model",
+            change_summary=f"Version {version}.",
+            status=status,
+            created_by="modeller",
+        )
+
+    def definition(version: int, status: str) -> GlossaryTermVersion:
+        return GlossaryTermVersion(
+            organization_id=estate.org.id,
+            term_id=term.id,
+            version=version,
+            status=status,
+            display_name="Net revenue",
+            definition=f"Revenue after discounts, as defined in version {version}.",
+            synonyms=[],
+            created_by="steward-2",
+        )
+
+    first_model, first_term = model(1, "PUBLISHED"), definition(1, "APPROVED")
+    session.add_all([first_model, first_term])
+    await session.flush()
+    await create_context_product(
+        estate.project.id,
+        ContextProductCreate(
+            product_key="orders-semantics",
+            name="Orders",
+            description="Orders, in the revenue model's and glossary's terms.",
+            purpose="Answer order questions with the approved revenue definitions.",
+            owner_type="INDIVIDUAL",
+            owner_principal="steward-1",
+            table_ids=[estate.orders.id],
+            semantic_model_version_ids=[first_model.id],
+            glossary_term_version_ids=[first_term.id],
+            allowed_consumer_roles=["Analyst"],
+        ),
+        context=estate.steward,
+        session=session,
+    )
+    product = await session.scalar(
+        select(ContextProductVersion)
+        .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+        .where(ContextProduct.product_key == "orders-semantics")
+    )
+    assert product is not None
+    review = await submit_context_product_version(
+        product.id, context=estate.steward, session=session
+    )
+    await _approve(estate, review.id)
+    assert not (await _rebuild(estate)).acted
+
+    # The project publishes a second model and the term a second definition.
+    second_model, second_term = model(2, "PUBLISHED"), definition(2, "APPROVED")
+    first_model.status, first_term.status = "SUPERSEDED", "SUPERSEDED"
+    session.add_all([second_model, second_term])
+    await session.commit()
+
+    outcome = await _rebuild(estate)
+    assert (outcome.products_drafted, outcome.blocked) == (1, {}), outcome.as_details()
+    assert await _approve_rebuilt(estate, "CONTEXT_PRODUCT_VERSION") == 1
+    current = await session.scalar(
+        select(ContextProductVersion).where(
+            ContextProductVersion.product_id == product.product_id,
+            ContextProductVersion.status == "PUBLISHED",
+        )
+    )
+    assert current is not None
+    assert (current.semantic_model_version_ids, current.glossary_term_version_ids) == (
+        [str(second_model.id)],
+        [str(second_term.id)],
+    )
     assert not (await _rebuild(estate)).acted
