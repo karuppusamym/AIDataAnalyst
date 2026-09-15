@@ -16,11 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from aida.db import Base
 from aida.document_ingestion import (
+    CLAIM_SUBJECT_RETIRED,
     DOCUMENT_MAX_CONTENT_BYTES,
     DOCUMENT_MAX_SECTIONS,
     create_document_from_csv,
     extract_description_claims,
     parse_csv_data_dictionary,
+    remap_document,
     resolve_structural_mappings,
 )
 from aida.document_ingestion_api import (
@@ -613,3 +615,96 @@ async def test_get_document_rejects_cross_organization_access(session: AsyncSess
     with pytest.raises(HTTPException) as exc_info:
         await get_document(document.id, other_context, session)
     assert exc_info.value.status_code == 403
+
+
+def _checker(project: Project) -> SecurityContext:
+    return SecurityContext(
+        principal_id="checker@example.com",
+        principal_type="USER",
+        organization_id=project.organization_id,
+        roles=frozenset({"DataSteward"}),
+    )
+
+
+async def test_a_claim_is_not_approved_once_its_column_left_the_source(
+    session: AsyncSession,
+) -> None:
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    table = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, table, name="customer_id")
+    ssn = await _seed_column(session, table, name="ssn")
+    document = await create_document_from_csv(
+        session,
+        organization_id=project.organization_id,
+        project_id=project.id,
+        filename="dictionary.csv",
+        content=_DICTIONARY_CSV,
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    claims = await extract_description_claims(session, document, requested_by="maker@example.com")
+    (ssn_claim,) = [claim for claim in claims if claim.subject_id == str(ssn.id)]
+    claim_id, review_id = ssn_claim.id, ssn_claim.governance_review_id
+    ssn.status = "DEPRECATED"
+    await session.commit()
+
+    with pytest.raises(HTTPException) as refused:
+        await decide_governance_review(
+            review_id,
+            GovernanceDecisionRequest(decision="APPROVE"),
+            _checker(project),
+            session,
+        )
+
+    assert refused.value.status_code == 409
+    detail = refused.value.detail
+    assert isinstance(detail, dict) and detail["code"] == CLAIM_SUBJECT_RETIRED
+    await session.rollback()
+    refreshed = await session.get(DocumentClaim, claim_id)
+    assert refreshed is not None and refreshed.status == "PENDING"
+
+
+async def test_mapping_again_proposes_what_now_matches_and_unmaps_what_left_the_source(
+    session: AsyncSession,
+) -> None:
+    project = await _seed_project(session)
+    datasource = await _seed_datasource(session, project, name="primary")
+    table = await _seed_table(session, datasource, name="customers")
+    await _seed_column(session, table, name="customer_id")
+    ssn = await _seed_column(session, table, name="ssn")
+    document = await create_document_from_csv(
+        session,
+        organization_id=project.organization_id,
+        project_id=project.id,
+        filename="dictionary.csv",
+        content=_DICTIONARY_CSV,
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    assert len(await extract_description_claims(session, document, requested_by="steward")) == 2
+    # The source gains the orders table the dictionary already describes, and loses ssn.
+    orders = await _seed_table(session, datasource, name="orders")
+    ssn.status = "DEPRECATED"
+    await session.flush()
+
+    first = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+    again = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+
+    assert (first.remapped, first.unmatched, len(first.claims)) == (1, 1, 1)
+    (orders_claim,) = first.claims
+    assert (
+        orders_claim.subject_type,
+        orders_claim.subject_id,
+        orders_claim.status,
+        orders_claim.created_by,
+    ) == ("TABLE", str(orders.id), "PENDING", "maker@example.com")
+    review = await session.get(GovernanceReview, orders_claim.governance_review_id)
+    assert review is not None and review.requested_by == "scheduler:context-rebuild"
+    assert (again.remapped, again.unmatched, again.claims) == (0, 0, [])
+
+    # ssn returns: it maps back, and its text was already proposed for it, so nothing new.
+    ssn.status = "ACTIVE"
+    await session.flush()
+    back = await remap_document(session, document, requested_by="scheduler:context-rebuild")
+    assert (back.remapped, back.unmatched, back.claims) == (1, 0, [])

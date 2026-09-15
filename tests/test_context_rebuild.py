@@ -42,16 +42,24 @@ from aida.context_rebuild import (
     RESHAPE_RELEASE_REASON,
     RETIREMENT_RELEASE_REASON,
     RebuildOutcome,
+    organizations_needing_rebuild,
     run_context_rebuild,
+)
+from aida.document_ingestion import (
+    create_document_from_csv,
+    extract_description_claims,
+    resolve_structural_mappings,
 )
 from aida.envelope_models import MetadataViewDefinition
 from aida.lineage_agent import as_create_view
 from aida.models import (
+    AnalysisRun,
     AssetDescriptionDraft,
     ContextProduct,
     ContextProductVersion,
     DataQualityIncident,
     DataSource,
+    DocumentClaim,
     GovernanceReview,
     GovernedToolVersion,
     MetadataColumn,
@@ -841,3 +849,49 @@ async def test_the_scheduler_pass_is_off_by_default_and_opens_no_session(
 
     monkeypatch.setattr(scheduler, "session_factory", refuse)
     assert await scheduler.run_context_rebuild_pass(Settings(_env_file=None)) == 0
+
+
+async def test_a_proposed_document_is_mapped_again_after_a_scan_and_new_matches_go_to_review(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    document = await create_document_from_csv(
+        session,
+        organization_id=estate.org.id,
+        project_id=estate.project.id,
+        filename="dictionary.csv",
+        content=(
+            "schema,table,column,description\n"
+            "public,orders,amount,gross amount of the order\n"
+            "public,orders,channel,how the order was placed\n"
+        ),
+        uploaded_by="maker@example.com",
+    )
+    await resolve_structural_mappings(session, document)
+    assert len(await extract_description_claims(session, document, requested_by="steward-1")) == 1
+    await session.commit()
+    assert estate.org.id not in await organizations_needing_rebuild(session)
+
+    # The source adds the column the dictionary already describes, and a scan reads it.
+    await _add_orders_column(estate)
+    session.add(
+        AnalysisRun(
+            organization_id=estate.org.id,
+            datasource_id=estate.datasource.id,
+            mode="FULL",
+            trigger_type="MANUAL",
+            status="COMPLETED",
+        )
+    )
+    await session.commit()
+    assert estate.org.id in await organizations_needing_rebuild(session)
+
+    first = await _rebuild(estate)
+    assert (first.sections_remapped, first.claims_proposed) == (1, 1), first.as_details()
+    assert await _approve_rebuilt(estate, "DOCUMENT_CLAIM") == 1
+    claim = await session.scalar(
+        select(DocumentClaim).where(DocumentClaim.created_by == "maker@example.com")
+    )
+    assert claim is not None and claim.status == "APPROVED"
+    assert not (await _rebuild(estate)).acted
+    assert estate.org.id not in await organizations_needing_rebuild(session)

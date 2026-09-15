@@ -15,15 +15,19 @@ For each organization:
 3. **Descriptions.** A view or table whose current approved description was drafted against
    another definition, or other columns, gets a draft from today's evidence, submitted for
    review once it clears the bar.
-4. **Retirements.** A published tool that reads a held table the source no longer has, or
+4. **Document claims.** A data dictionary whose claims were proposed is mapped again
+   once a scan in its project finishes after it was mapped. A row that now names exactly
+   one live table or column gets a claim proposed for review; one whose subject left is
+   UNMATCHED again, and a pending claim on a retired subject is refused at approval.
+5. **Retirements.** A published tool that reads a held table the source no longer has, or
    whose SQL names a column a held table no longer has (and that is not regenerated from a
    view or routine), gets a DEPRECATE review. A person decides; a rejected proposal is not
    made again until the source changes again.
-5. **Context products.** A PUBLISHED context product version that pins a tool version since
+6. **Context products.** A PUBLISHED context product version that pins a tool version since
    superseded gets a version re-pinned to that tool's published version; one that includes a
    held table the source no longer has, or pins a tool reading it, gets a version without
    them. Each is submitted for review.
-6. **Holds.** A source-change hold is resolved once nothing standing on its table is stale,
+7. **Holds.** A source-change hold is resolved once nothing standing on its table is stale,
    and its change signals are processed. For a table the source no longer has: no published
    tool reads it, and no published context product includes it or pins a tool reading it.
    For a view or table still in the source: every tool generated from it matches its
@@ -48,7 +52,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot.errors import SqlglotError
 
@@ -72,17 +76,22 @@ from aida.context_product_api import (
     replace_context_product_role_bindings,
     validate_context_product_references,
 )
+from aida.document_ingestion import remap_document
 from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import CLEAN
 from aida.lineage_agent import as_create_view
 from aida.models import (
+    AnalysisRun,
     AssetDescriptionDraft,
     AssetDocumentationVersion,
     ContextProduct,
     ContextProductVersion,
     DataQualityIncident,
     DataSource,
+    Document,
+    DocumentClaim,
+    DocumentSection,
     GovernanceReview,
     GovernedTool,
     GovernedToolVersion,
@@ -175,6 +184,8 @@ class RebuildOutcome:
     lineage_edges_superseded: int = 0
     tools_drafted: int = 0
     descriptions_drafted: int = 0
+    sections_remapped: int = 0
+    claims_proposed: int = 0
     deprecations_proposed: int = 0
     products_drafted: int = 0
     holds_released: int = 0
@@ -195,6 +206,8 @@ class RebuildOutcome:
                 self.lineage_edges_superseded,
                 self.tools_drafted,
                 self.descriptions_drafted,
+                self.sections_remapped,
+                self.claims_proposed,
                 self.deprecations_proposed,
                 self.products_drafted,
                 self.holds_released,
@@ -208,6 +221,8 @@ class RebuildOutcome:
             "lineage_edges_superseded": self.lineage_edges_superseded,
             "tools_drafted": self.tools_drafted,
             "descriptions_drafted": self.descriptions_drafted,
+            "sections_remapped": self.sections_remapped,
+            "claims_proposed": self.claims_proposed,
             "deprecations_proposed": self.deprecations_proposed,
             "products_drafted": self.products_drafted,
             "holds_released": self.holds_released,
@@ -653,6 +668,105 @@ async def _rebuild_descriptions(
 
 
 # --------------------------------------------------------------------------
+# 4. Document claims
+# --------------------------------------------------------------------------
+
+
+def _document_needs_remap() -> ColumnElement[bool]:
+    """A document whose claims were proposed, read by a scan that finished since it was mapped."""
+    newer_scan = (
+        select(AnalysisRun.id)
+        .join(DataSource, DataSource.id == AnalysisRun.datasource_id)
+        .where(
+            DataSource.project_id == Document.project_id,
+            AnalysisRun.status == "COMPLETED",
+            AnalysisRun.updated_at > Document.updated_at,
+        )
+        .exists()
+    )
+    proposed = (
+        select(DocumentClaim.id)
+        .join(DocumentSection, DocumentSection.id == DocumentClaim.document_section_id)
+        .where(DocumentSection.document_id == Document.id)
+        .exists()
+    )
+    return and_(Document.status == "MAPPED", newer_scan, proposed)
+
+
+def _record_claim_proposal(
+    session: AsyncSession,
+    context: SecurityContext,
+    organization_id: UUID,
+    document: Document,
+    claim: DocumentClaim,
+) -> None:
+    review_id = str(claim.governance_review_id)
+    record_audit(
+        session,
+        context,
+        action="context_rebuild.propose",
+        resource_type="governance_review",
+        resource_id=review_id,
+        outcome="SUCCESS",
+        correlation_id=str(organization_id),
+        details={
+            "object_type": "DOCUMENT_CLAIM",
+            "object_id": str(claim.id),
+            "requested_action": "DESCRIBES",
+            "document_id": str(document.id),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=review_id,
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": review_id,
+            "object_type": "DOCUMENT_CLAIM",
+            "object_id": str(claim.id),
+            "requested_action": "DESCRIBES",
+        },
+    )
+
+
+async def _rebuild_document_claims(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    outcome: RebuildOutcome,
+    now: datetime,
+) -> None:
+    document_ids = list(
+        await session.scalars(
+            select(Document.id).where(
+                Document.organization_id == organization_id, _document_needs_remap()
+            )
+        )
+    )
+    for document_id in document_ids:
+        document = await session.get(Document, document_id, populate_existing=True)
+        if document is None:
+            continue
+        try:
+            async with session.begin_nested():
+                remapped = await remap_document(
+                    session, document, requested_by=CONTEXT_REBUILD_PRINCIPAL
+                )
+                for claim in remapped.claims:
+                    _record_claim_proposal(session, context, organization_id, document, claim)
+                # The watermark: the document waits for a scan that finishes after this pass.
+                document.updated_at = now
+        except Exception:  # noqa: BLE001 -- one document must not stop the pass
+            logger.exception("context_rebuild_document_failed", document_id=str(document_id))
+            outcome.failed += 1
+            continue
+        outcome.sections_remapped += remapped.remapped + remapped.unmatched
+        outcome.claims_proposed += len(remapped.claims)
+
+
+# --------------------------------------------------------------------------
 # What stands on a held table
 # --------------------------------------------------------------------------
 
@@ -809,7 +923,7 @@ def _answers_can_move(table: MetadataTable, incident: DataQualityIncident) -> bo
 
 
 # --------------------------------------------------------------------------
-# 4. Retirements
+# 5. Retirements
 # --------------------------------------------------------------------------
 
 
@@ -941,7 +1055,7 @@ async def _propose_deprecations(
 
 
 # --------------------------------------------------------------------------
-# 5. Context products
+# 6. Context products
 # --------------------------------------------------------------------------
 
 
@@ -1105,7 +1219,7 @@ async def _rebuild_products(
 
 
 # --------------------------------------------------------------------------
-# 6. Holds
+# 7. Holds
 # --------------------------------------------------------------------------
 
 _RELEASE_REASONS: Final = {
@@ -1253,7 +1367,8 @@ async def _release_holds(
 
 
 async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
-    """Organizations with a source-change hold open, or a published source-bound tool."""
+    """Organizations with a source-change hold open, a published source-bound tool, or a
+    proposed document a scan has read since it was mapped."""
     held = await session.scalars(
         select(DataQualityIncident.organization_id)
         .where(
@@ -1273,7 +1388,10 @@ async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
         )
         .distinct()
     )
-    return sorted(set(held) | set(bound), key=str)
+    remapping = await session.scalars(
+        select(Document.organization_id).where(_document_needs_remap()).distinct()
+    )
+    return sorted(set(held) | set(bound) | set(remapping), key=str)
 
 
 async def run_context_rebuild(
@@ -1290,6 +1408,7 @@ async def run_context_rebuild(
     await _supersede_lineage(session, organization_id, outcome, effective_now)
     await _rebuild_tools(session, organization_id, context, settings, outcome)
     await _rebuild_descriptions(session, organization_id, context, outcome)
+    await _rebuild_document_claims(session, organization_id, context, outcome, effective_now)
     await _propose_deprecations(session, organization_id, context, settings, outcome)
     await _rebuild_products(session, organization_id, context, outcome)
     await _release_holds(session, organization_id, context, outcome, effective_now)

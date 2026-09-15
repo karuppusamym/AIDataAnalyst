@@ -21,7 +21,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
@@ -42,6 +42,7 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
 )
+from aida.refusal import RefusalDetail
 
 #: A data dictionary is a small operational document, not a bulk data feed --
 #: this cap keeps parsing and the structural-mapping pass that follows it
@@ -166,6 +167,83 @@ async def create_document_from_csv(
     return document
 
 
+@dataclass(slots=True)
+class _CatalogIndex:
+    """One project's live catalog, indexed the way structural mapping reads it."""
+
+    tables_by_key: dict[tuple[str, str], list[MetadataTable]] = field(default_factory=dict)
+    tables_by_name: dict[str, list[MetadataTable]] = field(default_factory=dict)
+    columns_by_table: dict[UUID, dict[str, list[MetadataColumn]]] = field(default_factory=dict)
+
+
+async def _catalog_index(session: AsyncSession, project_id: UUID) -> _CatalogIndex:
+    candidate_rows = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .join(DataSource, DataSource.id == MetadataTable.datasource_id)
+            .where(
+                DataSource.project_id == project_id,
+                MetadataTable.status == "ACTIVE",
+            )
+        )
+    ).all()
+    index = _CatalogIndex()
+    for table, schema_name in candidate_rows:
+        key = (schema_name.casefold(), table.name.casefold())
+        index.tables_by_key.setdefault(key, []).append(table)
+        index.tables_by_name.setdefault(table.name.casefold(), []).append(table)
+    return index
+
+
+async def _resolve_section(
+    session: AsyncSession, index: _CatalogIndex, section: DocumentSection
+) -> tuple[str, str | None]:
+    """The subject a section names, as `(subject_type, subject_id)`; no id unless exactly one."""
+    subject_type = "COLUMN" if section.raw_column_name else "TABLE"
+    table_key = (
+        (section.raw_schema_name.casefold(), section.raw_table_name.casefold())
+        if section.raw_schema_name
+        else None
+    )
+    matched_tables = (
+        index.tables_by_key.get(table_key)
+        if table_key is not None
+        else index.tables_by_name.get(section.raw_table_name.casefold())
+    ) or []
+    if len(matched_tables) != 1:
+        return subject_type, None
+    table = matched_tables[0]
+    if section.raw_column_name is None:
+        return "TABLE", str(table.id)
+    # Column names are matched the way table names are -- casefolded equality,
+    # in Python -- and never with `ILIKE`, which reads `%` and `_` in a
+    # spreadsheet cell as wildcards: a column cell of `%` matched whichever
+    # column the database returned first, at confidence 1.0 (AR-03).
+    if table.id not in index.columns_by_table:
+        by_name: dict[str, list[MetadataColumn]] = {}
+        for candidate in await session.scalars(
+            select(MetadataColumn).where(
+                MetadataColumn.table_id == table.id,
+                MetadataColumn.status == "ACTIVE",
+            )
+        ):
+            by_name.setdefault(candidate.name.casefold(), []).append(candidate)
+        index.columns_by_table[table.id] = by_name
+    matched_columns = index.columns_by_table[table.id].get(section.raw_column_name.casefold(), [])
+    # Two columns differing only by case are as ambiguous as two tables.
+    if len(matched_columns) != 1:
+        return "COLUMN", None
+    return "COLUMN", str(matched_columns[0].id)
+
+
+def _set_subject(mapping: DocumentMapping, subject_type: str, subject_id: str | None) -> None:
+    mapping.subject_type = subject_type
+    mapping.subject_id = subject_id
+    mapping.mapping_kind = "STRUCTURAL" if subject_id is not None else "UNMATCHED"
+    mapping.confidence = 1.0 if subject_id is not None else 0.0
+
+
 async def resolve_structural_mappings(
     session: AsyncSession, document: Document
 ) -> list[DocumentMapping]:
@@ -185,106 +263,56 @@ async def resolve_structural_mappings(
             .order_by(DocumentSection.ordinal)
         )
     ).all()
-    candidate_rows = (
-        await session.execute(
-            select(MetadataTable, MetadataSchema.name)
-            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
-            .join(DataSource, DataSource.id == MetadataTable.datasource_id)
-            .where(
-                DataSource.project_id == document.project_id,
-                MetadataTable.status == "ACTIVE",
-            )
-        )
-    ).all()
-    tables_by_key: dict[tuple[str, str], list[MetadataTable]] = {}
-    tables_by_name: dict[str, list[MetadataTable]] = {}
-    for table, schema_name in candidate_rows:
-        tables_by_key.setdefault((schema_name.casefold(), table.name.casefold()), []).append(table)
-        tables_by_name.setdefault(table.name.casefold(), []).append(table)
-
+    index = await _catalog_index(session, document.project_id)
     mappings: list[DocumentMapping] = []
-    # Column names are matched the way table names are -- casefolded equality,
-    # in Python -- and never with `ILIKE`, which reads `%` and `_` in a
-    # spreadsheet cell as wildcards: a column cell of `%` matched whichever
-    # column the database returned first, at confidence 1.0 (AR-03).
-    columns_by_table: dict[UUID, dict[str, list[MetadataColumn]]] = {}
     for section in sections:
-        table_key = (
-            (section.raw_schema_name.casefold(), section.raw_table_name.casefold())
-            if section.raw_schema_name
-            else None
+        subject_type, subject_id = await _resolve_section(session, index, section)
+        mapping = DocumentMapping(
+            organization_id=document.organization_id, document_section_id=section.id
         )
-        matched_tables = (
-            tables_by_key.get(table_key)
-            if table_key is not None
-            else tables_by_name.get(section.raw_table_name.casefold())
-        ) or []
-        if len(matched_tables) != 1:
-            mappings.append(
-                DocumentMapping(
-                    organization_id=document.organization_id,
-                    document_section_id=section.id,
-                    subject_type="COLUMN" if section.raw_column_name else "TABLE",
-                    subject_id=None,
-                    mapping_kind="UNMATCHED",
-                    confidence=0.0,
-                )
-            )
-            continue
-        table = matched_tables[0]
-        if section.raw_column_name is None:
-            mappings.append(
-                DocumentMapping(
-                    organization_id=document.organization_id,
-                    document_section_id=section.id,
-                    subject_type="TABLE",
-                    subject_id=str(table.id),
-                    mapping_kind="STRUCTURAL",
-                    confidence=1.0,
-                )
-            )
-            continue
-        if table.id not in columns_by_table:
-            by_name: dict[str, list[MetadataColumn]] = {}
-            for candidate in await session.scalars(
-                select(MetadataColumn).where(
-                    MetadataColumn.table_id == table.id,
-                    MetadataColumn.status == "ACTIVE",
-                )
-            ):
-                by_name.setdefault(candidate.name.casefold(), []).append(candidate)
-            columns_by_table[table.id] = by_name
-        matched_columns = columns_by_table[table.id].get(
-            section.raw_column_name.casefold(), []
-        )
-        # Two columns differing only by case are as ambiguous as two tables.
-        column = matched_columns[0] if len(matched_columns) == 1 else None
-        if column is None:
-            mappings.append(
-                DocumentMapping(
-                    organization_id=document.organization_id,
-                    document_section_id=section.id,
-                    subject_type="COLUMN",
-                    subject_id=None,
-                    mapping_kind="UNMATCHED",
-                    confidence=0.0,
-                )
-            )
-            continue
-        mappings.append(
-            DocumentMapping(
-                organization_id=document.organization_id,
-                document_section_id=section.id,
-                subject_type="COLUMN",
-                subject_id=str(column.id),
-                mapping_kind="STRUCTURAL",
-                confidence=1.0,
-            )
-        )
+        _set_subject(mapping, subject_type, subject_id)
+        mappings.append(mapping)
     session.add_all(mappings)
     await session.flush()
     document.status = "MAPPED"
     return mappings
+
+
+async def _propose_claim(
+    session: AsyncSession,
+    document: Document,
+    section: DocumentSection,
+    mapping: DocumentMapping,
+    *,
+    requested_by: str,
+    created_by: str,
+) -> DocumentClaim:
+    assert mapping.subject_id is not None
+    review = GovernanceReview(
+        organization_id=document.organization_id,
+        object_type="DOCUMENT_CLAIM",
+        object_id="pending",
+        requested_action="DESCRIBES",
+        requested_by=requested_by,
+    )
+    session.add(review)
+    await session.flush()
+    claim = DocumentClaim(
+        organization_id=document.organization_id,
+        document_section_id=section.id,
+        subject_type=mapping.subject_type,
+        subject_id=mapping.subject_id,
+        predicate="DESCRIBES",
+        object_value=section.raw_description,
+        confidence=mapping.confidence,
+        status="PENDING",
+        governance_review_id=review.id,
+        created_by=created_by,
+    )
+    session.add(claim)
+    await session.flush()
+    review.object_id = str(claim.id)
+    return claim
 
 
 async def extract_description_claims(
@@ -308,35 +336,117 @@ async def extract_description_claims(
             )
         )
     ).all()
-    claims: list[DocumentClaim] = []
-    for mapping, section in rows:
-        assert mapping.subject_id is not None
-        review = GovernanceReview(
-            organization_id=document.organization_id,
-            object_type="DOCUMENT_CLAIM",
-            object_id="pending",
-            requested_action="DESCRIBES",
-            requested_by=requested_by,
+    return [
+        await _propose_claim(
+            session, document, section, mapping, requested_by=requested_by, created_by=requested_by
         )
-        session.add(review)
-        await session.flush()
-        claim = DocumentClaim(
-            organization_id=document.organization_id,
-            document_section_id=section.id,
-            subject_type=mapping.subject_type,
-            subject_id=mapping.subject_id,
-            predicate="DESCRIBES",
-            object_value=section.raw_description,
-            confidence=mapping.confidence,
-            status="PENDING",
-            governance_review_id=review.id,
-            created_by=requested_by,
+        for mapping, section in rows
+    ]
+
+
+@dataclass(slots=True)
+class RemapOutcome:
+    """What mapping a document again changed: counts, and the claims it proposed."""
+
+    remapped: int = 0
+    unmatched: int = 0
+    claims: list[DocumentClaim] = field(default_factory=list)
+
+
+async def remap_document(
+    session: AsyncSession, document: Document, *, requested_by: str
+) -> RemapOutcome:
+    """R11-FP16: map a document's sections again, against the catalog as it is now.
+
+    The rules are `resolve_structural_mappings`'s own. A section whose table or column left the
+    source, or became ambiguous, is UNMATCHED again, and a pending claim on it cannot be approved
+    (`claim_subject_retired`). A section that now names exactly one live table or column, other
+    than the one it named, maps to it and gets a claim proposed for review, attributed to the
+    document's uploader -- unless its text was already proposed for that subject, pending or
+    decided, since a person's decision on it stands.
+    """
+    index = await _catalog_index(session, document.project_id)
+    rows = (
+        await session.execute(
+            select(DocumentSection, DocumentMapping)
+            .join(DocumentMapping, DocumentMapping.document_section_id == DocumentSection.id)
+            .where(DocumentSection.document_id == document.id)
+            .order_by(DocumentSection.ordinal)
         )
-        session.add(claim)
-        await session.flush()
-        review.object_id = str(claim.id)
-        claims.append(claim)
-    return claims
+    ).all()
+    outcome = RemapOutcome()
+    for section, mapping in rows:
+        subject_type, subject_id = await _resolve_section(session, index, section)
+        if (subject_type, subject_id) == (mapping.subject_type, mapping.subject_id):
+            continue
+        _set_subject(mapping, subject_type, subject_id)
+        if subject_id is None:
+            outcome.unmatched += 1
+            continue
+        outcome.remapped += 1
+        proposed = await session.scalar(
+            select(DocumentClaim.id)
+            .where(
+                DocumentClaim.document_section_id == section.id,
+                DocumentClaim.subject_id == subject_id,
+            )
+            .limit(1)
+        )
+        if proposed is None:
+            outcome.claims.append(
+                await _propose_claim(
+                    session,
+                    document,
+                    section,
+                    mapping,
+                    requested_by=requested_by,
+                    created_by=document.uploaded_by,
+                )
+            )
+    await session.flush()
+    return outcome
+
+
+#: R11-FP16: the table or column a claim describes is no longer in the source.
+CLAIM_SUBJECT_RETIRED = "CLAIM_SUBJECT_RETIRED"
+
+
+async def claim_subject_retired(
+    session: AsyncSession, claim: DocumentClaim
+) -> RefusalDetail | None:
+    """Why a claim cannot be published onto its subject, or `None` while its subject stands.
+
+    Catalog objects are retired, not deleted, so a claim mapped before its table or column left
+    the source would otherwise publish a description onto an object the source no longer has.
+    Refusing keeps the claim pending, so the same claim can be approved if the object returns. A
+    subject whose row is gone altogether cannot return; `apply_document_claim` approves its text
+    and publishes nothing.
+    """
+    try:
+        subject_id = UUID(claim.subject_id)
+    except ValueError:
+        return None
+    if claim.subject_type == "COLUMN":
+        column = await session.get(MetadataColumn, subject_id)
+        if column is None:
+            return None
+        table = await session.get(MetadataTable, column.table_id)
+        standing = column.status == "ACTIVE" and (table is None or table.status == "ACTIVE")
+    else:
+        table = await session.get(MetadataTable, subject_id)
+        if table is None:
+            return None
+        standing = table.status == "ACTIVE"
+    if standing:
+        return None
+    return RefusalDetail(
+        code=CLAIM_SUBJECT_RETIRED,
+        message=(
+            "The table or column this claim describes has left the source since the document "
+            "was mapped, so approving it would describe an object that no longer exists. Reject "
+            "it; the document is mapped again after the next scan."
+        ),
+    )
 
 
 async def apply_document_claim(
@@ -361,12 +471,17 @@ async def apply_document_claim(
     checker stay distinguishable on the published version exactly as they do
     for a GL-9 draft.
 
-    Returns the event type and the published version's id (`None` only if the
-    claim's subject id is unresolvable, which can happen when the catalog
-    object was dropped between mapping and review; the claim still moves to
-    APPROVED, since a steward's decision on the text stands regardless of a
-    later catalog change, but nothing is published against a dead id).
+    Returns the event type and the published version's id. A claim whose
+    table or column has left the source since mapping is refused with
+    `CLAIM_SUBJECT_RETIRED` before anything changes (R11-FP16): catalog
+    objects are retired rather than deleted, so the retired object would
+    otherwise still receive the description. The id is `None` when the
+    subject's row is gone altogether, or the id is not an id: the steward's
+    decision on the text stands, and nothing is published against it.
     """
+    refusal = await claim_subject_retired(session, claim)
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal)
     claim.status = "APPROVED"
     claim.reviewed_by = reviewer
     claim.reviewed_at = now
