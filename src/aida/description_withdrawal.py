@@ -100,6 +100,20 @@ async def _current_annotation_version(
     return version
 
 
+async def current_description_version(
+    session: AsyncSession, subject_type: str, subject_id: UUID
+) -> ColumnDocumentationVersion | AssetDocumentationVersion | None:
+    """The approved description a TABLE or COLUMN withdrawal would retire, if any.
+
+    Public so a caller deciding whether to raise one -- the correction for a
+    disputed agent decision (R11-C8) -- checks the same version the request
+    will record, rather than re-deriving "current" its own way.
+    """
+    if subject_type == "COLUMN":
+        return await _current_column_version(session, subject_id)
+    return await _current_table_version(session, subject_id)
+
+
 async def _latest_withdrawn_version(
     session: AsyncSession, subject_type: str, subject_id: UUID
 ) -> ColumnDocumentationVersion | AssetDocumentationVersion | None:

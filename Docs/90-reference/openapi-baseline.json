@@ -18553,6 +18553,18 @@
             "title": "Rejected Row Count",
             "type": "integer"
           },
+          "reverses_batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reverses Batch Id"
+          },
           "reviewed_at": {
             "anyOf": [
               {

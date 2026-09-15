@@ -2726,6 +2726,8 @@ async def _decide_model_import_batch(
         "applied_count": applied,
         "skipped_count": batch.skipped_count,
         "review_id": str(review.id),
+        # R11-C8: set when the batch undoes an applied one.
+        "reverses_batch_id": str(batch.reverses_batch_id) if batch.reverses_batch_id else None,
     }
     return TargetEffect(event_type, aggregate_type, aggregate_id, payload)
 

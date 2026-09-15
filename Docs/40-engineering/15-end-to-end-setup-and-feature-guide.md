@@ -492,7 +492,7 @@ anything from you.
 | R11-B2 | **Done.** Ask no longer picks a tool for an input the question never mentions. Re-measured live: 7 of 7 answered questions matched, none wrongly refused |
 | R11-C1 | **Done.** Run it yourself: `./.venv/Scripts/python.exe scripts/verify_ontology_lifecycle.py` — draft, a refused self-approval, independent approval, publication. It publishes a new version each run |
 | R11-C6 | **Done.** Every door checks the agent's contract, including a new per-agent allowlist over the native MCP tools. Existing contracts reach no native tool until an amendment names them, and that amendment goes to review |
-| R11-C8 | **Mostly done:** every bulk stewardship operation can be reversed and an agent-approved business annotation withdrawn, always decided by someone other than whoever asked, and a correction nobody decides keeps its sample open. Left: measuring downstream harm, and a correction path from the sample for descriptions and model-import batches |
+| R11-C8 | **Mostly done:** every decision the reviewer agent can make can be corrected from its sample -- bulk operations and workbook imports reversed, annotations and descriptions withdrawn -- always decided by someone other than whoever asked, and a correction nobody decides keeps its sample open. Left: measuring downstream harm |
 | R11-B8 | **Done.** Freshness is measured: an approved contract's watermark is read on the schedule through the query gateway, and the table is judged on it ([ADR-0014 addendum](../10-architecture/adr/ADR-0014-value-free-control-plane.md)) |
 | R11-C3 | **Done.** Unattended reviewer approvals stay off for good, and production now refuses the setting |
 | R11-C7 | **Done.** INV-3 is accepted as the control for rows a tool call returns |

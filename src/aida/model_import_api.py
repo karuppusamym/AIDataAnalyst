@@ -71,6 +71,9 @@ class ModelImportBatchRead(ApiModel):
     uploaded_by: str
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None
+    #: R11-C8: set when this batch undoes an applied one, raised from a
+    #: disputed reviewer-agent decision rather than uploaded.
+    reverses_batch_id: UUID | None = None
 
 
 class WorksheetColumnEdit(ApiModel):
@@ -182,7 +185,9 @@ class ModelImportChangeRead(ApiModel):
     subject_label: str
     field: str
     old_value: str | None = None
-    new_value: str
+    #: `None` only on a reversal: the field had no value before, so applying
+    #: the change withdraws what the reversed batch published (R11-C8).
+    new_value: str | None
     expected_version: int | None = None
     status: str
     skip_reason: str | None = None

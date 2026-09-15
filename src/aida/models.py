@@ -1820,6 +1820,21 @@ class ModelImportBatch(Base, TimestampMixin):
     uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: R11-C8: the applied batch this one undoes. A reversal is an ordinary
+    #: batch -- same review, same maker-checker guard, same stale check at
+    #: apply -- raised by `model_import.request_model_import_reversal` rather
+    #: than uploaded. The reviewer agent reads this to pin it at T2, as it reads
+    #: `BulkStewardshipOperation.reverses_operation_id`: no agent may decide a
+    #: correction, whatever its size.
+    reverses_batch_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("model_import_batch.id", ondelete="SET NULL"), index=True
+    )
+    #: R11-C8: the sampled agent decision a DISAGREED verdict raised this
+    #: reversal from -- the sample-to-correction edge the other correction
+    #: paths carry, and what keeps that sample unresolved while this waits.
+    review_audit_sample_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("review_audit_sample.id", ondelete="SET NULL"), index=True
+    )
 
 
 class ModelImportChange(Base, TimestampMixin):
@@ -1862,11 +1877,20 @@ class ModelImportChange(Base, TimestampMixin):
     subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
     field: Mapped[str] = mapped_column(String(50), nullable=False)
     old_value: Mapped[str | None] = mapped_column(Text)
-    new_value: Mapped[str] = mapped_column(Text, nullable=False)
+    #: `None` only on a reversal batch, where it means "put back no value": the
+    #: field had no version before the batch being undone published one, so
+    #: undoing it withdraws that version rather than inventing text. An upload
+    #: never produces `None` -- a blank cell means "no edit".
+    new_value: Mapped[str | None] = mapped_column(Text)
     expected_version: Mapped[int | None] = mapped_column(Integer)
     # PENDING -> APPLIED, or SKIPPED_STALE / SKIPPED_MISSING / REJECTED.
     status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
     skip_reason: Mapped[str | None] = mapped_column(String(500))
+    #: R11-C8: the version number this change published when it applied -- the
+    #: record a reversal needs to name exactly the version it undoes. Not
+    #: backfilled: on a change applied before it existed, `None` means "not
+    #: recorded", and that batch is refused a reversal rather than guessed at.
+    published_version: Mapped[int | None] = mapped_column(Integer)
 
 
 class AssetTermLink(Base, TimestampMixin):

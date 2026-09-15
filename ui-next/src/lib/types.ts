@@ -3087,6 +3087,7 @@ export interface ModelImportBatchRead {
   uploaded_by: string;
   reviewed_by?: string | null;
   reviewed_at?: string | null;
+  reverses_batch_id?: string | null;
 }
 
 export interface ModelImportExclusionRequest {

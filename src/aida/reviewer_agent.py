@@ -511,14 +511,22 @@ async def _authoritative_change_count(
 async def _reverses_operation_id(
     session: AsyncSession, review: GovernanceReview
 ) -> UUID | None:
-    """The operation this review's bulk operation undoes, if it undoes one.
+    """The applied change this review's bulk item undoes, if it undoes one.
 
-    Read from the row rather than from the review's payload for the same
-    reason `_authoritative_change_count` is (AR-02): the tier must be
-    recomputed from authoritative evidence at decision time, and a flag that
-    decides whether an agent may act on an item is exactly the flag a caller
-    must not be able to supply.
+    A bulk operation's `reverses_operation_id` or, since R11-C8, a workbook
+    import's `reverses_batch_id`. Read from the row rather than from the
+    review's payload for the same reason `_authoritative_change_count` is
+    (AR-02): the tier must be recomputed from authoritative evidence at
+    decision time, and a flag that decides whether an agent may act on an item
+    is exactly the flag a caller must not be able to supply.
     """
+    if review.object_type == "MODEL_IMPORT_BATCH":
+        return await session.scalar(
+            select(ModelImportBatch.reverses_batch_id).where(
+                ModelImportBatch.governance_review_id == review.id,
+                ModelImportBatch.organization_id == review.organization_id,
+            )
+        )
     if review.object_type != "BULK_STEWARDSHIP_OPERATION":
         return None
     return await session.scalar(
@@ -555,6 +563,7 @@ async def _sized_risk_tier(
         {
             "item_count": count,
             "governance_threshold": governance_threshold,
+            # The one flag `risk_tier_for` reads, for both bulk types.
             "reverses_operation_id": reverses,
         },
     )
@@ -564,7 +573,12 @@ async def _sized_risk_tier(
         "governance_threshold": governance_threshold,
     }
     if reverses is not None:
-        evidence["reverses_operation_id"] = str(reverses)
+        key = (
+            "reverses_batch_id"
+            if review.object_type == "MODEL_IMPORT_BATCH"
+            else "reverses_operation_id"
+        )
+        evidence[key] = str(reverses)
     return tier, evidence
 
 
@@ -750,8 +764,8 @@ def _correction_pending() -> Any:
         )
         .exists()
     )
-    # The correction for a disputed enrichment proposal is a withdrawal of the
-    # annotation version the agent approved.
+    # The correction for a disputed enrichment proposal or description draft is
+    # a withdrawal of the version the agent's decision published.
     withdrawal = (
         select(DescriptionWithdrawal.id)
         .where(
@@ -760,7 +774,17 @@ def _correction_pending() -> Any:
         )
         .exists()
     )
-    return or_(reversal, withdrawal)
+    # The correction for a disputed workbook import is a reversal batch.
+    import_reversal = (
+        select(ModelImportBatch.id)
+        .where(
+            ModelImportBatch.review_audit_sample_id == ReviewAuditSample.id,
+            ModelImportBatch.reverses_batch_id.is_not(None),
+            ModelImportBatch.status == "PENDING_REVIEW",
+        )
+        .exists()
+    )
+    return or_(reversal, withdrawal, import_reversal)
 
 
 async def unresolved_audit_samples(session: AsyncSession, organization_id: UUID) -> int:
@@ -830,9 +854,22 @@ async def oldest_unresolved_sample_age_hours(
             DescriptionWithdrawal.status == "PENDING_REVIEW",
         )
     )
+    oldest_import_reversal = await session.scalar(
+        select(func.min(ModelImportBatch.created_at)).where(
+            ModelImportBatch.organization_id == organization_id,
+            ModelImportBatch.review_audit_sample_id.is_not(None),
+            ModelImportBatch.reverses_batch_id.is_not(None),
+            ModelImportBatch.status == "PENDING_REVIEW",
+        )
+    )
     waiting = [
         value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        for value in (oldest_unread, oldest_correction, oldest_withdrawal)
+        for value in (
+            oldest_unread,
+            oldest_correction,
+            oldest_withdrawal,
+            oldest_import_reversal,
+        )
         if value is not None
     ]
     if not waiting:

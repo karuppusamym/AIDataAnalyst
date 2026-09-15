@@ -484,12 +484,15 @@ async def test_a_correction_is_not_raised_without_being_asked_for(
 async def test_an_object_type_with_no_compensating_action_says_so(
     session: AsyncSession,
 ) -> None:
+    """Since R11-C8 every type the agent can approve today has a correction, so
+    the refusal is for a sample of a type it no longer decides -- a glossary
+    link proposal, which it approved before AR-03 made it abstain."""
     org = await _org(session)
     review = GovernanceReview(
         organization_id=org.id,
-        object_type="MODEL_IMPORT_BATCH",
+        object_type="GLOSSARY_LINK_PROPOSAL",
         object_id=str(uuid4()),
-        requested_action="APPLY",
+        requested_action="APPROVE",
         requested_by="agent:reviewer",
     )
     session.add(review)
@@ -498,8 +501,8 @@ async def test_an_object_type_with_no_compensating_action_says_so(
         organization_id=org.id,
         governance_review_id=review.id,
         agent_principal_id="agent:reviewer",
-        object_type="MODEL_IMPORT_BATCH",
-        risk_tier="T0",
+        object_type="GLOSSARY_LINK_PROPOSAL",
+        risk_tier="T1",
         decision="APPROVED",
         sampled_at=datetime.now(UTC) - timedelta(hours=2),
         human_outcome="PENDING",
@@ -513,7 +516,7 @@ async def test_an_object_type_with_no_compensating_action_says_so(
             sample.id,
             ResolveSampleRequest(
                 human_outcome="DISAGREED",
-                rationale="the batch published descriptions for the wrong tables",
+                rationale="the proposal linked a staging table to the Revenue term",
                 reverse_applied_changes=True,
             ),
             context=_context(org, "reviewer-h"),
@@ -521,7 +524,7 @@ async def test_an_object_type_with_no_compensating_action_says_so(
         )
 
     assert refused.value.status_code == 422
-    assert "MODEL_IMPORT_BATCH" in str(refused.value.detail)
+    assert "GLOSSARY_LINK_PROPOSAL" in str(refused.value.detail)
 
 
 async def test_a_reversal_cannot_accompany_an_agreement(session: AsyncSession) -> None:

@@ -37,9 +37,13 @@ from aida.agent_contracts import (
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
-from aida.description_withdrawal import request_description_withdrawal
+from aida.description_withdrawal import (
+    current_description_version,
+    request_description_withdrawal,
+)
 from aida.events import record_audit, record_outbox
 from aida.governance_notifications import notify_safely
+from aida.model_import import request_model_import_reversal
 from aida.models import (
     AGENT_SAMPLING_RATE_FLOOR,
     AgentBudgetWindow,
@@ -48,11 +52,14 @@ from aida.models import (
     AgentTask,
     AiAsset,
     AiAssetVersion,
+    AssetDescriptionDraft,
     AuditEvent,
     BulkStewardshipOperation,
+    ColumnDescriptionDraft,
     GovernanceReview,
     MetadataBusinessAnnotation,
     MetadataBusinessAnnotationVersion,
+    ModelImportBatch,
     Organization,
     ReviewAuditSample,
 )
@@ -1317,17 +1324,29 @@ async def _raise_sample_reversal(
     it is walked here rather than trusted from the request body -- the
     reviewer says "reverse this sample", never "reverse operation X".
 
-    Bulk stewardship is reachable, and since R11-C8 so is an enrichment
-    proposal, corrected by withdrawing the annotation version the agent
-    approved (`_raise_annotation_withdrawal`). The refusal for everything else
-    is deliberately explicit: the two description draft types have a
-    compensating path of their own (`description_withdrawal`), raised by a
-    steward rather than from here, and answering "no such reversal" is honest
-    where quietly doing nothing would let a reviewer believe a correction had
-    been filed.
+    Since R11-C8 every object type the agent can approve has a correction
+    reachable from here, each through that type's own governed path:
+
+    * bulk stewardship -- a reversal operation, below;
+    * an enrichment proposal -- a withdrawal of the annotation version the
+      agent approved (`_raise_annotation_withdrawal`);
+    * the two description draft types -- a withdrawal of the version the
+      draft published (`_raise_description_draft_withdrawal`);
+    * a workbook import -- a reversal batch that puts back what the import
+      replaced (`_raise_model_import_reversal`).
+
+    The refusal for anything else is deliberately explicit: answering "no such
+    reversal" is honest where quietly doing nothing would let a reviewer
+    believe a correction had been filed.
     """
     if sample.object_type == "METADATA_ENRICHMENT_PROPOSAL":
         await _raise_annotation_withdrawal(session, sample, context=context)
+        return
+    if sample.object_type in ("ASSET_DESCRIPTION_DRAFT", "COLUMN_DESCRIPTION_DRAFT"):
+        await _raise_description_draft_withdrawal(session, sample, context=context)
+        return
+    if sample.object_type == "MODEL_IMPORT_BATCH":
+        await _raise_model_import_reversal(session, sample, context=context)
         return
     if sample.object_type != "BULK_STEWARDSHIP_OPERATION":
         raise HTTPException(
@@ -1448,6 +1467,132 @@ async def _raise_annotation_withdrawal(
             "version_id": str(current.id),
             "review_audit_sample_id": str(sample.id),
             "governance_review_id": str(withdrawal_review.id),
+        },
+    )
+
+
+async def _raise_description_draft_withdrawal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """R11-C8: undo an agent-approved description draft by withdrawing it.
+
+    The chain is walked, not trusted: the sample names its review, the review
+    names the draft, and the draft records the exact version its approval
+    published (`published_version_id`). That version is withdrawn only while
+    it is still the asset's description. If someone has published since, the
+    current text is theirs, and withdrawing it would be the second wrong change
+    this ledger exists to prevent -- the correction is then a new description,
+    and this refuses rather than guesses.
+
+    Withdrawn through the same `description_withdrawal` a steward raises (T2,
+    decided by a person), not rolled back to the version the draft superseded:
+    a withdrawn description already follows that rule, and the asset reads as
+    undescribed until a better description is approved.
+    """
+    review = await session.get(GovernanceReview, sample.governance_review_id)
+    draft: AssetDescriptionDraft | ColumnDescriptionDraft | None = None
+    if review is not None:
+        if sample.object_type == "COLUMN_DESCRIPTION_DRAFT":
+            draft = await session.get(ColumnDescriptionDraft, UUID(review.object_id))
+        else:
+            draft = await session.get(AssetDescriptionDraft, UUID(review.object_id))
+    if (
+        draft is None
+        or draft.organization_id != sample.organization_id
+        or draft.published_version_id is None
+    ):
+        raise HTTPException(
+            status_code=409, detail="the sampled draft published no description to withdraw"
+        )
+    if isinstance(draft, ColumnDescriptionDraft):
+        subject_type, subject_id = "COLUMN", draft.column_id
+    else:
+        subject_type, subject_id = "TABLE", draft.table_id
+    current = await current_description_version(session, subject_type, subject_id)
+    if current is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the description this draft published is no longer approved; "
+                "nothing is left to withdraw"
+            ),
+        )
+    if current.id != draft.published_version_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this description has been published again since the agent's decision; "
+                "correct it with a new description rather than withdrawing a person's version"
+            ),
+        )
+    withdrawal, withdrawal_review = await request_description_withdrawal(
+        session,
+        organization_id=sample.organization_id,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        reason=f"withdraws a disputed reviewer-agent decision (sample {sample.id})",
+        requested_by=context.principal_id,
+        sample=sample,
+    )
+    record_audit(
+        session,
+        context,
+        action="description.withdrawal.request",
+        resource_type="description_withdrawal",
+        resource_id=str(withdrawal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "subject_type": subject_type,
+            "subject_id": str(subject_id),
+            "version_id": str(current.id),
+            "draft_id": str(draft.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(withdrawal_review.id),
+        },
+    )
+
+
+async def _raise_model_import_reversal(
+    session: AsyncSession,
+    sample: ReviewAuditSample,
+    *,
+    context: SecurityContext,
+) -> None:
+    """R11-C8: undo an agent-approved workbook import by restoring what it replaced.
+
+    The batch is found by the review the sample names, never named by the
+    caller. What the reversal restores, and what it refuses, is
+    `model_import.request_model_import_reversal`'s to decide; this walks the
+    chain and records who asked.
+    """
+    batch = await session.scalar(
+        select(ModelImportBatch).where(
+            ModelImportBatch.governance_review_id == sample.governance_review_id,
+            ModelImportBatch.organization_id == sample.organization_id,
+        )
+    )
+    if batch is None:
+        raise HTTPException(status_code=409, detail="the sampled import is no longer available")
+    reversal, review = await request_model_import_reversal(
+        session, batch, requested_by=context.principal_id, sample=sample
+    )
+    record_audit(
+        session,
+        context,
+        action="model_import.reversal_requested",
+        resource_type="model_import_batch",
+        resource_id=str(reversal.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "reverses_batch_id": str(batch.id),
+            "review_audit_sample_id": str(sample.id),
+            "governance_review_id": str(review.id),
+            "change_count": reversal.change_count,
         },
     )
 
@@ -1834,10 +1979,10 @@ async def resolve_sample(
         # AR-11: this is the sample-to-correction link being written. Raised
         # inside the same transaction as the verdict, so a sample can never be
         # resolved as disputed with the reversal the reviewer asked for
-        # silently missing -- and the refusals inside
-        # `request_bulk_operation_reversal` (wrong object type, no
-        # compensating action, no recorded effect) surface as the reviewer's
-        # own 4xx rather than as a correction that quietly did not happen.
+        # silently missing -- and the refusals inside each type's correction
+        # (no compensating action, no recorded effect, changed since) surface
+        # as the reviewer's own 4xx rather than as a correction that quietly
+        # did not happen.
         await _raise_sample_reversal(session, sample, context=context)
     await session.commit()
     if body.human_outcome == "DISAGREED":

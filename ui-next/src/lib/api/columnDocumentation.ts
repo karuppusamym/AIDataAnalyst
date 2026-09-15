@@ -253,6 +253,9 @@ export interface ModelImportBatchRead {
   uploaded_by: string;
   reviewed_by: string | null;
   reviewed_at: string | null;
+  /** R11-C8: set when this batch undoes an applied one. Optional only because
+   *  fixtures written before it existed omit it; the server always sends it. */
+  reverses_batch_id?: string | null;
 }
 
 /** `src/aida/model_import_api.py::ModelImportChangeRead`. */
@@ -266,7 +269,9 @@ export interface ModelImportChangeRead {
   subject_label: string;
   field: string;
   old_value: string | null;
-  new_value: string;
+  /** `null` only on a reversal: the field had no value before the import it
+   *  undoes, so applying the change withdraws what that import published. */
+  new_value: string | null;
   expected_version: number | null;
   status:
     | "PENDING"

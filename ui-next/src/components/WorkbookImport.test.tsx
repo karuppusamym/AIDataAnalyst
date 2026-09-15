@@ -193,6 +193,21 @@ it("shows the value being replaced next to the new one", async () => {
   expect(screen.getByText("Old wording.")).toBeInTheDocument();
 });
 
+it("says a reversal withdraws a value rather than showing a blank one", async () => {
+  // R11-C8: a reversal's change carries no value when the field had none
+  // before the import it undoes.
+  upload.mockResolvedValue(batch({ filename: "reversal of warehouse-model.xlsx" }));
+  fetchChanges.mockResolvedValue([
+    change({ old_value: "Agent wording.", new_value: null, expected_version: 1 }),
+  ]);
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+
+  await waitFor(() => expect(screen.getByText("(no value: withdrawn)")).toBeInTheDocument());
+  expect(screen.getByText("Agent wording.")).toBeInTheDocument();
+});
+
 it("submits only when asked, and then says a reviewer still has to decide", async () => {
   upload.mockResolvedValue(batch());
   fetchChanges.mockResolvedValue([change()]);

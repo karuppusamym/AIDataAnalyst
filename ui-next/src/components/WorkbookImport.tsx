@@ -114,9 +114,16 @@ function ChangeRow({
           ) : (
             <div className="wbi__old wbi__old--empty">(no current value)</div>
           )}
-          <div className="wbi__new" title={change.new_value}>
-            {truncate(change.new_value)}
-          </div>
+          {change.new_value === null ? (
+            // Only a reversal carries no value: the field had none before the
+            // import it undoes, so applying it withdraws what that import
+            // published (R11-C8).
+            <div className="wbi__new wbi__new--empty">(no value: withdrawn)</div>
+          ) : (
+            <div className="wbi__new" title={change.new_value}>
+              {truncate(change.new_value)}
+            </div>
+          )}
         </div>
       )}
     </li>
