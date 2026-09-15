@@ -2384,6 +2384,9 @@ class ContextProductDefinition(ApiModel):
     #: R11-FP12: stored procedures and functions the product names directly. Views need no list
     #: of their own -- a view is a table id, and its coverage is derived from `table_ids`.
     routine_ids: list[UUID] = Field(default_factory=list, max_length=500)
+    #: R11-FP09: approved ontology versions whose meaning the product is bound to -- pinned by
+    #: version id, so a later publication never changes what an existing product says.
+    ontology_version_ids: list[UUID] = Field(default_factory=list, max_length=50)
     allowed_consumer_roles: list[str] = Field(min_length=1, max_length=50)
     lineage_depth: int = Field(default=2, ge=0, le=4)
     quality_requirements: ContextProductQualityRequirements = Field(
@@ -2404,6 +2407,7 @@ class ContextProductDefinition(ApiModel):
             self.glossary_term_version_ids,
             self.eligible_tool_version_ids,
             self.routine_ids,
+            self.ontology_version_ids,
         )
         if not any(reference_groups):
             raise ValueError("a context product must include at least one governed reference")

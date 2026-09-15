@@ -1414,6 +1414,7 @@ export interface ContextProductCreate {
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
   routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1479,6 +1480,7 @@ export interface ContextProductVersionCreate {
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
   routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1498,6 +1500,7 @@ export interface ContextProductVersionRead {
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
   routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;
@@ -1533,6 +1536,7 @@ export interface ContextProductVersionUpdate {
   glossary_term_version_ids?: string[];
   eligible_tool_version_ids?: string[];
   routine_ids?: string[];
+  ontology_version_ids?: string[];
   allowed_consumer_roles: string[];
   lineage_depth?: number;
   quality_requirements?: ContextProductQualityRequirements;

@@ -144,6 +144,7 @@ def test_a_product_with_no_routine_or_view_compiles_and_fingerprints_as_before()
     definition = _definition()
     legacy = definition.model_dump(mode="json")
     legacy.pop("routine_ids")
+    legacy.pop("ontology_version_ids")  # the other late group (R11-FP09), empty here
     expected = hashlib.sha256(
         json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

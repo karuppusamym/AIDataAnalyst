@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-354 Python modules under `src/`, 2001 intra-`src` import edges.
+354 Python modules under `src/`, 2002 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -60,7 +60,7 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|544| domain
+  routers -->|545| domain
   app -->|63| routers
   workflows -->|48| domain
   domain -->|47| platform

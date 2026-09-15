@@ -262,6 +262,19 @@ async def validate_mappings(
         raise HTTPException(
             status_code=422, detail="mapping target is unavailable in this organization"
         )
+    await _authorize_mapping_reads(session, context, settings, definition, targets, validity)
+
+
+async def _authorize_mapping_reads(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    definition: OntologyDefinition,
+    targets: _Targets,
+    validity: list[OntologyMappingValidityRead],
+) -> None:
+    """Every target that exists must be readable by the caller -- on writes and on the listing
+    alike, so reporting drift never becomes a way to learn about objects one may not read."""
     _, columns, _ = targets
     authorized: set[tuple[str, str]] = set()
     for mapping, entry in zip(definition.mappings, validity, strict=True):
@@ -346,14 +359,17 @@ async def list_ontology_versions(
             .offset(offset)
         )
     )
-    # R11-FP09: report, never refuse. Writes still require every mapping VALID; a read of
-    # history must survive the catalog moving on underneath an approved version.
-    validity = {
-        row.id: await resolve_mapping_targets(
-            session, OntologyDefinition.model_validate(row.definition), organization_id
+    # R11-FP09: drift is reported, never refused -- a read of history must survive the catalog
+    # moving on underneath an approved version. Reading a target still requires being allowed
+    # to read it, exactly as before; only a missing or retired target stopped being an error.
+    validity: dict[UUID, list[OntologyMappingValidityRead]] = {}
+    for row in rows:
+        definition = OntologyDefinition.model_validate(row.definition)
+        targets = await _load_targets(session, definition)
+        validity[row.id] = _validity(definition, organization_id, targets)
+        await _authorize_mapping_reads(
+            session, context, settings, definition, targets, validity[row.id]
         )
-        for row in rows
-    }
     heads = {
         head.id: head
         for head in await session.scalars(

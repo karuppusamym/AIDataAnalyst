@@ -2657,6 +2657,7 @@ async def _read_context_product_resource(
             "glossary_term_version_ids": product_version.glossary_term_version_ids,
             "eligible_tool_version_ids": product_version.eligible_tool_version_ids,
             "routine_ids": list(product_version.routine_ids or []),
+            "ontology_version_ids": list(product_version.ontology_version_ids or []),
         },
         # R11-FP12: built after every gate above, so it is read under the same decision as the
         # rest of the product, and rendered by the compiler's own helper.

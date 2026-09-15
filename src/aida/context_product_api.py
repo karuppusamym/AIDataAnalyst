@@ -48,6 +48,7 @@ from aida.models import (
     Project,
     SemanticModelVersion,
 )
+from aida.ontology_models import OntologyVersion
 from aida.resource_scope import load_project_in_scope
 from aida.schemas import (
     ContextProductConsumerBindingCreate,
@@ -84,10 +85,12 @@ CONTEXT_PRODUCT_LIFECYCLE_READERS = frozenset(
 
 def context_product_fingerprint(body: ContextProductDefinition) -> str:
     definition = body.model_dump(mode="json")
-    # R11-FP12: a definition naming no routines fingerprints exactly as it did before
-    # `routine_ids` existed, so no stored fingerprint -- or etag built on one -- goes stale.
-    if not definition.get("routine_ids"):
-        definition.pop("routine_ids", None)
+    # R11-FP12/FP09: a reference group added after products existed is left out while empty,
+    # so a definition naming none fingerprints exactly as it did before the group existed and
+    # no stored fingerprint -- or etag built on one -- goes stale.
+    for late_group in ("routine_ids", "ontology_version_ids"):
+        if not definition.get(late_group):
+            definition.pop(late_group, None)
     payload = json.dumps(definition, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -143,6 +146,7 @@ def _definition_from_version(version: ContextProductVersion) -> ContextProductDe
             "glossary_term_version_ids": version.glossary_term_version_ids,
             "eligible_tool_version_ids": version.eligible_tool_version_ids,
             "routine_ids": version.routine_ids or [],
+            "ontology_version_ids": version.ontology_version_ids or [],
             "allowed_consumer_roles": version.allowed_consumer_roles,
             "lineage_depth": version.lineage_depth,
             "quality_requirements": version.quality_requirements,
@@ -168,6 +172,7 @@ def apply_context_product_definition(
     version.glossary_term_version_ids = payload["glossary_term_version_ids"]
     version.eligible_tool_version_ids = payload["eligible_tool_version_ids"]
     version.routine_ids = payload["routine_ids"]
+    version.ontology_version_ids = payload["ontology_version_ids"]
     version.allowed_consumer_roles = list(body.allowed_consumer_roles)
     version.lineage_depth = body.lineage_depth
     version.quality_requirements = payload["quality_requirements"]
@@ -414,6 +419,16 @@ async def validate_context_product_references(
         ),
         body.routine_ids,
         "routines",
+    )
+    await _require_exact_ids(
+        session,
+        select(OntologyVersion.id).where(
+            OntologyVersion.id.in_(body.ontology_version_ids),
+            OntologyVersion.organization_id == project.organization_id,
+            OntologyVersion.status == "APPROVED",
+        ),
+        body.ontology_version_ids,
+        "ontology versions",
     )
 
 

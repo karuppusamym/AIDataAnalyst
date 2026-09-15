@@ -8,6 +8,7 @@ import {
   fetchTools,
 } from "../lib/api";
 import { listGlossaryTerms } from "../lib/_api_append";
+import { listOntologyVersions } from "../lib/api/ontology";
 import { ReferencePicker, usePickerOptions } from "../components/ReferencePicker";
 import { Button, Field, Pill } from "../components/primitives";
 import { splitList } from "../components/screenState";
@@ -52,6 +53,7 @@ interface DraftState {
   glossaryIds: string[];
   toolIds: string[];
   routineIds: string[];
+  ontologyVersionIds: string[];
   consumerRoles: string;
   lineageDepth: string;
   minimumScore: string;
@@ -70,6 +72,7 @@ const INITIAL_DRAFT: DraftState = {
   glossaryIds: [],
   toolIds: [],
   routineIds: [],
+  ontologyVersionIds: [],
   consumerRoles: "Analyst",
   lineageDepth: "2",
   minimumScore: "85",
@@ -135,6 +138,18 @@ export function CreateDraftPanel({
     { enabled: Boolean(projectId) },
   );
 
+  /* R11-FP09: only APPROVED versions can be bound; the picker offers exactly those. */
+  const ontologyOptions = usePickerOptions(
+    (signal) =>
+      listOntologyVersions(orgId, 0, signal).then((rows) => rows.filter((row) => row.status === "APPROVED")),
+    (row) => ({
+      id: row.id,
+      label: `${row.ontology_key} v${row.version}`,
+      hint: row.published_version === row.version ? "current published version" : "earlier approved version",
+    }),
+    [orgId],
+  );
+
   const submit = useCallback(
     async (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
@@ -154,6 +169,7 @@ export function CreateDraftPanel({
         glossary_term_version_ids: draft.glossaryIds,
         eligible_tool_version_ids: draft.toolIds,
         ...(draft.routineIds.length > 0 ? { routine_ids: draft.routineIds } : {}),
+        ...(draft.ontologyVersionIds.length > 0 ? { ontology_version_ids: draft.ontologyVersionIds } : {}),
         allowed_consumer_roles: splitList(draft.consumerRoles),
         lineage_depth: Number(draft.lineageDepth || 2),
         quality_requirements: {
@@ -314,6 +330,18 @@ export function CreateDraftPanel({
               selected={draft.routineIds}
               onChange={(ids) => setField("routineIds", ids)}
               emptyHint="No active routines on this project's sources. Scan a source that exposes them first."
+              visibleRows={4}
+            />
+          </div>
+          <div className="cpform__span2">
+            <ReferencePicker
+              label="Ontology versions"
+              options={ontologyOptions.options}
+              loading={ontologyOptions.loading}
+              error={ontologyOptions.error}
+              selected={draft.ontologyVersionIds}
+              onChange={(ids) => setField("ontologyVersionIds", ids)}
+              emptyHint="No approved ontology versions yet. Publish one from Unified lineage, Manage ontology."
               visibleRows={4}
             />
           </div>

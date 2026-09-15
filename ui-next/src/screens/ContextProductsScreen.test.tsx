@@ -33,6 +33,12 @@ const fetchSemanticModelVersions = vi.fn();
 const fetchTools = vi.fn();
 const listGlossaryTerms = vi.fn();
 const fetchContextProductRoutineOptions = vi.fn();
+const listOntologyVersions = vi.fn();
+
+vi.mock("../lib/api/ontology", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/api/ontology")>();
+  return { ...actual, listOntologyVersions: (...args: unknown[]) => listOntologyVersions(...args) };
+});
 
 /* Staged rollout (AT-7(b) consumer bindings). */
 const fetchContextProductVersions = vi.fn();
@@ -113,11 +119,12 @@ beforeEach(() => {
   compileContextProductVersion.mockReset();
   for (const fn of [
     fetchCatalogRows, fetchSemanticModelVersions, fetchTools, listGlossaryTerms,
-    fetchContextProductRoutineOptions,
+    fetchContextProductRoutineOptions, listOntologyVersions,
     fetchContextProductVersions, fetchContextProductBindings,
     setContextProductBinding, removeContextProductBinding,
   ]) fn.mockReset();
   fetchContextProductRoutineOptions.mockResolvedValue([]);
+  listOntologyVersions.mockResolvedValue([]);
 
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
   fetchCatalogRows.mockResolvedValue({ items: CATALOG_ROWS, limit: 200, offset: 0, total: CATALOG_ROWS.length });
@@ -322,6 +329,38 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     const [, bodyArg] = createContextProduct.mock.calls[0]!;
     expect(bodyArg.routine_ids).toEqual(["r1"]);
     expect(bodyArg.table_ids).toEqual([]);
+    expect(bodyArg).not.toHaveProperty("ontology_version_ids");
+  });
+
+  it("binds an approved ontology version and never offers a draft one (R11-FP09)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+    listOntologyVersions.mockResolvedValue([
+      { id: "ov1", ontology_id: "o1", ontology_key: "commerce", version: 2, base_version: 1, published_version: 2,
+        status: "APPROVED", definition: {}, created_by: "a", approved_by: "b", governance_review_id: null },
+      { id: "ov2", ontology_id: "o1", ontology_key: "commerce", version: 3, base_version: 2, published_version: 2,
+        status: "DRAFT", definition: {}, created_by: "a", approved_by: null, governance_review_id: null },
+    ]);
+    createContextProduct.mockResolvedValue(DRAFT_PRODUCT);
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("No Context Products")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Stable key"), { target: { value: "consumer-risk-context" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Consumer risk analysis" } });
+    fireEvent.change(screen.getByLabelText("Owner principal"), { target: { value: "risk-data-stewards" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Bounded context for risk analysts." } });
+    fireEvent.change(screen.getByLabelText("Approved purpose"), {
+      target: { value: "Explain drivers of consumer delinquency for the monthly risk packet." },
+    });
+    fireEvent.click(await screen.findByRole("checkbox", { name: /commerce v2/ }));
+    expect(screen.queryByRole("checkbox", { name: /commerce v3/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create governed draft" }));
+
+    await waitFor(() => expect(createContextProduct).toHaveBeenCalledTimes(1));
+    const [, bodyArg] = createContextProduct.mock.calls[0]!;
+    expect(bodyArg.ontology_version_ids).toEqual(["ov1"]);
   });
   /* ---- Staged rollout (AT-7(b) consumer bindings) --------------------- */
 

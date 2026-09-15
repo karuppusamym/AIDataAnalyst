@@ -8324,6 +8324,15 @@
             "title": "Name",
             "type": "string"
           },
+          "ontology_version_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Ontology Version Ids",
+            "type": "array"
+          },
           "owner_principal": {
             "maxLength": 255,
             "minLength": 2,
@@ -8691,6 +8700,15 @@
             "title": "Name",
             "type": "string"
           },
+          "ontology_version_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Ontology Version Ids",
+            "type": "array"
+          },
           "owner_principal": {
             "maxLength": 255,
             "minLength": 2,
@@ -8871,6 +8889,15 @@
             "minLength": 3,
             "title": "Name",
             "type": "string"
+          },
+          "ontology_version_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Ontology Version Ids",
+            "type": "array"
           },
           "organization_id": {
             "format": "uuid",
@@ -9088,6 +9115,15 @@
             "minLength": 3,
             "title": "Name",
             "type": "string"
+          },
+          "ontology_version_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Ontology Version Ids",
+            "type": "array"
           },
           "owner_principal": {
             "maxLength": 255,

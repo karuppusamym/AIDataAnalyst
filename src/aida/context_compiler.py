@@ -238,6 +238,9 @@ def _artifact_payload(
             ),
             key=lambda item: item["id"],
         )
+    # R11-FP09: the approved ontology meaning the product is bound to, by pinned version.
+    if version.ontology_version_ids:
+        references["ontology_version_ids"] = sorted(version.ontology_version_ids)
     common = {
         "product_key": product.product_key,
         "version": version.version,

@@ -22,6 +22,7 @@ CONTEXT_FIELDS = (
     "glossary_term_version_ids",
     "eligible_tool_version_ids",
     "routine_ids",
+    "ontology_version_ids",
     "allowed_consumer_roles",
     "lineage_depth",
     "quality_requirements",
