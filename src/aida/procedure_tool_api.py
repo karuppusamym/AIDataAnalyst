@@ -126,7 +126,13 @@ async def create_procedure_tool_blueprint(
         allowed_roles=body.allowed_roles,
     )
     tool_version = await _persist_tool_version_draft(
-        project, datasource, create_body, context=context, session=session, settings=settings
+        project,
+        datasource,
+        create_body,
+        context=context,
+        session=session,
+        settings=settings,
+        source_routine_id=routine.id,
     )
 
     # R11-X2: which routine and statement a draft was generated from is evidence,

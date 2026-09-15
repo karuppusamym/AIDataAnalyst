@@ -2651,6 +2651,7 @@ export interface GovernedToolVersionRead {
   approved_at: string | null;
   created_at: string;
   updated_at: string;
+  source_routine_id?: string | null;
   usage_count?: number;
 }
 

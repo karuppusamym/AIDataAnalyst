@@ -114,6 +114,7 @@ from aida.query_memory import (
     find_query_memory_matches,
     retrieved_table_ids_from_hits,
 )
+from aida.routine_tool_hold import SOURCE_ROUTINE_CHANGED_MESSAGE, fetch_source_routine_holds
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
 from aida.semantic_inference import (
@@ -1226,10 +1227,15 @@ class GovernedAgentOrchestrator:
             datasource=request.datasource,
             table_ids=list(dependency_table_ids.values()),
         )
+        # R11-FP16: the same source-routine hold `tool_api.execute_tool_version` applies.
+        routine_asset_ids, routine_holds = await fetch_source_routine_holds(session, version)
         tool_quality_gate = check_tool_gate(
             tool_id=str(version.tool_id),
-            dependency_asset_ids=[str(t) for t in dependency_table_ids.values()],
-            incidents=dependency_incidents,
+            dependency_asset_ids=[
+                *(str(t) for t in dependency_table_ids.values()),
+                *routine_asset_ids,
+            ],
+            incidents=[*dependency_incidents, *routine_holds],
         )
         if tool_quality_gate.action == "BLOCK":
             await self._persist_rejection(
@@ -1238,7 +1244,11 @@ class GovernedAgentOrchestrator:
                 ledger,
                 f"QUALITY_INCIDENT_BLOCK:{','.join(tool_quality_gate.affected_assets)}",
             )
-            raise AgentPolicyRejected(tool_quality_gate.message)
+            raise AgentPolicyRejected(
+                f"{tool_quality_gate.message} {SOURCE_ROUTINE_CHANGED_MESSAGE}"
+                if routine_holds
+                else tool_quality_gate.message
+            )
         if tool_quality_gate.action == "WARN":
             ledger.plan_evidence["tool_quality_gate"] = {
                 "action": tool_quality_gate.action,

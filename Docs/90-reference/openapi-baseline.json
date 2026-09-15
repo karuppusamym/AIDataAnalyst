@@ -15818,6 +15818,18 @@
             "title": "Slug",
             "type": "string"
           },
+          "source_routine_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Routine Id"
+          },
           "sql_template": {
             "title": "Sql Template",
             "type": "string"

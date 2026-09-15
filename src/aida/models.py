@@ -786,6 +786,10 @@ class GovernedToolVersion(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # R11-FP16: the routine a procedure tool's SQL was extracted from, so a change to that
+    # routine holds this version (`aida.routine_tool_hold`). No foreign key: the routine table
+    # lives in `envelope_models`, and a retired routine is kept rather than deleted.
+    source_routine_id: Mapped[UUID | None] = mapped_column(index=True)
 
 
 class ToolExecution(Base, TimestampMixin):

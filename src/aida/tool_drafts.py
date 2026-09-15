@@ -18,6 +18,7 @@ import hashlib
 import json
 from dataclasses import replace
 from typing import Final
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,8 +57,12 @@ async def stage_tool_version_draft(
     *,
     audit_context: SecurityContext,
     settings: Settings,
+    source_routine_id: UUID | None = None,
 ) -> tuple[GovernedTool, GovernedToolVersion]:
-    """Validate `body` and stage a new DRAFT version of the project's tool with its slug."""
+    """Validate `body` and stage a new DRAFT version of the project's tool with its slug.
+
+    `source_routine_id` names the routine a procedure tool's SQL was extracted from, so a
+    later change to that routine holds the version (R11-FP16)."""
     definitions = body.parameters
     declared = {definition.name for definition in definitions}
     try:
@@ -138,6 +143,7 @@ async def stage_tool_version_draft(
         allowed_roles=sorted(body.allowed_roles),
         fingerprint=fingerprint,
         created_by=audit_context.principal_id,
+        source_routine_id=source_routine_id,
     )
     session.add(version)
     await session.flush()

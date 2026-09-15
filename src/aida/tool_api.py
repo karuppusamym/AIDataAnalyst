@@ -44,6 +44,7 @@ from aida.multi_table_blueprint import (
 from aida.quality_coupling import check_tool_gate, fetch_open_incidents, resolve_table_ids
 from aida.query_execution_view import query_execution_response
 from aida.query_gateway import QueryExecutionGateway, QueryRejected
+from aida.routine_tool_hold import SOURCE_ROUTINE_CHANGED_MESSAGE, fetch_source_routine_holds
 from aida.schemas import (
     ApiModel,
     GovernanceReviewRead,
@@ -125,6 +126,7 @@ def _tool_read(
         approved_at=version.approved_at,
         created_at=version.created_at,
         updated_at=version.updated_at,
+        source_routine_id=version.source_routine_id,
         usage_count=usage_count,
     )
 
@@ -196,6 +198,7 @@ async def _persist_tool_version_draft(
     context: SecurityContext,
     session: AsyncSession,
     settings: Settings,
+    source_routine_id: UUID | None = None,
 ) -> GovernedToolVersionRead:
     """The shared draft-creation tail: validate `body.sql_template` the same
     way regardless of whether it was hand-authored (`create_tool_version`)
@@ -210,7 +213,13 @@ async def _persist_tool_version_draft(
     """
     try:
         tool, version = await stage_tool_version_draft(
-            session, project, datasource, body, audit_context=context, settings=settings
+            session,
+            project,
+            datasource,
+            body,
+            audit_context=context,
+            settings=settings,
+            source_routine_id=source_routine_id,
         )
     except ToolDraftRefused as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
@@ -986,12 +995,22 @@ async def execute_tool_version(
     dependency_incidents = await fetch_open_incidents(
         session, datasource=datasource, table_ids=list(dependency_table_ids.values())
     )
+    # R11-FP16: a tool extracted from a routine also depends on that routine's definition.
+    routine_asset_ids, routine_holds = await fetch_source_routine_holds(session, version)
     quality_gate = check_tool_gate(
         tool_id=str(tool.id),
-        dependency_asset_ids=[str(table_id) for table_id in dependency_table_ids.values()],
-        incidents=dependency_incidents,
+        dependency_asset_ids=[
+            *(str(table_id) for table_id in dependency_table_ids.values()),
+            *routine_asset_ids,
+        ],
+        incidents=[*dependency_incidents, *routine_holds],
     )
     if quality_gate.action == "BLOCK":
+        message = (
+            f"{quality_gate.message} {SOURCE_ROUTINE_CHANGED_MESSAGE}"
+            if routine_holds
+            else quality_gate.message
+        )
         record_audit(
             session,
             execution_context,
@@ -1002,12 +1021,13 @@ async def execute_tool_version(
             correlation_id=get_correlation_id(),
             details={
                 "reason": "QUALITY_INCIDENT_BLOCK",
-                "message": quality_gate.message,
+                "message": message,
                 "affected_assets": quality_gate.affected_assets,
+                "source_routine_changed": bool(routine_holds),
             },
         )
         await session.commit()
-        raise HTTPException(status_code=409, detail=quality_gate.message)
+        raise HTTPException(status_code=409, detail=message)
 
     try:
         rendered = render_tool_sql(
