@@ -148,6 +148,58 @@ def test_text_fingerprint_is_stable_and_evidence_payload_is_json_safe() -> None:
     assert isinstance(payload["dbt_description_present"], bool)
 
 
+def test_a_view_is_described_as_a_view_with_what_its_definition_lets_a_reader_rely_on() -> None:
+    """R11-FP08: the draft names the kind and the definition's state, never the definition."""
+    captured = compose_draft_text(
+        _evidence(
+            table_name="open_accounts",
+            column_count=2,
+            object_kind="VIEW",
+            definition_state="CAPTURED",
+            upstream_table_names=("accounts",),
+        )
+    )
+    assert captured.startswith("open_accounts is a view in the public schema with 2 columns.")
+    assert "captured from the source" in captured
+    assert "reads from accounts" in captured
+    assert "populated from" not in captured
+
+    withheld = compose_draft_text(
+        _evidence(object_kind="MATERIALIZED_VIEW", definition_state="WITHHELD")
+    )
+    assert "is a materialized view" in withheld
+    assert "withholds its definition" in withheld
+
+    table_text = compose_draft_text(_evidence(definition_state=None))
+    assert "definition" not in table_text
+
+
+def test_a_captured_definition_is_a_views_structural_evidence() -> None:
+    """A view rarely declares keys; without this every view scored as if it had none."""
+    keyless_table = score_evidence(_evidence(column_count=3))
+    captured_view = score_evidence(
+        _evidence(column_count=3, object_kind="VIEW", definition_state="CAPTURED")
+    )
+    withheld_view = score_evidence(
+        _evidence(column_count=3, object_kind="VIEW", definition_state="WITHHELD")
+    )
+
+    assert captured_view.completeness > keyless_table.completeness
+    assert withheld_view.completeness == keyless_table.completeness
+
+
+def test_a_views_evidence_records_the_definition_it_was_written_against() -> None:
+    view = evidence_payload(
+        _evidence(object_kind="VIEW", definition_state="CAPTURED", definition_digest="d" * 64)
+    )
+    assert (view["object_kind"], view["definition_state"], view["definition_digest"]) == (
+        "VIEW",
+        "CAPTURED",
+        "d" * 64,
+    )
+    assert "object_kind" not in evidence_payload(_evidence())
+
+
 # --- exit condition (a): a low-evidence draft never reaches PENDING_APPROVAL ---
 
 

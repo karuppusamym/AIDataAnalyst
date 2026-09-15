@@ -27,6 +27,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
+from aida.envelope_models import AVAILABLE, MetadataViewDefinition
+from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
     AssetDescriptionDraft,
     AssetDocumentation,
@@ -44,6 +46,7 @@ from aida.models import (
     ViewLineageEdge,
 )
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 # Below this overall score a draft carries too little evidence to be worth an
 # independent reviewer's time. A draft below this line stays in DRAFT and can
@@ -84,6 +87,17 @@ class AssetEvidence:
     #: in `upstream_table_names`/`downstream_table_names` beside OpenLineage's.
     upstream_parsed_edges: tuple[tuple[str, UUID], ...] = ()
     downstream_parsed_edges: tuple[tuple[str, UUID], ...] = ()
+    #: R11-FP08: TABLE, VIEW or MATERIALIZED_VIEW -- a view is described as a view.
+    object_kind: str = "TABLE"
+    #: For a view, how much of its definition Atlas holds: CAPTURED, TRUNCATED, QUARANTINED,
+    #: WITHHELD or NOT_CAPTURED. Never the definition itself, and never one of its constants.
+    definition_state: str | None = None
+    #: SHA-256 of the stored value-free definition the draft was written against.
+    definition_digest: str | None = None
+
+    @property
+    def is_view(self) -> bool:
+        return self.object_kind != "TABLE"
 
     @property
     def lineage_edge_count(self) -> int:
@@ -135,7 +149,10 @@ def score_evidence(evidence: AssetEvidence) -> ConfidenceBreakdown:
     """
     categories = (
         evidence.column_count > 0,
-        bool(evidence.primary_key_columns) or evidence.foreign_key_count > 0,
+        # A view rarely declares keys; a captured definition is its structural evidence.
+        bool(evidence.primary_key_columns)
+        or evidence.foreign_key_count > 0
+        or evidence.definition_state == "CAPTURED",
         evidence.lineage_edge_count > 0,
         bool(evidence.dbt_description),
         bool(evidence.business_description),
@@ -180,13 +197,38 @@ def score_evidence(evidence: AssetEvidence) -> ConfidenceBreakdown:
     )
 
 
+_KIND_NOUNS = {"TABLE": "table", "VIEW": "view", "MATERIALIZED_VIEW": "materialized view"}
+#: R11-FP08: what a view's definition state lets a reader rely on. Each sentence describes the
+#: definition's availability; none quotes it, so no redacted constant is ever put back in prose.
+_DEFINITION_SENTENCES = {
+    "CAPTURED": (
+        "Its definition was captured from the source, so its lineage is read from the "
+        "definition itself."
+    ),
+    "TRUNCATED": (
+        "The source gave only part of its definition, so lineage read from it may be incomplete."
+    ),
+    "QUARANTINED": (
+        "Its captured definition was set aside by prompt-risk screening and is not read for "
+        "lineage."
+    ),
+    "WITHHELD": (
+        "The source withholds its definition from the scanning principal, so what it reads "
+        "from cannot be confirmed here."
+    ),
+    "NOT_CAPTURED": "Its definition has not been captured from the source.",
+}
+
+
 def compose_draft_text(evidence: AssetEvidence) -> str:
     """Assemble readable prose entirely from evidence fields. No model call."""
     column_word = "column" if evidence.column_count == 1 else "columns"
     sentences = [
-        f"{evidence.table_name} is a table in the {evidence.schema_name} schema with "
-        f"{evidence.column_count} {column_word}."
+        f"{evidence.table_name} is a {_KIND_NOUNS.get(evidence.object_kind, 'table')} in the "
+        f"{evidence.schema_name} schema with {evidence.column_count} {column_word}."
     ]
+    if evidence.is_view and evidence.definition_state in _DEFINITION_SENTENCES:
+        sentences.append(_DEFINITION_SENTENCES[evidence.definition_state])
     if evidence.primary_key_columns:
         sentences.append("It is keyed by " + ", ".join(evidence.primary_key_columns) + ".")
     if evidence.foreign_key_count:
@@ -196,10 +238,11 @@ def compose_draft_text(evidence: AssetEvidence) -> str:
             "catalog tables."
         )
     if evidence.upstream_table_names:
-        sentences.append(
+        lead = "Lineage shows it reads from " if evidence.is_view else (
             "Lineage shows it is populated from "
-            + ", ".join(evidence.upstream_table_names[:_LINEAGE_PROSE_LIMIT])
-            + "."
+        )
+        sentences.append(
+            lead + ", ".join(evidence.upstream_table_names[:_LINEAGE_PROSE_LIMIT]) + "."
         )
     if evidence.downstream_table_names:
         sentences.append(
@@ -229,7 +272,7 @@ def text_fingerprint(text: str) -> str:
 
 def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
     """JSON-safe evidence record: the raw signals a draft was built from."""
-    return {
+    payload: dict[str, Any] = {
         "column_count": evidence.column_count,
         "primary_key_columns": list(evidence.primary_key_columns),
         "foreign_key_count": evidence.foreign_key_count,
@@ -251,6 +294,34 @@ def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
         ),
         "bound_term_ids": [str(value) for value in evidence.bound_term_ids],
     }
+    if evidence.is_view:
+        # R11-FP08: which kind of object the draft describes, and the definition it was written
+        # against -- a digest of the stored value-free text, so a later check can tell it moved.
+        payload["object_kind"] = evidence.object_kind
+        payload["definition_state"] = evidence.definition_state
+        payload["definition_digest"] = evidence.definition_digest
+    return payload
+
+
+def _object_kind(object_type: str) -> str:
+    normalized = object_type.strip().replace(" ", "_").upper()
+    return normalized if normalized in ("VIEW", "MATERIALIZED_VIEW") else "TABLE"
+
+
+def _definition_facts(definition: MetadataViewDefinition | None) -> tuple[str, str | None]:
+    if definition is None:
+        return "NOT_CAPTURED", None
+    stored = definition.definition_sql_redacted
+    if definition.availability != AVAILABLE or stored is None:
+        return "WITHHELD", None
+    digest = (
+        hashlib.sha256(stored.encode("utf-8")).hexdigest()
+        if definition.redaction_status in VALUE_FREE_REDACTION_STATUSES
+        else None
+    )
+    if not is_eligible_for_model_context(definition.screening_status):
+        return "QUARANTINED", digest
+    return ("TRUNCATED" if definition.truncated else "CAPTURED"), digest
 
 
 #: ADR-0026's parsed-edge tables whose rows name two catalog tables.
@@ -409,6 +480,19 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
 
     dbt_description, dbt_documented_column_count = await _latest_dbt_evidence(session, table.id)
 
+    object_kind = _object_kind(table.object_type)
+    definition_state: str | None = None
+    definition_digest: str | None = None
+    if object_kind != "TABLE":
+        definition_state, definition_digest = _definition_facts(
+            await session.scalar(
+                select(MetadataViewDefinition).where(
+                    MetadataViewDefinition.table_id == table.id,
+                    MetadataViewDefinition.status == "ACTIVE",
+                )
+            )
+        )
+
     return AssetEvidence(
         table_id=table.id,
         table_name=table.name,
@@ -438,6 +522,9 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         downstream_parsed_edges=tuple(
             (edge_type, edge_id) for _, edge_type, edge_id in downstream_parsed
         ),
+        object_kind=object_kind,
+        definition_state=definition_state,
+        definition_digest=definition_digest,
     )
 
 
