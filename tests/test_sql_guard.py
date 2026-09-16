@@ -164,3 +164,32 @@ def test_authorization_never_lifts_the_adversarial_denylist() -> None:
     ).validate("SELECT pg_sleep(5)", dialect="postgres")
 
     assert "FORBIDDEN_FUNCTION:pg_sleep" in result.violations
+
+
+@pytest.mark.parametrize(
+    ("dialect", "sql"),
+    [
+        ("oracle", "SELECT order_seq.NEXTVAL AS v FROM retail.customer"),
+        ("snowflake", "SELECT order_seq.NEXTVAL AS v FROM retail.customer"),
+        ("tsql", "SELECT NEXT VALUE FOR dbo.order_seq AS v"),
+    ],
+)
+def test_advancing_a_sequence_is_refused(dialect: str, sql: str) -> None:
+    """A sequence advance writes, and only Postgres enforces a read-only transaction server-side.
+
+    Postgres spells it `nextval('s')`, which the unrecognised-call rule already refuses; these
+    three spell it as a qualified column or a `NEXT VALUE FOR` clause, which are not calls.
+    """
+    result = guard().validate(sql, dialect=dialect)
+
+    assert not result.valid
+    assert "SEQUENCE_ADVANCE_FORBIDDEN" in result.violations
+
+
+def test_a_column_named_nextval_is_still_a_column() -> None:
+    result = guard().validate(
+        "SELECT c.nextval FROM retail.customer AS c", dialect="oracle"
+    )
+
+    assert result.valid
+    assert "SEQUENCE_ADVANCE_FORBIDDEN" not in result.violations

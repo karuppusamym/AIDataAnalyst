@@ -430,6 +430,31 @@ class SqlGuard:
             if user_schema_qualified or unrecognised:
                 violations.append(f"UNAUTHORIZED_FUNCTION:{qualified_name}")
 
+        # Advancing a sequence is a write, and a read-only transaction is enforced by the server
+        # on Postgres alone, so a guard that reads as "SELECT only" must refuse it here. Postgres
+        # spells it `nextval('s')`, a call the unrecognised-function rule above already refuses.
+        # Oracle and Snowflake spell it `seq.NEXTVAL`, which parses as a qualified column, and
+        # T-SQL as `NEXT VALUE FOR seq`. A column of a table the query already reads is a column,
+        # not a sequence, so the qualifier is what separates them.
+        if statement.find(exp.NextValueFor) is not None:
+            violations.append("SEQUENCE_ADVANCE_FORBIDDEN")
+        else:
+            query_sources = {
+                name.lower()
+                for table in statement.find_all(exp.Table)
+                for name in (table.name, table.alias)
+                if name
+            }
+            for column in statement.find_all(exp.Column):
+                qualifier = column.table
+                if (
+                    column.name.lower() == "nextval"
+                    and qualifier
+                    and qualifier.lower() not in query_sources
+                ):
+                    violations.append("SEQUENCE_ADVANCE_FORBIDDEN")
+                    break
+
         # A data source that is not a plain catalog table -- a table-valued
         # function call used as a FROM/JOIN source (T-SQL OPENQUERY/OPENROWSET,
         # Snowflake/BigQuery TABLE(...)) -- cannot be resolved against the
