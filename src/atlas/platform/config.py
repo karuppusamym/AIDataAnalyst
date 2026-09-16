@@ -765,6 +765,13 @@ class Settings(BaseSettings):
     vector_index_rebuild_enabled: bool = True
     vector_index_rebuild_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
     vector_index_rebuild_batch_size: int = Field(default=25, ge=1, le=1_000)
+    # R11-FP17: the footprint register as gauges an alert can be written against. Enabled by
+    # default because it reads what the Operations screen already reads and exports totals by
+    # kind alone -- no tenant in a label, nothing a boundary protects -- and because the
+    # failure it exists to catch is a backlog growing while every request still succeeds.
+    # Five minutes: fast enough to alert on, far too slow to cost anything.
+    footprint_metrics_enabled: bool = True
+    footprint_metrics_interval_seconds: int = Field(default=300, ge=60, le=86_400)
     # R11-B18: an approved route can be silently retired by its provider, and
     # the approval cannot expire when they do. The sweep lists models (free)
     # and never generates (not free), so it is on by default; it is a no-op

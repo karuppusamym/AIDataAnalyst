@@ -22,6 +22,7 @@ from aida.delivery_intents import run_delivery_worker_pass
 from aida.entitlements import run_entitlement_fulfilment_pass
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
+from aida.footprint_metrics import run_footprint_metrics_pass
 from aida.freshness import (
     FRESHNESS_SCHEDULER_PRINCIPAL,
     evaluate_freshness_for_datasource,
@@ -891,6 +892,11 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # R11-FP16: carry those changes down the dependency chain into review queues, and release
     # a hold once nothing standing on the view is stale. Off by default, like the pass above.
     await run_context_rebuild_pass(settings, now=now)
+    # R11-FP17: publish what those passes have left outstanding as gauges. On by default and
+    # five-minutely: it reads the same register the Operations screen reads, exports totals by
+    # gap kind with no tenant in a label, and is the only thing that notices a backlog growing
+    # while every request still succeeds.
+    await run_footprint_metrics_pass(settings, now=now)
     await run_due_playbooks_pass(now=now)
     # ADR-0029: scheduled task-agent runs. Off by default -- every
     # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening

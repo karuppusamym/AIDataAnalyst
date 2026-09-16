@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**260 settings.** 0 are read nowhere. 54 more ship switched off, empty or zero.
+**262 settings.** 0 are read nowhere. 54 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -289,6 +289,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `vector_index_rebuild_enabled` | `bool` | `True` | 1 |
 | `vector_index_rebuild_interval_seconds` | `int` | `86400` | 1 |
 | `vector_index_rebuild_batch_size` | `int` | `25` | 1 |
+| `footprint_metrics_enabled` | `bool` | `True` | 1 |
+| `footprint_metrics_interval_seconds` | `int` | `300` | 1 |
 | `model_route_health_enabled` | `bool` | `True` | 2 |
 | `model_route_health_interval_seconds` | `int` | `21600` | 1 |
 | `model_route_health_batch_size` | `int` | `50` | 1 |
