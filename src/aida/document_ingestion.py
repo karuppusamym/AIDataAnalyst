@@ -169,10 +169,17 @@ async def create_document_from_csv(
 
 @dataclass(slots=True)
 class _CatalogIndex:
-    """One project's live catalog, indexed the way structural mapping reads it."""
+    """One project's live catalog, indexed the way structural mapping reads it.
+
+    `renamed_*` (R11-FP16) index the *old* names of tables a steward's approved rename retired,
+    each under the table it became. A row of a data dictionary naming a table by the name it had
+    last quarter is about the table it is now, not about nothing.
+    """
 
     tables_by_key: dict[tuple[str, str], list[MetadataTable]] = field(default_factory=dict)
     tables_by_name: dict[str, list[MetadataTable]] = field(default_factory=dict)
+    renamed_by_key: dict[tuple[str, str], list[MetadataTable]] = field(default_factory=dict)
+    renamed_by_name: dict[str, list[MetadataTable]] = field(default_factory=dict)
     columns_by_table: dict[UUID, dict[str, list[MetadataColumn]]] = field(default_factory=dict)
 
 
@@ -189,10 +196,35 @@ async def _catalog_index(session: AsyncSession, project_id: UUID) -> _CatalogInd
         )
     ).all()
     index = _CatalogIndex()
+    live: dict[UUID, MetadataTable] = {}
     for table, schema_name in candidate_rows:
         key = (schema_name.casefold(), table.name.casefold())
         index.tables_by_key.setdefault(key, []).append(table)
         index.tables_by_name.setdefault(table.name.casefold(), []).append(table)
+        live[table.id] = table
+    # R11-FP16: the names retired by an approved rename, indexed under what they became. Only a
+    # rename a steward approved writes `superseded_by_table_id` (CT-4), and only a successor the
+    # source still has is offered, so nothing here maps a document onto a guess.
+    renamed_rows = (
+        await session.execute(
+            select(MetadataTable.superseded_by_table_id, MetadataSchema.name, MetadataTable.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .join(DataSource, DataSource.id == MetadataTable.datasource_id)
+            .where(
+                DataSource.project_id == project_id,
+                MetadataTable.status != "ACTIVE",
+                MetadataTable.superseded_by_table_id.is_not(None),
+            )
+        )
+    ).all()
+    for successor_id, schema_name, old_name in renamed_rows:
+        successor = live.get(successor_id)
+        if successor is None:
+            continue
+        index.renamed_by_key.setdefault(
+            (schema_name.casefold(), old_name.casefold()), []
+        ).append(successor)
+        index.renamed_by_name.setdefault(old_name.casefold(), []).append(successor)
     return index
 
 
@@ -211,6 +243,16 @@ async def _resolve_section(
         if table_key is not None
         else index.tables_by_name.get(section.raw_table_name.casefold())
     ) or []
+    if not matched_tables:
+        # R11-FP16: no table has this name any more. If exactly one that did was renamed to a
+        # table the source still has, the row is about that table: a rename does not make a data
+        # dictionary wrong, only out of date. A name the source has again wins above, so a new
+        # table reusing a retired name is never read as the old one.
+        matched_tables = (
+            index.renamed_by_key.get(table_key)
+            if table_key is not None
+            else index.renamed_by_name.get(section.raw_table_name.casefold())
+        ) or []
     if len(matched_tables) != 1:
         return subject_type, None
     table = matched_tables[0]
@@ -358,12 +400,13 @@ async def remap_document(
 ) -> RemapOutcome:
     """R11-FP16: map a document's sections again, against the catalog as it is now.
 
-    The rules are `resolve_structural_mappings`'s own. A section whose table or column left the
-    source, or became ambiguous, is UNMATCHED again, and a pending claim on it cannot be approved
-    (`claim_subject_retired`). A section that now names exactly one live table or column, other
-    than the one it named, maps to it and gets a claim proposed for review, attributed to the
-    document's uploader -- unless its text was already proposed for that subject, pending or
-    decided, since a person's decision on it stands.
+    The rules are `resolve_structural_mappings`'s own, including that a section naming a table
+    an approved rename retired follows it to what it became. A section whose table or column
+    left the source, or became ambiguous, is UNMATCHED again, and a pending claim on it cannot
+    be approved (`claim_subject_retired`). A section that now names exactly one live table or
+    column, other than the one it named, maps to it and gets a claim proposed for review,
+    attributed to the document's uploader -- unless its text was already proposed for that
+    subject, pending or decided, since a person's decision on it stands.
     """
     index = await _catalog_index(session, document.project_id)
     rows = (

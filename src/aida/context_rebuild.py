@@ -19,10 +19,13 @@ For each organization:
    once a scan in its project finishes after it was mapped. A row that now names exactly
    one live table or column gets a claim proposed for review; one whose subject left is
    UNMATCHED again, and a pending claim on a retired subject is refused at approval.
-5. **Retirements.** A published tool that reads a held table the source no longer has, or
-   whose SQL names a column a held table no longer has (and that is not regenerated from a
-   view or routine), gets a DEPRECATE review. A person decides; a rejected proposal is not
-   made again until the source changes again.
+5. **Retirements, and renames.** A published tool that reads a held table the source no
+   longer has, or whose SQL names a column a held table no longer has (and that is not
+   regenerated from a view or routine), gets a DEPRECATE review. Where a steward approved
+   a rename for that table, the tool is proposed against what it became instead --
+   regenerated from the successor view, or its SQL written against the new name -- and
+   only a tool that cannot be is proposed for retirement. A person decides either way; a
+   rejected proposal is not made again until the source changes again.
 6. **Context products.** A PUBLISHED context product version that pins a tool version since
    superseded gets a version re-pinned to that tool's published version; one that includes a
    held table the source no longer has, or pins a tool reading it, gets a version without
@@ -119,7 +122,7 @@ from aida.procedure_tool_blueprint import (
 from aida.query_gateway import catalog_columns
 from aida.relationship_drift import check_relationship_drift, relationship_drift_pending
 from aida.routine_lineage_edges import RoutineNotEligibleError
-from aida.schemas import GovernedToolVersionCreate
+from aida.schemas import GovernedToolVersionCreate, ToolParameterDefinition
 from aida.security import SecurityContext
 from aida.sql_lineage_parser import parse_view_lineage
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
@@ -128,6 +131,7 @@ from aida.sql_validation import (
     locally_defined_names,
     resolve_column_references,
 )
+from aida.table_rename_rewrite import rewrite_table_references
 from aida.tool_drafts import ToolDraftRefused, stage_tool_version_draft
 from aida.tool_impact import compute_deprecation_impact, impact_summary
 from aida.tool_source_binding import (
@@ -160,6 +164,9 @@ WAIT_RETIRED_TABLE_IN_USE: Final = "RETIRED_TABLE_IN_USE"
 #: Why a DEPRECATE review is proposed.
 DEPRECATE_TABLE_RETIRED: Final = "TABLE_RETIRED"
 DEPRECATE_COLUMNS_MISSING: Final = "COLUMNS_MISSING"
+#: Why a tool is rebuilt rather than retired: a steward approved a rename, and the table
+#: the tool reads is the one it became.
+REWRITE_TABLE_RENAMED: Final = "TABLE_RENAMED"
 
 HOLD_RELEASE_REASON: Final = (
     "Everything standing on the redefined view was rebuilt against its current definition and "
@@ -195,6 +202,7 @@ class RebuildOutcome:
     joins_suspended: int = 0
     joins_restored: int = 0
     tools_drafted: int = 0
+    tools_rewritten: int = 0
     descriptions_drafted: int = 0
     sections_remapped: int = 0
     claims_proposed: int = 0
@@ -219,6 +227,7 @@ class RebuildOutcome:
                 self.joins_suspended,
                 self.joins_restored,
                 self.tools_drafted,
+                self.tools_rewritten,
                 self.descriptions_drafted,
                 self.sections_remapped,
                 self.claims_proposed,
@@ -236,6 +245,7 @@ class RebuildOutcome:
             "joins_suspended": self.joins_suspended,
             "joins_restored": self.joins_restored,
             "tools_drafted": self.tools_drafted,
+            "tools_rewritten": self.tools_rewritten,
             "descriptions_drafted": self.descriptions_drafted,
             "sections_remapped": self.sections_remapped,
             "claims_proposed": self.claims_proposed,
@@ -413,6 +423,71 @@ async def _supersede_lineage(
 # --------------------------------------------------------------------------
 
 
+async def _stage_tool_rebuild(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    version: GovernedToolVersion,
+    *,
+    sql_template: str,
+    parameters: list[ToolParameterDefinition],
+    reason: str,
+    details: dict[str, Any] | None = None,
+    source_routine: MetadataRoutine | None = None,
+    source_view: MetadataViewDefinition | None = None,
+) -> None:
+    """Stage one rebuilt version of a published tool and put it in the review queue.
+
+    Shared by the two ways a tool is rebuilt -- regenerated from its source's current
+    definition, and written against the table a rename replaced -- so both keep the published
+    version's name, description, roles and semantic model, and both are decided by a person.
+    `stage_tool_version_draft` runs the SQL guard, the placeholder check and per-object
+    authorization, so a rebuild that would not have been accepted from a person is refused here.
+    """
+    tool = await session.get(GovernedTool, version.tool_id)
+    datasource = await session.get(DataSource, version.datasource_id)
+    project = await session.get(Project, tool.project_id) if tool is not None else None
+    if tool is None or datasource is None or project is None:
+        raise _RebuildRefused("TOOL_DEPENDENCY_UNAVAILABLE")
+    body = GovernedToolVersionCreate(
+        slug=tool.slug,
+        name=version.name,
+        description=version.description,
+        datasource_id=datasource.id,
+        semantic_model_version_id=version.semantic_model_version_id,
+        sql_template=sql_template,
+        parameters=parameters,
+        allowed_roles=list(version.allowed_roles),
+    )
+    try:
+        _, draft = await stage_tool_version_draft(
+            session,
+            project,
+            datasource,
+            body,
+            audit_context=context,
+            settings=settings,
+            source_routine=source_routine,
+            source_view=source_view,
+        )
+    except ToolDraftRefused as exc:
+        raise _RebuildRefused(exc.code) from exc
+    draft.status = "REVIEW_REQUIRED"
+    await _open_review(
+        session,
+        context,
+        organization_id,
+        object_type="GOVERNED_TOOL_VERSION",
+        object_id=draft.id,
+        details={
+            "rebuilds_version_id": str(version.id),
+            "reason": reason,
+            **(details or {}),
+        },
+    )
+
+
 async def _regenerate_tool(
     session: AsyncSession,
     organization_id: UUID,
@@ -420,6 +495,9 @@ async def _regenerate_tool(
     settings: Settings,
     version: GovernedToolVersion,
     reason: str,
+    *,
+    source_view_table_id: UUID | None = None,
+    details: dict[str, Any] | None = None,
 ) -> None:
     tool = await session.get(GovernedTool, version.tool_id)
     datasource = await session.get(DataSource, version.datasource_id)
@@ -428,13 +506,16 @@ async def _regenerate_tool(
         raise _RebuildRefused("TOOL_DEPENDENCY_UNAVAILABLE")
     source_view: MetadataViewDefinition | None = None
     source_routine: MetadataRoutine | None = None
-    if version.source_view_table_id is not None:
+    # R11-FP16: the view to generate from is this version's own source, except where a
+    # rename replaced it -- then it is what the steward said that view became.
+    view_table_id = source_view_table_id or version.source_view_table_id
+    if view_table_id is not None:
         try:
             view_source = await resolve_view_tool_source(
                 session,
                 organization_id=organization_id,
                 datasource_id=datasource.id,
-                table_id=version.source_view_table_id,
+                table_id=view_table_id,
             )
             view_blueprint = build_view_tool_blueprint(view_source, dialect=datasource.dialect)
         except ViewNotEligibleError as exc:
@@ -444,7 +525,7 @@ async def _regenerate_tool(
         sql_template, parameters = view_blueprint.sql_template, list(view_blueprint.parameters)
         source_view = await session.scalar(
             select(MetadataViewDefinition).where(
-                MetadataViewDefinition.table_id == version.source_view_table_id
+                MetadataViewDefinition.table_id == view_table_id
             )
         )
     elif version.source_routine_id is not None:
@@ -477,37 +558,18 @@ async def _regenerate_tool(
         source_routine = routine
     else:
         raise _RebuildRefused("TOOL_NOT_SOURCE_BOUND")
-    body = GovernedToolVersionCreate(
-        slug=tool.slug,
-        name=version.name,
-        description=version.description,
-        datasource_id=datasource.id,
-        semantic_model_version_id=version.semantic_model_version_id,
+    await _stage_tool_rebuild(
+        session,
+        organization_id,
+        context,
+        settings,
+        version,
         sql_template=sql_template,
         parameters=parameters,
-        allowed_roles=list(version.allowed_roles),
-    )
-    try:
-        _, draft = await stage_tool_version_draft(
-            session,
-            project,
-            datasource,
-            body,
-            audit_context=context,
-            settings=settings,
-            source_routine=source_routine,
-            source_view=source_view,
-        )
-    except ToolDraftRefused as exc:
-        raise _RebuildRefused(exc.code) from exc
-    draft.status = "REVIEW_REQUIRED"
-    await _open_review(
-        session,
-        context,
-        organization_id,
-        object_type="GOVERNED_TOOL_VERSION",
-        object_id=draft.id,
-        details={"rebuilds_version_id": str(version.id), "reason": reason},
+        reason=reason,
+        details=details,
+        source_routine=source_routine,
+        source_view=source_view,
     )
 
 
@@ -994,6 +1056,158 @@ async def _propose_deprecation(
     )
 
 
+async def _successor(session: AsyncSession, table: MetadataTable) -> MetadataTable | None:
+    """The table an approved rename says this one became, where the source still has it.
+
+    CT-4 writes `superseded_by_table_id` when a steward approves a rename and identity merges;
+    nothing writes it automatically. Followed at most three hops -- a table renamed twice
+    between two passes is ordinary, a cycle is not -- and only within the same datasource,
+    since a rename is one source's event.
+    """
+    seen = {table.id}
+    current = table
+    for _ in range(3):
+        successor_id = current.superseded_by_table_id
+        if successor_id is None or successor_id in seen:
+            return None
+        successor = await session.get(MetadataTable, successor_id)
+        if successor is None or successor.datasource_id != table.datasource_id:
+            return None
+        if successor.status == "ACTIVE":
+            return successor
+        seen.add(successor.id)
+        current = successor
+    return None
+
+
+async def _qualified_names(session: AsyncSession, table: MetadataTable) -> tuple[str, str] | None:
+    """`(schema.table, catalog.schema.table)` -- the two shapes the gateway authorises."""
+    row = (
+        await session.execute(
+            select(MetadataCatalog.name, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
+            .where(MetadataSchema.id == table.schema_id)
+        )
+    ).first()
+    if row is None:
+        return None
+    catalog_name, schema_name = row
+    return f"{schema_name}.{table.name}", f"{catalog_name}.{schema_name}.{table.name}"
+
+
+async def _bare_name_is_unambiguous(
+    session: AsyncSession, datasource: DataSource, table: MetadataTable
+) -> bool:
+    """Whether this source has exactly one table of this name, retired ones included.
+
+    A bare `orders` in a tool's SQL is only this table when no other schema has one too.
+    Where two do, the bare form is left alone: rewriting the wrong one would be worse than
+    proposing the retirement this rewrite exists to avoid.
+    """
+    count = await session.scalar(
+        select(func.count())
+        .select_from(MetadataTable)
+        .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+        .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+        .where(
+            MetadataCatalog.datasource_id == datasource.id,
+            MetadataTable.organization_id == datasource.organization_id,
+            func.lower(MetadataTable.name) == table.name.lower(),
+        )
+    )
+    return count == 1
+
+
+async def _rebuild_proposed(
+    session: AsyncSession, version: GovernedToolVersion, since: datetime
+) -> bool:
+    """A newer version of this tool was drafted since the change: proposed once is enough.
+
+    Covers a draft still waiting and one a person rejected. A published successor never
+    reaches here, because publishing it supersedes the version this pass is looking at.
+    """
+    drafted = await session.scalar(
+        select(GovernedToolVersion.created_at)
+        .where(
+            GovernedToolVersion.tool_id == version.tool_id,
+            GovernedToolVersion.version > version.version,
+        )
+        .order_by(GovernedToolVersion.created_at.desc())
+        .limit(1)
+    )
+    return drafted is not None and _aware(drafted) >= since
+
+
+async def _propose_rewrite(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    datasource: DataSource,
+    version: GovernedToolVersion,
+    table: MetadataTable,
+    successor: MetadataTable,
+) -> bool:
+    """Propose the same tool against the table a rename says the retired one became.
+
+    A retired table used to leave one answer: retire every tool that reads it. That is right
+    when the table is gone and wrong when it was renamed -- the query is still correct, the
+    name is not. A tool generated from the renamed view is regenerated from the successor's own
+    definition; any other tool has its SQL written against the new name
+    (`aida.table_rename_rewrite`). Returns False when nothing can be proposed, and the caller
+    then proposes the retirement it would have proposed anyway.
+    """
+    if version.source_routine_id is not None:
+        # A routine's tool stands on the routine, not on this table: its own definition moving
+        # is what rebuilds it, through the binding pass above.
+        return False
+    replacement = await _qualified_names(session, successor)
+    if replacement is None:
+        return False
+    if version.source_view_table_id == table.id:
+        await _regenerate_tool(
+            session,
+            organization_id,
+            context,
+            settings,
+            version,
+            REWRITE_TABLE_RENAMED,
+            source_view_table_id=successor.id,
+            details={"replaces_table_id": str(table.id), "with_table_id": str(successor.id)},
+        )
+        return True
+    names = await _qualified_names(session, table)
+    if names is None:
+        return False
+    schema_qualified, catalog_qualified = names
+    replacements = {
+        schema_qualified.lower(): replacement[0],
+        catalog_qualified.lower(): replacement[0],
+    }
+    if await _bare_name_is_unambiguous(session, datasource, table):
+        replacements[table.name.lower()] = replacement[0]
+    rewritten = rewrite_table_references(
+        version.sql_template, dialect=datasource.dialect, replacements=replacements
+    )
+    if rewritten is None:
+        return False
+    await _stage_tool_rebuild(
+        session,
+        organization_id,
+        context,
+        settings,
+        version,
+        sql_template=rewritten,
+        parameters=[
+            ToolParameterDefinition.model_validate(parameter)
+            for parameter in version.parameter_schema
+        ],
+        reason=REWRITE_TABLE_RENAMED,
+        details={"replaces_table_id": str(table.id), "with_table_id": str(successor.id)},
+    )
+    return True
+
+
 async def _propose_deprecations(
     session: AsyncSession,
     organization_id: UUID,
@@ -1047,6 +1261,35 @@ async def _propose_deprecations(
             if replacement is not None:
                 # Someone is already drafting the version that replaces it.
                 continue
+            # A rename is not a retirement: where a steward approved one, the tool is proposed
+            # against what the table became, and only a tool that cannot be is proposed for
+            # retirement below.
+            successor = await _successor(session, table) if retired else None
+            if successor is not None and not await _rebuild_proposed(session, version, since):
+                try:
+                    async with session.begin_nested():
+                        rewritten = await _propose_rewrite(
+                            session,
+                            organization_id,
+                            context,
+                            settings,
+                            datasource,
+                            version,
+                            table,
+                            successor,
+                        )
+                except _RebuildRefused as refused:
+                    outcome.block(refused.code)
+                    continue
+                except Exception:  # noqa: BLE001 -- one rewrite must not stop the pass
+                    logger.exception(
+                        "context_rebuild_rewrite_failed", tool_version_id=str(version_id)
+                    )
+                    outcome.failed += 1
+                    continue
+                if rewritten:
+                    outcome.tools_rewritten += 1
+                    continue
             try:
                 async with session.begin_nested():
                     await _propose_deprecation(

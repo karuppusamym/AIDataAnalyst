@@ -11,6 +11,9 @@ in-memory SQLite through the real draft, review and decision routes, so it runs 
 * a table the source no longer has is retired through review: DEPRECATE reviews for the tools
   reading it and a context product version without it; its hold is released once approved,
   and a rejected proposal keeps the hold and is not proposed again;
+* a renamed table is followed instead: the tool is rebuilt against what it became and the hold
+  released once approved, a rejected rewrite is followed by the retirement, and a successor
+  that is retired or in another source is not followed;
 * a table back unchanged is released; a column a tool names leaving proposes retiring the tool;
   a retyped column waits for re-approval and an added one does not;
 * a table description written against other columns is redrafted, and never approved stale;
@@ -66,6 +69,7 @@ from aida.models import (
     GovernedToolVersion,
     MetadataColumn,
     MetadataConstraint,
+    MetadataSchema,
     MetadataTable,
     Organization,
     OutboxEvent,
@@ -1067,3 +1071,124 @@ async def test_a_product_pinning_superseded_semantic_and_glossary_versions_is_re
         [str(second_term.id)],
     )
     assert not (await _rebuild(estate)).acted
+
+
+# --- a rename is followed, not treated as a retirement (R11-FP16) ----------------------------
+
+
+async def _rename_orders(estate: Estate, name: str = "orders_2026") -> MetadataTable:
+    """A steward approves a rename: the old row is tombstoned and points at what it became.
+
+    Exactly what `decide_rename_candidate` writes on APPROVE -- identity merges, the old table
+    keeps its id and gains `superseded_by_table_id` -- followed by the rescan's own signal,
+    which is what holds the table.
+    """
+    schema = await estate.session.get(MetadataSchema, estate.orders.schema_id)
+    assert schema is not None
+    renamed = await seed_table(estate.session, estate.org, estate.datasource, schema, name=name)
+    await _columns(
+        estate.session,
+        estate.org,
+        renamed,
+        ("order_id", "integer"),
+        ("customer_id", "integer"),
+        ("amount", "numeric"),
+        ("discount", "numeric"),
+    )
+    estate.orders.status = "DEPRECATED"
+    estate.orders.superseded_by_table_id = renamed.id
+    await _table_signal(estate, estate.orders, "DEPRECATED")
+    return renamed
+
+
+async def _newest_version(estate: Estate, version: GovernedToolVersion) -> GovernedToolVersion:
+    newest = await estate.session.scalar(
+        select(GovernedToolVersion)
+        .where(GovernedToolVersion.tool_id == version.tool_id)
+        .order_by(GovernedToolVersion.version.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    assert newest is not None
+    return newest
+
+
+async def test_a_renamed_table_rebuilds_the_tool_against_it_instead_of_retiring_it(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    tool = await _orders_tool(estate)
+    await _rename_orders(estate)
+
+    first = await _rebuild(estate)
+
+    assert (first.tools_rewritten, first.deprecations_proposed) == (1, 0), first.as_details()
+    drafted = await _newest_version(estate, tool)
+    assert drafted.status == "REVIEW_REQUIRED"
+    assert "orders_2026" in drafted.sql_template
+    assert "public.orders " not in drafted.sql_template
+    # Nothing was published: the rewrite is a proposal like every other rebuild.
+    assert (await session.get(GovernedToolVersion, tool.id)).status == "PUBLISHED"
+    assert (await _hold(estate, estate.orders)).status == "OPEN"
+
+    assert await _approve_rebuilt(estate, "GOVERNED_TOOL_VERSION") == 1
+    await session.refresh(tool)
+    assert tool.status == "SUPERSEDED"
+
+    second = await _rebuild(estate)
+    assert (second.tools_rewritten, second.holds_released) == (0, 1), second.as_details()
+    assert (await _hold(estate, estate.orders)).status == "RESOLVED"
+    assert not (await _rebuild(estate)).acted
+
+
+async def test_a_rejected_rewrite_is_followed_by_the_retirement_and_neither_is_proposed_twice(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    await _orders_tool(estate)
+    await _rename_orders(estate)
+
+    assert (await _rebuild(estate)).tools_rewritten == 1
+    assert await _reject_rebuilt(estate, "GOVERNED_TOOL_VERSION") == 1
+
+    # The reviewer did not want the rewrite, and the table is still gone: the tool that reads it
+    # is proposed for retirement, which is the answer that was there before the rename was
+    # followed. Neither proposal is made a second time.
+    after = await _rebuild(estate)
+    assert (after.tools_rewritten, after.deprecations_proposed) == (0, 1), after.as_details()
+    again = await _rebuild(estate)
+    assert (again.tools_rewritten, again.deprecations_proposed) == (0, 0), again.as_details()
+    assert (await _hold(estate, estate.orders)).status == "OPEN"
+
+
+async def test_a_rename_pointing_at_a_table_the_source_no_longer_has_is_not_followed(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    await _orders_tool(estate)
+    renamed = await _rename_orders(estate)
+    # Renamed, then retired in turn: there is nothing to write the tool against.
+    renamed.status = "DEPRECATED"
+    await session.commit()
+
+    outcome = await _rebuild(estate)
+
+    assert (outcome.tools_rewritten, outcome.deprecations_proposed) == (0, 1), outcome.as_details()
+
+
+async def test_a_rename_into_another_source_is_never_followed(session: AsyncSession) -> None:
+    estate = await _estate(session)
+    await _orders_tool(estate)
+    _, elsewhere, elsewhere_schema = await seed_estate(session, organization=estate.org)
+    foreign = await seed_table(
+        session, estate.org, elsewhere, elsewhere_schema, name="orders_2026"
+    )
+    estate.orders.status = "DEPRECATED"
+    estate.orders.superseded_by_table_id = foreign.id
+    await _table_signal(estate, estate.orders, "DEPRECATED")
+
+    outcome = await _rebuild(estate)
+
+    # A rename is one source's event; a pointer across sources is not one, so the tool is
+    # proposed for retirement exactly as it was before.
+    assert (outcome.tools_rewritten, outcome.deprecations_proposed) == (0, 1), outcome.as_details()
