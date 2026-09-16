@@ -10,6 +10,9 @@ read -- so the two cannot describe the same version differently:
   tables it reads and writes;
 * `load_ontology_meaning` (R11-FP09) reads the meaning of the ontology versions a version
   is pinned to, from those versions and never from the ontology's head;
+* `load_source_freshness` (R11-FP12) says when each source behind those tables was last
+  read, and last read in full, so a digest can be read as fresh or stale rather than
+  only as equal or different;
 * `load_view_coverage` derives, from the version's own `table_ids`, the views and materialized
   views among them and the same facts about their definitions.
 
@@ -26,21 +29,24 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context_compiler import (
     ResolvedOntologyMeaning,
     ResolvedRoutineReference,
+    ResolvedSourceFreshness,
     ResolvedViewCoverage,
 )
 from aida.discovery_selection import table_kind
 from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
 from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.models import (
+    AnalysisRun,
     MetadataCatalog,
     MetadataColumn,
     MetadataSchema,
@@ -57,6 +63,10 @@ LINEAGE_ACTIVE: Final = "ACTIVE"
 LINEAGE_PROPOSED: Final = "PROPOSED"
 LINEAGE_NONE: Final = "NONE"
 _UNPARSED: Final = "UNPARSED"
+#: R11-FP12: a discovery run that finished, and the mode that also retires what it did
+#: not see (`aida.workflows.activities`' single deprecate-missing pass).
+_RUN_COMPLETED: Final = "COMPLETED"
+_RUN_FULL: Final = "FULL"
 
 
 def _uuids(values: Sequence[Any]) -> list[UUID]:
@@ -247,6 +257,88 @@ async def load_view_coverage(
             ),
         )
         for table_id, kind, status, definition in views
+    ]
+
+
+def _moment(value: Any) -> str | None:
+    """A run's completion time as ISO-8601. PostgreSQL hands `func.max` back as a `datetime`
+    and SQLite as text; a caller of this module reads the same string from either."""
+    if value is None:
+        return None
+    return value.isoformat() if isinstance(value, datetime) else str(value)
+
+
+async def _last_completed_scan(
+    session: AsyncSession,
+    organization_id: UUID,
+    datasource_ids: list[UUID],
+    *,
+    mode: str | None = None,
+) -> dict[UUID, str]:
+    """When each of these sources last finished a discovery run, by that run row's own clock."""
+    filters = [
+        AnalysisRun.organization_id == organization_id,
+        AnalysisRun.datasource_id.in_(datasource_ids),
+        AnalysisRun.status == _RUN_COMPLETED,
+    ]
+    if mode is not None:
+        filters.append(AnalysisRun.mode == mode)
+    rows = (
+        await session.execute(
+            select(AnalysisRun.datasource_id, func.max(AnalysisRun.updated_at))
+            .where(*filters)
+            .group_by(AnalysisRun.datasource_id)
+        )
+    ).all()
+    latest: dict[UUID, str] = {}
+    for datasource_id, moment in rows:
+        text = _moment(moment)
+        if text is not None:
+            latest[datasource_id] = text
+    return latest
+
+
+async def load_source_freshness(
+    session: AsyncSession,
+    organization_id: UUID,
+    table_ids: Sequence[Any],
+) -> list[ResolvedSourceFreshness]:
+    """R11-FP12: when each source behind the product's own tables was last read.
+
+    A product reported digests, which say whether something changed, and never a time, which
+    says how old the answer is. This is that time, per datasource -- the unit a discovery run
+    actually covers -- with the product's own table ids grouped under the source they live in,
+    so a consumer can see which part of the product a stale source is about. Every mode of run
+    reads the whole catalog, but only a FULL run retires what it did not see, so both times are
+    reported rather than one. Value-free: ids already in the product's scope, and two clocks.
+    """
+    ids = _uuids(table_ids)
+    if not ids:
+        return []
+    rows = (
+        await session.execute(
+            select(MetadataTable.datasource_id, MetadataTable.id).where(
+                MetadataTable.id.in_(ids),
+                MetadataTable.organization_id == organization_id,
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+    by_source: dict[UUID, set[str]] = {}
+    for datasource_id, table_id in rows:
+        by_source.setdefault(datasource_id, set()).add(str(table_id))
+    datasource_ids = list(by_source)
+    completed = await _last_completed_scan(session, organization_id, datasource_ids)
+    full = await _last_completed_scan(session, organization_id, datasource_ids, mode=_RUN_FULL)
+    return [
+        ResolvedSourceFreshness(
+            datasource_id=str(datasource_id),
+            table_ids=tuple(sorted(scoped)),
+            last_scan_completed_at=completed.get(datasource_id),
+            last_full_scan_completed_at=full.get(datasource_id),
+        )
+        for datasource_id, scoped in sorted(by_source.items(), key=lambda item: str(item[0]))
     ]
 
 

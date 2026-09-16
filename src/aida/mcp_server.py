@@ -82,10 +82,11 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings, get_settings
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
-from aida.context_compiler import coverage_section, ontology_section
+from aida.context_compiler import coverage_section, freshness_section, ontology_section
 from aida.context_product_coverage import (
     load_ontology_meaning,
     load_routine_references,
+    load_source_freshness,
     load_view_coverage,
 )
 from aida.context_product_policy import (
@@ -2675,6 +2676,12 @@ async def _read_context_product_resource(
             await load_view_coverage(
                 session, product_version.organization_id, product_version.table_ids
             ),
+        ),
+        # R11-FP12: how old what coverage describes is, per source behind it.
+        "freshness": freshness_section(
+            await load_source_freshness(
+                session, product_version.organization_id, product_version.table_ids
+            )
         ),
         # R11-FP09: the ontology meaning the version is pinned to, from those versions.
         "ontology": ontology_section(

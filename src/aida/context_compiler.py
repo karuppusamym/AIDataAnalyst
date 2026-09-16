@@ -79,6 +79,29 @@ class ResolvedOntologyMeaning:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedSourceFreshness:
+    """R11-FP12: when the source behind part of a product's table scope was last read.
+
+    Coverage says what Atlas holds about a view or a routine and, by digest, whether it has
+    changed -- but a digest reads the same whether the scan that took it ran this morning or
+    last quarter. This is the time side of that question. It is per datasource because a
+    discovery run's reach is a datasource: `last_scan_completed_at` is the last run of either
+    mode that completed, `last_full_scan_completed_at` the last FULL one. Both modes read the
+    whole catalog; only a FULL run reconciles what it did not see, so an object dropped at the
+    source stays ACTIVE here until a FULL run completes. `None` means no such run has ever
+    completed -- the state in which the orchestrator refuses to answer at all
+    (`NO_COMPLETED_METADATA_ANALYSIS`).
+
+    Pre-serialized like every resolved reference above: ISO-8601 strings, never a `datetime`.
+    """
+
+    datasource_id: str
+    table_ids: tuple[str, ...]
+    last_scan_completed_at: str | None
+    last_full_scan_completed_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedExemplar:
     """A promoted exemplar (N17), pre-scoped and pre-serialized by the caller.
 
@@ -239,6 +262,29 @@ def ontology_section(meanings: list[ResolvedOntologyMeaning]) -> list[dict[str, 
             for meaning in meanings
         ),
         key=lambda item: str(item["version_id"]),
+    )
+
+
+def freshness_section(sources: list[ResolvedSourceFreshness]) -> list[dict[str, Any]]:
+    """R11-FP12: when each source behind the product was last read. Public: MCP's
+    context-product read renders the same section, so the two doors cannot disagree.
+
+    Deliberately *not* part of the compiled artifact. `compile_context_product` is a pure
+    function of its arguments precisely so one version compiles to the same bytes every time,
+    and a clock reading inside the hashed content would make every completed scan look like
+    deployment drift. It rides in `generated_from` instead: beside the artifact, not in it.
+    """
+    return sorted(
+        (
+            {
+                "datasource_id": source.datasource_id,
+                "table_ids": list(source.table_ids),
+                "last_scan_completed_at": source.last_scan_completed_at,
+                "last_full_scan_completed_at": source.last_full_scan_completed_at,
+            }
+            for source in sources
+        ),
+        key=lambda item: str(item["datasource_id"]),
     )
 
 
@@ -411,6 +457,7 @@ def compile_context_product(
     routines: list[ResolvedRoutineReference] | None = None,
     views: list[ResolvedViewCoverage] | None = None,
     ontology: list[ResolvedOntologyMeaning] | None = None,
+    sources: list[ResolvedSourceFreshness] | None = None,
 ) -> ContextCompilationRead:
     """Compile a version-pinned product without time- or environment-dependent fields.
 
@@ -432,6 +479,11 @@ def compile_context_product(
     `aida.context_product_coverage`. Routine references reach every target that embeds
     `common`; the coverage section -- availability, lineage state, digests -- reaches only the
     Atlas-native targets, like the two sections above. Both default to none.
+
+    `sources` (R11-FP12) is when each source behind the product's tables was last read,
+    pre-resolved by `aida.context_product_coverage.load_source_freshness`. It is the one
+    argument that never reaches the artifact -- see `freshness_section` for why -- and
+    travels in `generated_from` beside it. It defaults to none.
 
     `ontology` (R11-FP09) is the meaning of each bound ontology version, pre-resolved by
     `aida.context_product_coverage.load_ontology_meaning` from the pinned versions, and
@@ -465,6 +517,9 @@ def compile_context_product(
             "context_product_version_id": str(version.id),
             "product_key": product.product_key,
             "version": version.version,
+            # R11-FP12: beside the artifact, never inside it, so the hash a
+            # deployment is compared against does not move when a scan finishes.
+            "source_freshness": freshness_section(sources or []),
         },
     )
 
