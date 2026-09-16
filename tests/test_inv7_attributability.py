@@ -78,6 +78,11 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
         "validates a caller-supplied context product change-item shape (ST-A7) and "
         "returns the report; takes no session and persists nothing"
     ),
+    "POST /v1/datasources/{datasource_id}/discovery-selection/preview": (
+        "counts what a proposed discovery selection (R11-FP01) would keep and leave "
+        "out over the last completed scan; reads the catalog, stores no selection and "
+        "contacts no source -- the PUT that saves one is audited"
+    ),
 }
 
 # Read endpoints whose only write is the idempotent creation of a per-organization
