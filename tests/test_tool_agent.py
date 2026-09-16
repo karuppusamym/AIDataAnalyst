@@ -21,7 +21,8 @@ import pytest
 from sqlalchemy import select
 
 from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
-from aida.models import GovernanceReview, GovernedToolVersion, MetadataColumn
+from aida.models import DataSource, GovernanceReview, GovernedToolVersion, MetadataColumn
+from aida.schemas import GovernedToolVersionCreate
 from aida.task_agent import (
     ACTION_PROPOSED,
     ACTION_SKIPPED,
@@ -32,10 +33,12 @@ from aida.task_agent import (
 from aida.tool_agent import (
     DEFAULT_ALLOWED_ROLES,
     REASON_NOT_ENTITLED,
+    SKIP_SOURCE_HAS_TOOL,
     SKIP_TOOL_EXISTS,
     run_tool_agent,
     tool_slug,
 )
+from aida.tool_api import create_tool_version
 from tests.support.task_agents import (
     agent_settings,
     count_rows,
@@ -214,3 +217,70 @@ def test_a_slug_is_valid_and_keeps_overloads_and_look_alikes_apart() -> None:
     }
     assert len(slugs) == 5
     assert all(pattern.match(slug) for slug in slugs)
+
+
+async def _hand_written(session, org, view, *, slug: str, sql: str) -> None:
+    """A tool a person wrote over the same source, under a slug of their own choosing."""
+    datasource = await session.get(DataSource, view.datasource_id)
+    assert datasource is not None
+    await create_tool_version(
+        datasource.project_id,
+        GovernedToolVersionCreate(
+            slug=slug,
+            name="Revenue report",
+            description="Written by hand, before the agent ever looked at this source.",
+            datasource_id=datasource.id,
+            sql_template=sql,
+            allowed_roles=["Analyst"],
+        ),
+        context=human(org, principal_id="tool-dev-2", roles=frozenset({"ToolDeveloper"})),
+        session=session,
+        settings=agent_settings(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tool_someone_wrote_over_the_same_view_stops_a_second_proposal() -> None:
+    """R11-FP14: the slug check catches the agent's own repeat; this catches a person's first."""
+    async with task_agent_session() as session:
+        org, view, reader, _ = await _estate(session)
+        await _hand_written(
+            session,
+            org,
+            view,
+            slug="revenue_by_region",
+            sql="SELECT customer_id, region FROM public.v_revenue",
+        )
+
+        outcome = await _run(session, org)
+
+        by_subject = {item.subject_id: item for item in outcome.items}
+        assert (by_subject[view.id].action, by_subject[view.id].reason) == (
+            ACTION_SKIPPED,
+            SKIP_SOURCE_HAS_TOOL,
+        )
+        # Only that view is spoken for: the read-only routine still gets its proposal.
+        assert by_subject[reader.id].action == ACTION_PROPOSED
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_joins_the_view_to_something_else_is_a_different_tool() -> None:
+    async with task_agent_session() as session:
+        org, view, _, _ = await _estate(session)
+        await _hand_written(
+            session,
+            org,
+            view,
+            slug="revenue_with_orders",
+            sql=(
+                "SELECT v.customer_id FROM public.v_revenue v "
+                "JOIN public.orders o ON o.customer_id = v.customer_id"
+            ),
+        )
+
+        outcome = await _run(session, org)
+
+        by_subject = {item.subject_id: item for item in outcome.items}
+        # That tool answers a question about two objects; the view still has no tool of its own,
+        # so proposing one is not a duplicate.
+        assert by_subject[view.id].action == ACTION_PROPOSED

@@ -45,7 +45,15 @@ from aida.context import get_correlation_id
 from aida.edition_entitlements import evaluate_entitlement
 from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.events import record_audit
-from aida.models import AgentTask, DataSource, GovernedTool, MetadataSchema, MetadataTable, Project
+from aida.models import (
+    AgentTask,
+    DataSource,
+    GovernedTool,
+    GovernedToolVersion,
+    MetadataSchema,
+    MetadataTable,
+    Project,
+)
 from aida.procedure_tool_blueprint import (
     ProcedureNotEligibleError,
     ProcedureToolBlueprintError,
@@ -84,6 +92,8 @@ TOOL_VERSION_OBJECT_TYPE: Final = "GOVERNED_TOOL_VERSION"
 
 # Declines that are not a generator's own blocker code.
 SKIP_TOOL_EXISTS: Final = "tool_already_exists"
+#: R11-FP14: something live already stands on this view or routine, under any slug.
+SKIP_SOURCE_HAS_TOOL: Final = "source_already_has_a_tool"
 SKIP_NO_PROJECT: Final = "datasource_has_no_project"
 SKIP_BLUEPRINT_REFUSED: Final = "BLUEPRINT_REFUSED"
 
@@ -317,6 +327,58 @@ def _inputs(capability: str, candidate: _Candidate, slug: str) -> dict[str, Any]
     }
 
 
+#: Statuses in which a tool version still stands on its source: a draft someone is writing, one
+#: waiting for review, and the published one. A rejected or superseded version stands on nothing.
+_LIVE_TOOL_STATUSES: Final = ("DRAFT", "REVIEW_REQUIRED", "PUBLISHED")
+
+
+def _reads_only(referenced: Any, schema_name: str, object_name: str) -> bool:
+    """Whether a tool's referenced tables are this one object and nothing else.
+
+    A tool that joins the view with another table is a different tool, and this view still has
+    none of its own; only a tool that reads exactly this object makes a proposal a duplicate.
+    The three name shapes the gateway authorises -- `catalog.schema.object`, `schema.object` and
+    an unambiguous bare name -- all resolve to the same object here.
+    """
+    qualified = f"{schema_name}.{object_name}".lower()
+    names = {str(name).lower() for name in referenced or []}
+    return bool(names) and all(
+        name == object_name.lower() or name == qualified or name.endswith(f".{qualified}")
+        for name in names
+    )
+
+
+async def _source_already_has_a_tool(
+    session: AsyncSession, candidate: _Candidate, *, by_name: bool
+) -> bool:
+    """Whether a live tool version in this source already stands on this object.
+
+    The slug check above catches the agent's own second proposal; this catches the one a person
+    wrote first. A generated tool is matched by its source binding, whatever it was named. A
+    hand-written one has no binding, so a view is matched by the names its SQL references --
+    which is why `by_name` is false for a routine: a routine tool runs the routine's extracted
+    result query, and the routine's own name never appears in what that query references.
+    """
+    rows = (
+        await session.execute(
+            select(
+                GovernedToolVersion.referenced_tables,
+                GovernedToolVersion.source_view_table_id,
+                GovernedToolVersion.source_routine_id,
+            ).where(
+                GovernedToolVersion.datasource_id == candidate.datasource_id,
+                GovernedToolVersion.status.in_(_LIVE_TOOL_STATUSES),
+            )
+        )
+    ).all()
+    for referenced, source_view_table_id, source_routine_id in rows:
+        if candidate.subject_id in (source_view_table_id, source_routine_id):
+            return True
+        if by_name and _reads_only(referenced, candidate.schema_name, candidate.object_name):
+            return True
+    return False
+
+
 class _Proposal:
     """One candidate's decline and draft-and-submit paths, sharing its ledger reference."""
 
@@ -359,6 +421,13 @@ class _Proposal:
         )
         if taken is not None:
             return await self.decline(SKIP_TOOL_EXISTS)
+        # R11-FP14: the same source under a different slug -- a tool a person wrote first, or a
+        # generated one somebody renamed. Proposing a second tool over it would put two callables
+        # with the same answer in front of every agent, and a reviewer would have to notice.
+        if await _source_already_has_a_tool(
+            session, self.candidate, by_name=self.capability == CAPABILITY_VIEW_TOOL
+        ):
+            return await self.decline(SKIP_SOURCE_HAS_TOOL)
         return project, datasource
 
     async def draft_and_submit(
