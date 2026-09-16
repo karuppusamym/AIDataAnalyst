@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.sql.expression import UpdateBase
 
 from aida.connectors.base import ConnectorCapabilities, QueryEstimate, QueryResult
+from aida.envelope_models import MetadataRoutine
 from aida.models import (
     AssetCertification,
     DataProductPort,
@@ -340,7 +341,8 @@ class CatalogSession(RecordingSession):
     QG-6 tokenization-policy lookup. `(SourceBinding, ...)` is the workspace
     binding lookup, `(MetadataColumn, "name")` the sensitive-classification
     lookup, `(MetadataColumn, "classification")` and `(MetadataTable, "id")`
-    the AU-11 classification/table-resolution lookups, `(AssetCertification,
+    the AU-11 classification/table-resolution lookups, `(MetadataRoutine, "name")` the
+    R11-FP14 declared-routine lookup, `(AssetCertification,
     ...)`, `(DataQualityIncident, "severity")`, `(DataQualityObservation, ...)`
     and `(FreshnessObservation, ...)`/`(FreshnessWatermarkConfig, ...)` the
     AU-11 certification/quality/freshness lookups. Anything else raises, so a
@@ -364,6 +366,7 @@ class CatalogSession(RecordingSession):
         freshness_configs: list[FreshnessWatermarkConfig] | None = None,
         freshness_observations: list[tuple[UUID, Any]] | None = None,
         product_port_version_ids: list[UUID] | None = None,
+        routine_names: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._tables = tables
@@ -380,6 +383,7 @@ class CatalogSession(RecordingSession):
         # inventing a port here would make every gateway test depend on an
         # entitlement none of them set up.
         self._product_port_version_ids = product_port_version_ids or []
+        self._routine_names = routine_names or []
         # No tokenization policy by default -- every column stays fully redacted
         # (today's behaviour) unless a test opts a column in explicitly.
         # (value_shape, column_name) pairs, matching `_tokenized_output_names`'
@@ -447,6 +451,11 @@ class CatalogSession(RecordingSession):
             return ScriptedResult(list(self._quality_incident_severities))
         if entity is DataProductPort and name == "data_product_version_id":
             return ScriptedResult(list(self._product_port_version_ids))
+        # R11-FP14: the guard asks which of this source's own routines share a name with a
+        # built-in, so a user-defined `nvl` is not trusted as one. Empty by default, which is
+        # what every test written before that lookup existed assumed of its source.
+        if entity is MetadataRoutine and name == "name":
+            return ScriptedResult(list(self._routine_names))
         if entity is DataProductVersion:
             return ScriptedResult([])
         raise AssertionError(
