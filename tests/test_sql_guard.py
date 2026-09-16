@@ -167,6 +167,51 @@ def test_authorization_never_lifts_the_adversarial_denylist() -> None:
 
 
 @pytest.mark.parametrize(
+    ("name", "sql"),
+    [
+        ("nvl", "SELECT nvl(c.amount, 0) AS v FROM retail.customer AS c"),
+        ("median", "SELECT median(c.amount) AS v FROM retail.customer AS c"),
+        ("greatest", "SELECT greatest(c.amount, 0) AS v FROM retail.customer AS c"),
+    ],
+)
+def test_a_call_naming_a_routine_this_source_declares_is_refused(name: str, sql: str) -> None:
+    """sqlglot models these names for every dialect, so the parser alone calls them built-ins.
+
+    Discovery read the source's routines, and a name it declares is a user-defined function here
+    whatever the parser made of the call -- its effects are as unknown as any other's.
+    """
+    assert guard().validate(sql, dialect="postgres").valid
+    refused = guard().validate(sql, dialect="postgres", user_defined_functions={name})
+
+    assert not refused.valid
+    assert f"UNAUTHORIZED_FUNCTION:{name}" in refused.violations
+
+
+def test_operator_authorization_still_lifts_a_declared_routine() -> None:
+    authorized = SqlGuard(
+        default_row_limit=5000, hard_row_limit=100_000, allowed_functions=["nvl"]
+    )
+
+    result = authorized.validate(
+        "SELECT nvl(c.amount, 0) AS v FROM retail.customer AS c",
+        dialect="postgres",
+        user_defined_functions={"nvl"},
+    )
+
+    assert result.valid
+
+
+def test_a_column_named_like_a_declared_routine_is_still_a_column() -> None:
+    result = guard().validate(
+        "SELECT c.median FROM retail.customer AS c",
+        dialect="postgres",
+        user_defined_functions={"median"},
+    )
+
+    assert result.valid
+
+
+@pytest.mark.parametrize(
     ("dialect", "sql"),
     [
         ("oracle", "SELECT order_seq.NEXTVAL AS v FROM retail.customer"),

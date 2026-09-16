@@ -142,13 +142,17 @@ async def stage_tool_version_draft(
         hard_row_limit=settings.hard_query_row_limit,
         allowed_functions=settings.sql_guard_allowed_functions,
     )
-    validation = guard.validate(body.sql_template, dialect=datasource.dialect)
+    gateway = QueryExecutionGateway(settings)
+    validation = guard.validate(
+        body.sql_template,
+        dialect=datasource.dialect,
+        user_defined_functions=await gateway.declared_routine_names(session, datasource),
+    )
     if not validation.valid or not validation.normalized_sql:
         raise ToolDraftRefused(
             REFUSED_SQL_GUARD,
             f"invalid governed tool SQL: {', '.join(validation.violations)}",
         )
-    gateway = QueryExecutionGateway(settings)
     allowed_tables = await gateway.allowed_tables(session, datasource)
     unauthorized = sorted(
         table for table in validation.referenced_tables if table.lower() not in allowed_tables

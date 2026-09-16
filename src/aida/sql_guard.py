@@ -1,8 +1,8 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from sqlglot import exp, parse
-from sqlglot.errors import ParseError
+from sqlglot import TokenType, exp, parse, tokenize
+from sqlglot.errors import ParseError, TokenError
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,7 +319,12 @@ class SqlGuard:
         )
 
     def validate(
-        self, sql: str, *, dialect: str, requested_limit: int | None = None
+        self,
+        sql: str,
+        *,
+        dialect: str,
+        requested_limit: int | None = None,
+        user_defined_functions: Iterable[str] = (),
     ) -> SqlValidationResult:
         violations: list[str] = []
         try:
@@ -398,6 +403,27 @@ class SqlGuard:
                 violations.append("CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN")
                 break
 
+        declared_routines = {name.lower() for name in user_defined_functions if name}
+        if declared_routines:
+            # R11-FP14: sqlglot models about six hundred function names, for every dialect, so a
+            # call it recognises is not evidence of a built-in -- a user-defined `nvl` or `median`
+            # parses as the modelled expression and reaches no check below. The parser also
+            # rewrites the name (`nvl` becomes COALESCE), so the call as the author wrote it
+            # survives only in the tokens. A name this source declares as a routine is a
+            # user-defined function whatever the parser made of it.
+            try:
+                tokens = tokenize(sql, read=dialect)
+            except (ParseError, TokenError, ValueError):
+                tokens = []
+            for token, following in zip(tokens, tokens[1:], strict=False):
+                name = token.text.lower()
+                if (
+                    following.token_type is TokenType.L_PAREN
+                    and name in declared_routines
+                    and name not in self.allowed_functions
+                ):
+                    violations.append(f"UNAUTHORIZED_FUNCTION:{name}")
+                    break
         dialect_forbidden_functions = self._forbidden_functions_by_dialect.get(
             dialect, frozenset()
         )

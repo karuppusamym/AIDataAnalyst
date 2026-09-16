@@ -17,6 +17,7 @@ from aida.connectors.base import QueryEstimate
 from aida.connectors.execution_access import open_execution_session
 from aida.connectors.sql_execution import SqlExecutor
 from aida.entitlements import blocking_product_revocation
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
 from aida.lob_concurrency import LobConcurrencyDenied, resolve_lob_concurrency_controller
 from aida.models import (
@@ -330,6 +331,28 @@ class QueryExecutionGateway:
         provider = resolve_signing_provider(self.settings)
         return await provider.sign(sql)
 
+    async def declared_routine_names(
+        self, session: AsyncSession, datasource: DataSource
+    ) -> set[str]:
+        """The names of the routines this source declares, lower-cased.
+
+        R11-FP14 refuses a call the parser does not recognise, but sqlglot models about six
+        hundred function names and models them for every dialect, so a user-defined `nvl` or
+        `median` parsed as a built-in and was trusted. Discovery already read this source's
+        routines, so Atlas can say which of those names are not built-ins here. A statement
+        naming one is refused unless an operator authorized it by name.
+        """
+        rows = (
+            await session.scalars(
+                select(MetadataRoutine.name).where(
+                    MetadataRoutine.datasource_id == datasource.id,
+                    MetadataRoutine.organization_id == datasource.organization_id,
+                    MetadataRoutine.status == "ACTIVE",
+                )
+            )
+        ).all()
+        return {name.lower() for name in rows if name}
+
     async def allowed_tables(self, session: AsyncSession, datasource: DataSource) -> set[str]:
         rows = (
             await session.execute(
@@ -552,7 +575,10 @@ class QueryExecutionGateway:
         # freshness onto the decision, and `_run_validation` reuses this same
         # `guard_result` rather than re-parsing.
         guard_result = self.guard.validate(
-            sql, dialect=datasource.dialect, requested_limit=requested_limit
+            sql,
+            dialect=datasource.dialect,
+            requested_limit=requested_limit,
+            user_defined_functions=await self.declared_routine_names(session, datasource),
         )
         table_ids = await resolve_referenced_table_ids(
             session, datasource, guard_result.referenced_tables
@@ -782,7 +808,10 @@ class QueryExecutionGateway:
             # classification/certification/quality/freshness attributes before
             # authorization without moving the connector-opening line at all.
             guard_result = self.guard.validate(
-                sql, dialect=datasource.dialect, requested_limit=requested_limit
+                sql,
+                dialect=datasource.dialect,
+                requested_limit=requested_limit,
+                user_defined_functions=await self.declared_routine_names(session, datasource),
             )
             table_ids = await resolve_referenced_table_ids(
                 session, datasource, guard_result.referenced_tables
