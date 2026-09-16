@@ -92,7 +92,7 @@ confirmed absent after rollback. See generated artifacts for details.
 | PostgreSQL temp procedure | Since 2026-09-15 `ON COMMIT DROP AS` parses and the temp table is an intermediate, so `orders.discount` reaches `customer_totals.net_revenue` through it. Before that date the statement was explicitly unparsed | Same transitive evidence as SQL Server. The procedure writes data, so read-tool generation is refused |
 | Dynamic SQL, both dialects | Explicit `DYNAMIC_SQL` evidence in both dialects; tool generation refused. Before 2026-09-15 PostgreSQL reported an unsupported statement shape instead | Dynamic text remains a named gap |
 | Nested calls, both dialects | Since 2026-09-15 the call is read through the captured callee (`routine_call_descent`), and `nested_revenue` has no gap left on either engine (`tests/test_nested_callee_lineage_live.py`); tool generation is still refused | A callee that is not captured, ambiguous, cyclic or too deep stays a named gap |
-| Ontology evolution | New concept accepted; invalid relation target and routine mapping rejected | Business vocabulary is extensible; target types remain controlled |
+| Ontology evolution | New concept accepted; a routine mapping accepted since 2026-09-15 (R11-FP09) and an unknown subject kind rejected | Business vocabulary is extensible; target types remain controlled |
 
 The read/temp-flow samples qualify selected columns with table aliases. Unqualified columns
 can remain unresolved by the current parser without additional schema resolution; a fully

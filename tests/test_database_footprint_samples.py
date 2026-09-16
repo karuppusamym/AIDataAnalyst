@@ -129,10 +129,12 @@ def test_ontology_accepts_new_business_concepts_but_validates_relationships():
         OntologyDefinition.model_validate(invalid)
 
 
-def test_ontology_routine_mapping_is_an_explicit_current_gap():
+def test_an_ontology_maps_a_concept_to_a_routine_and_refuses_an_unknown_kind():
     definition = OntologyDefinition.model_validate_json(
         (FIXTURES / "ontology.json").read_text(encoding="utf-8")
     ).model_dump(mode="json")
+    # R11-FP09: ROUTINE joined TABLE, VIEW and COLUMN as a mapping subject; the kind is still
+    # checked against the catalog object on every write.
     definition["mappings"] = [
         {
             "concept": "customer_revenue",
@@ -140,5 +142,8 @@ def test_ontology_routine_mapping_is_an_explicit_current_gap():
             "subject_id": "00000000-0000-0000-0000-000000000001",
         }
     ]
+    assert OntologyDefinition.model_validate(definition).mappings[0].subject_type == "ROUTINE"
+
+    definition["mappings"][0]["subject_type"] = "SYNONYM"
     with pytest.raises(ValidationError):
         OntologyDefinition.model_validate(definition)

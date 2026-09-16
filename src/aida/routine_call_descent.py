@@ -1,8 +1,9 @@
 """R11-FP07: bounded descent into the routines a routine calls.
 
-`procedure_lineage` marks `CALL p()`, `EXEC p` and `PERFORM f()` as a NESTED_PROCEDURE_CALL gap:
-the caller's own body says nothing about what the callee reads or writes. When the callee is a
-routine Atlas has captured in the same datasource, that lineage is known, and this reads it.
+`procedure_lineage` marks `CALL p()`, `EXEC p` and `PERFORM f()` as a NESTED_PROCEDURE_CALL gap,
+and a `FROM s.fn(...)` source as a TABLE_FUNCTION_READ gap: the caller's own body says nothing
+about what the callee reads or writes. When the callee is a routine Atlas has captured in the
+same datasource, that lineage is known, and this reads it.
 
 * **Resolution** is by name within the caller's datasource. A qualified name matches its schema;
   a bare name matches the caller's schema first, then a name unique across the datasource. More
@@ -14,7 +15,9 @@ routine Atlas has captured in the same datasource, that lineage is known, and th
   called routine's qualified name in `via_routine`, and at most PARTIAL confidence: a parameter
   can steer the callee's branches. On PostgreSQL a callee's result set stays inside the caller
   (`PERFORM` discards it and `CALL` returns none), so it becomes a local read; on SQL Server `EXEC`
-  streams it into the caller's own result.
+  streams it into the caller's own result. A table function's rows land on the name the caller
+  selects from, so the hop propagation `procedure_lineage` already runs joins the function's own
+  sources to whatever the caller writes.
 * **The gap marker** goes only when the callee was fully parsed, all the way down. Otherwise it
   stays and names why: NOT_CAPTURED, AMBIGUOUS, BODY_WITHHELD, CYCLE, DEPTH_LIMIT, CALLEE_LIMIT or
   CALLEE_NOT_FULLY_PARSED.
@@ -42,6 +45,7 @@ from aida.procedure_lineage import (
     ProcedureParseResult,
     UnparsedReason,
     parse_procedure_lineage,
+    propagate_intermediate_hops,
 )
 from aida.routine_lineage_edges import RoutineNotEligibleError, require_eligible_routine_body
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET, Confidence
@@ -57,7 +61,6 @@ CALLEE_DEPTH_LIMIT: Final = "DEPTH_LIMIT"
 CALLEE_LIMIT: Final = "CALLEE_LIMIT"
 CALLEE_NOT_FULLY_PARSED: Final = "CALLEE_NOT_FULLY_PARSED"
 
-_NESTED_PREFIX: Final = f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: "
 _RANK: Final = {Confidence.LOW.value: 0, Confidence.PARTIAL.value: 1, Confidence.FULL.value: 2}
 #: Dialects whose nested call streams a callee's result set into the caller's own result.
 _RESULT_STREAMING_DIALECTS: Final = frozenset({"tsql"})
@@ -81,18 +84,39 @@ class _Budget:
     remaining: int
 
 
-def callee_name(edge: ProcedureLineageEdgeRecord) -> str | None:
-    """The routine a NESTED_PROCEDURE_CALL marker names, or `None` for any other edge."""
+KIND_CALL: Final = "CALL"
+KIND_TABLE_FUNCTION: Final = "TABLE_FUNCTION"
+_PREFIXES: Final = {
+    KIND_CALL: f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: ",
+    KIND_TABLE_FUNCTION: f"{UnparsedReason.TABLE_FUNCTION_READ.value}: ",
+}
+
+
+def called_routine(edge: ProcedureLineageEdgeRecord) -> tuple[str, str] | None:
+    """The routine a gap names and how it is read -- called, or read as a table function."""
     reason = edge.unparsed_reason
     if edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE or not reason:
         return None
-    if not reason.startswith(_NESTED_PREFIX):
-        return None
-    return reason[len(_NESTED_PREFIX) :].split(" (", 1)[0].strip() or None
+    for kind, prefix in _PREFIXES.items():
+        if reason.startswith(prefix):
+            name = reason[len(prefix) :].split(" (", 1)[0].strip()
+            return (kind, name) if name else None
+    return None
+
+
+def callee_name(edge: ProcedureLineageEdgeRecord) -> str | None:
+    """The routine a gap names, however it is read."""
+    called = called_routine(edge)
+    return called[1] if called is not None else None
 
 
 def _at_call_site(
-    edge: ProcedureLineageEdgeRecord, call: ProcedureLineageEdgeRecord, callee: str, dialect: str
+    edge: ProcedureLineageEdgeRecord,
+    call: ProcedureLineageEdgeRecord,
+    callee: str,
+    dialect: str,
+    kind: str,
+    source_name: str,
 ) -> ProcedureLineageEdgeRecord:
     confidence = (
         edge.confidence
@@ -100,8 +124,12 @@ def _at_call_site(
         else Confidence.PARTIAL.value
     )
     target, intermediate, write = edge.target_table, edge.is_intermediate, edge.is_write
-    if target == PROCEDURE_RESULT_TARGET and dialect not in _RESULT_STREAMING_DIALECTS:
-        target, intermediate, write = PROCEDURE_LOCAL_TARGET, True, False
+    if target == PROCEDURE_RESULT_TARGET:
+        if kind == KIND_TABLE_FUNCTION:
+            # The function's rows are what the caller selects from, under the name it reads.
+            target, intermediate, write = source_name, True, False
+        elif dialect not in _RESULT_STREAMING_DIALECTS:
+            target, intermediate, write = PROCEDURE_LOCAL_TARGET, True, False
     return replace(
         edge,
         statement_ordinal=call.statement_ordinal,
@@ -175,10 +203,11 @@ def _descend(
 ) -> ProcedureParseResult:
     edges: list[ProcedureLineageEdgeRecord] = []
     for edge in result.edges:
-        name = callee_name(edge)
-        if name is None:
+        called = called_routine(edge)
+        if called is None:
             edges.append(edge)
             continue
+        kind, name = called
         callee = resolve(name)
         missing = callee.missing
         if missing is None and (callee.key is None or callee.body is None):
@@ -200,14 +229,14 @@ def _descend(
                 budget=budget,
             )
             edges.extend(
-                _at_call_site(child_edge, edge, callee.qualified_name or name, dialect)
+                _at_call_site(child_edge, edge, callee.qualified_name or name, dialect, kind, name)
                 for child_edge in child.edges
                 if child_edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE
             )
             if child.is_fully_parsed:
                 continue
             missing = CALLEE_NOT_FULLY_PARSED
-        edges.append(replace(edge, unparsed_reason=f"{_NESTED_PREFIX}{name} ({missing})"))
+        edges.append(replace(edge, unparsed_reason=f"{_PREFIXES[kind]}{name} ({missing})"))
     return _summarised(result, _deduplicated(edges))
 
 
@@ -215,9 +244,9 @@ def descend_nested_calls(
     result: ProcedureParseResult, *, dialect: str, resolve: Resolver, root_key: str
 ) -> ProcedureParseResult:
     """`result` with each nested call read through where its callee resolves; see the module."""
-    if not any(callee_name(edge) for edge in result.edges):
+    if not any(called_routine(edge) for edge in result.edges):
         return result
-    return _descend(
+    descended = _descend(
         result,
         dialect=dialect,
         resolve=resolve,
@@ -225,6 +254,10 @@ def descend_nested_calls(
         depth=0,
         budget=_Budget(MAX_CALLEES),
     )
+    # A table function's rows arrive as an intermediate, so the hops through it are the
+    # caller's own end-to-end lineage.
+    spliced = [*descended.edges, *propagate_intermediate_hops(descended.edges)]
+    return _summarised(descended, _deduplicated(spliced))
 
 
 def _name_parts(name: str) -> tuple[str | None, str]:
@@ -290,7 +323,7 @@ async def descend_routine_calls(
     result: ProcedureParseResult,
 ) -> ProcedureParseResult:
     """A captured routine's parse, with its calls to routines captured here read through."""
-    if not any(callee_name(edge) for edge in result.edges):
+    if not any(called_routine(edge) for edge in result.edges):
         return result
     resolve = await routine_resolver(session, datasource, routine)
     return descend_nested_calls(

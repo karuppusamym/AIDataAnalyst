@@ -98,6 +98,10 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     ),
     "CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL)": "_PG_TEMP_ON_COMMIT_RE",
     "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query)": "_FOR_IN_QUERY_LOOP_RE",
+    "CREATE PROCEDURE/FUNCTION header, and DO $$ ... $$ (anonymous block)": "_HEADER_RE",
+    "RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body)": (
+        "_TSQL_INLINE_RETURN_RE"
+    ),
 }
 
 # Regex-recognised constructs that end in an explicit UNPARSED marker rather than

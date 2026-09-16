@@ -217,3 +217,72 @@ async def test_the_lineage_agent_reads_a_call_through_and_proposes_the_callee_ed
         ("customer_id", "customer_id", "public.load_totals", "PROPOSED"),
         ("amount", "total", "public.load_totals", "PROPOSED"),
     }
+
+
+INLINE_TVF = (
+    "CREATE FUNCTION s.customer_net(@id int) RETURNS TABLE AS RETURN ("
+    "SELECT r.customer_id, r.net_revenue FROM s.customer_revenue r WHERE r.customer_id = @id)"
+)
+READS_TVF = (
+    "CREATE PROCEDURE s.load AS BEGIN "
+    "INSERT INTO s.totals (customer_id, net) "
+    "SELECT n.customer_id, n.net_revenue FROM s.customer_net(2) n; END"
+)
+
+
+def test_a_table_function_source_is_never_read_as_a_table() -> None:
+    """Before this, `FROM s.customer_net(2) n` stated a table named `s` -- the schema."""
+    parsed = parse_procedure_lineage(READS_TVF, dialect="tsql")
+
+    assert _gaps(parsed) == ["TABLE_FUNCTION_READ: s.customer_net"]
+    assert not parsed.is_fully_parsed
+    assert all(edge.source_table != "s" for edge in parsed.edges), "the schema is not a table"
+    assert {
+        (edge.source_table, edge.source_column, edge.target_table, edge.target_column)
+        for edge in parsed.edges
+        if edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE
+    } == {
+        ("s.customer_net", "customer_id", "s.totals", "customer_id"),
+        ("s.customer_net", "net_revenue", "s.totals", "net"),
+    }
+
+
+def test_a_table_function_is_read_through_to_what_it_selects_from() -> None:
+    result = _descend(READS_TVF, {"s.customer_net": INLINE_TVF}, dialect="tsql")
+
+    assert _gaps(result) == []
+    assert result.is_fully_parsed
+    end_to_end = {
+        (edge.source_table, edge.source_column, edge.target_table, edge.target_column)
+        for edge in result.edges
+        if not edge.is_intermediate
+    }
+    assert ("s.customer_revenue", "net_revenue", "s.totals", "net") in end_to_end
+    assert all(edge.source_table != "s" for edge in result.edges)
+
+
+def test_an_overloaded_function_keeps_its_gap() -> None:
+    def ambiguous(name: str) -> Callee:
+        return Callee(None, None, None, "AMBIGUOUS")
+
+    result = descend_nested_calls(
+        parse_procedure_lineage(READS_TVF, dialect="tsql"),
+        dialect="tsql",
+        resolve=ambiguous,
+        root_key="root",
+    )
+
+    assert _gaps(result) == ["TABLE_FUNCTION_READ: s.customer_net (AMBIGUOUS)"]
+
+
+def test_an_anonymous_block_reads_like_a_body() -> None:
+    parsed = parse_procedure_lineage(
+        "DO $$ BEGIN INSERT INTO s.totals (customer_id, net) "
+        "SELECT o.customer_id, o.amount FROM s.orders o; END $$;",
+        dialect="postgres",
+    )
+
+    assert parsed.is_fully_parsed and _gaps(parsed) == []
+    assert {(edge.source_table, edge.target_table) for edge in parsed.edges} == {
+        ("s.orders", "s.totals")
+    }

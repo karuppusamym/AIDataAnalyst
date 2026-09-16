@@ -161,6 +161,18 @@
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._FOR_IN_QUERY_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "SUPPORTED",
       "view_parser_status": "N/A"
+    },
+    {
+      "construct": "CREATE PROCEDURE/FUNCTION header, and DO $$ ... $$ (anonymous block)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._HEADER_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._TSQL_INLINE_RETURN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
     }
   ],
   "dialects": [
@@ -170,10 +182,11 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-15T04:33:19.753038+00:00",
+  "generated_at": "2026-09-16T00:26:30.465156+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",
+    "TABLE_FUNCTION_READ",
     "UNSUPPORTED_STATEMENT_SHAPE",
     "PARSE_ERROR",
     "UNRESOLVED_CONTROL_FLOW"

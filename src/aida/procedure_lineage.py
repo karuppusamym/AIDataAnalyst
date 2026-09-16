@@ -93,7 +93,7 @@ like a T-SQL `#temp`. A dollar-quoted body may carry any tag --
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Final
 
@@ -106,7 +106,6 @@ from aida.sql_lineage_parser import (
     LineageEdge,
     TransformationType,
     _classify_transformation,
-    _collect_table_aliases,
     _compute_sql_hash,
     _extract_edges_from_select,
     _extract_from_statement,
@@ -136,6 +135,8 @@ except ImportError:  # pragma: no cover -- see _SQLGLOT_AVAILABLE above
 class UnparsedReason(StrEnum):
     DYNAMIC_SQL = "DYNAMIC_SQL"
     NESTED_PROCEDURE_CALL = "NESTED_PROCEDURE_CALL"
+    # R11-FP07: a source that is a table-valued function, not a table.
+    TABLE_FUNCTION_READ = "TABLE_FUNCTION_READ"
     UNSUPPORTED_STATEMENT_SHAPE = "UNSUPPORTED_STATEMENT_SHAPE"
     PARSE_ERROR = "PARSE_ERROR"
     UNRESOLVED_CONTROL_FLOW = "UNRESOLVED_CONTROL_FLOW"
@@ -235,9 +236,13 @@ class ProcedureParseResult:
 # a caller may hand in an already-unwrapped body.
 # ---------------------------------------------------------------------------
 
+# R11-FP07: `DO $$ ... $$` is an anonymous block -- a body with no name, whose statements
+# are read exactly like a routine's.
 _HEADER_RE = re.compile(
-    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION)\b", re.IGNORECASE
+    r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION)|DO)\b", re.IGNORECASE
 )
+#: T-SQL inline table-valued function: its body is the query of `AS RETURN ( ... )`.
+_TSQL_INLINE_RETURN_RE = re.compile(r"\bAS\s+RETURN\s*\(", re.IGNORECASE)
 _DOLLAR_TAG_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 _LANGUAGE_RE = re.compile(r"\bLANGUAGE\s+'?([A-Za-z0-9_]+)'?", re.IGNORECASE)
 
@@ -329,7 +334,16 @@ def _extract_body(sql: str) -> str:
         # The dollar-quoted body may itself be a BEGIN..END block; if so
         # strip that too so plpgsql matches the T-SQL/PL-SQL shape.
         return _strip_begin_end(inner) or inner
-    return _strip_begin_end_from_tokens(sql, tokens) or sql
+    stripped = _strip_begin_end_from_tokens(sql, tokens)
+    if stripped is not None:
+        return stripped
+    # A T-SQL inline table-valued function has no BEGIN..END at all.
+    if match := _TSQL_INLINE_RETURN_RE.search(sql):
+        opened = match.end() - 1
+        closed = _matching_paren(sql, opened)
+        if closed is not None:
+            return sql[opened + 1 : closed]
+    return sql
 
 
 def _strip_begin_end(text: str) -> str | None:
@@ -577,6 +591,25 @@ def _table_is_temp(table: object) -> bool:
     return False
 
 
+def _table_function_name(table: object) -> str | None:
+    """The qualified name of a table-valued function used as a source, or `None` for a table.
+
+    `FROM s.fn(2) n` parses as a `Table` whose `this` is the function call, so
+    `_resolve_table_name` returns `s` alone -- the schema, stated as if it were the table. A
+    function's rows are a routine's result, never a table's: it is an intermediate here, named
+    after the function, and `aida.routine_call_descent` reads it through when that function is a
+    routine captured in the same source.
+    """
+    if not _SQLGLOT_AVAILABLE or not isinstance(table, exp.Table):
+        return None
+    this = table.args.get("this")
+    if not isinstance(this, exp.Func):
+        return None
+    name = this.name or this.sql_name()
+    parts = [part for part in (table.catalog, table.db, name) if part]
+    return ".".join(parts) if parts else None
+
+
 def _collect_table_aliases_with_temp(statement: object) -> tuple[dict[str, str], set[str]]:
     """Mirrors `sql_lineage_parser._collect_table_aliases`'s exact walk
     order (so alias resolution stays consistent) while additionally
@@ -586,10 +619,11 @@ def _collect_table_aliases_with_temp(statement: object) -> tuple[dict[str, str],
     if not _SQLGLOT_AVAILABLE or not isinstance(statement, exp.Expression):
         return aliases, temp
     for table in statement.find_all(exp.Table):
-        fqn = _resolve_table_name(table)
+        function = _table_function_name(table)
+        fqn = function or _resolve_table_name(table)
         if not fqn:
             continue
-        is_temp = _table_is_temp(table)
+        is_temp = function is not None or _table_is_temp(table)
         if table.alias:
             aliases[table.alias] = fqn
             if is_temp:
@@ -819,7 +853,7 @@ def _extract_edges_from_insert(
     if not target_table:
         return [], ""
 
-    table_aliases = _collect_table_aliases(statement)
+    table_aliases, _ = _collect_table_aliases_with_temp(statement)
     inner_select = statement.find(exp.Union) or statement.find(exp.Select)
     if inner_select is None:
         return [], target_table
@@ -935,7 +969,7 @@ def _local_statement(
             target_table=None, is_intermediate_target=False, node=node, edges=(),
         )
     edges = _extract_edges_from_select(
-        node, PROCEDURE_LOCAL_TARGET, dialect, _collect_table_aliases(node)
+        node, PROCEDURE_LOCAL_TARGET, dialect, _collect_table_aliases_with_temp(node)[0]
     )
     return ParsedStatement(
         ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=False,
@@ -1096,7 +1130,7 @@ def _classify_and_extract(
         )
         return results
 
-    table_aliases = _collect_table_aliases(node)
+    table_aliases, _ = _collect_table_aliases_with_temp(node)
 
     if plpgsql and isinstance(node, exp.Select) and node.args.get("into") is not None:
         # PL/pgSQL `SELECT ... INTO target` assigns variables; it creates no table.
@@ -1384,6 +1418,15 @@ def _propagate_intermediate_hops(
     return synthesized
 
 
+def propagate_intermediate_hops(
+    edges: list[ProcedureLineageEdgeRecord],
+) -> list[ProcedureLineageEdgeRecord]:
+    """The transitive edges an intermediate implies -- a temp table, a variable, or a table
+    function's rows. Public for `aida.routine_call_descent`, which splices a called
+    routine's edges in and then needs this same fixed-point pass run over the result."""
+    return _propagate_intermediate_hops(edges)
+
+
 def _dedupe_edges(
     edges: list[ProcedureLineageEdgeRecord],
 ) -> list[ProcedureLineageEdgeRecord]:
@@ -1413,6 +1456,62 @@ def _dedupe_edges(
 # ---------------------------------------------------------------------------
 
 
+def _attributed(statement: ParsedStatement) -> ParsedStatement:
+    """A statement with exactly one source attributes its unqualified columns to it.
+
+    `SELECT customer_id, net_revenue FROM s.customer_revenue` qualifies nothing, so every column
+    resolved as UNRESOLVED even though there is one table they can have come from. The statement's
+    own target is not a source, so an `INSERT INTO t (...) SELECT ... FROM one_table` counts as one.
+    """
+    if statement.node is None or not statement.edges:
+        return statement
+    names = {
+        _table_function_name(table) or _resolve_table_name(table)
+        for table in statement.node.find_all(exp.Table)
+    }
+    names.discard("")
+    names.discard(statement.target_table or "")
+    if len(names) != 1:
+        return statement
+    only = next(iter(names))
+    return replace(
+        statement,
+        edges=tuple(
+            edge
+            if edge.source_resolved or edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+            else replace(edge, source_table=only, source_resolved=True)
+            for edge in statement.edges
+        ),
+    )
+
+
+def _table_function_markers(statement: ParsedStatement, dialect: str) -> list[ParsedStatement]:
+    """One marker per table-valued function a parsed statement reads.
+
+    The statement's own edges stay right -- its function source is an intermediate, so nothing
+    claims the function is a table -- but what that function reads is not in this body.
+    `aida.routine_call_descent` reads it through when the function is captured here.
+    """
+    if statement.node is None:
+        return []
+    markers: list[ParsedStatement] = []
+    seen: set[str] = set()
+    for table in statement.node.find_all(exp.Table):
+        name = _table_function_name(table)
+        if name is None or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        markers.append(
+            _unparsed_statement(
+                statement.ordinal,
+                dialect,
+                statement.control_flow_context,
+                f"{UnparsedReason.TABLE_FUNCTION_READ.value}: {name}",
+            )
+        )
+    return markers
+
+
 def walk_procedure_statements(sql: str, dialect: str) -> list[ParsedStatement]:
     """Split, peel, and classify every top-level statement in a procedure
     body. Exposed (not just an internal helper of `parse_procedure_lineage`)
@@ -1428,9 +1527,13 @@ def walk_procedure_statements(sql: str, dialect: str) -> list[ParsedStatement]:
     statements: list[ParsedStatement] = []
     ordinal = 0
     for chunk in chunks:
-        for statement in _classify_and_extract(ordinal, chunk, dialect, sqlglot_dialect, plpgsql):
+        for parsed in _classify_and_extract(ordinal, chunk, dialect, sqlglot_dialect, plpgsql):
+            statement = _attributed(parsed)
             statements.append(statement)
             ordinal += 1
+            for marker in _table_function_markers(statement, dialect):
+                statements.append(marker)
+                ordinal += 1
     return statements
 
 
