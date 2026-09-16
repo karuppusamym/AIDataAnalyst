@@ -31,9 +31,13 @@ from aida.envelope_models import MetadataRoutine
 from aida.models import AuditEvent, GovernanceReview, GovernedToolVersion, ToolExecution
 from aida.procedure_tool_api import ProcedureToolBlueprintRequest, create_procedure_tool_blueprint
 from aida.query_gateway import QueryExecutionGateway
-from aida.schemas import GovernedToolVersionRead, ToolExecutionRequest
+from aida.schemas import (
+    GovernedToolVersionCreate,
+    GovernedToolVersionRead,
+    ToolExecutionRequest,
+)
 from aida.semantic_api import _decide_governed_tool_version
-from aida.tool_api import execute_tool
+from aida.tool_api import create_tool_version, execute_tool
 from aida.tool_source_binding import (
     REASON_CHANGED_SINCE_GENERATION,
     REASON_DEFINITION_CHANGED,
@@ -272,3 +276,105 @@ async def test_a_tool_not_extracted_from_a_routine_has_no_routine_dependency(
     version = await scenario.tool_version()
 
     assert await fetch_source_binding_holds(db, version) == ([], [])
+
+
+async def _hand_written(
+    db: AsyncSession,
+    scenario: ProcedureScenario,
+    generated: GovernedToolVersionRead,
+    *,
+    slug: str,
+) -> GovernedToolVersionRead:
+    """The generated tool's own SQL, authored by hand under `slug`."""
+    return await create_tool_version(
+        scenario.project.id,
+        GovernedToolVersionCreate(
+            slug=slug,
+            name="Customer order totals",
+            description="Authored by a tool developer rather than generated.",
+            datasource_id=scenario.datasource.id,
+            sql_template=generated.sql_template,
+            parameters=list(generated.parameters),
+            allowed_roles=list(generated.allowed_roles),
+        ),
+        context=scenario.maker(),
+        session=db,
+        settings=Settings(),
+    )
+
+
+async def test_a_hand_written_version_cannot_supersede_a_tool_bound_to_its_routine(
+    db: AsyncSession,
+) -> None:
+    scenario = await ProcedureScenario(db).build()
+    routine = scenario.routine(body=_REPORT_BODY)
+    routine.body_fingerprint = DEFINITION_A
+    db.add(routine)
+    await db.flush()
+    generated = await _generate(db, scenario, routine)
+    # The routine changes, so the generated version is held.
+    routine.body_fingerprint = DEFINITION_B
+    await db.flush()
+
+    # Its SQL, posted again under the same slug, would otherwise supersede it with no binding --
+    # nothing to hold at approval or at execution.
+    with pytest.raises(HTTPException) as refused:
+        await _hand_written(db, scenario, generated, slug=generated.slug)
+
+    assert refused.value.status_code == 422
+    versions = (
+        await db.scalars(
+            select(GovernedToolVersion).where(GovernedToolVersion.tool_id == generated.tool_id)
+        )
+    ).all()
+    assert [version.version for version in versions] == [1]
+
+
+async def test_a_tool_that_was_never_generated_still_takes_a_hand_written_version(
+    db: AsyncSession,
+) -> None:
+    scenario = await ProcedureScenario(db).build()
+    routine = scenario.routine(body=_REPORT_BODY)
+    routine.body_fingerprint = DEFINITION_A
+    db.add(routine)
+    await db.flush()
+    generated = await _generate(db, scenario, routine)
+
+    first = await _hand_written(db, scenario, generated, slug="hand_written_totals")
+    second = await _hand_written(db, scenario, generated, slug="hand_written_totals")
+
+    assert (first.version, second.version) == (1, 2)
+    assert second.tool_id == first.tool_id
+
+
+async def test_a_bound_tool_is_not_re_pointed_at_a_different_routine(
+    db: AsyncSession,
+) -> None:
+    scenario = await ProcedureScenario(db).build()
+    routine = scenario.routine(body=_REPORT_BODY)
+    routine.body_fingerprint = DEFINITION_A
+    db.add(routine)
+    await db.flush()
+    generated = await _generate(db, scenario, routine)
+    other = scenario.routine(body=_REPORT_BODY, name="usp_report_v2")
+    other.body_fingerprint = DEFINITION_A
+    db.add(other)
+    await db.flush()
+
+    with pytest.raises(HTTPException) as refused:
+        await create_procedure_tool_blueprint(
+            scenario.project.id,
+            ProcedureToolBlueprintRequest(
+                slug=generated.slug,
+                name="Customer order totals",
+                description="Read surface from a different routine.",
+                datasource_id=scenario.datasource.id,
+                routine_id=other.id,
+                allowed_roles=["Analyst"],
+            ),
+            context=scenario.maker(),
+            session=db,
+            settings=Settings(),
+        )
+
+    assert refused.value.status_code == 422

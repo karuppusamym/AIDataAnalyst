@@ -19,7 +19,7 @@ import json
 from dataclasses import replace
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
@@ -32,11 +32,14 @@ from aida.schemas import GovernedToolVersionCreate
 from aida.security import SecurityContext
 from aida.sql_guard import SqlGuard
 from aida.tool_rendering import template_placeholders
+from aida.tool_source_binding import SOURCE_KIND_ROUTINE, SOURCE_KIND_VIEW
 
 REFUSED_TEMPLATE_UNPARSEABLE: Final = "TEMPLATE_UNPARSEABLE"
 REFUSED_PLACEHOLDER_MISMATCH: Final = "PLACEHOLDER_MISMATCH"
 REFUSED_SQL_GUARD: Final = "SQL_GUARD_REFUSED"
 REFUSED_TABLES_NOT_ALLOWED: Final = "TABLES_NOT_ALLOWED"
+REFUSED_SOURCE_BINDING_REQUIRED: Final = "SOURCE_BINDING_REQUIRED"
+REFUSED_SOURCE_BINDING_MISMATCH: Final = "SOURCE_BINDING_MISMATCH"
 
 
 class ToolDraftRefused(ValueError):
@@ -47,6 +50,59 @@ class ToolDraftRefused(ValueError):
         self.code = code
         self.detail = detail
         super().__init__(detail)
+
+
+async def _require_matching_source_binding(
+    session: AsyncSession,
+    tool: GovernedTool,
+    *,
+    source_routine: MetadataRoutine | None,
+    source_view: MetadataViewDefinition | None,
+) -> None:
+    """A tool generated from a view or routine keeps that source, version after version.
+
+    R11-FP16 holds a published tool once its source moves, and refuses a draft generated from a
+    definition that has since changed. Neither reaches a version that names no source at all: the
+    SQL of a held version, posted again under the same slug, supersedes it unbound, and an unbound
+    version has nothing to hold. So a tool whose versions are bound keeps the binding -- a
+    replacement is generated from the source the tool already has, through the view or procedure
+    route, or by `context_rebuild` -- and a bound tool is never re-pointed at a different object.
+    """
+    bound = await session.scalar(
+        select(GovernedToolVersion)
+        .where(
+            GovernedToolVersion.tool_id == tool.id,
+            or_(
+                GovernedToolVersion.source_routine_id.is_not(None),
+                GovernedToolVersion.source_view_table_id.is_not(None),
+            ),
+        )
+        .order_by(GovernedToolVersion.version.desc())
+        .limit(1)
+    )
+    if bound is None:
+        return
+    if source_routine is not None:
+        incoming = (SOURCE_KIND_ROUTINE, source_routine.id)
+    elif source_view is not None:
+        incoming = (SOURCE_KIND_VIEW, source_view.table_id)
+    else:
+        raise ToolDraftRefused(
+            REFUSED_SOURCE_BINDING_REQUIRED,
+            "this tool's versions are generated from a view or routine; generate a new version "
+            "from that source rather than authoring its SQL",
+        )
+    existing = (
+        (SOURCE_KIND_ROUTINE, bound.source_routine_id)
+        if bound.source_routine_id is not None
+        else (SOURCE_KIND_VIEW, bound.source_view_table_id)
+    )
+    if incoming != existing:
+        raise ToolDraftRefused(
+            REFUSED_SOURCE_BINDING_MISMATCH,
+            "this tool's versions are generated from a different view or routine; a tool's "
+            "source does not change",
+        )
 
 
 async def stage_tool_version_draft(
@@ -116,6 +172,10 @@ async def stage_tool_version_draft(
             slug=body.slug,
         )
         session.add(tool)
+    else:
+        await _require_matching_source_binding(
+            session, tool, source_routine=source_routine, source_view=source_view
+        )
         await session.flush()
     latest = await session.scalar(
         select(func.max(GovernedToolVersion.version)).where(GovernedToolVersion.tool_id == tool.id)
