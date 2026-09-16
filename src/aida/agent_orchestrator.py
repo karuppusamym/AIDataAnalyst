@@ -396,6 +396,10 @@ class ContextProductScope:
     version: int
     table_ids: frozenset[str]
     tool_version_ids: frozenset[str]
+    routine_ids: frozenset[str]
+    ontology_version_ids: frozenset[str]
+    glossary_term_version_ids: frozenset[str]
+    semantic_model_version_ids: frozenset[str]
 
     @classmethod
     def of(cls, version: ContextProductVersion) -> ContextProductScope:
@@ -406,19 +410,60 @@ class ContextProductScope:
             tool_version_ids=frozenset(
                 str(tool_id) for tool_id in version.eligible_tool_version_ids
             ),
+            routine_ids=frozenset(str(routine_id) for routine_id in version.routine_ids),
+            ontology_version_ids=frozenset(
+                str(version_id) for version_id in version.ontology_version_ids
+            ),
+            glossary_term_version_ids=frozenset(
+                str(version_id) for version_id in version.glossary_term_version_ids
+            ),
+            semantic_model_version_ids=frozenset(
+                str(version_id) for version_id in version.semantic_model_version_ids
+            ),
         )
 
     def admits(self, hit: RetrievalHit) -> bool:
+        """Whether this candidate is evidence the product allows an answer to stand on.
+
+        Each kind is decided on the reference group that governs it, because a hit that names no
+        table would otherwise pass an allowlist written in table ids -- a routine, which reads
+        tables of its own, did exactly that.
+
+        **Meaning is pinned where the product pins it.** A product that binds ontology, glossary
+        or semantic-model versions answers from those and no others, so Ask agrees with what the
+        compiler publishes. A product that binds none of a kind does not narrow that kind, and
+        current approved meaning applies: pinning nothing is not the same as forbidding
+        everything, or every product would have to re-pin the whole glossary to stay usable.
+        """
         if hit.object_type == "GOVERNED_TOOL":
             return hit.object_id in self.tool_version_ids
         if hit.object_type == "TABLE":
             # A table reached by graph expansion carries no `table_id` of its own, so the hit's
             # id is what decides: a table the product does not name is not evidence here.
             return hit.object_id in self.table_ids
+        if hit.object_type == "ROUTINE":
+            return str(hit.metadata.get("routine_id")) in self.routine_ids
+        if hit.object_type == "ONTOLOGY_CONCEPT":
+            return self._pinned(self.ontology_version_ids, hit.metadata.get("ontology_version_id"))
+        if hit.object_type == "GLOSSARY_TERM":
+            return self._pinned(
+                self.glossary_term_version_ids, hit.metadata.get("term_version_id")
+            )
+        if hit.object_type in {"METRIC", "SEMANTIC_METRIC"}:
+            return self._pinned(
+                self.semantic_model_version_ids, hit.metadata.get("semantic_model_version_id")
+            )
         table_id = hit.metadata.get("table_id")
         if table_id is None:
+            # Evidence that names no object this product governs -- it narrows nothing here.
             return True
         return str(table_id) in self.table_ids
+
+    @staticmethod
+    def _pinned(pinned_version_ids: frozenset[str], version_id: object) -> bool:
+        if not pinned_version_ids:
+            return True
+        return str(version_id) in pinned_version_ids
 
 
 async def _load_published_context_product(
@@ -1756,7 +1801,10 @@ class GovernedAgentOrchestrator:
             raise
 
         validated_failure = await self._checkpoint_validated(
-            session, datasource=request.datasource, gateway_result=gateway_result
+            session,
+            datasource=request.datasource,
+            gateway_result=gateway_result,
+            scope=retrieved.context_product_scope,
         )
         if validated_failure:
             await self._deny_after_execution(
@@ -2145,6 +2193,7 @@ class GovernedAgentOrchestrator:
         *,
         datasource: DataSource,
         gateway_result: GatewayResult,
+        scope: ContextProductScope | None = None,
     ) -> str | None:
         """VALIDATED: independently re-derive the table allowlist and confirm
         every table the executed statement actually touched is still in it.
@@ -2170,6 +2219,21 @@ class GovernedAgentOrchestrator:
         )
         if unauthorized:
             return f"VALIDATED_TABLE_NOT_ALLOWLISTED:{','.join(unauthorized)}"
+        if scope is not None:
+            # The allowlist above is the datasource's, which is the boundary a product narrows.
+            # The validate stage refuses an out-of-scope statement before a session is opened;
+            # this is the independent re-check on what execution actually touched, so a defect
+            # between the two is caught rather than trusted (R11-FP12, C3).
+            executed_table_ids = await resolve_referenced_table_ids(
+                session, datasource, gateway_result.execution.referenced_tables
+            )
+            outside = sorted(
+                str(table_id)
+                for table_id in executed_table_ids
+                if str(table_id) not in scope.table_ids
+            )
+            if outside:
+                return f"VALIDATED_TABLE_OUTSIDE_CONTEXT_PRODUCT:{','.join(outside)}"
         return None
 
     def _checkpoint_costed(self, *, gateway_result: GatewayResult) -> str | None:

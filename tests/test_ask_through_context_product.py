@@ -21,12 +21,14 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.agent_intelligence import RetrievalHit
 from aida.agent_orchestrator import (
     CONTEXT_PRODUCT_FORBIDDEN,
     CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE,
     CONTEXT_PRODUCT_UNAVAILABLE,
     AgentClarificationRequired,
     AgentPolicyRejected,
+    ContextProductScope,
     GovernedAgentOrchestrator,
 )
 from aida.config import Settings
@@ -221,6 +223,75 @@ async def test_generated_sql_over_the_products_own_table_passes_the_scope_check(
         )
 
     assert str(ended.value) != CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE
+
+
+def _scope(
+    *,
+    table_ids: Iterable[str] = (),
+    tool_version_ids: Iterable[str] = (),
+    routine_ids: Iterable[str] = (),
+    ontology_version_ids: Iterable[str] = (),
+    glossary_term_version_ids: Iterable[str] = (),
+    semantic_model_version_ids: Iterable[str] = (),
+) -> ContextProductScope:
+    return ContextProductScope(
+        version_id=uuid4(),
+        version=1,
+        table_ids=frozenset(table_ids),
+        tool_version_ids=frozenset(tool_version_ids),
+        routine_ids=frozenset(routine_ids),
+        ontology_version_ids=frozenset(ontology_version_ids),
+        glossary_term_version_ids=frozenset(glossary_term_version_ids),
+        semantic_model_version_ids=frozenset(semantic_model_version_ids),
+    )
+
+
+def _hit(object_type: str, object_id: str, metadata: dict[str, Any]) -> RetrievalHit:
+    return RetrievalHit(
+        object_type=object_type,
+        object_id=object_id,
+        display_name="candidate",
+        score=1.0,
+        reason_codes=[],
+        metadata=metadata,
+    )
+
+
+def test_a_routine_the_product_does_not_reference_is_not_evidence() -> None:
+    """A routine reads tables of its own, and names none in `table_id`.
+
+    An allowlist written in table ids therefore admitted every routine in the datasource, which
+    is how evidence walked past a product that never referenced it.
+    """
+    selected, other = str(uuid4()), str(uuid4())
+    scope = _scope(routine_ids=[selected])
+
+    assert scope.admits(_hit("ROUTINE", selected, {"routine_id": selected}))
+    assert not scope.admits(_hit("ROUTINE", other, {"routine_id": other}))
+
+
+def test_a_product_naming_no_routine_admits_none() -> None:
+    scope = _scope(table_ids=[str(uuid4())])
+    routine_id = str(uuid4())
+
+    assert not scope.admits(_hit("ROUTINE", routine_id, {"routine_id": routine_id}))
+
+
+def test_meaning_is_pinned_where_the_product_pins_it() -> None:
+    """The product's pinned versions are the meaning its answers stand on."""
+    pinned, other = str(uuid4()), str(uuid4())
+    scope = _scope(ontology_version_ids=[pinned])
+
+    assert scope.admits(_hit("ONTOLOGY_CONCEPT", str(uuid4()), {"ontology_version_id": pinned}))
+    assert not scope.admits(_hit("ONTOLOGY_CONCEPT", str(uuid4()), {"ontology_version_id": other}))
+
+
+def test_a_kind_the_product_pins_nothing_of_is_not_narrowed() -> None:
+    """Pinning nothing is not forbidding everything, or a product would have to re-pin the whole
+    glossary to stay usable; current approved meaning applies."""
+    scope = _scope(table_ids=[str(uuid4())])
+
+    assert scope.admits(_hit("GLOSSARY_TERM", str(uuid4()), {"term_version_id": str(uuid4())}))
 
 
 async def test_an_unknown_product_is_refused(scenario: _Scenario) -> None:
