@@ -49,7 +49,7 @@ _READER_ROLES = (
 NO_CROSS_BOUNDARY_GRANT = "NO_CROSS_BOUNDARY_GRANT"
 
 
-async def _authorize_sides(
+async def authorize_relationship_sides(
     session: AsyncSession,
     context: SecurityContext,
     settings: Settings,
@@ -78,7 +78,13 @@ async def _authorize_sides(
             continue
         # The source side's domain must be granted sight into the target side's domain.
         allowed = await check_cross_boundary_grant(
-            session, source.organization_id, target.data_domain_id, source.data_domain_id
+            session,
+            source.organization_id,
+            target.data_domain_id,
+            source.data_domain_id,
+            # A grant naming edge kinds admits only those; a proposed join is a
+            # SUGGESTED_RELATIONSHIP, as it is for unified lineage and the graph neighborhood.
+            edge_kind="SUGGESTED_RELATIONSHIP",
         )
         if not allowed:
             raise HTTPException(status_code=403, detail=NO_CROSS_BOUNDARY_GRANT)
@@ -122,7 +128,7 @@ async def get_relationship_candidate_validation(
     if candidate is None:
         raise HTTPException(status_code=404, detail="relationship candidate not found")
     enforce_organization(context, candidate.organization_id)
-    await _authorize_sides(
+    await authorize_relationship_sides(
         session,
         context,
         settings,
@@ -156,7 +162,7 @@ async def get_composite_relationship_candidate_validation(
     if group is None:
         raise HTTPException(status_code=404, detail="composite relationship candidate not found")
     enforce_organization(context, group.organization_id)
-    await _authorize_sides(
+    await authorize_relationship_sides(
         session,
         context,
         settings,

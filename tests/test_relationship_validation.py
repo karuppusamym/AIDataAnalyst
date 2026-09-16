@@ -405,6 +405,7 @@ async def test_approving_a_join_that_rests_on_a_name_match_is_refused(
             RelationshipCandidateDecision(decision="APPROVE"),
             context=_context(org, "reviewer"),
             session=session,
+            settings=Settings(),
         )
 
     assert refused.value.status_code == 409
@@ -429,6 +430,7 @@ async def test_an_approval_keeps_its_validation_and_a_dropped_key_shows_as_lost(
         RelationshipCandidateDecision(decision="APPROVE"),
         context=reviewer,
         session=session,
+        settings=Settings(),
     )
 
     recorded = approved.evidence["validation"]
@@ -473,6 +475,7 @@ async def test_a_bulk_approval_fails_only_the_join_without_evidence(
         ),
         context=_context(org, "reviewer"),
         session=session,
+        settings=Settings(),
     )
 
     by_id = {item.candidate_id: item for item in result.results}
@@ -537,6 +540,7 @@ async def test_a_composite_join_is_approved_only_once_a_key_covers_its_columns(
             RelationshipCandidateDecision(decision="APPROVE"),
             context=reviewer,
             session=session,
+            settings=Settings(),
         )
     assert refused.value.status_code == 409
 
@@ -546,6 +550,7 @@ async def test_a_composite_join_is_approved_only_once_a_key_covers_its_columns(
         RelationshipCandidateDecision(decision="APPROVE"),
         context=reviewer,
         session=session,
+        settings=Settings(),
     )
 
     assert approved.status == "APPROVED"

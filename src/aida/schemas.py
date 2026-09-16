@@ -2,9 +2,17 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
+from aida.relationship_validation import public_relationship_evidence
 
 
 class ApiModel(BaseModel):
@@ -687,6 +695,13 @@ class RelationshipCandidateRead(ApiModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: the recorded validation is served by its own gated read, not here."""
+        return public_relationship_evidence(evidence)
+
 
 class RelationshipCandidateDecision(ApiModel):
     decision: Literal["APPROVE", "REJECT"]
@@ -1053,6 +1068,13 @@ class CompositeRelationshipCandidateRead(ApiModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: the recorded validation is served by its own gated read, not here."""
+        return public_relationship_evidence(evidence)
+
 
 class GraphNodeRead(ApiModel):
     id: UUID
@@ -1081,6 +1103,13 @@ class GraphEdgeRead(ApiModel):
     confidence: float
     evidence: dict[str, Any]
     candidate_id: UUID | None = None
+
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: an approved join's recorded validation is not graph-edge evidence."""
+        return public_relationship_evidence(evidence)
 
 
 class KnowledgeGraphRead(ApiModel):
@@ -1175,6 +1204,13 @@ class UnifiedLineageEdgeRead(ApiModel):
     source_columns: list[str] = Field(default_factory=list)
     target_columns: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @field_serializer("evidence")
+    def _evidence_without_recorded_validation(
+        self, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """R11-FP06: an approved join's recorded validation is not graph-edge evidence."""
+        return public_relationship_evidence(evidence)
 
 
 class UnifiedLineageGraphRead(ApiModel):

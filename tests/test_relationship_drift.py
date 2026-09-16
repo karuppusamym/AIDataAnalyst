@@ -95,6 +95,7 @@ async def test_a_join_whose_key_is_dropped_is_suspended_and_restored_when_the_ke
         RelationshipCandidateDecision(decision="APPROVE", reason="The customer key."),
         context=reviewer,
         session=session,
+        settings=Settings(),
     )
     start = datetime.now(UTC) + timedelta(minutes=1)
 
@@ -147,6 +148,7 @@ async def test_a_changed_join_stays_approved_and_one_whose_column_left_is_suspen
             RelationshipCandidateDecision(decision="APPROVE"),
             context=reviewer,
             session=session,
+            settings=Settings(),
         )
     referencing = await session.get(MetadataColumn, changed.source_column_id)
     departed = await session.get(MetadataColumn, gone.target_column_id)
@@ -217,6 +219,7 @@ async def test_a_composite_join_is_suspended_when_the_key_covering_it_is_dropped
         RelationshipCandidateDecision(decision="APPROVE"),
         context=_context(org, "reviewer"),
         session=session,
+        settings=Settings(),
     )
     (await _target_key(session, target_table)).status = "DEPRECATED"
     start = datetime.now(UTC) + timedelta(minutes=1)
@@ -239,6 +242,7 @@ async def test_the_rebuild_pass_checks_joins_and_brings_their_organization_in(
         RelationshipCandidateDecision(decision="APPROVE"),
         context=_context(org, "reviewer"),
         session=session,
+        settings=Settings(),
     )
     (await _target_key(session, target_table)).status = "DEPRECATED"
     start = datetime.now(UTC) + timedelta(minutes=1)

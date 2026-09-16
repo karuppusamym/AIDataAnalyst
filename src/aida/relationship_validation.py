@@ -35,7 +35,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -681,6 +681,10 @@ def refusal_detail(validation: RelationshipValidation) -> dict[str, Any]:
     }
 
 
+#: Where an approval records the validation it rested on, inside the candidate's evidence.
+RECORDED_VALIDATION_KEY: Final = "validation"
+
+
 def with_recorded_validation(
     evidence: Mapping[str, Any] | None, validation: RelationshipValidation, validated_at: datetime
 ) -> dict[str, Any]:
@@ -690,13 +694,29 @@ def with_recorded_validation(
     """
     return {
         **(evidence or {}),
-        "validation": {**validation.as_evidence(), "validated_at": validated_at.isoformat()},
+        RECORDED_VALIDATION_KEY: {
+            **validation.as_evidence(),
+            "validated_at": validated_at.isoformat(),
+        },
     }
+
+
+def public_relationship_evidence(evidence: Mapping[str, Any] | None) -> dict[str, Any]:
+    """A candidate's evidence without the validation an approval recorded.
+
+    The recorded validation names the key columns of both sides and carries their profile
+    counts, so it is served by the validation read alone, under that read's datasource and
+    domain gates (R11-FP06). Every surface that serves a candidate on organization membership
+    -- the candidate lists, a decision response, the review queue, a lineage graph edge --
+    serves this instead, so approving a join never becomes the way to read what the gated read
+    refuses.
+    """
+    return {key: value for key, value in (evidence or {}).items() if key != RECORDED_VALIDATION_KEY}
 
 
 def validation_drift(evidence: Mapping[str, Any] | None, validation: RelationshipValidation) -> str:
     """How today's validation compares with the one recorded when the join was approved."""
-    recorded = (evidence or {}).get("validation")
+    recorded = (evidence or {}).get(RECORDED_VALIDATION_KEY)
     if not isinstance(recorded, Mapping) or not recorded.get("fingerprint"):
         return "NOT_RECORDED"
     if recorded.get("outcome") == CORROBORATED and not validation.approvable:

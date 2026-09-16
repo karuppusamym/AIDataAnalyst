@@ -69,6 +69,7 @@ from aida.models import (
     MetadataTable,
     RelationshipCandidate,
 )
+from aida.relationship_validation import public_relationship_evidence
 from aida.resource_scope import load_datasource_in_scope
 from aida.schemas import (
     DomainLineageGraphRead,
@@ -371,7 +372,7 @@ async def build_domain_unified_lineage_graph_payload(
                     confidence=candidate.confidence,
                     source_columns=[source_column] if source_column else [],
                     target_columns=[target_column] if target_column else [],
-                    evidence=dict(candidate.evidence),
+                    evidence=public_relationship_evidence(candidate.evidence),
                 )
             )
         if len(cross_source_candidates) >= remaining_edge_budget:
@@ -526,7 +527,7 @@ async def build_domain_unified_lineage_graph_payload(
                             confidence=candidate.confidence,
                             source_columns=[source_column] if source_column else [],
                             target_columns=[target_column] if target_column else [],
-                            evidence=dict(candidate.evidence),
+                            evidence=public_relationship_evidence(candidate.evidence),
                         )
                     )
             if len(boundary_candidates) >= boundary_scan_limit:

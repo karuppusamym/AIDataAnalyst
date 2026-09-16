@@ -30,7 +30,7 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from aida.config import get_settings
+from aida.config import Settings, get_settings
 from aida.db import Base
 from aida.intelligence_api import (
     bulk_decide_relationship_candidates,
@@ -440,6 +440,7 @@ async def test_bulk_decision_approve_becomes_a_real_edge_reject_becomes_negative
         ),
         context=context,
         session=session,
+        settings=Settings(),
     )
     assert result.succeeded_count == 1
     result = await bulk_decide_relationship_candidates(
@@ -448,6 +449,7 @@ async def test_bulk_decision_approve_becomes_a_real_edge_reject_becomes_negative
         ),
         context=context,
         session=session,
+        settings=Settings(),
     )
     assert result.succeeded_count == 1
 
@@ -561,6 +563,7 @@ async def test_rejected_candidate_is_suppressed_from_re_proposal_even_after_row_
         RelationshipCandidateDecision(decision="REJECT", reason="not a real key"),
         context=reviewer_context,
         session=session,
+        settings=Settings(),
     )
 
     negatives = (

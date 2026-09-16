@@ -76,6 +76,7 @@ from aida.models import (
     ViewLineageEdge,
 )
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.relationship_validation import public_relationship_evidence
 from aida.unified_lineage import UnifiedLink
 
 SuggestionStatus = Literal["ALL", "PENDING", "APPROVED", "REJECTED"]
@@ -600,7 +601,7 @@ async def collect_relationship_candidates(
                 confidence=candidate.confidence,
                 source_columns=(source_column,) if source_column else (),
                 target_columns=(target_column,) if target_column else (),
-                evidence=dict(candidate.evidence),
+                evidence=public_relationship_evidence(candidate.evidence),
             )
         )
     graph.note_scan_bound(candidates, graph.edge_limit, "EDGE_LIMIT")

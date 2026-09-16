@@ -68,11 +68,13 @@ from aida.relationship_intelligence import (
 from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.relationship_validation import (
     RelationshipColumnsMissingError,
+    public_relationship_evidence,
     refusal_detail,
     validate_composite_relationship_candidate,
     validate_relationship_candidate,
     with_recorded_validation,
 )
+from aida.relationship_validation_api import authorize_relationship_sides
 from aida.schemas import (
     RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
     CanonicalTableMappingRead,
@@ -305,7 +307,7 @@ async def get_knowledge_graph(
             target_columns=[columns_by_id[candidate.target_column_id].name],
             status=candidate.status,
             confidence=candidate.confidence,
-            evidence=candidate.evidence,
+            evidence=public_relationship_evidence(candidate.evidence),
             candidate_id=candidate.id,
         )
         for candidate in candidates
@@ -1324,11 +1326,22 @@ async def decide_relationship_candidate(
         require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RelationshipCandidate:
     candidate = await session.get(RelationshipCandidate, candidate_id)
     if candidate is None:
         raise HTTPException(status_code=404, detail="relationship candidate not found")
     enforce_organization(context, candidate.organization_id)
+    # R11-FP06: deciding a join reads both sides, and an approval records their evidence on the
+    # candidate. The same datasource and domain gates the validation read applies hold here, so
+    # approving is never the way around a read the gates refuse.
+    await authorize_relationship_sides(
+        session,
+        context,
+        settings,
+        source_datasource_id=candidate.datasource_id,
+        target_datasource_ids=[candidate.target_datasource_id],
+    )
     if candidate.created_by == context.principal_id:
         raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
     if candidate.status != "PENDING":
@@ -1884,6 +1897,7 @@ async def bulk_decide_relationship_candidates(
         require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> RelationshipCandidateBulkDecisionResultRead:
     """RL-6: decide up to RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS PENDING
     relationship candidates in one call, by explicit id list or by a
@@ -1934,6 +1948,24 @@ async def bulk_decide_relationship_candidates(
                     candidate_id=str(candidate_id),
                     status="FAILED",
                     reason="cross-organization access denied",
+                )
+            )
+            continue
+        try:
+            # R11-FP06: the single decision's datasource and domain gates, reported per item.
+            await authorize_relationship_sides(
+                session,
+                context,
+                settings,
+                source_datasource_id=candidate.datasource_id,
+                target_datasource_ids=[candidate.target_datasource_id],
+            )
+        except HTTPException as exc:
+            results.append(
+                RelationshipCandidateBulkDecisionItemRead(
+                    candidate_id=str(candidate_id),
+                    status="FAILED",
+                    reason=str(exc.detail),
                 )
             )
             continue
@@ -2744,11 +2776,20 @@ async def decide_composite_relationship_candidate(
         require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> CompositeRelationshipCandidateRead:
     group = await session.get(RelationshipCandidateGroup, group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="composite relationship candidate not found")
     enforce_organization(context, group.organization_id)
+    # R11-FP06: the same gate the composite validation read applies.
+    await authorize_relationship_sides(
+        session,
+        context,
+        settings,
+        source_datasource_id=group.datasource_id,
+        target_datasource_ids=[],
+    )
     if group.created_by == context.principal_id:
         raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
     if group.status != "PENDING":
