@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Select, exists, func, select
+from sqlalchemy import Select, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import AuthorizationDenied, gate
@@ -37,6 +37,7 @@ from aida.envelope_models import AVAILABLE, UNAVAILABLE, MetadataRoutine, Metada
 from aida.ingest_screening import CLEAN
 from aida.models import DataQualityIncident, DataSource, ViewLineageEdge
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.routine_call_descent import CALLEE_BODY_WITHHELD, CALLEE_NOT_CAPTURED
 from aida.schemas import ApiModel
 from aida.security import SecurityContext
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
@@ -72,6 +73,15 @@ GAP_DEFINITIONS: Final[dict[str, tuple[str, str, str]]] = {
         "none",
         "Routines with statements lineage cannot read, such as dynamic SQL. Recorded once as "
         "UNPARSED and examined again only when the body changes structurally.",
+    ),
+    "LINEAGE_UNRESOLVED_CALLEE": (
+        "SOURCE_ACCESS",
+        "source administrator",
+        "Routines whose call to another routine, or read of a table function, could not be read "
+        "through because the callee is not captured here or its body is withheld. Widening the "
+        "discovery selection or granting read access, then rescanning, closes it. An ambiguous "
+        "overload, a cycle or the descent bound is explained instead, and stays in the count "
+        "above.",
     ),
     "LINEAGE_AWAITING_REVIEW": (
         "HUMAN_REVIEW",
@@ -264,6 +274,26 @@ async def footprint_gaps(
                 DeepProcedureLineageEdge.datasource_id.in_(ids),
                 DeepProcedureLineageEdge.review_status == "ACTIVE",
                 DeepProcedureLineageEdge.transformation_type == "UNPARSED",
+            )
+            .group_by(DeepProcedureLineageEdge.datasource_id),
+        )
+        # R11-FP05/FP07: the calls `routine_call_descent` could not read through for a reason
+        # someone can act on.
+        counts["LINEAGE_UNRESOLVED_CALLEE"] = await _grouped(
+            session,
+            select(
+                DeepProcedureLineageEdge.datasource_id,
+                func.count(func.distinct(DeepProcedureLineageEdge.routine_id)),
+            )
+            .where(
+                DeepProcedureLineageEdge.organization_id == organization_id,
+                DeepProcedureLineageEdge.datasource_id.in_(ids),
+                DeepProcedureLineageEdge.review_status == "ACTIVE",
+                DeepProcedureLineageEdge.transformation_type == "UNPARSED",
+                or_(
+                    DeepProcedureLineageEdge.unparsed_reason.like(f"%({CALLEE_NOT_CAPTURED})"),
+                    DeepProcedureLineageEdge.unparsed_reason.like(f"%({CALLEE_BODY_WITHHELD})"),
+                ),
             )
             .group_by(DeepProcedureLineageEdge.datasource_id),
         )

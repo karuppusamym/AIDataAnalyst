@@ -105,6 +105,7 @@ async def test_each_gap_is_counted_routed_and_hidden_past_the_gate(
     )
     dynamic = _routine(org, datasource, schema, "r_dynamic")
     proposed = _routine(org, datasource, schema, "r_proposed")
+    unresolved = _routine(org, datasource, schema, "r_unresolved")
     session.add_all(
         [
             _routine(org, datasource, schema, "r_quarantined", screening_status="QUARANTINED"),
@@ -112,6 +113,7 @@ async def test_each_gap_is_counted_routed_and_hidden_past_the_gate(
             _routine(org, datasource, schema, "r_package", routine_type="PACKAGE"),
             dynamic,
             proposed,
+            unresolved,
             _routine(
                 org,
                 denied,
@@ -125,7 +127,22 @@ async def test_each_gap_is_counted_routed_and_hidden_past_the_gate(
     await session.flush()
     session.add_all(
         [
-            _edge(org, datasource, dynamic, transformation_type="UNPARSED"),
+            # A gap nobody can act on: the callee is itself on the call path.
+            _edge(
+                org,
+                datasource,
+                dynamic,
+                transformation_type="UNPARSED",
+                unparsed_reason="NESTED_PROCEDURE_CALL: public.y (CYCLE)",
+            ),
+            # A gap a source administrator can close.
+            _edge(
+                org,
+                datasource,
+                unresolved,
+                transformation_type="UNPARSED",
+                unparsed_reason="NESTED_PROCEDURE_CALL: public.x (NOT_CAPTURED)",
+            ),
             _edge(org, datasource, proposed, review_status="PROPOSED"),
             DataQualityIncident(
                 organization_id=org.id,
@@ -177,7 +194,9 @@ async def test_each_gap_is_counted_routed_and_hidden_past_the_gate(
         # r_waiting only: the quarantined body is not eligible, the package is not a callable
         # routine, and the other two already have edges.
         "LINEAGE_AWAITING_PARSE": 1,
-        "LINEAGE_UNPARSED_STATEMENTS": 1,
+        "LINEAGE_UNPARSED_STATEMENTS": 2,
+        # Of those two, the one whose callee is simply not captured here.
+        "LINEAGE_UNRESOLVED_CALLEE": 1,
         "LINEAGE_AWAITING_REVIEW": 1,
         "SOURCE_CHANGE_HOLDS": 1,
         "CHANGE_SIGNALS_PENDING": 1,
