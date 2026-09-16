@@ -18,6 +18,8 @@ in-memory SQLite through the real draft, review and decision routes, so it runs 
   a retyped column waits for re-approval and an added one does not;
 * a table description written against other columns is redrafted, and never approved stale;
 * a routine tool is regenerated bound to the routine's new definition;
+* a second view's tool, description and lineage are left alone by the first view's change, so a
+  rebuild updates what the change reached and reuses the rest;
 * the scheduler pass is off by default and opens no session.
 """
 
@@ -1174,6 +1176,170 @@ async def test_a_rename_pointing_at_a_table_the_source_no_longer_has_is_not_foll
     outcome = await _rebuild(estate)
 
     assert (outcome.tools_rewritten, outcome.deprecations_proposed) == (0, 1), outcome.as_details()
+
+
+_OTHER_VIEW_SQL = "SELECT c.customer_id, c.region FROM public.customers c"
+
+
+async def _second_view(estate: Estate) -> tuple[MetadataTable, GovernedToolVersion]:
+    """A second published view with its own lineage, tool and open description draft.
+
+    Nothing about it reads the first view, so a change to that one must leave all of this
+    standing: the point of rebuilding from signals rather than rebuilding everything.
+    """
+    session = estate.session
+    schema = await session.get(MetadataSchema, estate.view.schema_id)
+    assert schema is not None
+    other = await seed_table(
+        session, estate.org, estate.datasource, schema, name="customer_regions", object_type="VIEW"
+    )
+    await _columns(session, estate.org, other, ("customer_id", "integer"), ("region", "varchar"))
+    session.add(
+        MetadataViewDefinition(
+            organization_id=estate.org.id,
+            datasource_id=estate.datasource.id,
+            table_id=other.id,
+            definition_sql_redacted=_OTHER_VIEW_SQL,
+            definition_fingerprint="c" * 64,
+            redaction_status="PARSED",
+            fingerprint="fp",
+        )
+    )
+    customers = await session.scalar(
+        select(MetadataTable).where(
+            MetadataTable.datasource_id == estate.datasource.id,
+            MetadataTable.name == "customers",
+        )
+    )
+    assert customers is not None
+    parsed = parse_view_lineage(as_create_view("public.customer_regions", _OTHER_VIEW_SQL))
+    for edge in parsed.edges:
+        session.add(
+            ViewLineageEdge(
+                organization_id=estate.org.id,
+                datasource_id=estate.datasource.id,
+                source_table=edge.source_table,
+                source_column=edge.source_column,
+                target_table=edge.target_table,
+                target_column=edge.target_column,
+                source_table_id=customers.id,
+                target_table_id=other.id,
+                transformation_type=edge.transformation_type,
+                confidence=edge.confidence,
+                dialect=edge.dialect,
+                sql_hash=parsed.sql_hash,
+                review_status="ACTIVE",
+                created_by="agent:lineage",
+            )
+        )
+    await session.flush()
+
+    drafted = await create_view_tool_blueprint(
+        estate.project.id,
+        ViewToolBlueprintRequest(
+            slug="customer_regions",
+            name="Customer regions",
+            description="The region each customer belongs to.",
+            datasource_id=estate.datasource.id,
+            table_id=other.id,
+            allowed_roles=["Analyst"],
+        ),
+        context=estate.developer,
+        session=session,
+        settings=estate.settings,
+    )
+    review = await submit_tool_for_review(drafted.id, context=estate.developer, session=session)
+    await _approve(estate, review.id)
+
+    await generate_asset_description_drafts(
+        estate.org.id,
+        AssetDescriptionDraftGenerate(table_ids=[other.id]),
+        context=estate.steward,
+        session=session,
+    )
+    draft = await session.scalar(
+        select(AssetDescriptionDraft).where(AssetDescriptionDraft.table_id == other.id)
+    )
+    assert draft is not None
+    await session.commit()
+
+    version = await session.get(GovernedToolVersion, drafted.id)
+    assert version is not None
+    return other, version
+
+
+async def test_a_change_to_one_view_leaves_another_views_context_alone(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session, tool=True, description=True, product=True)
+    other, other_tool = await _second_view(estate)
+    other_drafts_before = await session.scalar(
+        select(func.count())
+        .select_from(AssetDescriptionDraft)
+        .where(AssetDescriptionDraft.table_id == other.id)
+    )
+    other_edges_before = await session.scalar(
+        select(func.count())
+        .select_from(ViewLineageEdge)
+        .where(
+            ViewLineageEdge.target_table_id == other.id,
+            ViewLineageEdge.review_status == "ACTIVE",
+        )
+    )
+
+    await _redefine(estate)
+    outcome = await _rebuild(estate)
+
+    # The changed view is rebuilt, as its own test asserts in full.
+    assert (outcome.tools_drafted, outcome.descriptions_drafted) == (1, 1), outcome.as_details()
+
+    # Nothing of the other view's is touched: no second tool version, no new description draft,
+    # no hold, and its lineage still stands.
+    other_versions = (
+        await session.scalars(
+            select(GovernedToolVersion).where(GovernedToolVersion.tool_id == other_tool.tool_id)
+        )
+    ).all()
+    assert [(version.version, version.status) for version in other_versions] == [
+        (other_tool.version, "PUBLISHED")
+    ]
+    other_drafts_after = await session.scalar(
+        select(func.count())
+        .select_from(AssetDescriptionDraft)
+        .where(AssetDescriptionDraft.table_id == other.id)
+    )
+    assert other_drafts_after == other_drafts_before
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(DataQualityIncident)
+            .where(
+                DataQualityIncident.table_id == other.id,
+                DataQualityIncident.anomaly_type == SOURCE_CHANGE_ANOMALY_TYPE,
+            )
+        )
+        == 0
+    )
+    other_edges_after = await session.scalar(
+        select(func.count())
+        .select_from(ViewLineageEdge)
+        .where(
+            ViewLineageEdge.target_table_id == other.id,
+            ViewLineageEdge.review_status == "ACTIVE",
+        )
+    )
+    assert other_edges_after == other_edges_before
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(GovernanceReview)
+            .where(
+                GovernanceReview.requested_by == CONTEXT_REBUILD_PRINCIPAL,
+                GovernanceReview.object_id == str(other_tool.id),
+            )
+        )
+        == 0
+    )
 
 
 async def test_a_rename_into_another_source_is_never_followed(session: AsyncSession) -> None:
