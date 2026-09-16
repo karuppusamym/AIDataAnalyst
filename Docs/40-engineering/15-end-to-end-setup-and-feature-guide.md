@@ -411,6 +411,61 @@ having been tried and refused. And for Teams the output says so explicitly: a
 
 ---
 
+### 5.8 Keeping context current when the source changes
+
+Discovery, review and publication get context in place once. Keeping it right
+when the database changes is a separate loop, and **every part of it ships
+off**, so a fresh stack notices nothing: a rescan records what changed, and
+there it stops.
+
+Four switches turn it on, all `0` by default:
+
+```
+AIDA_CHANGE_SIGNAL_PROCESSING_INTERVAL_MINUTES   # signals -> holds
+AIDA_CONTEXT_REBUILD_INTERVAL_MINUTES            # holds -> drafts in the review queues
+AIDA_LINEAGE_AGENT_INTERVAL_MINUTES              # re-parse definitions that moved
+AIDA_STEWARD_AGENT_INTERVAL_MINUTES              # describe what is newly missing meaning
+```
+
+They are opt-in rather than on by default because the first two open holds and
+draft reviews: an estate that has never been reviewed would wake up to a queue
+nobody asked for. Turning them on is a deliberate act, and the two agent
+intervals still need their contract registered first (5.4).
+
+**Nothing rescans on its own either.** A source change reaches Atlas only when
+a scan runs, so give the datasource a scan policy —
+`PUT /v1/datasources/{id}/scan-policy` — or start a run by hand. Without one,
+the rest of the loop has nothing to consume.
+
+With those set, one source change walks this path unattended:
+
+1. the scan records a **change signal** per object that moved;
+2. the change-signal pass turns a redefined view or a retired table into a
+   **CRITICAL hold**, and warns the views that read it — tools over the changed
+   object stop answering, the ones downstream keep running and say why they
+   might have moved;
+3. the **lineage agent** re-parses what changed structurally;
+4. the **rebuild pass** drafts the replacements — a tool regenerated from the
+   current definition, a description written against it, a context product
+   re-pinned to the new version — into the review queues. It publishes nothing;
+5. a **reviewer approves** each draft, as for any other governed change;
+6. the hold is released once nothing standing on the object is stale, and Ask
+   answers again from the rebuilt context.
+
+Two things still need a person by design, and the pass names both rather than
+retrying: a rebuilt description a reviewer **rejects** is reported as
+`DESCRIPTION_AWAITING_AUTHOR`, because every redraft would be the same words on
+the same evidence; and a proposal rejected for a retired table is not made
+again until the source changes again.
+
+To watch the whole chain once without waiting on intervals,
+`tests/test_footprint_journey.py` runs it end to end against the local
+PostgreSQL and SQL Server sample containers — discover, review, publish, ask
+(150), change the view, refuse under the hold, rebuild, approve, ask again
+(160), with the question asked through the published context product.
+
+---
+
 ## 6. The fleet scheduler
 
 One polling loop drives nineteen passes. Each is independently gated and each
