@@ -263,6 +263,19 @@
             ],
             "title": "Candidate Sql"
           },
+          "context_product_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Product Key"
+          },
           "max_rows": {
             "anyOf": [
               {

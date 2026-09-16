@@ -69,6 +69,7 @@ export interface AgentAnalysisRequest {
   preferred_tool_version_id?: string | null;
   tool_parameters?: Record<string, unknown>;
   max_rows?: number | null;
+  context_product_key?: string | null;
 }
 
 export interface AgentAnalysisResponse {
