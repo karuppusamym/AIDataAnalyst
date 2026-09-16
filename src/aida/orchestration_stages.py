@@ -30,6 +30,7 @@ from aida.agent_runtime import RuntimeStage, RuntimeState
 
 if TYPE_CHECKING:
     from aida.agent_intelligence import AgentPlan, RetrievalHit
+    from aida.agent_orchestrator import ContextProductScope
     from aida.models import AgentContract, AgentRun, DataSource, ToolExecution
     from aida.prompt_risk import PromptRiskAssessment
     from aida.query_gateway import GatewayResult
@@ -134,12 +135,17 @@ class RetrievalOutcome:
 
     `hits` is what the planner sees; `rejected` is what the retrieval bound
     discarded and is recorded as evidence rather than dropped silently.
+
+    `context_product_scope` is set when the question was asked through a published context
+    product: the hits are already scoped to it, and later stages hold generated SQL to the same
+    tables, so a model cannot reach past the product the caller asked through (R11-FP12).
     """
 
     semantic_version: str
     hits: list[RetrievalHit]
     rejected: list[RetrievalHit]
     evidence: list[dict[str, Any]]
+    context_product_scope: ContextProductScope | None = None
 
 
 @dataclass(frozen=True, slots=True)

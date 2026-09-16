@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_orchestrator import (
     CONTEXT_PRODUCT_FORBIDDEN,
+    CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE,
     CONTEXT_PRODUCT_UNAVAILABLE,
     AgentClarificationRequired,
     AgentPolicyRejected,
@@ -95,6 +96,24 @@ async def _ask(
     )
 
 
+async def _ask_with_sql(scenario: _Scenario, *, product_key: str, sql: str) -> None:
+    """Ask through a product with caller-supplied SQL, the cheapest generated-statement path."""
+    await GovernedAgentOrchestrator(
+        Settings(_env_file=None, allow_development_sql_override=True)
+    ).run(
+        scenario.db,
+        datasource=scenario.datasource,
+        context=scenario.steward(),
+        correlation_id=f"corr-{uuid4().hex[:8]}",
+        question=QUESTION,
+        candidate_sql=sql,
+        preferred_tool_version_id=None,
+        tool_parameters={},
+        requested_limit=None,
+        context_product_key=product_key,
+    )
+
+
 async def _latest_run(scenario: _Scenario) -> AgentRun:
     run = await scenario.db.scalar(select(AgentRun).order_by(AgentRun.created_at.desc()).limit(1))
     assert run is not None
@@ -159,6 +178,49 @@ async def test_a_table_the_product_does_not_name_is_not_evidence(scenario: _Scen
     # `dim_customer` is reachable only by graph expansion from `fact_orders`, and the product
     # does not name it, so scoping drops it while the table it does name stays.
     assert table_ids == {str(scenario.fact_orders.id)}
+
+
+async def test_generated_sql_may_not_read_a_table_the_product_does_not_name(
+    scenario: _Scenario,
+) -> None:
+    """Scoping retrieval decides what the model saw, not what the statement reads."""
+    await _product(
+        scenario,
+        key="orders-context",
+        table_ids=[scenario.fact_orders.id],
+        tool_version_ids=[scenario.tool_version.id],
+    )
+
+    with pytest.raises(AgentPolicyRejected) as refused:
+        await _ask_with_sql(
+            scenario,
+            product_key="orders-context",
+            sql="SELECT c.customer_id FROM public.dim_customer AS c",
+        )
+
+    assert str(refused.value) == CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE
+
+
+async def test_generated_sql_over_the_products_own_table_passes_the_scope_check(
+    scenario: _Scenario,
+) -> None:
+    await _product(
+        scenario,
+        key="orders-context",
+        table_ids=[scenario.fact_orders.id],
+        tool_version_ids=[scenario.tool_version.id],
+    )
+
+    # It still ends some other way -- there is no warehouse behind this scenario -- but the scope
+    # check is not what stops it.
+    with pytest.raises(Exception) as ended:  # noqa: B017, PT011
+        await _ask_with_sql(
+            scenario,
+            product_key="orders-context",
+            sql="SELECT o.order_id FROM public.fact_orders AS o",
+        )
+
+    assert str(ended.value) != CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE
 
 
 async def test_an_unknown_product_is_refused(scenario: _Scenario) -> None:

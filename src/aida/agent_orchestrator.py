@@ -100,6 +100,7 @@ from aida.orchestration_stages import (
     ValidatedStatement,
     trace_entry,
 )
+from aida.policy_resource_attributes import resolve_referenced_table_ids
 from aida.prompt_risk import DeterministicPromptRiskClassifier
 from aida.quality_coupling import (
     check_quality_gate,
@@ -376,6 +377,7 @@ def run_token_charge(evidence: ModelCallEvidence, attempt_count: int) -> RunToke
 
 CONTEXT_PRODUCT_UNAVAILABLE: Final = "CONTEXT_PRODUCT_NOT_AVAILABLE"
 CONTEXT_PRODUCT_FORBIDDEN: Final = "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"
+CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: Final = "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1145,6 +1147,7 @@ class GovernedAgentOrchestrator:
             hits=retrieval_hits,
             rejected=rejected_candidates,
             evidence=retrieval_evidence,
+            context_product_scope=scope,
         )
 
     # ------------------------------------------------------------------
@@ -1270,6 +1273,16 @@ class GovernedAgentOrchestrator:
         else:
             statement = await self._generate_statement(
                 session, request, ledger, screened, retrieved
+            )
+
+        if retrieved.context_product_scope is not None and plan.strategy != "GOVERNED_TOOL":
+            # Scoping retrieval decides what the model was shown; it does not decide what it
+            # wrote. A table the product does not name is out of scope however the statement
+            # reached it, and the gateway's own allowlist is the whole datasource -- which is
+            # the boundary a product exists to narrow (R11-FP12). A governed tool needs no such
+            # check: the product declared that version eligible.
+            await self._enforce_context_product_scope(
+                session, request, ledger, retrieved.context_product_scope, statement.sql
             )
 
         ledger.agent_run.generation_source = statement.generation_source
@@ -1952,6 +1965,35 @@ class GovernedAgentOrchestrator:
         await self._close_agent_task(session, agent_run, status="APPLIED")
         await session.commit()
         return AgentOrchestrationResult(agent_run, gateway_result, explanation)
+
+    async def _enforce_context_product_scope(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        ledger: RunLedger,
+        scope: ContextProductScope,
+        sql: str,
+    ) -> None:
+        """Refuse a generated statement that reads past the product it was asked through."""
+        guard_result = self.query_gateway.guard.validate(
+            sql,
+            dialect=request.datasource.dialect,
+            user_defined_functions=await self.query_gateway.declared_routine_names(
+                session, request.datasource
+            ),
+        )
+        if not guard_result.valid:
+            # Not this rule's refusal to make: the gateway refuses it on its own terms, with its
+            # own violation, a few lines later.
+            return
+        table_ids = await resolve_referenced_table_ids(
+            session, request.datasource, guard_result.referenced_tables
+        )
+        if any(str(table_id) not in scope.table_ids for table_id in table_ids):
+            await self._persist_rejection(
+                session, request, ledger, CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE
+            )
+            raise AgentPolicyRejected(CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE)
 
     async def _reject(
         self,
