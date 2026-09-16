@@ -46,11 +46,13 @@ from aida.embedding_provider import (
     index_signature,
     resolve_embedding_provider,
 )
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit
 from aida.models import (
     Embedding,
     GlossaryTerm,
     MetadataColumn,
+    MetadataSchema,
     MetadataTable,
     Organization,
 )
@@ -65,7 +67,7 @@ _log = structlog.get_logger(__name__)
 #: type that reaches the index without a matching read path in retrieval is
 #: cost with no benefit, and one that reaches it carrying business values
 #: would be an INV-6 breach.
-INDEXED_OWNER_TYPES = ("TABLE", "COLUMN", "GLOSSARY_TERM")
+INDEXED_OWNER_TYPES = ("TABLE", "COLUMN", "ROUTINE", "GLOSSARY_TERM")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +110,7 @@ async def _indexable_objects(
 ) -> list[tuple[str, str, str]]:
     """`(owner_type, owner_id, text)` for everything worth embedding.
 
-    Three statements regardless of estate size -- one per owner type -- not
+    Four statements regardless of estate size -- one per owner type -- not
     one per object. Only ACTIVE objects: a deprecated table answering a
     semantic search is a wrong answer with a confident score.
     """
@@ -139,6 +141,30 @@ async def _indexable_objects(
     for column_id, name in (await session.execute(column_stmt)).all():
         rows.append(
             ("COLUMN", str(column_id), build_embedding_text(name=name, object_type="COLUMN"))
+        )
+
+    # R11-FP11: routines are retrieval candidates like tables and columns, and were the only
+    # kind the index did not cover: every question paid a provider call to embed them live
+    # (`retrieval_stages` logs that as `retrieval_vector_index_gap`). The text is the one the
+    # live path composes -- `schema.name`, the display name a ROUTINE hit carries -- so moving a
+    # routine into the index changes what it costs and not how it ranks.
+    routine_stmt = (
+        select(MetadataSchema.name, MetadataRoutine.id, MetadataRoutine.name)
+        .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+        .where(
+            MetadataRoutine.organization_id == organization_id,
+            MetadataRoutine.status == "ACTIVE",
+        )
+    )
+    if datasource_id is not None:
+        routine_stmt = routine_stmt.where(MetadataRoutine.datasource_id == datasource_id)
+    for schema_name, routine_id, name in (await session.execute(routine_stmt)).all():
+        rows.append(
+            (
+                "ROUTINE",
+                str(routine_id),
+                build_embedding_text(name=f"{schema_name}.{name}", object_type="ROUTINE"),
+            )
         )
 
     # Glossary terms are organization-wide rather than per-datasource, so a

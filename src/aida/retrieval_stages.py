@@ -427,9 +427,10 @@ async def run_vector_channel(
     "why was this ranked here" stays answerable.
 
     **The two paths are not interchangeable, and this said they were until
-    2026-09-12.** The index covers `INDEXED_OWNER_TYPES` only -- TABLE, COLUMN
-    and GLOSSARY_TERM -- so a TOOL candidate, which this platform does retrieve,
-    has no index entry and the persisted search cannot score it. It used to
+    2026-09-12.** The index covers `INDEXED_OWNER_TYPES` only -- TABLE, COLUMN,
+    ROUTINE (R11-FP11) and GLOSSARY_TERM -- so a TOOL candidate, which this
+    platform does retrieve, has no index entry and the persisted search cannot
+    score it. It used to
     leave the stage with no vector signal at all while the live path scored it,
     reported as `PERSISTED_INDEX / USABLE` with nothing saying a candidate class
     had been dropped. Measured on the AG-8 corpus, that cost 6 points of
@@ -529,11 +530,12 @@ async def run_vector_channel(
             freshness = replace(freshness, usable=False)
         else:
             # The index covers `vector_index_service.INDEXED_OWNER_TYPES` only
-            # -- TABLE, COLUMN and GLOSSARY_TERM. A candidate of any other
-            # type, and a TOOL is the one this platform actually retrieves,
-            # has no index entry, so the persisted search cannot score it and
-            # it silently left the stage with no vector signal at all. The
-            # live path embeds every candidate and scores all of them, which
+            # -- TABLE, COLUMN, ROUTINE and GLOSSARY_TERM. A candidate of any
+            # other type, and a TOOL is the one this platform actually
+            # retrieves, has no index entry, so the persisted search cannot
+            # score it and it silently left the stage with no vector signal
+            # at all. The live path embeds every candidate and scores all of
+            # them, which
             # is why this module's own docstring claiming the fallback "is the
             # same computation" was wrong: measured on the AG-8 corpus, using
             # the index cost 6 points of recall-within-bound purely by
