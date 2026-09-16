@@ -1631,6 +1631,7 @@ async def run_agent_analysis(
             agent_asset_version_id=(
                 caller_contract.ai_asset_version_id if caller_contract is not None else None
             ),
+            context_product_key=body.context_product_key,
         )
     except AgentClarificationRequired as exc:
         # Structured, because the caller has to *act* on this one: it names the

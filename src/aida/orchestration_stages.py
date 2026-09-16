@@ -70,6 +70,8 @@ class OrchestrationRequest:
     tool_parameters: dict[str, Any]
     requested_limit: int | None
     agent_asset_version_id: UUID | None = None
+    #: The published context product this question is asked through, if any.
+    context_product_key: str | None = None
 
     @property
     def organization_id(self) -> UUID:

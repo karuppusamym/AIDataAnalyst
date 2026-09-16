@@ -367,10 +367,19 @@ async def _ask(
     analyst: SecurityContext,
     settings: Settings,
 ) -> tuple[str, float]:
-    """Ask the question through Ask; answer with the tool it chose and the revenue it read."""
+    """Ask the question through Ask; answer with the tool it chose and the revenue it read.
+
+    Asked *through the published context product* (R11-FP12), so the answer stands on the tables
+    that product names and the tool version it declares eligible -- the step that ties publishing
+    context to answering from it, rather than the two happening to agree.
+    """
     response = await run_agent_analysis(
         datasource.id,
-        AgentAnalysisRequest(question=QUESTION, tool_parameters={"customer_id": 1}),
+        AgentAnalysisRequest(
+            question=QUESTION,
+            tool_parameters={"customer_id": 1},
+            context_product_key="customer-revenue",
+        ),
         context=analyst,
         session=session,
         settings=settings,

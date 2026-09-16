@@ -521,6 +521,10 @@ class AgentAnalysisRequest(ApiModel):
     preferred_tool_version_id: UUID | None = None
     tool_parameters: dict[str, Any] = Field(default_factory=dict)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
+    #: Ask through a published context product: the answer may then stand only on the tables it
+    #: names and the tool versions it declares eligible (R11-FP12), as MCP's `contextProductUri`
+    #: already scopes an agent's tool list.
+    context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class AgentAnalysisResponse(ApiModel):

@@ -23,7 +23,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, NoReturn
+from typing import Any, Final, NoReturn
 from uuid import UUID
 
 from sqlalchemy import select
@@ -77,6 +77,8 @@ from aida.model_gateway import (
 from aida.models import (
     AgentRun,
     AnalysisRun,
+    ContextProduct,
+    ContextProductVersion,
     DataSource,
     GovernedTool,
     GovernedToolVersion,
@@ -370,6 +372,76 @@ def run_token_charge(evidence: ModelCallEvidence, attempt_count: int) -> RunToke
             else "PROVIDER_REPORTED_PLUS_ESTIMATED_FAILED_ATTEMPTS"
         ),
     )
+
+
+CONTEXT_PRODUCT_UNAVAILABLE: Final = "CONTEXT_PRODUCT_NOT_AVAILABLE"
+CONTEXT_PRODUCT_FORBIDDEN: Final = "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextProductScope:
+    """What an answer asked through a published context product may stand on.
+
+    R11-FP12: a product names the tables an agent should read and the tool versions it declares
+    eligible. MCP already scopes an agent's tool list to a product it is read through; asking
+    through one over REST scoped nothing, so a curated product had no bearing on the answer.
+    Semantic candidates -- a glossary term, an ontology concept, a metric -- carry meaning rather
+    than data access and are left alone; what the product decides is which tables and which tool
+    versions this answer may use.
+    """
+
+    version_id: UUID
+    version: int
+    table_ids: frozenset[str]
+    tool_version_ids: frozenset[str]
+
+    @classmethod
+    def of(cls, version: ContextProductVersion) -> ContextProductScope:
+        return cls(
+            version_id=version.id,
+            version=version.version,
+            table_ids=frozenset(str(table_id) for table_id in version.table_ids),
+            tool_version_ids=frozenset(
+                str(tool_id) for tool_id in version.eligible_tool_version_ids
+            ),
+        )
+
+    def admits(self, hit: RetrievalHit) -> bool:
+        if hit.object_type == "GOVERNED_TOOL":
+            return hit.object_id in self.tool_version_ids
+        if hit.object_type == "TABLE":
+            # A table reached by graph expansion carries no `table_id` of its own, so the hit's
+            # id is what decides: a table the product does not name is not evidence here.
+            return hit.object_id in self.table_ids
+        table_id = hit.metadata.get("table_id")
+        if table_id is None:
+            return True
+        return str(table_id) in self.table_ids
+
+
+async def _load_published_context_product(
+    session: AsyncSession, request: OrchestrationRequest
+) -> ContextProductVersion | None:
+    """The published version of the product this question is asked through, or `None`.
+
+    `None` covers both "no such product in this organization" and "it has no published version":
+    neither is a context an answer may stand on, and telling them apart would report which
+    products exist to a caller who cannot read them.
+    """
+    key = request.context_product_key
+    if key is None:
+        return None
+    version: ContextProductVersion | None = await session.scalar(
+        select(ContextProductVersion)
+        .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+        .where(
+            ContextProduct.organization_id == request.organization_id,
+            ContextProduct.product_key == key,
+            ContextProductVersion.status == "PUBLISHED",
+        )
+        .limit(1)
+    )
+    return version
 
 
 class GovernedAgentOrchestrator:
@@ -780,6 +852,7 @@ class GovernedAgentOrchestrator:
         tool_parameters: dict[str, Any],
         requested_limit: int | None,
         agent_asset_version_id: UUID | None = None,
+        context_product_key: str | None = None,
     ) -> AgentOrchestrationResult:
         """Compose the six governed stages; hold no rule of its own.
 
@@ -808,6 +881,7 @@ class GovernedAgentOrchestrator:
             tool_parameters=tool_parameters,
             requested_limit=requested_limit,
             agent_asset_version_id=agent_asset_version_id,
+            context_product_key=context_product_key,
         )
         ledger = await self._open_run(session, request)
 
@@ -1006,6 +1080,28 @@ class GovernedAgentOrchestrator:
             question=request.question,
             preferred_tool_version_id=request.preferred_tool_version_id,
         )
+        scope: ContextProductScope | None = None
+        if request.context_product_key is not None:
+            # R11-FP12: asked through a product, the answer stands on that product's own
+            # references. A candidate it does not name is not evidence here, so it is dropped
+            # before the retrieval limit rather than after -- the cap then fills with what the
+            # product does name.
+            product_version = await _load_published_context_product(session, request)
+            if product_version is None:
+                await self._persist_rejection(
+                    session, request, ledger, CONTEXT_PRODUCT_UNAVAILABLE
+                )
+                raise AgentPolicyRejected(CONTEXT_PRODUCT_UNAVAILABLE)
+            roles = request.context.roles
+            allowed_roles = set(product_version.allowed_consumer_roles)
+            if "PlatformAdmin" not in roles and roles.isdisjoint(allowed_roles):
+                await self._persist_rejection(
+                    session, request, ledger, CONTEXT_PRODUCT_FORBIDDEN
+                )
+                raise AgentPolicyRejected(CONTEXT_PRODUCT_FORBIDDEN)
+            scope = ContextProductScope.of(product_version)
+            scored_candidates = [hit for hit in scored_candidates if scope.admits(hit)]
+
         retrieval_hits = scored_candidates[: self.settings.agent_retrieval_limit]
         rejected_candidates = scored_candidates[self.settings.agent_retrieval_limit :]
         _record_retrieval_decisions(
@@ -1030,13 +1126,18 @@ class GovernedAgentOrchestrator:
             await self._persist_rejection(session, request, ledger, "AMBIGUOUS_DEFINITION")
             raise AgentClarificationRequired(ambiguity_reason)
 
+        resolved_details: dict[str, Any] = {
+            "semantic_version": semantic_version,
+            "retrieval_evidence_count": len(retrieval_evidence),
+        }
+        if scope is not None:
+            # Which published context the answer was scoped to, in the trace the run keeps.
+            resolved_details["context_product_version_id"] = str(scope.version_id)
+            resolved_details["context_product_version"] = scope.version
         ledger.advance(
             RuntimeStage.RESOLVED,
             control_type="DETERMINISTIC",
-            details={
-                "semantic_version": semantic_version,
-                "retrieval_evidence_count": len(retrieval_evidence),
-            },
+            details=resolved_details,
             semantic_version=semantic_version,
         )
         return RetrievalOutcome(
