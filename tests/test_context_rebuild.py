@@ -20,6 +20,10 @@ in-memory SQLite through the real draft, review and decision routes, so it runs 
 * a routine tool is regenerated bound to the routine's new definition;
 * a second view's tool, description and lineage are left alone by the first view's change, so a
   rebuild updates what the change reached and reuses the rest;
+* a view that reads the redefined view is warned rather than blocked, so a change is visible one
+  hop down without stopping tools that still bind to what they were approved against;
+* a description a reviewer rejected waits for a person to author its replacement, and says so on
+  every later pass rather than counting a refusal it will repeat;
 * the scheduler pass is off by default and opens no session.
 """
 
@@ -46,6 +50,7 @@ from aida.context_rebuild import (
     CONTEXT_REBUILD_PRINCIPAL,
     RESHAPE_RELEASE_REASON,
     RETIREMENT_RELEASE_REASON,
+    WAIT_DESCRIPTION_AWAITING_AUTHOR,
     RebuildOutcome,
     organizations_needing_rebuild,
     run_context_rebuild,
@@ -81,6 +86,7 @@ from aida.models import (
 )
 from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.procedure_tool_api import ProcedureToolBlueprintRequest, create_procedure_tool_blueprint
+from aida.quality_coupling import check_tool_gate, fetch_open_incidents
 from aida.schemas import (
     AssetDescriptionDraftGenerate,
     ContextProductCreate,
@@ -1176,6 +1182,81 @@ async def test_a_rename_pointing_at_a_table_the_source_no_longer_has_is_not_foll
     outcome = await _rebuild(estate)
 
     assert (outcome.tools_rewritten, outcome.deprecations_proposed) == (0, 1), outcome.as_details()
+
+
+async def test_a_view_that_reads_a_redefined_view_is_warned_rather_than_blocked(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session, tool=True)
+    schema = await session.get(MetadataSchema, estate.view.schema_id)
+    assert schema is not None
+    derived = await seed_table(
+        session, estate.org, estate.datasource, schema, name="revenue_summary", object_type="VIEW"
+    )
+    await _columns(session, estate.org, derived, ("region", "varchar"), ("net_revenue", "numeric"))
+    session.add(
+        ViewLineageEdge(
+            organization_id=estate.org.id,
+            datasource_id=estate.datasource.id,
+            source_table="public.customer_revenue",
+            source_column="net_revenue",
+            target_table="public.revenue_summary",
+            target_column="net_revenue",
+            source_table_id=estate.view.id,
+            target_table_id=derived.id,
+            transformation_type="AGGREGATION",
+            confidence=0.9,
+            dialect="postgres",
+            sql_hash="h" * 64,
+            review_status="ACTIVE",
+            created_by="agent:lineage",
+        )
+    )
+    await session.commit()
+
+    await _redefine(estate)
+
+    # The view that changed is held: a tool over it may now answer something nobody approved.
+    changed = await _hold(estate, estate.view)
+    assert (changed.severity, changed.status) == ("CRITICAL", "OPEN")
+    # The view reading it has its own definition intact, so its tools keep running -- but the
+    # numbers moved underneath it, and that is now visible rather than silent.
+    downstream = await _hold(estate, derived)
+    assert (downstream.severity, downstream.status) == ("WARNING", "OPEN")
+    gate = check_tool_gate(
+        tool_id="tool-over-the-derived-view",
+        dependency_asset_ids=[str(derived.id)],
+        incidents=await fetch_open_incidents(
+            session, datasource=estate.datasource, table_ids=[derived.id]
+        ),
+    )
+    assert gate.action == "WARN"
+
+
+async def test_a_rejected_description_waits_for_a_person_instead_of_churning(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session, tool=True, description=True)
+    await _redefine(estate)
+    first = await _rebuild(estate)
+    assert first.descriptions_drafted == 1, first.as_details()
+
+    # A reviewer refuses the redraft. The next pass cannot propose anything else: the same
+    # evidence composes the same words, which the refusal rule refuses.
+    assert await _reject_rebuilt(estate, "ASSET_DESCRIPTION_DRAFT") == 1
+    assert await _approve_rebuilt(estate, "GOVERNED_TOOL_VERSION") == 1
+
+    second = await _rebuild(estate)
+
+    assert second.descriptions_drafted == 0, second.as_details()
+    assert second.waiting.get(WAIT_DESCRIPTION_AWAITING_AUTHOR) == 1, second.as_details()
+    # The hold stays: the published description is still written against the old definition.
+    incident = await _hold(estate, estate.view)
+    assert incident.status == "OPEN"
+
+    # And it says so the same way on every later pass, rather than counting a fresh refusal.
+    third = await _rebuild(estate)
+    assert third.waiting.get(WAIT_DESCRIPTION_AWAITING_AUTHOR) == 1, third.as_details()
 
 
 _OTHER_VIEW_SQL = "SELECT c.customer_id, c.region FROM public.customers c"

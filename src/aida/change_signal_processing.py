@@ -14,6 +14,11 @@ time, and routes each through machinery that already exists rather than a second
   or `context_rebuild` resolves it once nothing standing on the table is stale.
 * **A table that changed shape, or a view whose definition the source stopped providing**, opens
   a WARNING: tools still run, and say why they might be wrong.
+* **A view that reads a redefined view** gets that same WARNING, to a bounded depth. Its own
+  definition never moved, so nothing else here would notice it, yet its numbers moved with the
+  change upstream. It is warned rather than held: its tools still bind to the definition they
+  were approved against, and blocking every dependant of every edit would stop the platform
+  serving without making an answer more correct.
 * **A view or routine redefined, retired or returning** is left to the lineage agent, which
   re-examines any definition changed structurally since its newest edge (`lineage_agent`).
 * Permission and meaning signals are recorded as seen. A newly published ontology reaches the
@@ -46,7 +51,7 @@ from aida.change_signals import (
     SIGNAL_STRUCTURE_CHANGED,
 )
 from aida.events import record_audit
-from aida.models import DataQualityIncident, MetadataTable
+from aida.models import DataQualityIncident, MetadataTable, ViewLineageEdge
 from aida.security import SecurityContext
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +67,14 @@ ACTION_VIEW_DEFINITION_RETIRED: Final = "VIEW_DEFINITION_RETIRED"
 ACTION_LINEAGE_REEXAMINE: Final = "LINEAGE_REEXAMINE"
 ACTION_RECORDED: Final = "RECORDED"
 ACTION_SUBJECT_GONE: Final = "SUBJECT_GONE"
+#: A view that reads a redefined view answers differently without its own definition moving.
+ACTION_DEPENDENT_VIEW_WARNED: Final = "DEPENDENT_VIEW_WARNED"
+
+#: How far a redefinition is followed down the views that read it, and how many it may warn.
+#: Bounded by construction: the pass is batch-limited already, and a deep estate must not turn
+#: one signal into an unbounded traversal.
+DEPENDENT_VIEW_DEPTH: Final = 3
+DEPENDENT_VIEW_LIMIT: Final = 50
 
 _SEVERITY_RANK: Final = {"WARNING": 1, "CRITICAL": 2}
 _EVIDENCE_LIMIT: Final = 20
@@ -80,6 +93,10 @@ _SUMMARIES: Final = {
     ACTION_VIEW_DEFINITION_RETIRED: (
         "The source stopped providing this view's definition. Its lineage can no longer be "
         "checked against the source."
+    ),
+    ACTION_DEPENDENT_VIEW_WARNED: (
+        "A view this one reads was redefined in the source. Its own definition is unchanged, so "
+        "tools over it still run, and what they answer may have moved with the change upstream."
     ),
 }
 
@@ -115,6 +132,7 @@ class ProcessingOutcome:
     failed: int = 0
     incidents_opened: int = 0
     incidents_updated: int = 0
+    dependents_warned: int = 0
     actions: dict[str, int] = field(default_factory=dict)
 
     def as_details(self) -> dict[str, Any]:
@@ -123,6 +141,7 @@ class ProcessingOutcome:
             "failed": self.failed,
             "incidents_opened": self.incidents_opened,
             "incidents_updated": self.incidents_updated,
+            "dependents_warned": self.dependents_warned,
             "actions": dict(sorted(self.actions.items())),
         }
 
@@ -133,17 +152,40 @@ async def _hold(
     table = await session.get(MetadataTable, signal.subject_id)
     if table is None or table.organization_id != signal.organization_id:
         return ACTION_SUBJECT_GONE, None, None
-    fingerprint = source_change_fingerprint(signal.organization_id, table.id)
     change = {"signal_id": str(signal.id), "action": action}
     if signal.change_class is not None:
         # R11-FP16: the kind of change, so a rebuild can tell one a bound query survives.
         change["change_class"] = signal.change_class
+    incident_id, opened = await _upsert_incident(
+        session,
+        organization_id=signal.organization_id,
+        table=table,
+        action=action,
+        severity=severity,
+        now=now,
+        change=change,
+    )
+    return action, incident_id, opened
+
+
+async def _upsert_incident(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    table: MetadataTable,
+    action: str,
+    severity: str,
+    now: datetime,
+    change: dict[str, str],
+) -> tuple[UUID, bool]:
+    """Open this table's source-change incident, or fold the change into the open one."""
+    fingerprint = source_change_fingerprint(organization_id, table.id)
     incident = await session.scalar(
         select(DataQualityIncident).where(DataQualityIncident.fingerprint == fingerprint)
     )
     if incident is None:
         incident = DataQualityIncident(
-            organization_id=signal.organization_id,
+            organization_id=organization_id,
             datasource_id=table.datasource_id,
             table_id=table.id,
             policy_id=None,
@@ -158,7 +200,7 @@ async def _hold(
         )
         session.add(incident)
         await session.flush()
-        return action, incident.id, True
+        return incident.id, True
     reopened = incident.status == "RESOLVED"
     # A new change is new information: an acknowledged hold asks for attention again. Severity
     # only rises while the hold is open; a resolved one starts from this change.
@@ -174,7 +216,69 @@ async def _hold(
         incident.resolved_by = None
         incident.resolved_at = None
         incident.resolution_reason = None
-    return action, incident.id, reopened
+    return incident.id, reopened
+
+
+async def _warn_dependent_views(
+    session: AsyncSession, signal: MetadataChangeSignal, now: datetime
+) -> int:
+    """Warn the views that read a redefined view, to a bounded depth.
+
+    A redefinition reaches further than the object it names: a view selecting from the changed
+    view answers differently while its own definition, and every tool bound to it, stay exactly
+    as they were -- so nothing else in this module would notice. The hold on the changed view
+    stays CRITICAL, because that is where a tool can now be answering something it was never
+    approved for. A view downstream gets a WARNING instead: its tools still bind, its numbers
+    move with the change upstream, and blocking every dependant of every edit would stop the
+    platform serving without making an answer more correct.
+    """
+    seen: set[UUID] = {signal.subject_id}
+    frontier: list[UUID] = [signal.subject_id]
+    warned = 0
+    for _ in range(DEPENDENT_VIEW_DEPTH):
+        if not frontier or warned >= DEPENDENT_VIEW_LIMIT:
+            break
+        dependents = (
+            await session.scalars(
+                select(ViewLineageEdge.target_table_id)
+                .where(
+                    ViewLineageEdge.organization_id == signal.organization_id,
+                    ViewLineageEdge.source_table_id.in_(frontier),
+                    ViewLineageEdge.review_status == "ACTIVE",
+                )
+                .distinct()
+            )
+        ).all()
+        frontier = []
+        for table_id in dependents:
+            if table_id is None or table_id in seen:
+                continue
+            seen.add(table_id)
+            table = await session.get(MetadataTable, table_id)
+            if (
+                table is None
+                or table.organization_id != signal.organization_id
+                or table.status != "ACTIVE"
+            ):
+                continue
+            await _upsert_incident(
+                session,
+                organization_id=signal.organization_id,
+                table=table,
+                action=ACTION_DEPENDENT_VIEW_WARNED,
+                severity="WARNING",
+                now=now,
+                change={
+                    "signal_id": str(signal.id),
+                    "action": ACTION_DEPENDENT_VIEW_WARNED,
+                    "upstream_table_id": str(signal.subject_id),
+                },
+            )
+            warned += 1
+            frontier.append(table_id)
+            if warned >= DEPENDENT_VIEW_LIMIT:
+                break
+    return warned
 
 
 async def process_change_signals(
@@ -204,22 +308,29 @@ async def process_change_signals(
                 action, severity = decide(signal)
                 incident_id: UUID | None = None
                 opened: bool | None = None
+                dependents_warned = 0
                 if severity is not None:
                     action, incident_id, opened = await _hold(
                         session, signal, action, severity, effective_now
                     )
+                    if action == ACTION_VIEW_REDEFINED:
+                        dependents_warned = await _warn_dependent_views(
+                            session, signal, effective_now
+                        )
                 signal.status = "PROCESSED"
                 signal.processed_at = effective_now
                 signal.processed_by = CHANGE_SIGNAL_PROCESSOR_PRINCIPAL
                 signal.outcome = {
                     "action": action,
                     **({"incident_id": str(incident_id)} if incident_id is not None else {}),
+                    **({"dependents_warned": dependents_warned} if dependents_warned else {}),
                 }
         except Exception:  # noqa: BLE001 -- one signal must not stop the batch
             logger.exception("change_signal_processing_item_failed", signal_id=str(signal.id))
             outcome.failed += 1
             continue
         outcome.processed += 1
+        outcome.dependents_warned += dependents_warned
         outcome.actions[action] = outcome.actions.get(action, 0) + 1
         if opened is True:
             outcome.incidents_opened += 1

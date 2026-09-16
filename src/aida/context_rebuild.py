@@ -67,6 +67,8 @@ from sqlglot.errors import SqlglotError
 
 from aida.asset_description_service import (
     MINIMUM_EVIDENCE_FOR_REVIEW,
+    REFUSED_EVIDENCE,
+    REFUSED_TEXT,
     compose_draft_text,
     definition_moved,
     evidence_payload,
@@ -160,6 +162,12 @@ WAIT_PRODUCT_STALE: Final = "PRODUCT_STALE"
 WAIT_TABLE_NOT_STANDING: Final = "TABLE_NOT_STANDING"
 WAIT_TOOL_COLUMNS_MISSING: Final = "TOOL_COLUMNS_MISSING"
 WAIT_RETIRED_TABLE_IN_USE: Final = "RETIRED_TABLE_IN_USE"
+#: A person refused this description already, so no pass can draft its replacement.
+WAIT_DESCRIPTION_AWAITING_AUTHOR: Final = "DESCRIPTION_AWAITING_AUTHOR"
+#: The refusal codes that mean a reviewer rejected exactly what a rebuild would propose again.
+_DESCRIPTION_REJECTED_CODES: Final = frozenset(
+    {f"DESCRIPTION_REFUSED_{REFUSED_TEXT}", f"DESCRIPTION_REFUSED_{REFUSED_EVIDENCE}"}
+)
 
 #: Why a DEPRECATE review is proposed.
 DEPRECATE_TABLE_RETIRED: Final = "TABLE_RETIRED"
@@ -736,7 +744,16 @@ async def _rebuild_descriptions(
             async with session.begin_nested():
                 await _regenerate_description(session, organization_id, context, table, previous_id)
         except _RebuildRefused as refused:
-            outcome.block(refused.code)
+            if refused.code in _DESCRIPTION_REJECTED_CODES:
+                # A reviewer already refused this proposal, and a redraft is the same words on
+                # the same evidence, so the refusal rule refuses it again: no pass can move this
+                # on. The hold stays -- the published description is still written against a
+                # definition that moved, and that is what a hold is for -- but it is reported as
+                # waiting for a person to author the replacement rather than as a refusal the
+                # next pass will repeat, which read as churn and named no way out.
+                outcome.wait(WAIT_DESCRIPTION_AWAITING_AUTHOR)
+            else:
+                outcome.block(refused.code)
             continue
         except Exception:  # noqa: BLE001 -- one rebuild must not stop the pass
             logger.exception("context_rebuild_description_failed", table_id=str(table_id))
