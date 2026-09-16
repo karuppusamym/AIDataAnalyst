@@ -3,12 +3,18 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import null, select, update
+from sqlalchemy import func, null, select, update
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from aida.change_signal_models import MetadataChangeSignal
 from aida.config import get_settings
 from aida.db import session_factory
+from aida.discovery_receipt import (
+    STREAM_COMPLETE,
+    STREAM_INTERRUPTED,
+    DiscoveryReceipt,
+)
 from aida.events import record_audit, record_outbox
 from aida.ingestion import (
     EnvelopeScope,
@@ -67,7 +73,9 @@ async def _batch_control_status(batch_id: UUID) -> str | None:
     return None
 
 
-async def _mark_batch_failed(batch_id: UUID, exc: Exception) -> None:
+async def _mark_batch_failed(
+    batch_id: UUID, exc: Exception, receipt: DiscoveryReceipt | None = None
+) -> None:
     async with session_factory() as session:
         batch = await session.get(MetadataIngestionBatch, batch_id)
         # A batch an operator has already paused or cancelled (or that finished)
@@ -84,6 +92,10 @@ async def _mark_batch_failed(batch_id: UUID, exc: Exception) -> None:
                 run.status = "FAILED"
                 run.error_class = type(exc).__name__
                 run.error_message = "chunked metadata ingestion failed"
+                # R11-FP02: the chunks that did land keep their counts, marked as a
+                # stream that did not finish -- never left looking complete.
+                if receipt is not None:
+                    run.discovery_receipt = receipt.as_json(STREAM_INTERRUPTED)
         await session.commit()
 
 
@@ -170,6 +182,7 @@ async def _process_chunk(
     envelope_scope: EnvelopeScope,
     *,
     record_changes: bool,
+    receipt: DiscoveryReceipt | None = None,
 ) -> None:
     async with session_factory() as session:
         batch = await session.get(MetadataIngestionBatch, batch_id)
@@ -212,6 +225,11 @@ async def _process_chunk(
             analysis_run_id=run.id,
         )
         if record_changes and prior_status != "PROCESSED":
+            # R11-FP02: counted once, on the pass that records changes. The reapply
+            # pass below re-persists the same objects to resolve cross-chunk keys, and
+            # counting them again would report a source twice its size.
+            if receipt is not None:
+                receipt.observe_batch(discovery, {})
             chunk.change_counts = {
                 key: counts[key] + extension_counts[key]
                 for key in ("created_objects", "changed_objects")
@@ -223,7 +241,10 @@ async def _process_chunk(
 
 
 async def _complete_batch(
-    batch_id: UUID, scope: SnapshotScope, envelope_scope: EnvelopeScope
+    batch_id: UUID,
+    scope: SnapshotScope,
+    envelope_scope: EnvelopeScope,
+    receipt: DiscoveryReceipt | None = None,
 ) -> dict[str, Any]:
     async with session_factory() as session:
         batch = await session.scalar(
@@ -272,6 +293,20 @@ async def _complete_batch(
                 created_table_ids=scope.created_table_ids,
                 deprecated_table_ids=deprecation_result.deprecated_table_ids,
             )
+        if receipt is not None:
+            # R11-FP02: only a FULL batch reconciles what it did not see, exactly as
+            # only a FULL pull run does; an INCREMENTAL one says so and retires nothing.
+            if batch.snapshot_type == "FULL":
+                receipt.record_reconciliation(deprecated=deprecated, retained_out_of_scope=0)
+            change_rows = await session.execute(
+                select(MetadataChangeSignal.signal_type, func.count())
+                .where(MetadataChangeSignal.analysis_run_id == run.id)
+                .group_by(MetadataChangeSignal.signal_type)
+            )
+            receipt.record_changes(
+                {signal_type: int(count) for signal_type, count in change_rows.all()}
+            )
+            run.discovery_receipt = receipt.as_json(STREAM_COMPLETE)
         object_counts = {**scope.object_counts(), **envelope_scope.object_counts()}
         change_counts = {
             "created_objects": created,
@@ -345,6 +380,9 @@ async def _complete_batch(
 @activity.defn(name="process_metadata_ingestion_batch")
 async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
     batch_uuid = UUID(batch_id)
+    # R11-FP02: declared before the first thing that can fail, so a batch that never got as
+    # far as reading its own manifest still takes the failure path rather than an unbound name.
+    receipt: DiscoveryReceipt | None = None
     try:
         async with session_factory() as session:
             batch = await session.get(MetadataIngestionBatch, batch_uuid)
@@ -369,6 +407,20 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
             batch.status = "PROCESSING"
             batch.error_class = None
             batch.error_message = None
+            # R11-FP02: the same receipt a pulled run keeps, for a snapshot that was
+            # pushed. `selection_fingerprint` is None because this path applies no
+            # discovery selection -- it persists what the sender sent -- and `invisible`
+            # stays None because a sender cannot be asked what it left out: the receipt
+            # reports UNKNOWN rather than claiming nothing was held back.
+            receipt = DiscoveryReceipt(
+                mode=batch.snapshot_type,
+                selection_fingerprint=None,
+                capabilities={
+                    **(datasource.capabilities or {}),
+                    "canonical_push": True,
+                    "chunked_ingestion": True,
+                },
+            )
             if batch.analysis_run_id:
                 run = await session.get(AnalysisRun, batch.analysis_run_id)
                 if run is not None:
@@ -388,7 +440,12 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
             if control is not None:
                 raise BatchControlSignal(control)
             await _process_chunk(
-                batch_uuid, chunk_id, scope, envelope_scope, record_changes=True
+                batch_uuid,
+                chunk_id,
+                scope,
+                envelope_scope,
+                record_changes=True,
+                receipt=receipt,
             )
             if activity.in_activity():
                 activity.heartbeat(
@@ -407,7 +464,7 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
             await _process_chunk(
                 batch_uuid, chunk_id, scope, envelope_scope, record_changes=False
             )
-        return await _complete_batch(batch_uuid, scope, envelope_scope)
+        return await _complete_batch(batch_uuid, scope, envelope_scope, receipt)
     except BatchControlSignal as signal:
         # The operator already owns the batch's status (PAUSED/CANCELLED); return
         # cleanly so the workflow completes without retrying and without marking
@@ -415,8 +472,8 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
         # on resume.
         return {"batch_id": str(batch_uuid), "status": signal.status, "stopped": True}
     except BatchContractError as exc:
-        await _mark_batch_failed(batch_uuid, exc)
+        await _mark_batch_failed(batch_uuid, exc, receipt)
         raise ApplicationError(str(exc), type="BatchContractError", non_retryable=True) from exc
     except Exception as exc:
-        await _mark_batch_failed(batch_uuid, exc)
+        await _mark_batch_failed(batch_uuid, exc, receipt)
         raise
