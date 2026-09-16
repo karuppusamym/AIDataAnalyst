@@ -347,6 +347,22 @@ class Connector(ABC):
         """
         return False
 
+    async def count_invisible_objects(self) -> dict[str, int] | None:
+        """R11-FP02: how many objects in scope this login may not see, by kind -- or `None`.
+
+        A source's metadata is itself permission-filtered. PostgreSQL's `information_schema`
+        shows a role only what it holds some privilege on, so a run that read 40 tables of a
+        400-table schema returns exactly what a complete run of a 40-table schema returns:
+        every count in the receipt is right, and the estate it describes is a third of the
+        real one. Where a connector can ask the source the unfiltered question -- for
+        PostgreSQL, `pg_class` is readable by every role -- it answers here.
+
+        `None` means the source cannot be asked, which is *not* zero: the receipt records it
+        as UNKNOWN rather than as nothing hidden. Value-free, and deliberately counts only:
+        the name of an object this login may not read is not ours to publish.
+        """
+        return None
+
     async def discover_streaming(
         self, *, batch_size: int = 500
     ) -> AsyncIterator[tuple[DiscoveredCatalog, ...]]:

@@ -8,8 +8,9 @@ route that closes it:
 
 * `AGENT` -- bounded work an existing task agent does (the lineage agent's backlog);
 * `HUMAN_REVIEW` -- a decision a person makes in an existing queue;
-* `SOURCE_ACCESS` -- outside Atlas: the source withholds or truncates, so retrying is pointless and
-  never happens; granting read access and rescanning closes it;
+* `SOURCE_ACCESS` -- outside Atlas: the source withholds or truncates, or hides an object from
+  this principal entirely, so retrying is pointless and never happens; granting read access and
+  rescanning closes it;
 * `OPERATIONS` -- a pass an operator has not turned on, or that is behind;
 * `EXPLAINED` -- terminal: recorded once with its reason, re-examined only when the source changes.
 
@@ -35,7 +36,7 @@ from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE
 from aida.config import Settings
 from aida.envelope_models import AVAILABLE, UNAVAILABLE, MetadataRoutine, MetadataViewDefinition
 from aida.ingest_screening import CLEAN
-from aida.models import DataQualityIncident, DataSource, ViewLineageEdge
+from aida.models import AnalysisRun, DataQualityIncident, DataSource, ViewLineageEdge
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.routine_call_descent import CALLEE_BODY_WITHHELD, CALLEE_NOT_CAPTURED
 from aida.schemas import ApiModel
@@ -93,6 +94,15 @@ GAP_DEFINITIONS: Final[dict[str, tuple[str, str, str]]] = {
         "data steward",
         "Tables held because the source changed them. Governed tools over them fail closed until "
         "a steward confirms and resolves the hold.",
+    ),
+    "SOURCE_OBJECTS_INVISIBLE": (
+        "SOURCE_ACCESS",
+        "source administrator",
+        "Objects the source holds that the scanning principal may not see at all. They are not "
+        "in the catalog, so no other gap can count them and no answer can mention them -- the "
+        "last completed run asked the source's own catalog how many it kept back. Granting read "
+        "access and rescanning closes it; a source that cannot be asked reports none rather "
+        "than a false zero.",
     ),
     "CHANGE_SIGNALS_PENDING": (
         "OPERATIONS",
@@ -330,6 +340,45 @@ async def footprint_gaps(
             )
             .group_by(DataQualityIncident.datasource_id),
         )
+        # R11-FP02: what the last completed run was told it may not see. Read from that run's
+        # own receipt rather than recounted, so the figure is the one the run recorded and a
+        # source that could not be asked (`invisible: null`) contributes nothing.
+        latest_run = (
+            select(
+                AnalysisRun.datasource_id,
+                func.max(AnalysisRun.updated_at).label("finished_at"),
+            )
+            .where(
+                AnalysisRun.organization_id == organization_id,
+                AnalysisRun.datasource_id.in_(ids),
+                AnalysisRun.status == "COMPLETED",
+            )
+            .group_by(AnalysisRun.datasource_id)
+            .subquery()
+        )
+        receipt_rows = (
+            await session.execute(
+                select(AnalysisRun.datasource_id, AnalysisRun.discovery_receipt).join(
+                    latest_run,
+                    (AnalysisRun.datasource_id == latest_run.c.datasource_id)
+                    & (AnalysisRun.updated_at == latest_run.c.finished_at),
+                )
+            )
+        ).all()
+        counts["SOURCE_OBJECTS_INVISIBLE"] = {}
+        for datasource_id, receipt in receipt_rows:
+            if datasource_id is None or not isinstance(receipt, dict):
+                continue
+            kinds = receipt.get("kinds")
+            if not isinstance(kinds, dict):
+                continue
+            hidden = sum(
+                int(counted.get("invisible") or 0)
+                for counted in kinds.values()
+                if isinstance(counted, dict)
+            )
+            if hidden:
+                counts["SOURCE_OBJECTS_INVISIBLE"][datasource_id] = hidden
         pending_rows = (
             await session.execute(
                 select(

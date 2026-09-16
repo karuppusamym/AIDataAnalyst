@@ -41,6 +41,7 @@ from aida.classification_feed import (
 )
 from aida.config import get_settings
 from aida.connectors.base import (
+    Connector,
     ConnectorValueProfilingUnsupported,
     DiscoveredCatalog,
     DiscoveredColumn,
@@ -1246,6 +1247,20 @@ async def _mark_run_cancelled(run_uuid: UUID) -> None:
         await session.commit()
 
 
+async def _count_invisible(connector: Connector) -> dict[str, int] | None:
+    """R11-FP02: ask the source how much of itself this login may not see, or give up quietly.
+
+    A connector that cannot ask answers `None`, and so does one whose attempt fails: the run
+    goes on reading what it is allowed to, and the receipt says UNKNOWN rather than claiming
+    nothing is hidden. The failure is logged, because "we could not ask" is worth knowing.
+    """
+    try:
+        return await connector.count_invisible_objects()
+    except Exception:  # noqa: BLE001 -- asking is best-effort; a run must not fail over it
+        logger.warning("discovery_invisible_count_failed", exc_info=True)
+        return None
+
+
 async def _interrupt_receipt(run_uuid: UUID, receipt: DiscoveryReceipt) -> None:
     """R11-FP02: a cancelled run keeps the batches its receipt already counted, marked as
     not finished -- never left looking like a stream still running."""
@@ -1355,6 +1370,11 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             selection_fingerprint=selection.fingerprint(),
             capabilities=asdict(connector.capabilities),
             selection_pushed_down=pushed_down,
+            # R11-FP02: what this run's login may not see, asked once, before the stream. A
+            # source that cannot answer leaves it None, which the receipt reports as UNKNOWN
+            # rather than as nothing hidden; a failure to ask is the same answer, and never
+            # fails a run that can still read what it is allowed to.
+            invisible=await _count_invisible(connector),
         )
         created_objects_total = 0
         changed_objects_total = 0

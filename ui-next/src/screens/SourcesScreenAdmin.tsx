@@ -111,12 +111,23 @@ export function receiptWords(receipt: unknown): string | null {
   const body = receipt as {
     stream?: { state?: string; batches?: number };
     facets?: { view_definitions?: ReceiptCode; routine_bodies?: ReceiptCode };
+    kinds?: Record<string, { invisible?: number | null }>;
     changes?: Record<string, number>;
   };
   const parts = [
     codeWords("view code", body.facets?.view_definitions),
     codeWords("routine code", body.facets?.routine_bodies),
   ].filter((part): part is string => part !== null);
+  // R11-FP02: what the source holds that this run's login may not see. Only stated when the
+  // source could be asked: a null is "we could not ask", which is not "nothing is hidden".
+  const invisible = Object.entries(body.kinds ?? {})
+    .map(([kind, counts]) => [kind, counts?.invisible ?? 0] as const)
+    .filter(([, count]) => count > 0);
+  if (invisible.length > 0) {
+    const total = invisible.reduce((sum, [, count]) => sum + count, 0);
+    const detail = invisible.map(([kind, count]) => `${count} ${kind.toLowerCase().replace(/_/g, " ")}`);
+    parts.push(`${total} object(s) this login may not see: ${detail.join(", ")}`);
+  }
   // R11-FP15: what this run found changed, by kind of change.
   const changes = Object.entries(body.changes ?? {}).filter(([, count]) => count > 0);
   if (changes.length > 0) {

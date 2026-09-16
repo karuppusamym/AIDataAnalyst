@@ -20,6 +20,7 @@ const KIND_WORDS: Record<string, string> = {
   LINEAGE_AWAITING_PARSE: "Lineage waiting to be parsed",
   LINEAGE_UNPARSED_STATEMENTS: "Statements lineage cannot read",
   LINEAGE_AWAITING_REVIEW: "Lineage waiting for review",
+  SOURCE_OBJECTS_INVISIBLE: "Objects this login may not see",
   SOURCE_CHANGE_HOLDS: "Tables held after a source change",
   CHANGE_SIGNALS_PENDING: "Source changes not yet processed",
 };

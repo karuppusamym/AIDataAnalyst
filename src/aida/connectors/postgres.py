@@ -608,6 +608,40 @@ _GRANT_BATCH_SQL = (
 
 
 
+# R11-FP02: what this login may not see. `pg_class` is readable by every role, so the
+# unfiltered estate can be counted even where `information_schema` hides most of it.
+#
+# Deliberately only the kinds whose roster *is* permission-filtered. `_TABLE_ROSTER_SQL` reads
+# `information_schema.tables`, so a table or view this role holds no privilege on never reaches
+# discovery -- that is what is counted here, as the exact negation of that view's own visibility
+# rule. Materialized views and routines are read from `pg_class`/`pg_proc` directly
+# (`_MATERIALIZED_VIEW_ROSTER_SQL`, `_ROUTINE_SQL`), which every role may read, so none of them
+# is ever hidden from discovery and counting the ones this role cannot SELECT or EXECUTE would
+# report a gap that does not exist.
+_INVISIBLE_TABLE_SQL = """
+    -- `relkind` is PostgreSQL's `"char"`, which asyncpg hands back as bytes; ::text keeps
+    -- the lookup below reading the letter the catalog means.
+    SELECT c.relkind::text AS relkind, COUNT(*) AS invisible
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'f')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg\\_toast%' ESCAPE '\\'
+      AND n.nspname NOT LIKE 'pg\\_temp%' ESCAPE '\\'
+      AND NOT (
+          pg_has_role(c.relowner, 'USAGE')
+          OR has_table_privilege(
+              c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+          )
+          OR has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+      )
+    GROUP BY c.relkind
+"""
+
+#: `pg_class.relkind` as a selection kind. A foreign table is a table Atlas reads as one.
+_RELKIND_TO_KIND = {"r": "TABLE", "p": "TABLE", "f": "TABLE", "v": "VIEW"}
+
+
 class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
@@ -660,6 +694,27 @@ class PostgresConnector(SqlExecutor):
         """A discovery query, restricted to the pushed-down schema scope if there is one."""
         scoped, bound = scoped_postgres_query(sql, self._schema_scope, arguments)
         return list(await connection.fetch(scoped, *bound))
+
+    async def count_invisible_objects(self) -> dict[str, int] | None:
+        """R11-FP02: objects in the pushed-down scope this login holds no privilege on.
+
+        Read from `pg_class`, which every role may read, so the answer covers the whole
+        database rather than the part `information_schema` returns. Tables and views only --
+        see `_INVISIBLE_TABLE_SQL` for why a materialized view or a routine is never hidden
+        from this connector. The schema scope applies here exactly as it does to every other
+        query, so a schema the selection excludes is not counted as hidden: it was not asked
+        for, which is a different fact.
+        """
+        connection = await asyncpg.connect(self._dsn, command_timeout=self._command_timeout)
+        try:
+            counts: dict[str, int] = {}
+            for relkind, invisible in await self._fetch(connection, _INVISIBLE_TABLE_SQL):
+                kind = _RELKIND_TO_KIND.get(relkind)
+                if kind is not None and invisible:
+                    counts[kind] = counts.get(kind, 0) + int(invisible)
+            return counts
+        finally:
+            await connection.close()
 
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
         connection = await asyncpg.connect(self._dsn, command_timeout=self._command_timeout)

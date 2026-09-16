@@ -505,4 +505,24 @@ describe("run receipt (R11-FP02)", () => {
       receiptWords({ stream: { state: "COMPLETE", batches: 1 }, changes: { DEFINITION_CHANGED: 2, DEPRECATED: 1 } }),
     ).toBe("3 change signal(s): 2 definition changed, 1 deprecated");
   });
+
+  it("says how much of the source this login may not see, and stays quiet when it cannot be asked", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        kinds: {
+          TABLE: { discovered: 4, excluded: 0, invisible: 412 },
+          VIEW: { discovered: 1, excluded: 0, invisible: 3 },
+        },
+      }),
+    ).toBe("415 object(s) this login may not see: 412 table, 3 view");
+    // A source that could not be asked reports null per kind, which is not a claim of none.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        kinds: { TABLE: { discovered: 4, excluded: 0, invisible: null } },
+      }),
+    ).toBeNull();
+  });
 });

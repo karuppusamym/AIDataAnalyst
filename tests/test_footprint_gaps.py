@@ -22,7 +22,7 @@ from aida.authorization_gate import AuthorizationDenied
 from aida.change_signal_models import MetadataChangeSignal
 from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
 from aida.footprint_gaps import GAP_DEFINITIONS, footprint_gaps
-from aida.models import DataQualityIncident
+from aida.models import AnalysisRun, DataQualityIncident
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from tests.support.task_agents import (
     agent_settings,
@@ -207,3 +207,85 @@ async def test_each_gap_is_counted_routed_and_hidden_past_the_gate(
     assert listed.oldest_pending_signal_minutes == 30
     # The denied datasource's withheld routine is in no count, total included.
     assert result.totals["CODE_WITHHELD"] == 1
+
+
+async def test_what_the_scanning_login_may_not_see_is_a_gap_with_a_route(
+    session: AsyncSession,
+) -> None:
+    """R11-FP02: objects outside the catalog entirely, counted from the last run's receipt."""
+    org, datasource, _ = await seed_estate(session)
+
+    def run(status: str, at: datetime, invisible: dict[str, int | None]) -> AnalysisRun:
+        return AnalysisRun(
+            id=uuid4(),
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            mode="FULL",
+            status=status,
+            created_at=at,
+            updated_at=at,
+            discovery_receipt={
+                "kinds": {
+                    kind: {"discovered": 1, "excluded": 0, "invisible": hidden}
+                    for kind, hidden in invisible.items()
+                }
+            },
+        )
+
+    session.add_all(
+        [
+            # An older run saw more; the count follows the last completed one, not the worst.
+            run("COMPLETED", NOW - timedelta(days=2), {"TABLE": 900}),
+            run("COMPLETED", NOW - timedelta(hours=1), {"TABLE": 412, "VIEW": 3}),
+            # A run still going says nothing yet.
+            run("RUNNING", NOW, {"TABLE": 1_000}),
+        ]
+    )
+    await session.commit()
+
+    result = await footprint_gaps(
+        session,
+        context=human(org, "ops-1", frozenset({"Operations"})),
+        settings=agent_settings(),
+        organization_id=org.id,
+        now=NOW,
+    )
+
+    (listed,) = result.datasources
+    (gap,) = [item for item in listed.gaps if item.kind == "SOURCE_OBJECTS_INVISIBLE"]
+    assert gap.count == 415
+    assert (gap.resolution, gap.owner) == ("SOURCE_ACCESS", "source administrator")
+
+
+async def test_a_source_that_could_not_be_asked_reports_no_invisible_gap(
+    session: AsyncSession,
+) -> None:
+    """`invisible: null` is "we could not ask", and must never be counted as none hidden."""
+    org, datasource, _ = await seed_estate(session)
+    session.add(
+        AnalysisRun(
+            id=uuid4(),
+            organization_id=org.id,
+            datasource_id=datasource.id,
+            mode="FULL",
+            status="COMPLETED",
+            created_at=NOW,
+            updated_at=NOW,
+            discovery_receipt={
+                "kinds": {"TABLE": {"discovered": 4, "excluded": 0, "invisible": None}}
+            },
+        )
+    )
+    await session.commit()
+
+    result = await footprint_gaps(
+        session,
+        context=human(org, "ops-1", frozenset({"Operations"})),
+        settings=agent_settings(),
+        organization_id=org.id,
+        now=NOW,
+    )
+
+    (listed,) = result.datasources
+    assert [gap for gap in listed.gaps if gap.kind == "SOURCE_OBJECTS_INVISIBLE"] == []
+    assert "SOURCE_OBJECTS_INVISIBLE" not in result.totals

@@ -91,9 +91,11 @@ def test_the_receipt_counts_kinds_and_keeps_withheld_code_apart_from_captured() 
     receipt.observe_batch(_batch("retail"), {"VIEW": 2})
     body = receipt.as_json("COMPLETE")
 
-    assert body["kinds"]["TABLE"] == {"discovered": 1, "excluded": 0}
-    assert body["kinds"]["VIEW"] == {"discovered": 3, "excluded": 2}
-    assert body["kinds"]["PROCEDURE"] == {"discovered": 1, "excluded": 0}
+    # R11-FP02: `invisible` is None here -- this source was never asked what it hides, which
+    # is not the same claim as "nothing".
+    assert body["kinds"]["TABLE"] == {"discovered": 1, "excluded": 0, "invisible": None}
+    assert body["kinds"]["VIEW"] == {"discovered": 3, "excluded": 2, "invisible": None}
+    assert body["kinds"]["PROCEDURE"] == {"discovered": 1, "excluded": 0, "invisible": None}
     assert body["facets"]["view_definitions"] == {
         "support": "SUPPORTED",
         "captured": 2,
@@ -240,3 +242,26 @@ async def test_a_run_that_fails_mid_stream_keeps_an_interrupted_receipt(
     assert receipt["kinds"]["VIEW"]["discovered"] == 3
     # A FULL run that never saw its whole stream reconciles nothing.
     assert receipt["reconciliation"] == {"performed": False, "reason": "STREAM_NOT_FINISHED"}
+
+
+def test_what_the_login_may_not_see_is_counted_apart_from_what_it_returned() -> None:
+    """R11-FP02: a source that can be asked says how much of itself it kept back."""
+    receipt = DiscoveryReceipt(
+        mode="FULL",
+        selection_fingerprint=None,
+        capabilities={"views": True, "routines": True},
+        invisible={"TABLE": 412, "MATERIALIZED_VIEW": 3},
+    )
+
+    receipt.observe_batch(_batch("retail"), {})
+    body = receipt.as_json("COMPLETE")
+
+    assert body["kinds"]["TABLE"] == {"discovered": 1, "excluded": 0, "invisible": 412}
+    # A kind this run returned none of still appears when the source hides some of it.
+    assert body["kinds"]["MATERIALIZED_VIEW"] == {
+        "discovered": 0,
+        "excluded": 0,
+        "invisible": 3,
+    }
+    # Asked and told none is zero, which is a different answer from never asked.
+    assert body["kinds"]["VIEW"]["invisible"] == 0

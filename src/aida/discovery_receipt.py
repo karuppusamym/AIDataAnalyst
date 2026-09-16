@@ -5,8 +5,8 @@ kind, or how completely. "We scanned the source" and "we scanned the source but 
 bodies were withheld from our principal" read the same in those counters. The receipt keeps them
 apart:
 
-* per object kind, how many the source returned into scope and how many the selection left out
-  (R11-FP01);
+* per object kind, how many the source returned into scope, how many the selection left
+  out (R11-FP01), and how many exist that this run's login may not see at all;
 * per facet, whether the connector collects it at all (`SUPPORTED` / `UNSUPPORTED`, from its own
   capability flags, which INV-9 keeps honest) and, for code -- view definitions and routine
   bodies -- how much arrived, how much was withheld, and how much was truncated;
@@ -29,7 +29,9 @@ from typing import Any, Final
 from aida.connectors.base import DiscoveredCatalog
 from aida.discovery_selection import routine_kind, table_kind
 
-RECEIPT_VERSION: Final = 1
+#: 2 (R11-FP02) adds `invisible` to every kind. A reader of a version-1 receipt finds the
+#: key absent, which reads the same as `null` does: that run never asked.
+RECEIPT_VERSION: Final = 2
 STREAM_IN_PROGRESS: Final = "IN_PROGRESS"
 STREAM_COMPLETE: Final = "COMPLETE"
 STREAM_INTERRUPTED: Final = "INTERRUPTED"
@@ -62,6 +64,9 @@ class DiscoveryReceipt:
     changes: dict[str, int] = field(default_factory=dict)
     #: R11-FP01: whether the connector took the selection's schema scope into its own queries.
     selection_pushed_down: bool = False
+    #: R11-FP02: per kind, how many objects in scope this run's login may not see; `None` where
+    #: the source cannot be asked, which is not the same as none hidden.
+    invisible: Mapping[str, int] | None = None
 
     def observe_batch(
         self, catalogs: Iterable[DiscoveredCatalog], excluded: Mapping[str, int]
@@ -114,7 +119,8 @@ class DiscoveryReceipt:
             # Only a FULL run that saw its whole stream may reconcile what it did not see.
             reason = "INCREMENTAL_MODE" if self.mode != "FULL" else "STREAM_NOT_FINISHED"
             reconciliation = {"performed": False, "reason": reason}
-        kinds = sorted(set(self.discovered) | set(self.excluded))
+        invisible = self.invisible
+        kinds = sorted(set(self.discovered) | set(self.excluded) | set(invisible or {}))
         return {
             "receipt_version": RECEIPT_VERSION,
             "mode": self.mode,
@@ -125,6 +131,8 @@ class DiscoveryReceipt:
                 kind: {
                     "discovered": self.discovered.get(kind, 0),
                     "excluded": self.excluded.get(kind, 0),
+                    # R11-FP02: `None` is "the source cannot say", never zero.
+                    "invisible": (None if invisible is None else invisible.get(kind, 0)),
                 }
                 for kind in kinds
             },
