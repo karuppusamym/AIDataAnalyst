@@ -72,12 +72,13 @@ class _ScalarResult:
 
 class _RetrievalSession:
     """Answers hybrid_retrieve's sequential fetches in call order: three
-    `scalars()` calls (tables, columns, dbt project ids) and six `execute()`
-    calls (governed tool versions, business annotations, SM-2 semantic-metric
-    term bindings, SM-2 glossary-term semantic bindings, R11-FP11 routines,
-    R11-FP09 published ontology versions). Leaving dbt_project_ids empty (the
-    default) short-circuits the dbt-resource branch, which otherwise issues two
-    further fetches; leaving routine_rows empty skips the routine parameter and
+    `scalars()` calls (tables, columns, dbt project ids) and seven `execute()`
+    calls (R11-FP11 view definitions, governed tool versions, business
+    annotations, SM-2 semantic-metric term bindings, SM-2 glossary-term semantic
+    bindings, R11-FP11 routines, R11-FP09 published ontology versions). Leaving
+    dbt_project_ids empty (the default) short-circuits the dbt-resource branch,
+    which otherwise issues two further fetches; leaving routine_rows empty skips
+    the routine parameter and
     lineage fetches the same way, and ontology_rows empty skips the mapping
     target fetches.
     """
@@ -87,6 +88,7 @@ class _RetrievalSession:
         *,
         table_rows: list[object] | None = None,
         column_rows: list[object] | None = None,
+        view_definition_rows: list[tuple[object, object]] | None = None,
         tool_rows: list[tuple[object, object]] | None = None,
         biz_rows: list[tuple[object, ...]] | None = None,
         dbt_project_ids: list[object] | None = None,
@@ -101,6 +103,7 @@ class _RetrievalSession:
             dbt_project_ids or [],
         ]
         self._execute_queue: list[list[tuple[object, ...]]] = [
+            view_definition_rows or [],
             tool_rows or [],
             biz_rows or [],
             metric_term_rows or [],

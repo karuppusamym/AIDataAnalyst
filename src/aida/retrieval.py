@@ -65,6 +65,7 @@ the hit type every caller consumes, and the composition's order.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -77,7 +78,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
 from aida.config import Settings
-from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataRoutineParameter
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataRoutineParameter,
+    MetadataViewDefinition,
+)
 from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
     BusinessDomain,
@@ -165,6 +171,11 @@ def _bm25_score(query_tokens: list[str], candidate_text: str) -> float:
         _idf_weight(t) for t in query_tokens if t in lower_text
     )
     return min(1.0, matched_weight / total_weight)
+
+
+#: R11-FP11: a view definition match is weaker evidence than a name or description match --
+#: it says what the view is built from, not what it is.
+_DEFINITION_MATCH_WEIGHT = 0.6
 
 
 def _exact_phrase_bonus(query: str, candidate_text: str) -> float:
@@ -445,8 +456,13 @@ async def hybrid_retrieve(
     # (sequential awaits — fine for typical catalog sizes)
     # ------------------------------------------------------------------
 
-    # 1. Tables
+    # 1. Tables. R11-FP11: fetched by name *or* source description -- a table the source
+    # describes in the question's words was never fetched, so its description could not score.
     name_filters = [func.lower(MetadataTable.name).contains(t) for t in query_tokens[:10]]
+    description_filters = [
+        func.lower(func.coalesce(MetadataTable.source_description, "")).contains(t)
+        for t in query_tokens[:10]
+    ]
     table_rows = (
         await session.scalars(
             select(MetadataTable)
@@ -454,7 +470,7 @@ async def hybrid_retrieve(
                 MetadataTable.datasource_id == datasource.id,
                 MetadataTable.organization_id == datasource.organization_id,
                 MetadataTable.status == "ACTIVE",
-                or_(*name_filters) if name_filters else true(),
+                or_(*name_filters, *description_filters) if name_filters else true(),
             )
             .limit(scan_limit)
         )
@@ -471,16 +487,78 @@ async def hybrid_retrieve(
             hit_id = f"TABLE:{table.id}"
             if hit_id not in seen_ids:
                 seen_ids.add(hit_id)
+                matched_name = any(token in table.name.lower() for token in query_tokens)
                 hits.append(
                     HybridRetrievalHit(
                         object_type="TABLE",
                         object_id=str(table.id),
                         display_name=table.name,
                         score=score,
-                        reason_codes=["BM25_TABLE_NAME"],
+                        reason_codes=[
+                            "BM25_TABLE_NAME" if matched_name else "BM25_TABLE_DESCRIPTION"
+                        ],
                         metadata={"table_id": str(table.id)},
                     )
                 )
+
+    # 1b. Views whose *definition* names what was asked (R11-FP11). A view called `v_rev_ltd`
+    # selecting `net_revenue` from `orders` answers "revenue by customer" and matched nothing
+    # before. Scored on the stored value-free text only, and only where screening lets that text
+    # be read at all; the hit carries a digest of it, never the text. A definition match is
+    # weaker evidence than a name match -- it names what the view is built from, not what it is --
+    # so it scores at `_DEFINITION_MATCH_WEIGHT` and never displaces a name match already found.
+    definition_filters = [
+        func.lower(MetadataViewDefinition.definition_sql_redacted).contains(t)
+        for t in query_tokens[:10]
+    ]
+    definition_rows = (
+        (
+            await session.execute(
+                select(MetadataViewDefinition, MetadataTable)
+                .join(MetadataTable, MetadataTable.id == MetadataViewDefinition.table_id)
+                .where(
+                    MetadataViewDefinition.organization_id == datasource.organization_id,
+                    MetadataViewDefinition.datasource_id == datasource.id,
+                    MetadataViewDefinition.status == "ACTIVE",
+                    MetadataViewDefinition.availability == AVAILABLE,
+                    MetadataViewDefinition.redaction_status.in_(
+                        sorted(VALUE_FREE_REDACTION_STATUSES)
+                    ),
+                    MetadataTable.status == "ACTIVE",
+                    or_(*definition_filters),
+                )
+                .limit(scan_limit)
+            )
+        ).all()
+        if definition_filters
+        else []
+    )
+
+    for definition, table in definition_rows:
+        stored = definition.definition_sql_redacted
+        if not stored or not is_eligible_for_model_context(definition.screening_status):
+            continue
+        hit_id = f"TABLE:{table.id}"
+        if hit_id in seen_ids:
+            continue
+        score = round(min(1.0, _bm25_score(query_tokens, stored) * _DEFINITION_MATCH_WEIGHT), 4)
+        if score <= 0:
+            continue
+        seen_ids.add(hit_id)
+        hits.append(
+            HybridRetrievalHit(
+                object_type="TABLE",
+                object_id=str(table.id),
+                display_name=table.name,
+                score=score,
+                reason_codes=["BM25_VIEW_DEFINITION"],
+                metadata={
+                    "table_id": str(table.id),
+                    "object_type": table.object_type,
+                    "definition_digest": hashlib.sha256(stored.encode("utf-8")).hexdigest(),
+                },
+            )
+        )
 
     # 2. Columns
     col_filters = [func.lower(MetadataColumn.name).contains(t) for t in query_tokens[:10]]
