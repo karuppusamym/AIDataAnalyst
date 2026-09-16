@@ -4,6 +4,7 @@ import type {
   AgentAnalysisResponse,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
+  ContextProductRead,
   DataSourceRead,
 } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
@@ -26,6 +27,8 @@ const fetchAgentRuns =
 const fetchAgentRun = vi.fn<(agentRunId: string, signal?: AbortSignal) => Promise<AgentRunRead>>();
 const fetchAgentRunGroundingReceipts =
   vi.fn<(agentRunId: string, signal?: AbortSignal) => Promise<AgentRunGroundingReceiptsRead>>();
+const fetchContextProducts =
+  vi.fn<(projectId: string, query?: unknown, signal?: AbortSignal) => Promise<PageOf<ContextProductRead>>>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -40,8 +43,30 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchAgentRun: (agentRunId: string, signal?: AbortSignal) => fetchAgentRun(agentRunId, signal),
     fetchAgentRunGroundingReceipts: (agentRunId: string, signal?: AbortSignal) =>
       fetchAgentRunGroundingReceipts(agentRunId, signal),
+    fetchContextProducts: (projectId: string, query?: unknown, signal?: AbortSignal) =>
+      fetchContextProducts(projectId, query, signal),
   };
 });
+
+/** R11-FP12: one published product this project offers, as the list route returns it. */
+const PUBLISHED_PRODUCT = {
+  id: "cp_1",
+  organization_id: "org1",
+  project_id: "proj1",
+  product_key: "customer-revenue",
+  lifecycle_status: "ACTIVE",
+  created_by: "steward-1",
+  latest_version: { id: "cpv_1", status: "PUBLISHED", version: 2, name: "Customer revenue" },
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+} as unknown as ContextProductRead;
+
+const DRAFT_ONLY_PRODUCT = {
+  ...PUBLISHED_PRODUCT,
+  id: "cp_2",
+  product_key: "draft-only",
+  latest_version: { id: "cpv_2", status: "DRAFT", version: 1, name: "Draft only" },
+} as unknown as ContextProductRead;
 
 const DATASOURCE: DataSourceRead = {
   id: "ds_1", organization_id: "org1", line_of_business_id: "lob1", data_domain_id: "dom1",
@@ -139,6 +164,8 @@ beforeEach(() => {
   fetchAgentRuns.mockReset();
   fetchAgentRun.mockReset();
   fetchAgentRunGroundingReceipts.mockReset();
+  fetchContextProducts.mockReset();
+  fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
   vi.resetModules();
@@ -323,6 +350,104 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     });
     // The retry's answer replaces the refusal rather than sitting beside it.
     expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+  });
+
+  it("asks through the selected published context product, and keeps asking through it when a clarification is answered (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT, DRAFT_ONLY_PRODUCT],
+      limit: 200,
+      offset: 0,
+      total: 2,
+    });
+    const { ApiError } = await import("../lib/api");
+    runAgentAnalysis.mockRejectedValueOnce(
+      new ApiError(409, "approved tool requires parameters: customer_id", {
+        details: {
+          code: "MISSING_TOOL_PARAMETERS",
+          message: "approved tool requires parameters: customer_id",
+          required_parameters: ["customer_id"],
+          tool_version_id: "tv_orders_lookup_1",
+        },
+      }),
+    );
+    runAgentAnalysis.mockResolvedValueOnce({
+      ...ANALYSIS_RESPONSE,
+      step_trace: [
+        { stage: "RESOLVED", details: { context_product_version_id: "cpv_1", context_product_version: 2 } },
+        { stage: "EXECUTED" },
+      ],
+    });
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    // Only the published product is offered: the server refuses the rest, so offering a draft
+    // would be offering a refusal.
+    const picker = await screen.findByLabelText("Context product");
+    await waitFor(() =>
+      expect(within(picker).getByRole("option", { name: "Customer revenue" })).toBeInTheDocument(),
+    );
+    expect(within(picker).queryByRole("option", { name: "Draft only" })).not.toBeInTheDocument();
+
+    fireEvent.change(picker, { target: { value: "customer-revenue" } });
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "revenue for a customer" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalled());
+    expect(runAgentAnalysis.mock.calls[0]![1]).toEqual({
+      question: "revenue for a customer",
+      context_product_key: "customer-revenue",
+    });
+
+    const refusal = await screen.findByRole("alert", { name: "Tool needs more input" });
+    fireEvent.change(within(refusal).getByLabelText("customer_id"), { target: { value: "C-42" } });
+    fireEvent.click(within(refusal).getByRole("button", { name: "Ask with these values" }));
+
+    // The retry still asks through the product: dropping it here would widen the answer back to
+    // the whole datasource precisely when the person supplied the inputs.
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toEqual({
+      question: "revenue for a customer",
+      tool_parameters: { customer_id: "C-42" },
+      context_product_key: "customer-revenue",
+      preferred_tool_version_id: "tv_orders_lookup_1",
+    });
+
+    // The answer says which published version it stood on.
+    expect(await screen.findByText("version 2")).toBeInTheDocument();
+    // …and the choice survives a reload or a shared link.
+    expect(new URLSearchParams(location.search).get("product")).toBe("customer-revenue");
+  });
+
+  it("renders a context-product refusal as its own state rather than a policy rejection (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT],
+      limit: 200,
+      offset: 0,
+      total: 1,
+    });
+    runAgentAnalysis.mockRejectedValue(
+      new (await import("../lib/api")).ApiError(422, "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE"),
+    );
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(await screen.findByLabelText("Context product"), {
+      target: { value: "customer-revenue" },
+    });
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "something else" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    expect(
+      await screen.findByText("This context product cannot answer that question"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("The generated query was rejected by policy"),
+    ).not.toBeInTheDocument();
   });
 
   it("distinguishes a disabled-datasource 409 from the AT-9 ambiguity 409", async () => {

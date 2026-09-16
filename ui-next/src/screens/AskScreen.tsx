@@ -4,6 +4,7 @@ import type {
   AgentAnalysisResponse,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
+  ContextProductRead,
 } from "../lib/types";
 import type { AgentAskError, AgentAskErrorKind } from "../lib/api";
 import {
@@ -13,6 +14,7 @@ import {
   fetchAgentRun,
   fetchAgentRunGroundingReceipts,
   fetchAgentRuns,
+  fetchContextProducts,
   runAgentAnalysis,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
@@ -77,6 +79,7 @@ const ERROR_TITLE: Record<Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION">, st
   DATASOURCE_DISABLED: "This datasource is disabled",
   NOT_AUTHORIZED: "You do not have access to answer questions here",
   POLICY_REJECTED: "The generated query was rejected by policy",
+  CONTEXT_PRODUCT_REFUSED: "This context product cannot answer that question",
   MODEL_UNAVAILABLE: "No model route is available right now",
   MODEL_THROTTLED: "The model provider is throttling us — try again in a moment",
   CLARIFICATION_NEEDED: "This question needs more information",
@@ -253,6 +256,17 @@ function AnswerPanel({
     : (detail?.retrieval_evidence ?? []);
   const planEvidence = isFresh ? askResult.plan_evidence : (detail?.plan_evidence ?? {});
   const failureReason = isFresh ? null : (detail?.failure_reason ?? null);
+  // R11-FP12: which published context product version the answer was scoped to, recorded by the
+  // run itself. Shown as provenance rather than inferred from the request, so a reopened run
+  // says what it actually stood on.
+  const contextProductVersion = (() => {
+    for (const step of stepTrace) {
+      const details = (step as { details?: Record<string, unknown> }).details;
+      const version = details?.["context_product_version"];
+      if (typeof version === "number") return version;
+    }
+    return null;
+  })();
   // Provenance the run pinned its answer to — which published semantic model
   // and policy version grounded it, and (for a stored run) which approved model
   // route generated the SQL. The fresh POST response omits the route, so it is
@@ -380,6 +394,14 @@ function AnswerPanel({
               <div>
                 <dt>Policy version</dt>
                 <dd>{policyVersion ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Context product</dt>
+                <dd>
+                  {contextProductVersion === null
+                    ? "not asked through one"
+                    : `version ${contextProductVersion}`}
+                </dd>
               </div>
               <div>
                 <dt>Model route</dt>
@@ -524,6 +546,34 @@ export function AskScreen() {
   const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
   const dsId = params.get("ds") ?? preferredDatasourceId;
   const selectedDatasourceName = datasourceName(datasources, dsId);
+  // R11-FP12: asking *through* a published context product scopes the answer to the tables it
+  // names and the tool versions it declares eligible. The key lives in the URL like the
+  // datasource, so a clarification retry, a reload and a shared link all keep asking through the
+  // same product rather than silently widening back to the whole datasource.
+  const productKey = params.get("product");
+  const projectId = datasources.find((d) => d.id === dsId)?.project_id ?? null;
+  const [products, setProducts] = useState<ContextProductRead[]>([]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setProducts([]);
+      return;
+    }
+    const ac = new AbortController();
+    void (async () => {
+      try {
+        const page = await fetchContextProducts(projectId, { limit: 200 }, ac.signal);
+        // Only a product with a published version can be asked through; the server refuses the
+        // rest, so offering them would be offering a refusal.
+        setProducts(page.items.filter((p) => p.latest_version?.status === "PUBLISHED"));
+      } catch {
+        // A product list that cannot be read is not a reason to block asking: Ask without one
+        // behaves exactly as it always has.
+        setProducts([]);
+      }
+    })();
+    return () => ac.abort();
+  }, [projectId]);
 
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -553,17 +603,19 @@ export function AskScreen() {
       // A retry after a clarification pins the tool the server already chose:
       // re-running retrieval could select a different one, and the answer would
       // then come from a tool the person never supplied inputs for.
+      const askedThrough = productKey ? { context_product_key: productKey } : {};
       const response = await runAgentAnalysis(
         dsId,
         clarification
           ? {
               question: trimmed,
               tool_parameters: clarification.toolParameters,
+              ...askedThrough,
               ...(clarification.toolVersionId
                 ? { preferred_tool_version_id: clarification.toolVersionId }
                 : {}),
             }
-          : { question: trimmed },
+          : { question: trimmed, ...askedThrough },
         ac.signal,
       );
       if (seq !== askSeq.current) return;
@@ -589,7 +641,7 @@ export function AskScreen() {
       if (seq === askSeq.current) setAsking(false);
     }
   },
-    [dsId, question, setParams],
+    [dsId, productKey, question, setParams],
   );
 
   // Switching datasources leaves any open answer behind -- it belonged to
@@ -749,6 +801,29 @@ export function AskScreen() {
           {dsPickerError ? (
             <p className="askscreen__pickerr" role="alert">{dsPickerError}</p>
           ) : null}
+        </Field>
+        <Field label="Context product">
+          <select
+            aria-label="Context product"
+            value={productKey ?? ""}
+            disabled={!dsId || products.length === 0}
+            onChange={(e) => setParams({ product: e.target.value || null, run: null })}
+          >
+            <option value="">
+              {products.length === 0
+                ? "No published product on this project"
+                : "Everything this datasource governs"}
+            </option>
+            {products.map((p) => (
+              <option key={p.id} value={p.product_key}>
+                {p.latest_version?.name ?? p.product_key}
+              </option>
+            ))}
+          </select>
+          <p className="askscreen__hint">
+            A product answers from the tables it names and the tool versions it declares
+            eligible; anything else is refused rather than quietly used.
+          </p>
         </Field>
         <Field label="Question">
           <textarea

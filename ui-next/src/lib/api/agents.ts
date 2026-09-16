@@ -176,11 +176,22 @@ export type AgentAskErrorKind =
   | "DATASOURCE_DISABLED"
   | "NOT_AUTHORIZED"
   | "POLICY_REJECTED"
+  | "CONTEXT_PRODUCT_REFUSED"
   | "MODEL_UNAVAILABLE"
   | "MODEL_THROTTLED"
   | "CLARIFICATION_NEEDED"
   | "SERVER_ERROR"
   | "UNKNOWN";
+
+/** R11-FP12: the three ways asking *through* a context product is refused, all 422s carrying a
+ *  stable code. They are not "the generated query was rejected by policy": the question never
+ *  reached a query, and what the person can do about each differs -- pick another product, ask
+ *  for access to this one, or ask something the product's tables can answer. */
+const CONTEXT_PRODUCT_REFUSALS = new Set([
+  "CONTEXT_PRODUCT_NOT_AVAILABLE",
+  "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED",
+  "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE",
+]);
 
 export interface AgentAskErrorAlternative {
   businessNodeId: string;
@@ -278,6 +289,9 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
   // them to support rather than to whoever grants access. R11-B11's browser
   // journey found it on the denied-access case.
   if (status === 403) return { kind: "NOT_AUTHORIZED", status, detail, ...NO_CLARIFICATION };
+  if (status === 422 && CONTEXT_PRODUCT_REFUSALS.has(detail)) {
+    return { kind: "CONTEXT_PRODUCT_REFUSED", status, detail, ...NO_CLARIFICATION };
+  }
   if (status === 422) return { kind: "POLICY_REJECTED", status, detail, ...NO_CLARIFICATION };
   if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, ...NO_CLARIFICATION };
   if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, ...NO_CLARIFICATION };
