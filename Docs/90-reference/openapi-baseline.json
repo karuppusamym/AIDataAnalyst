@@ -14047,6 +14047,101 @@
         "title": "FleetSummaryRead",
         "type": "object"
       },
+      "FootprintGapDetailRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "explanation": {
+            "title": "Explanation",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "objects": {
+            "items": {
+              "$ref": "#/components/schemas/FootprintGapObjectRead"
+            },
+            "title": "Objects",
+            "type": "array"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "resolution": {
+            "title": "Resolution",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "kind",
+          "resolution",
+          "owner",
+          "explanation",
+          "objects",
+          "truncated"
+        ],
+        "title": "FootprintGapDetailRead",
+        "type": "object"
+      },
+      "FootprintGapObjectRead": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "object_id": {
+            "format": "uuid",
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "qualified_name": {
+            "title": "Qualified Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_type",
+          "object_id",
+          "qualified_name"
+        ],
+        "title": "FootprintGapObjectRead",
+        "type": "object"
+      },
       "FootprintGapRead": {
         "additionalProperties": false,
         "properties": {
@@ -46666,6 +46761,144 @@
           }
         },
         "summary": "Preview Discovery Selection"
+      }
+    },
+    "/v1/datasources/{datasource_id}/footprint-gaps/{kind}": {
+      "get": {
+        "description": "R11-FP05: the objects behind one source's count of one gap kind.\n\nA caller who may not read this source's metadata gets the same answer as one asking about a\nsource that does not exist, because \"you may not read it\" and \"it is not there\" must not be\ndistinguishable from outside: the summary route drops such a source silently for the same\nreason. An unrecognised kind is a 404 rather than an empty list, which would read as a\nsource with none of that gap.",
+        "operationId": "get_footprint_gap_objects_v1_datasources__datasource_id__footprint_gaps__kind__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FootprintGapDetailRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Footprint Gap Objects",
+        "tags": [
+          "operations"
+        ]
       }
     },
     "/v1/datasources/{datasource_id}/freshness": {

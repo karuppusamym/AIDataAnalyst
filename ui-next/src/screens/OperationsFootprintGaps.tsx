@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import type { FootprintGapsRead } from "../lib/types";
+import type { FootprintGapDetailRead, FootprintGapsRead } from "../lib/types";
 import { ApiError } from "../lib/api";
-import { fetchFootprintGaps } from "../lib/api/footprintGaps";
+import { fetchFootprintGapObjects, fetchFootprintGaps } from "../lib/api/footprintGaps";
 import { ErrorState } from "../components/primitives";
 
 /* ---------------------------------------------------------------------------
@@ -11,6 +11,12 @@ import { ErrorState } from "../components/primitives";
    many, the one route that closes it and who acts. The server leaves out a
    source the caller may not read -- it is not shown as "0", because a zero
    would still say the source exists and was looked at.
+
+   A count expands (R11-FP05) into the objects behind it, fetched when asked
+   for rather than with the summary: the list is what a steward acts on, and
+   most rows are read without ever needing it. The gap whose objects Atlas
+   never saw expands to the server's sentence saying why there is nothing to
+   name, rather than to an empty list that would read as "none".
 --------------------------------------------------------------------------- */
 
 const KIND_WORDS: Record<string, string> = {
@@ -32,6 +38,94 @@ const RESOLUTION_WORDS: Record<string, string> = {
   OPERATIONS: "operations",
   EXPLAINED: "explained, not retried",
 };
+
+function GapRow({
+  datasourceId,
+  kind,
+  count,
+  resolution,
+  owner,
+  explanation,
+}: {
+  datasourceId: string;
+  kind: string;
+  count: number;
+  resolution: string;
+  owner: string;
+  explanation: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<FootprintGapDetailRead | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || detail) return;
+    const ac = new AbortController();
+    setError(null);
+    fetchFootprintGapObjects(datasourceId, kind, ac.signal)
+      .then(setDetail)
+      .catch((e: unknown) => {
+        if ((e as Error)?.name === "AbortError") return;
+        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+      });
+    return () => ac.abort();
+  }, [open, detail, datasourceId, kind]);
+
+  const label = KIND_WORDS[kind] ?? kind;
+  return (
+    <>
+      <tr>
+        <th scope="row">{label}</th>
+        <td className="tnum">
+          <button
+            type="button"
+            className="ops__linkbtn"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {count}
+          </button>
+        </td>
+        <td>{RESOLUTION_WORDS[resolution] ?? resolution}</td>
+        <td>{owner}</td>
+        <td>{explanation}</td>
+      </tr>
+      {open ? (
+        <tr>
+          <td colSpan={5}>
+            {error ? (
+              <span role="alert">These objects could not be loaded: {error}</span>
+            ) : !detail ? (
+              <span role="status">Loading the objects behind {label.toLowerCase()}…</span>
+            ) : detail.note ? (
+              <p className="ops__sub">{detail.note}</p>
+            ) : detail.objects.length === 0 ? (
+              <p className="ops__sub">Nothing left to show: these were closed since the count.</p>
+            ) : (
+              <>
+                <ul className="ops__list">
+                  {detail.objects.map((object) => (
+                    <li key={`${object.object_type}:${object.object_id}`}>
+                      <span className="ops__kind">{object.object_type}</span>{" "}
+                      {object.qualified_name}
+                      {object.detail ? <span className="ops__sub"> — {object.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                {detail.truncated ? (
+                  <p className="ops__sub">
+                    The first {detail.objects.length} of more than that. A source with this many is
+                    closed by a grant or a narrower discovery selection, not one object at a time.
+                  </p>
+                ) : null}
+              </>
+            )}
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
 
 export function FootprintGaps({ organizationId }: { organizationId: string }) {
   const [data, setData] = useState<FootprintGapsRead | null>(null);
@@ -97,13 +191,15 @@ export function FootprintGaps({ organizationId }: { organizationId: string }) {
                 </thead>
                 <tbody>
                   {source.gaps.map((gap) => (
-                    <tr key={gap.kind}>
-                      <th scope="row">{KIND_WORDS[gap.kind] ?? gap.kind}</th>
-                      <td className="tnum">{gap.count}</td>
-                      <td>{RESOLUTION_WORDS[gap.resolution] ?? gap.resolution}</td>
-                      <td>{gap.owner}</td>
-                      <td>{gap.explanation}</td>
-                    </tr>
+                    <GapRow
+                      key={gap.kind}
+                      datasourceId={source.datasource_id}
+                      kind={gap.kind}
+                      count={gap.count}
+                      resolution={gap.resolution}
+                      owner={gap.owner}
+                      explanation={gap.explanation}
+                    />
                   ))}
                 </tbody>
               </table>

@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **481**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 428, SDK 1
+- Surfaces covered: **482**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 429, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -69,7 +69,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/tables/bulk-tag` | BULK | `atlas.modules.catalog.router.bulk_tag_tables` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/ownership-assignments/bulk-reaffirm` | BULK | `aida.stewardship_api.bulk_reaffirm_ownership_assignments` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/projects/{project_id}/datasources/bulk-onboard` | BULK | `atlas.modules.connectivity.router.bulk_onboard_datasources` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/relationship-candidates/bulk-decision` | BULK | `aida.intelligence_api.bulk_decide_relationship_candidates` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/relationship-candidates/bulk-decision` | BULK | `aida.intelligence_api.bulk_decide_relationship_candidates` | DataSteward, MetadataReviewer, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/compliance/packs/{pack_id}/download` | EXPORT | `aida.compliance_api.download_compliance_pack` | ComplianceOfficer, DataSteward, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/compile/download` | EXPORT | `aida.context_compiler_api.download_context_compilation` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `GET /v1/datasources/{datasource_id}/model/export.xlsx` | EXPORT | `aida.model_export_api.export_datasource_model` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
@@ -162,6 +162,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/connector-certifications` | REST | `atlas.modules.ingestion.router.list_connector_certifications` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/cross-source-object-resolution-candidates` | REST | `aida.intelligence_api.list_cross_source_object_resolution_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/discovery-selection` | REST | `atlas.modules.connectivity.router.get_discovery_selection` | DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/footprint-gaps/{kind}` | REST | `aida.footprint_gaps_api.get_footprint_gap_objects` | Auditor, DataSteward, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/freshness/{table_id}` | REST | `aida.quality_api.get_freshness_status` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/freshness` | REST | `aida.quality_api.list_freshness_configs` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/graph-summary` | REST | `aida.api.get_graph_summary` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -359,7 +360,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/column-description-drafts/{draft_id}/submit` | REST | `aida.column_description_api.submit_column_description_draft` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/compliance/packs/generate` | REST | `aida.compliance_api.generate_compliance_pack` | ComplianceOfficer, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/composite-key-candidates/{candidate_id}/decision` | REST | `aida.composite_key_api.decide_composite_key_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
-| `POST /v1/composite-relationship-candidates/{group_id}/decision` | REST | `aida.intelligence_api.decide_composite_relationship_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/composite-relationship-candidates/{group_id}/decision` | REST | `aida.intelligence_api.decide_composite_relationship_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/context-compiler/validate` | REST | `aida.context_compiler_api.validate_context_compilation` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | no | no | mutating verb, no write found | no | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/compile/drift` | REST | `aida.context_compiler_api.inspect_context_compilation_drift` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/deprecate` | REST | `aida.context_product_api.request_context_product_deprecation` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
@@ -488,7 +489,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/quality-rule-packs/{rule_pack_id}/evaluate` | REST | `aida.quality_api.evaluate_rule_pack_now` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/quality-rule-packs/{rule_pack_id}/rules` | REST | `aida.quality_api.create_rule` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/query/validate` | REST | `aida.api.validate_query` | AgentDeveloper, Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
-| `POST /v1/relationship-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_relationship_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/relationship-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_relationship_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/rename-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_rename_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/schemas/{schema_id}/table-family-candidates/discover` | REST | `aida.table_family_api.discover_table_family_candidates` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/security/tokens/detokenize` | REST | `aida.detokenization_api.detokenize_value` | none declared | yes | no | writes | yes | not cancellable |

@@ -2356,6 +2356,24 @@ export interface FleetSummaryRead {
   generated_at: string;
 }
 
+export interface FootprintGapDetailRead {
+  datasource_id: string;
+  kind: string;
+  resolution: string;
+  owner: string;
+  explanation: string;
+  objects: FootprintGapObjectRead[];
+  truncated: boolean;
+  note?: string | null;
+}
+
+export interface FootprintGapObjectRead {
+  object_type: string;
+  object_id: string;
+  qualified_name: string;
+  detail?: string | null;
+}
+
 export interface FootprintGapRead {
   kind: string;
   count: number;

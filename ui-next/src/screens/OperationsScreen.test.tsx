@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { AnalysisRunRead, FleetSummaryRead, MetadataIngestionBatchRead, OutboxEventRead } from "../lib/types";
 import { ApiError } from "../lib/api";
 
@@ -26,8 +27,10 @@ const fetchIngestionBatches = vi.fn<
 >();
 
 const fetchFootprintGaps = vi.fn();
+const fetchFootprintGapObjects = vi.fn();
 vi.mock("../lib/api/footprintGaps", () => ({
   fetchFootprintGaps: (...args: unknown[]) => fetchFootprintGaps(...args),
+  fetchFootprintGapObjects: (...args: unknown[]) => fetchFootprintGapObjects(...args),
 }));
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -86,6 +89,7 @@ beforeEach(() => {
   fetchIngestionBatches.mockReset();
   fetchFleetSummary.mockResolvedValue(SUMMARY);
   fetchFootprintGaps.mockReset();
+  fetchFootprintGapObjects.mockReset();
   fetchFootprintGaps.mockResolvedValue({
     organization_id: ORG,
     generated_at: "2026-09-15T12:00:00Z",
@@ -127,6 +131,78 @@ describe("OperationsScreen against the real operational_api.py", () => {
     expect(panel).toHaveTextContent("waited 30 min");
     expect(screen.queryByRole("article", { name: "Gaps in quiet_source" })).not.toBeInTheDocument();
     expect(fetchFootprintGaps).toHaveBeenCalledWith(ORG, expect.anything());
+  });
+
+  it("expands a count into the objects behind it, asked for only when opened (R11-FP05)", async () => {
+    fetchFootprintGapObjects.mockResolvedValue({
+      datasource_id: "ds_snowflake_prod",
+      kind: "CODE_WITHHELD",
+      resolution: "SOURCE_ACCESS",
+      owner: "source administrator",
+      explanation: "The source withholds these view definitions or routine bodies.",
+      objects: [
+        {
+          object_type: "VIEW",
+          object_id: "tbl_1",
+          qualified_name: "bank.sales.v_revenue",
+          detail: null,
+        },
+      ],
+      truncated: false,
+      note: null,
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    // The summary costs one request; the list costs one more, and only on asking.
+    expect(fetchFootprintGapObjects).not.toHaveBeenCalled();
+    await userEvent.click(within(panel).getByRole("button", { name: "3" }));
+
+    expect(await within(panel).findByText("bank.sales.v_revenue")).toBeInTheDocument();
+    expect(fetchFootprintGapObjects).toHaveBeenCalledWith(
+      "ds_snowflake_prod",
+      "CODE_WITHHELD",
+      expect.anything(),
+    );
+  });
+
+  it("says why the objects it never saw cannot be listed, rather than showing none (R11-FP02)", async () => {
+    fetchFootprintGaps.mockResolvedValue({
+      organization_id: ORG,
+      generated_at: "2026-09-16T12:00:00Z",
+      datasources: [
+        {
+          datasource_id: "ds_snowflake_prod",
+          datasource_name: "snowflake_prod",
+          oldest_pending_signal_minutes: null,
+          gaps: [
+            {
+              kind: "SOURCE_OBJECTS_INVISIBLE", count: 412, resolution: "SOURCE_ACCESS",
+              owner: "source administrator", explanation: "Objects the source holds that this login may not see.",
+            },
+          ],
+        },
+      ],
+      totals: { SOURCE_OBJECTS_INVISIBLE: 412 },
+    });
+    fetchFootprintGapObjects.mockResolvedValue({
+      datasource_id: "ds_snowflake_prod",
+      kind: "SOURCE_OBJECTS_INVISIBLE",
+      resolution: "SOURCE_ACCESS",
+      owner: "source administrator",
+      explanation: "Objects the source holds that this login may not see.",
+      objects: [],
+      truncated: false,
+      note: "These objects are not in the catalog: Atlas has no name to show.",
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    await userEvent.click(within(panel).getByRole("button", { name: "412" }));
+
+    expect(await within(panel).findByText(/not in the catalog/)).toBeInTheDocument();
   });
 
   it("loads and renders fleet-summary tiles plus the analysis-runs list", async () => {
