@@ -52,20 +52,33 @@ fleet scheduler — not through a test harness.
    by `scheduler:context-rebuild`, with the reason "Everything standing on the redefined view was
    rebuilt against its current definition and approved, or re-approved after the change."
 
-## What this does and does not prove
+## The drafting half, with a published tool standing on the view
 
-It proves the loop runs on its own in a deployed environment: a source change is observed by a
-scan, becomes a signal, becomes a hold, and the hold is released by the pass rather than by a
-person — the half that had only ever been exercised by tests driving the functions directly.
+The first sequence released its hold immediately, correctly: nothing stood on that view, so the
+rebuild had nothing to draft. A second sequence gave it something to hold.
 
-It does not prove the drafting half on this estate, and the distinction matters. Nothing stood on
-this view — no governed tool, no approved description, no context product — so the rebuild had
-nothing to draft and released the hold on its first pass. The drafting chain (a regenerated tool
-version, a redrafted description, a re-pinned product, each into its review queue, and the hold
-held until a reviewer approves them) is proven by `tests/test_footprint_journey.py` against live
-PostgreSQL and SQL Server, and by `tests/test_context_rebuild.py` case by case. Proving it here
-as well needs an estate with published artifacts over a live view, which the sample source's
-three tables do not yet carry.
+6. **A governed tool was published over the live view** through the real routes:
+   `POST /v1/projects/{id}/tool-blueprints/from-view` produced a DRAFT bound to the view and its
+   definition fingerprint, `POST /v1/tool-versions/{id}/submit` opened the review, and a
+   *different* principal approved it — maker-checker, not a flag. v1 PUBLISHED.
+7. **The view was redefined again** (a `branch_code` column added to its projection) and the
+   datasource rescanned.
+8. **The hold reopened CRITICAL**, and this time the rebuild pass had work: it created **v2
+   itself** — `created_by = scheduler:context-rebuild`, status `REVIEW_REQUIRED`, bound to the
+   *new* definition fingerprint — and opened a `GOVERNED_TOOL_VERSION` / `PUBLISH` review. The
+   hold stayed open while that review waited, which is the point: the pass drafts, it does not
+   publish.
+9. **A reviewer approved v2.** v1 became `SUPERSEDED`, v2 `PUBLISHED`, and the hold was
+   `RESOLVED` by `scheduler:context-rebuild`.
+
+That is the whole loop on the deployment — change, signal, hold, regenerated draft, human
+approval, release — with a person in exactly one place: the approval.
+
+Two things are still proven only by tests rather than here: a redrafted description and a
+re-pinned context product travelling the same path (`tests/test_context_rebuild.py`,
+`tests/test_footprint_journey.py`), because this estate carries neither over a live view; and
+Ask answering before and after the change, which needs an approved model route in this
+organization.
 
 The lineage agent's interval was left at `0`. It needs an approved agent version and contract per
 organization (`scripts/seed_task_agent.py`); an interval alone does not start it, and registering
