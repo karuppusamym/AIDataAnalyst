@@ -30,7 +30,7 @@ F02 and F08 as well.
 |---|---|---|
 | F01 — product scope does not constrain SQL execution | R11-FP12 | **Closed.** Scope moved into the query gateway, at the choke point every execution path shares |
 | F02 — routine evidence escapes product selection | R11-FP12 | Already closed; the pinned-meaning contract it asked to specify is stated in `ContextProductScope.admits`'s own docstring and tested |
-| F03 — running deployment behind source and schema | **R11-D17 (new)** | **Detector built, deploy not performed.** See "Not done" below |
+| F03 — running deployment behind source and schema | **R11-D17 (new)** | **Closed.** Detector built, then the deploy performed and parity verified — 8 matched, 0 drifted |
 | F04 — automatic context maintenance disabled here | R11-D17's runbook | **Configuration templates only, by the user's decision.** See below |
 | F05 — development posture described as production | R11-D17's runbook, R11-B10 | **Procedures only.** The readiness endpoint's own answer is that the estate is not ready; see below |
 | F06.1 — routine descriptions | R11-FP08 | **Closed.** The description family extended, not duplicated |
@@ -42,7 +42,7 @@ F02 and F08 as well.
 | F07 — completion documents drifted | This document, and section P's row convention | **Closed for the rows touched**, normalised on touch thereafter |
 | F08 — product-scoped Ask has no UI request wiring | R11-FP12 | **Closed**, including four seams the review had not separated |
 | F09 — retrieval calibration | — | Already closed |
-| §3 — screens worth consolidating | R11-S13 (DEFERRED) | **Not started.** See below |
+| §3 — screens worth consolidating | R11-S13 | **Five of six merges landed**, 41 destinations → 38; the relationship/cross-source merge declined on the review's own constraint |
 | §5 — database coverage | R11-FP01 | **Closed.** One generated engine × six-facet matrix |
 
 ## Defects found this cycle that the review had not
@@ -98,13 +98,18 @@ read in full is a status document that drifts without anyone noticing.
 
 Each of these is a decision, not an omission.
 
-**The deploy and the migration (F03).** The user authorised both. Docker Desktop was down
-for this session, so neither was performed and the drift stands: the configured database is
-one revision behind and the running images predate `footprint_metrics_interval_seconds`.
-`scripts/check_deployment_parity.py` and the
-[alignment runbook](../40-engineering/16-deployment-alignment-and-enablement-runbook.md) are
-ready, and the four migrations authored in parallel were chained to a single head first —
-`alembic upgrade heads` would otherwise have applied three unreviewed branches as a union.
+**The deploy and the migration (F03) — done, after this document first said otherwise.** Docker Desktop
+was down when the cycle's work was committed; it was started afterwards and both were performed. The
+order mattered: the four parallel migrations were chained to one head, then
+`tests/test_migration_orm_drift.py` was run against real PostgreSQL **before** the configured database
+was touched — a failed `migrate` service holds the API down, and that gate skips silently without a
+reachable PostgreSQL, so a green local run had proven nothing about them. It passed. The rebuild
+repeated the `--profile full` flags so no profiled container was left on the old image, and the migrate
+service applied `b7e2d9c4f158` through `c9b3e7f15a48` in order. Parity then reported **8 matched, 0
+drifted**. The three surfaces the review named are all live: `context_product_key` on
+`AgentAnalysisRequest`, `/v1/datasources/{datasource_id}/footprint-gaps/{kind}`, and a deployed
+`Settings` carrying all 270 settings — so `run_footprint_metrics_pass`, absent from the old image
+entirely, now runs at its 300s default.
 
 **Enabling the maintenance loop (F04).** Configuration templates only, by the user's
 decision. Two facts made that the right default: change-signal processing opens CRITICAL
@@ -178,8 +183,9 @@ and C12 stays parked — no database candidate was added.
 | `scripts/generate_ui_types.py` | Regenerated, 516 schemas, matches |
 | `scripts/quality_benchmark.py` | Green; no regression beyond 5.0 points |
 | `GET /.../enforcement-readiness` | `ready: false`, three blockers — read-only |
-| `tests/test_migration_orm_drift.py` | **Skipped** — needs a live PostgreSQL and Docker was down. Not evidence of anything |
-| Playwright journey, change-burst harness, parity run, deploy | **Not executed** — all need the Docker stack |
+| `tests/test_migration_orm_drift.py` | **Passed** against real PostgreSQL once Docker was started — all five migrations apply to an empty database and the result matches `Base.metadata` |
+| Deploy, migration and `scripts/check_deployment_parity.py` | **Performed** — parity 8 matched / 0 drifted / 0 not measured; 17 services healthy |
+| Playwright journey, change-burst harness | **Not executed** — each needs its own harness built on top of the stack |
 
 Passing tests do not establish deployment parity, answer quality, or any of the
 customer-specific release evidence the review's §7 gate names. The full backend suite was
