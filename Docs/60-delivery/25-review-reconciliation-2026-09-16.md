@@ -185,7 +185,8 @@ and C12 stays parked — no database candidate was added.
 | `GET /.../enforcement-readiness` | `ready: false`, three blockers — read-only |
 | `tests/test_migration_orm_drift.py` | **Passed** against real PostgreSQL once Docker was started — all five migrations apply to an empty database and the result matches `Base.metadata` |
 | Deploy, migration and `scripts/check_deployment_parity.py` | **Performed** — parity 8 matched / 0 drifted / 0 not measured; 17 services healthy |
-| Playwright journey, change-burst harness | **Not executed** — each needs its own harness built on top of the stack |
+| Playwright browser journey | **14 passed** against the real production nginx image and the journey stub, including the three new product-scoped Ask steps |
+| Change-burst latency harness | **Not executed** — authored, and no measurement is claimed |
 
 Passing tests do not establish deployment parity, answer quality, or any of the
 customer-specific release evidence the review's §7 gate names. The full backend suite was
