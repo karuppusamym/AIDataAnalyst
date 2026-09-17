@@ -1,0 +1,507 @@
+# R11-FP17 alert rules for the footprint queue, the graph projection, retrieval
+# latency, the HTTP surface and the cost/quota series.
+#
+# Read ../../README.md first. The short version of what governs this file:
+#
+# **Every rule declares whether its threshold was measured.** A rule carries
+# `threshold_status: structural` when the comparison needs no magnitude anybody
+# had to choose -- a target that is down, a queue that is growing rather than
+# draining, a projector that is writing nothing while holding a backlog, a
+# provider that reported no usage at all. It carries
+# `threshold_status: placeholder` when the number in the expression is a
+# starting point an operator must replace with their own, and the annotation
+# says how to pick it. Nobody has run this platform under load, so no latency
+# or backlog magnitude in this file is a measurement, and a rule that pretended
+# otherwise would be worse than no rule.
+#
+# A firing placeholder alert says so in its own labels, so the person woken up
+# can tell "the estate broke its SLO" from "nobody has set this yet".
+#
+# **`aida_footprint_gaps` has no tenant label, by design.** `src/aida/
+# footprint_metrics.py` exports gap totals by `kind` only and sends the
+# per-organization figures to structlog instead, because an organization or
+# datasource id is unbounded metric cardinality and would put a tenant
+# identifier on a public surface. The consequence for alerting is concrete and
+# is not worked around here: **no rule below can be per-tenant.** A fleet total
+# that stays flat while one tenant's backlog grows will not fire. Making it
+# per-tenant means reversing that labelling decision, which is a change to
+# `footprint_metrics.py` and to the F17 finding it implements -- not something
+# an alert file gets to do quietly. Until then the per-tenant answer comes from
+# the `footprint_metrics_organization` structlog line and from
+# `GET /v1/organizations/{id}/footprint-gaps`.
+#
+# **The queue-age threshold belongs here, and that is deliberate.**
+# `src/aida/readiness.py` says it for both backlog probes: the probe "does not
+# own the threshold at which a backlog is an incident. It reports the two
+# numbers; alerting decides." `AtlasChangeSignalQueueStale` below is where that
+# decision lives, and it is a placeholder because the decision has not been
+# made.
+
+groups:
+  # ---------------------------------------------------------------------------
+  - name: atlas.recording
+    interval: 30s
+    rules:
+      # 5xx share of served requests. `status` is `str(response.status_code)`
+      # (main.py:533), so `5..` matches exactly the server-error class.
+      # No `clamp_min` on the denominator on purpose: with no traffic this is
+      # 0/0 = NaN, every comparison against NaN is false, and the alert stays
+      # quiet on an idle deployment instead of reading 0% and looking healthy.
+      - record: atlas:http_server_error_ratio:rate15m
+        expr: |
+          sum(rate(aida_http_requests_total{status=~"5.."}[15m]))
+            / sum(rate(aida_http_requests_total[15m]))
+
+      # p95 end-to-end retrieval latency, fleet-wide. `aida_retrieval_duration_
+      # seconds` covers the whole hybrid retrieval, which is the interactive
+      # read the change-burst harness (scripts/scale_harness/
+      # fp17_change_burst_latency.py) measures from the other side.
+      - record: atlas:retrieval_duration_seconds:p95_10m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(aida_retrieval_duration_seconds_bucket[10m]))
+          )
+
+      # p95 API request latency, fleet-wide across route templates. Grouped by
+      # `le` alone rather than by `path`: the per-path breakdown is available ad
+      # hoc, and a per-path alert would page on one slow report endpoint.
+      - record: atlas:http_request_duration_seconds:p95_10m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(aida_http_request_duration_seconds_bucket[10m]))
+          )
+
+      # Provider-reported share of model token spend. The showback/chargeback
+      # line, as a number: tokens a provider said it billed, over all tokens
+      # counted. Below 1 means part of the spend figure is this platform's own
+      # 4-bytes-per-token estimate and is not billable.
+      - record: atlas:model_tokens_reported_share:rate1h
+        expr: |
+          sum(rate(aida_model_call_tokens_total{basis="REPORTED"}[1h]))
+            / sum(rate(aida_model_call_tokens_total[1h]))
+
+  # ---------------------------------------------------------------------------
+  - name: atlas.scrape-health
+    rules:
+      - alert: AtlasTargetDown
+        expr: up{job=~"atlas-.*"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          threshold_status: structural
+        annotations:
+          summary: "Atlas target {{ $labels.job }} is not answering scrapes"
+          description: >-
+            Prometheus has failed to scrape this target for five minutes. For
+            atlas-fleet-scheduler and atlas-graph-projector the first thing to
+            check is not the process but the configuration: those two expose no
+            HTTP surface unless AIDA_WORKER_METRICS_PORT is set, so a target
+            that has never come up is far more likely unset than down.
+          runbook: infra/monitoring/README.md
+
+      # The footprint pass is on by default, so its series should always exist
+      # once the scheduler is scraped. Fifteen minutes is three consecutive
+      # misses at the configured footprint_metrics_interval_seconds default of
+      # 300 -- derived from a setting, not chosen.
+      - alert: AtlasFootprintMetricsAbsent
+        expr: absent(aida_footprint_metrics_organizations)
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "The footprint metrics pass is publishing nothing"
+          description: >-
+            aida_footprint_metrics_organizations is absent from every scraped
+            target. Either the fleet scheduler is not being scraped, or
+            footprint_metrics_enabled was turned off. While this fires every
+            other footprint rule here is silent for want of data, which is the
+            failure footprint_metrics.py publishes zeros to avoid -- so treat
+            it as the same class of incident as a growing backlog.
+          runbook: infra/monitoring/README.md
+
+      - alert: AtlasFootprintSweepReadNoOrganizations
+        expr: aida_footprint_metrics_organizations == 0
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "The footprint sweep read zero organizations"
+          description: >-
+            The pass ran and either every organization's read failed or there
+            are no ACTIVE organizations. Every gap gauge is therefore zero for
+            a reason that is not "the queues are empty". The
+            footprint_metrics_organization_failed structlog line names the
+            organizations that failed.
+          runbook: infra/monitoring/README.md
+
+  # ---------------------------------------------------------------------------
+  - name: atlas.footprint
+    rules:
+      # Growth, not magnitude. Nobody has chosen how many awaiting-parse views
+      # is too many, and a count that is large but falling is a queue doing its
+      # job. `deriv` over six hours at a five-minute publish cadence is ~72
+      # points, so a single noisy pass cannot trip it. Structural: the only
+      # number is zero, and "the backlog is bigger than it was" needs no SLO.
+      - alert: AtlasLineageParseBacklogNotDraining
+        expr: |
+          deriv(aida_footprint_gaps{kind="LINEAGE_AWAITING_PARSE"}[6h]) > 0
+            and aida_footprint_gaps{kind="LINEAGE_AWAITING_PARSE"} > 0
+        for: 1h
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "The lineage agent's parse backlog has been growing for six hours"
+          description: >-
+            Eligible views and routines are arriving faster than the lineage
+            agent is parsing them. The usual cause is that the agent is not
+            scheduled at all -- lineage_agent_interval_minutes ships at 0 --
+            in which case this is configuration, not capacity. Fleet-wide
+            only; see this file's header for why it cannot name the tenant.
+          runbook: infra/monitoring/README.md
+
+      # Same shape for the review queue, which has a person at the end of it
+      # rather than a process. Twelve hours rather than six: a steward queue
+      # that grows across one working day is normal, across two is a staffing
+      # signal.
+      - alert: AtlasLineageReviewBacklogNotDraining
+        expr: |
+          deriv(aida_footprint_gaps{kind="LINEAGE_AWAITING_REVIEW"}[12h]) > 0
+            and aida_footprint_gaps{kind="LINEAGE_AWAITING_REVIEW"} > 0
+        for: 2h
+        labels:
+          severity: info
+          threshold_status: structural
+        annotations:
+          summary: "The lineage review queue has been growing for twelve hours"
+          description: >-
+            Proposed lineage is being filed faster than stewards are deciding
+            it. Not a platform fault and deliberately info severity: the fix is
+            review capacity or a narrower proposal scope, not a restart.
+          runbook: infra/monitoring/README.md
+
+      - alert: AtlasSourceChangeHoldsRising
+        expr: |
+          deriv(aida_footprint_gaps{kind="SOURCE_CHANGE_HOLDS"}[6h]) > 0
+            and aida_footprint_gaps{kind="SOURCE_CHANGE_HOLDS"} > 0
+        for: 1h
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "Source-change holds are accumulating"
+          description: >-
+            A hold suspends the governed tools over the object it covers, so a
+            rising count means a widening set of tools is refusing to answer.
+            Each hold needs a steward decision; they do not expire.
+          runbook: infra/monitoring/README.md
+
+      # PLACEHOLDER THRESHOLD -- 3600s (one hour).
+      #
+      # This is the threshold readiness.py explicitly declines to own: "It
+      # reports the two numbers; alerting decides." The decision has not been
+      # made, and one hour is not a measurement of anything. How to replace it:
+      # take the estate's freshness commitment for catalog metadata (how stale
+      # may a table's shape be before an answer built on it is wrong?) and set
+      # this to a fraction of it -- a third is a common starting point, leaving
+      # room to react. If change_signal_processing_interval_minutes is 0 (the
+      # default) this queue never drains at all and this alert will fire
+      # permanently; that is correct, and the fix is to enable the pass or to
+      # accept the queue and silence this rule deliberately.
+      - alert: AtlasChangeSignalQueueStale
+        expr: aida_footprint_oldest_pending_change_signal_seconds > 3600
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "The oldest unprocessed source-change signal has waited over the placeholder age"
+          description: >-
+            Age, not depth, is the signal: a deep queue that is draining is
+            healthy, and a shallow queue whose oldest row is hours old means
+            nothing is moving. The 3600s in this rule is a documented
+            placeholder, not a measured or agreed number -- see the comment
+            above this rule for how to choose the estate's own value, and treat
+            a firing instance as "nobody has set this yet" until it is replaced.
+          runbook: infra/monitoring/README.md
+
+      # Structural companion to the placeholder above, and the one to trust
+      # while the threshold is unset: the queue's oldest entry is getting older
+      # over a whole hour, which can only mean the head of the queue is not
+      # being consumed.
+      - alert: AtlasChangeSignalQueueHeadNotMoving
+        expr: |
+          deriv(aida_footprint_oldest_pending_change_signal_seconds[1h]) > 0
+            and aida_footprint_oldest_pending_change_signal_seconds > 0
+        for: 30m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "The oldest pending change signal keeps getting older"
+          description: >-
+            The head of the change-signal queue is not being consumed. Needs no
+            threshold: the oldest entry ageing monotonically is the definition
+            of a queue that is not moving, whatever the estate's tolerance for
+            depth. Check that change_signal_processing_interval_minutes is
+            non-zero and that the fleet scheduler is alive.
+          runbook: infra/monitoring/README.md
+
+      - alert: AtlasQuarantinedCodeRising
+        expr: |
+          deriv(aida_footprint_gaps{kind="CODE_QUARANTINED"}[6h]) > 0
+            and aida_footprint_gaps{kind="CODE_QUARANTINED"} > 0
+        for: 1h
+        labels:
+          severity: info
+          threshold_status: structural
+        annotations:
+          summary: "Prompt-risk screening is quarantining more captured code"
+          description: >-
+            Nothing reads quarantined code for lineage, tools or model context
+            until a steward clears it, so a rising count silently narrows what
+            the platform can explain. A sharp rise is also worth reading as a
+            screening-rule change rather than a source change.
+          runbook: infra/monitoring/README.md
+
+  # ---------------------------------------------------------------------------
+  - name: atlas.projection
+    rules:
+      # Structural: a projector holding a backlog while writing no rows at all
+      # is stuck, at any scale. No magnitude to choose.
+      - alert: AtlasProjectionStalled
+        expr: |
+          sum(rate(aida_graph_projection_rows_total[30m])) == 0
+            and aida_graph_projection_backlog_events > 0
+        for: 30m
+        labels:
+          severity: critical
+          threshold_status: structural
+        annotations:
+          summary: "The graph projector is holding a backlog and writing nothing"
+          description: >-
+            Events are buffered in the fair-share scheduler and no hierarchy
+            level has been written for half an hour. The knowledge graph is
+            frozen while the API keeps answering, which is the silent-failure
+            shape this rule exists for.
+          runbook: infra/monitoring/README.md
+
+      - alert: AtlasProjectionBacklogGrowing
+        expr: |
+          deriv(aida_graph_projection_backlog_events[1h]) > 0
+            and aida_graph_projection_backlog_events > 0
+        for: 30m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "The graph projector's buffer has been filling for an hour"
+          description: >-
+            Arrival is outrunning projection. Once the buffer is full the
+            projector applies backpressure and drains rather than dropping, so
+            this degrades freshness before it degrades correctness -- but it is
+            the leading indicator for the lag alert below.
+          runbook: infra/monitoring/README.md
+
+      # PLACEHOLDER THRESHOLD -- 900s (fifteen minutes).
+      #
+      # aida_graph_projection_lag_seconds is source-event-to-projected
+      # freshness. What counts as too stale is a product commitment nobody has
+      # made here. To replace it: decide how out of date the graph explorer and
+      # unified lineage may be before an answer drawn from them is misleading,
+      # and set this below that. No load test has established what this lag
+      # looks like at rest, so 900 is an ordering-of-magnitude guess.
+      - alert: AtlasProjectionLagHigh
+        expr: aida_graph_projection_lag_seconds > 900
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "Graph projection freshness is past the placeholder lag"
+          description: >-
+            The 900s here is a documented placeholder, not a measured figure --
+            see the comment above this rule. Prefer
+            AtlasProjectionBacklogGrowing and AtlasProjectionStalled while it
+            is unset; both are structural.
+          runbook: infra/monitoring/README.md
+
+      # PLACEHOLDER THRESHOLD -- 1800s (thirty minutes).
+      #
+      # projection_metrics.py calls the oldest-backlog gauge "the signal a
+      # tenant-budget policy should be chosen from", which is precisely an
+      # admission that the number is not yet chosen. Replace it with a multiple
+      # of the observed steady-state age once the change-burst harness has been
+      # run against a real deployment.
+      - alert: AtlasProjectionBacklogAgeHigh
+        expr: aida_graph_projection_oldest_backlog_seconds > 1800
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "The projector's oldest buffered event is past the placeholder age"
+          description: >-
+            One tenant's events can sit behind another's under the fair-share
+            budget; this gauge is the fleet's worst case. The 1800s is a
+            documented placeholder -- see the comment above this rule.
+          runbook: infra/monitoring/README.md
+
+  # ---------------------------------------------------------------------------
+  - name: atlas.retrieval
+    rules:
+      # PLACEHOLDER THRESHOLD -- 5s p95.
+      #
+      # This is the interactive-latency number the tracker row's load test is
+      # supposed to produce and which has not been taken. Five seconds is a
+      # plausible ceiling for a hybrid retrieval, not an observation. Replace it
+      # from the steady-state p95 that scripts/scale_harness/
+      # fp17_change_burst_latency.py reports against a real deployment: that
+      # script's baseline percentile is exactly the input this line wants.
+      - alert: AtlasRetrievalLatencyHigh
+        expr: atlas:retrieval_duration_seconds:p95_10m > 5
+        for: 10m
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "p95 retrieval latency is past the placeholder ceiling"
+          description: >-
+            The 5s here is a documented placeholder, not a measurement -- see
+            the comment above this rule and the change-burst harness it names.
+          runbook: infra/monitoring/README.md
+
+      # Structural: PROVIDER_UNAVAILABLE is a closed-set reason meaning the
+      # embedding provider refused, so the vector channel contributed nothing.
+      # Any rate above zero is a real degradation of answer quality, silently,
+      # because retrieval still returns results from the other channels.
+      - alert: AtlasRetrievalChannelProviderUnavailable
+        expr: |
+          sum by (channel) (
+            rate(aida_retrieval_channel_skipped_total{reason="PROVIDER_UNAVAILABLE"}[15m])
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "Retrieval channel {{ $labels.channel }} is being skipped: provider unavailable"
+          description: >-
+            Retrieval degrades quietly rather than failing: the remaining
+            channels still answer, with worse ranking and no error for the
+            caller to see. Needs no threshold -- the healthy value is zero.
+          runbook: infra/monitoring/README.md
+
+  # ---------------------------------------------------------------------------
+  - name: atlas.http
+    rules:
+      # PLACEHOLDER THRESHOLD -- 5% of requests.
+      #
+      # An error budget is an estate's commitment, not a platform constant. 5%
+      # is the conventional starting point for a warning, and no availability
+      # target has been agreed for this platform. Replace it with the complement
+      # of the estate's own availability objective.
+      - alert: AtlasHttpServerErrorRateHigh
+        expr: atlas:http_server_error_ratio:rate15m > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          threshold_status: placeholder
+        annotations:
+          summary: "Over the placeholder share of API requests are returning 5xx"
+          description: >-
+            The 0.05 here is a documented placeholder, not an agreed error
+            budget -- see the comment above this rule. The expression reads NaN
+            and stays silent when there is no traffic, so an idle deployment
+            does not look healthy by accident.
+          runbook: infra/monitoring/README.md
+
+      # PLACEHOLDER THRESHOLD -- 3s p95.
+      #
+      # Same class of unmeasured number as the retrieval ceiling above, over the
+      # whole API surface rather than one path. Replace it from the harness
+      # baseline, or split it per route template once the estate knows which
+      # routes are interactive and which are reports.
+      - alert: AtlasHttpLatencyHigh
+        expr: atlas:http_request_duration_seconds:p95_10m > 3
+        for: 10m
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "p95 API latency is past the placeholder ceiling"
+          description: >-
+            The 3s here is a documented placeholder, not a measurement -- see
+            the comment above this rule.
+          runbook: infra/monitoring/README.md
+
+  # ---------------------------------------------------------------------------
+  - name: atlas.cost-and-quota
+    rules:
+      # Structural, and the showback/chargeback line expressed as an alert:
+      # calls were made this hour and not one of them came back with
+      # provider-reported usage, so every token figure for the period is this
+      # platform's own estimate. Nothing is wrong with the platform; what is
+      # wrong is any spend number quoted from that period as though it were
+      # billed. No magnitude to choose -- the comparison is against zero.
+      - alert: AtlasModelSpendEntirelyEstimated
+        expr: |
+          sum(rate(aida_model_calls_total{basis="ESTIMATED"}[1h])) > 0
+            and sum(rate(aida_model_calls_total{basis="REPORTED"}[1h])) == 0
+        for: 1h
+        labels:
+          severity: info
+          threshold_status: structural
+        annotations:
+          summary: "No model call reported provider usage this hour"
+          description: >-
+            Every model token counted in this period is an estimate by the
+            4-bytes-per-token heuristic, not a figure a provider billed. Expect
+            this on a deployment using fixture providers or a provider that
+            reports no usage; do not quote the period's spend as chargeback.
+          runbook: infra/monitoring/README.md
+
+      # Structural: a refused request is a tenant being told no. Whether that
+      # is correct depends on the cap, but an operator should always know it is
+      # happening, and the healthy value on a well-sized estate is zero.
+      - alert: AtlasUsageQuotaRefusals
+        expr: |
+          sum by (dimension, scope) (
+            rate(aida_usage_quota_decisions_total{decision="REFUSED"}[15m])
+          ) > 0
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "A {{ $labels.scope }} quota is refusing {{ $labels.dimension }} work"
+          description: >-
+            Either the cap is set too low for the estate's real load, or
+            something is consuming far more than expected. The metric carries
+            no tenant label by the same cardinality rule as the footprint
+            gauges; the refused organization and datasource are in the
+            usage_quota_refused structlog line and in the quota window rows.
+          runbook: infra/monitoring/README.md
+
+      # Structural: the parse path is falling over rather than returning
+      # low-confidence lineage. `outcome` is a closed set; FAILED means the
+      # parser raised or sqlglot is missing, which is a deployment fault, not
+      # an unparseable definition (that is UNPARSEABLE).
+      - alert: AtlasParserFailures
+        expr: |
+          sum by (parser) (rate(aida_parser_statements_total{outcome="FAILED"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: structural
+        annotations:
+          summary: "The {{ $labels.parser }} parser is failing outright"
+          description: >-
+            Distinct from a definition the parser cannot read, which is counted
+            as UNPARSEABLE and is normal. FAILED means sqlglot is unavailable or
+            the parse raised, so lineage is silently not being extracted at all.
+          runbook: infra/monitoring/README.md

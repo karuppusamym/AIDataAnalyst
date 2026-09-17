@@ -47,15 +47,21 @@ evidence number clears the 0.8 threshold, and it would read the same if every
 label in the corpus were flipped. What the twins establish is the qualitative
 fact, which is the serious one: the control cannot see content at all.
 
-**Result, pinned 2026-09-12** (`BASELINE`, 14 pairs across 7 object types):
+**Result, pinned 2026-09-12, corpus extended 2026-09-16** (`BASELINE`, 15 pairs
+across 8 object types):
 
 * No pair of any type is told apart, and within every pair the two twins carry
   an identical confidence. Every resolver's number measures how much evidence
   exists, how exactly a name matched or how large a change is -- never whether
   the content is true. This is the review's "self-reported score", measured.
-* 9 of the 14 false twins are approved. The 12-pair corpus of 2026-09-11 scored
+* 9 of the 15 false twins are approved. The 12-pair corpus of 2026-09-11 scored
   7 of 12; the two pairs added on 2026-09-12 were chosen to break the control
-  rather than to pass it, and both did.
+  rather than to pass it, and both did. The pair added on 2026-09-16 with
+  R11-FP08's routine descriptions was chosen to record the opposite: the type is
+  T0, so it is inside the agent's ceiling, and the agent abstains on both halves
+  because `reviewer_agent` deliberately has no resolver for it. A governed
+  artifact family can be extended without adding a route to a wrong certified
+  fact, and this is what that looks like when it is measured rather than claimed.
 * The 9 are description drafts built on misleading sources, rules-inferred
   enrichments from a keyword match, and bulk operations and workbooks whose
   only checked property is their size -- including, now, a one-subject bulk
@@ -115,6 +121,7 @@ from aida.document_ingestion_api import (
     map_document,
     upload_document,
 )
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.glossary_link_candidates import (
     _PRIMARY_MATCH_CONFIDENCE,
     _SECONDARY_MATCH_CONFIDENCE,
@@ -138,6 +145,12 @@ from aida.review_risk_tiers import (
     HARD_MAX_AGENT_TIER,
     agent_decidable_object_types,
     effective_agent_ceiling,
+)
+from aida.routine_description_service import (
+    RoutineEvidence,
+    compose_routine_draft_text,
+    routine_evidence_payload,
+    score_routine_evidence,
 )
 from aida.semantic_inference import (
     SEMANTIC_INFERENCE_VERSION,
@@ -757,6 +770,85 @@ async def _workbook_carrying_model_text(
     )
 
 
+# --- ROUTINE_DESCRIPTION_DRAFT (R11-FP08) -----------------------------------
+
+
+def _routine_evidence(*, source_description: str) -> RoutineEvidence:
+    """A well-catalogued procedure: a signature, a parameter, a fully captured
+    body, and person-approved lineage saying it reads `postings` and writes
+    `ledger`. Every score dimension is high, which is the point: the number
+    measures how much is *known* about the routine, not whether the comment
+    below is true of it."""
+    return RoutineEvidence(
+        routine_id=uuid4(),
+        datasource_id=uuid4(),
+        routine_name="sp_settle_postings",
+        qualified_name="bank.public.sp_settle_postings",
+        schema_name="public",
+        routine_type="PROCEDURE",
+        native_subtype=None,
+        language="plpgsql",
+        signature="(p_as_of date)",
+        parameter_names=("p_as_of",),
+        parameter_count=1,
+        output_parameter_count=0,
+        defaulted_parameter_count=0,
+        return_type=None,
+        is_deterministic=False,
+        security_mode="DEFINER",
+        source_description=source_description,
+        body_state="CAPTURED",
+        body_digest="d" * 64,
+        source_definition_version_id=uuid4(),
+        reads_table_names=("postings",),
+        writes_table_names=("ledger",),
+        lineage_edge_ids=(uuid4(), uuid4()),
+        current_description_version=None,
+    )
+
+
+async def _routine_misleading_comment(
+    session: AsyncSession, org: Organization, truthful: bool
+) -> Seeded:
+    """The source system's own comment on a procedure, right in one twin and
+    describing a different procedure in the other.
+
+    `MetadataRoutine.source_description` is the only authored statement of
+    *meaning* a routine carries, and it is evidence, never authority. It is also
+    exactly the shape of misleading source text this corpus already shows the
+    control cannot see through for tables and columns -- which is why
+    `reviewer_agent` has no resolver for this type, and why both halves of this
+    pair are expected to abstain."""
+    comment = (
+        "Settles the day's postings into the general ledger."
+        if truthful
+        else "Sends the daily customer statement emails."
+    )
+    evidence = _routine_evidence(source_description=comment)
+    scores = score_routine_evidence(evidence)
+    ensure_reviewable(scores.overall)  # the producer would have submitted it
+    text = compose_routine_draft_text(evidence)
+    review = await _review(session, org, "ROUTINE_DESCRIPTION_DRAFT")
+    draft = RoutineDescriptionDraft(
+        organization_id=org.id,
+        datasource_id=evidence.datasource_id,
+        routine_id=evidence.routine_id,
+        drafted_text=text,
+        text_fingerprint=text_fingerprint(text),
+        accuracy_score=scores.accuracy,
+        clarity_score=scores.clarity,
+        style_score=scores.style,
+        completeness_score=scores.completeness,
+        overall_score=scores.overall,
+        evidence={**routine_evidence_payload(evidence), "origin": ORIGIN_METADATA},
+        status="PENDING_APPROVAL",
+        governance_review_id=review.id,
+        created_by=_STEWARD,
+    )
+    await _point_at(session, review, draft)
+    return Seeded(review, comment)
+
+
 # --- the corpus and the measurement -----------------------------------------
 
 
@@ -857,6 +949,19 @@ TWINS: tuple[Twin, ...] = (
         "one-row workbook carrying refused model text",
         _workbook_carrying_model_text,
     ),
+    # Added 2026-09-16 with R11-FP08, which gave routines a description store.
+    # Chosen to record an *abstention* rather than to break the control: the
+    # routine draft type is T0, so it is inside the agent's ceiling, and what
+    # keeps the agent off it is the deliberate absence of an evidence resolver
+    # (`reviewer_agent._EVIDENCE_RESOLVERS` states why). This pair is the
+    # measurement of that choice -- both halves abstain, so the type adds a
+    # governed artifact without adding a route to a wrong certified fact.
+    Twin(
+        "routine-misleading-comment",
+        "ROUTINE_DESCRIPTION_DRAFT",
+        "a procedure described by a misleading source comment",
+        _routine_misleading_comment,
+    ),
 )
 
 _APPROVE = "APPROVE"
@@ -881,6 +986,11 @@ BASELINE: dict[str, dict[str, int]] = {
     "DOCUMENT_CLAIM": _row(1, 0, 0, 0),
     "BULK_STEWARDSHIP_OPERATION": _row(2, 2, 2, 0),
     "MODEL_IMPORT_BATCH": _row(2, 2, 2, 0),
+    # R11-FP08, 2026-09-16. Both halves abstain, so the one pair is told apart
+    # zero times and approves nothing: the deliberate absence of an evidence
+    # resolver for this type, measured. If a resolver is ever added, this row
+    # moves and the change that added it has to say why here.
+    "ROUTINE_DESCRIPTION_DRAFT": _row(1, 0, 0, 0),
 }
 
 
@@ -1084,7 +1194,7 @@ async def test_no_pair_is_separated_even_by_the_number_the_agent_reads(
 
     Within every pair the two twins are scored to an identical confidence. So
     `wrong_approved` equals `right_approved` for every type by construction,
-    and the headline figure -- 7 of 12 in 2026-09-11's corpus, 9 of 14 in this
+    and the headline figure -- 7 of 12 in 2026-09-11's corpus, 9 of 15 in this
     one -- is a count of the types whose stored number clears the threshold,
     not a measure of how often the control is fooled. Flipping every label in
     the corpus would leave it unchanged.

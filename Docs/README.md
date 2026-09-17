@@ -38,6 +38,7 @@ Start with the [September 11 reconciliation](60-delivery/23-review-reconciliatio
 | **Reviewing security** | `50-security/01-security-architecture.md` → `50-security/02-threat-model.md` → `50-security/03-ai-safety-controls.md` |
 | **Planning delivery** | `60-delivery/01-roadmap.md` → `60-delivery/03-tracker.md` → `60-delivery/00-status.md` |
 | **Operating the platform** | `40-engineering/07-local-runbook.md` → `10-architecture/09-deployment-topology.md` |
+| **Deploying, or turning something on** | `40-engineering/16-deployment-alignment-and-enablement-runbook.md` → `40-engineering/13-configuration-inventory.md` → `40-engineering/12-notification-delivery-runbook.md` |
 | **Auditing or assessing risk** | `50-security/04-compliance-and-evidence.md` → `60-delivery/00-status.md` |
 
 ## Structure
@@ -142,6 +143,12 @@ Full index with reading orders, **and a per-module map from bounded context to t
 | [08 Experience shell rebuild plan](40-engineering/08-experience-shell-rebuild-plan.md) | The `ui-next/` rebuild, its phases and its exit criteria |
 | [09 Compatibility shim register](40-engineering/09-compatibility-shim-register.md) | **Generated caller counts, hand-written removal conditions.** Every re-export shim, what replaces it, who still calls it, and what must be true before it can go (review D03) |
 | [10 Bounded-context relocation procedure](40-engineering/10-bounded-context-relocation-procedure.md) | The repeatable steps for moving one context's models and DTOs out of `models.py`/`schemas.py`, the four things it may not change and how each is proved, and what went wrong the last time (review R04) |
+| [11 Reviewer-agent oversight runbook](40-engineering/11-reviewer-agent-oversight-runbook.md) | Operating the reviewer agent, and why it is refused in production |
+| [12 Notification delivery runbook](40-engineering/12-notification-delivery-runbook.md) | **Maintained in place, not a snapshot.** Reading the delivery queue, and the live-infrastructure procedure for verifying a real Slack / Teams / SIEM destination |
+| [13 Configuration inventory](40-engineering/13-configuration-inventory.md) | **Generated from the `Settings` class.** Every setting, its default, how many places read it, and the recorded decision for each one that ships off |
+| [14 Acceptance testing guide](40-engineering/14-acceptance-testing-guide.md) | What an acceptance run covers, and what it cannot |
+| [15 End-to-end setup and feature guide](40-engineering/15-end-to-end-setup-and-feature-guide.md) | Bringing a stack up from nothing, seeding an estate, and walking the product |
+| [16 Deployment alignment and enablement runbook](40-engineering/16-deployment-alignment-and-enablement-runbook.md) | **Maintained in place, not a snapshot.** Deploying the reviewed commit (the profile flags and the migration that cannot be separated from it), verifying deployment parity afterwards, and the ordered, consequence-by-consequence procedure for enabling the maintenance loop, discovery cadence, the authorization posture and outbound delivery (review F03/F04/F05) |
 
 ### 50-security — Trust
 

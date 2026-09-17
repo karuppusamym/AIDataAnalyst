@@ -1,0 +1,25 @@
+/* R11-S13 (M1): the lineage workspace shell.
+
+   Only the `?view=` axis and the panel that holds a view. Each view is the
+   screen it always was and still ships its own stylesheet, so nothing here
+   restates a rule `NarratedLineageScreen.css` or `UnifiedLineageScreen.css`
+   already owns. The tab chrome matches `BusinessMeaningScreen.css`'s and
+   `DocumentationWorkspace.css`'s, which is the shell's one in-screen tab
+   pattern. */
+
+.linws{display:flex;flex-direction:column;min-height:0;height:100%;gap:10px;padding:22px 24px 0}
+.linws__tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);flex:none}
+.linws__tab{all:unset;padding:8px 12px;font-size:12.5px;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent}
+.linws__tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.linws__tab--active{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+
+/* The view's own screen draws its padding; the panel only gives it the
+   remaining height and its own scroll context. */
+.linws__panel{flex:1;min-height:0;display:flex;flex-direction:column}
+.linws__panel > *{flex:1;min-height:0}
+.linws__loading{flex:1;display:flex;align-items:center;justify-content:center;color:var(--ink-3);font-size:13px}
+
+@media (max-width:900px){
+  .linws{padding:16px 14px 0}
+  .linws__tabs{overflow-x:auto}
+}

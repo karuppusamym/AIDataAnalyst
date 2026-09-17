@@ -645,3 +645,214 @@ async def test_composite_key_discovery_persists_and_an_approved_key_corroborates
 
     assert validation.approvable
     assert validation.target_uniqueness.basis == "APPROVED_KEY"
+
+
+# --------------------------------------------------------------------------
+# R11-FP04: the stored observation scope, where approval evidence reads it
+# --------------------------------------------------------------------------
+
+
+def test_a_bounded_profile_that_looks_exhaustive_is_still_flagged_sample_bounded() -> None:
+    """R11-FP04, at the exact point the defect changed a reviewer's evidence.
+
+    This is the BigQuery shape: the connector reported the sample size *as* the
+    row estimate, so `sampled_row_count >= row_count_estimate` held and the old
+    derivation concluded FULL. The consequence was not cosmetic -- a
+    `PROFILED_UNIQUE` evidence class stopped being `sample_bounded`, the
+    `UNIQUENESS_SAMPLE_BOUNDED` grain warning disappeared, and a reviewer
+    approving a join saw uniqueness evidence presented as exhaustive when it
+    came from the first thousand rows of ten million.
+
+    With the stored facet the numbers are unchanged and the conclusion is
+    correct, which is what makes this a test of the scope rather than of the
+    counts.
+    """
+    looks_exhaustive = ProfileBounds(
+        uuid4(),
+        datetime(2026, 9, 16, tzinfo=UTC),
+        sampled_row_count=1_000,
+        row_count_estimate=1_000,
+        stored_observation_scope="SAMPLE",
+    )
+    target = _col("customer_id", nulls=0, non_null=1_000, distinct=995)
+
+    validation = assess_relationship(
+        _facts(
+            _col("customer_id"),
+            target,
+            target_table=TableFacts(TARGET_TABLE, profile=looks_exhaustive),
+        )
+    )
+
+    (profiled,) = [item for item in validation.evidence_classes if item.name == "PROFILED_UNIQUE"]
+    assert profiled.sample_bounded is True
+    assert "UNIQUENESS_SAMPLE_BOUNDED" in validation.grain_warnings
+    assert validation.as_evidence()["target_observation"]["scope"] == "SAMPLE"
+
+
+def test_the_old_derivation_would_have_called_that_profile_exhaustive() -> None:
+    """Negative control for the test above.
+
+    Same numbers, no stored facet: the pre-R11-FP04 derivation reads FULL and
+    the sample-bounded warning is gone. Without this, the assertions above could
+    be passing because the fixture happens to look sampled by the old rule too,
+    and the test would prove nothing about the stored facet.
+    """
+    same_numbers = ProfileBounds(
+        uuid4(),
+        datetime(2026, 9, 16, tzinfo=UTC),
+        sampled_row_count=1_000,
+        row_count_estimate=1_000,
+    )
+    target = _col("customer_id", nulls=0, non_null=1_000, distinct=995)
+
+    validation = assess_relationship(
+        _facts(
+            _col("customer_id"),
+            target,
+            target_table=TableFacts(TARGET_TABLE, profile=same_numbers),
+        )
+    )
+
+    assert same_numbers.scope == "FULL"
+    (profiled,) = [item for item in validation.evidence_classes if item.name == "PROFILED_UNIQUE"]
+    assert profiled.sample_bounded is False
+
+
+def test_a_full_scan_reported_with_a_nominal_sample_size_is_not_flagged_sampled() -> None:
+    """The Snowflake shape, the other direction.
+
+    That adapter issues no bound at all and used to report
+    `sampled_row_count = min(row_count, sample_rows)`, so a genuinely
+    exhaustive profile arrived with `sampled < estimate` and every statistic
+    drawn from it was qualified as sample-bounded. Over-qualifying evidence is
+    not the safe error it looks like: it makes the warning meaningless, and a
+    reviewer who sees it on every join stops reading it.
+    """
+    full_scan = ProfileBounds(
+        uuid4(),
+        datetime(2026, 9, 16, tzinfo=UTC),
+        sampled_row_count=1_000,
+        row_count_estimate=5_000_000,
+        stored_observation_scope="FULL",
+    )
+    target = _col("customer_id", nulls=0, non_null=1_000, distinct=1_000)
+
+    validation = assess_relationship(
+        _facts(
+            _col("customer_id"),
+            target,
+            target_table=TableFacts(TARGET_TABLE, profile=full_scan),
+        )
+    )
+
+    (profiled,) = [item for item in validation.evidence_classes if item.name == "PROFILED_UNIQUE"]
+    assert profiled.sample_bounded is False
+    assert "UNIQUENESS_SAMPLE_BOUNDED" not in validation.grain_warnings
+
+
+def test_an_unrecognised_stored_scope_falls_back_rather_than_being_believed() -> None:
+    """A scope outside the shared vocabulary is not a scope.
+
+    The write path already refuses to store one
+    (`facets.persistable_observation_scope`), so this is the read-side half of
+    the same rule -- a row hand-edited or written by a future revision must not
+    be able to assert a scope this code cannot interpret.
+    """
+    nonsense = ProfileBounds(
+        uuid4(),
+        datetime(2026, 9, 16, tzinfo=UTC),
+        sampled_row_count=1_000,
+        row_count_estimate=50_000,
+        stored_observation_scope="MOSTLY",
+    )
+    assert nonsense.scope == "SAMPLE"
+
+
+def test_a_profile_with_no_stored_scope_and_no_estimate_says_unknown() -> None:
+    """Three states, not two: recorded-and-full, recorded-and-sampled, and
+    nothing to go on. The third has to stay distinguishable or a reviewer cannot
+    tell a weak claim from an unmeasured one.
+    """
+    unknown = ProfileBounds(
+        uuid4(), datetime(2026, 9, 16, tzinfo=UTC), sampled_row_count=10, row_count_estimate=None
+    )
+    assert unknown.scope == "UNKNOWN"
+
+
+async def test_validation_reads_the_stored_scope_off_the_table_profile(
+    session: AsyncSession,
+) -> None:
+    """The loader half: `_load_facts` has to carry the column through.
+
+    Every assertion above constructs `ProfileBounds` by hand, so a loader that
+    never read the new column would leave all of them passing while production
+    kept using the fallback. This drives the real candidate-validation endpoint
+    against a `TableProfile` row whose numbers say FULL and whose stored facet
+    says SAMPLE.
+    """
+    org, datasource = await _source(session)
+    customers, customer_id = await _table_with_column(
+        session,
+        org,
+        datasource,
+        table_name="customers",
+        column_name="customer_id",
+        physical_type="INTEGER",
+    )
+    orders, order_customer_id = await _table_with_column(
+        session,
+        org,
+        datasource,
+        table_name="orders",
+        column_name="customer_id",
+        physical_type="INTEGER",
+    )
+    profile = TableProfile(
+        organization_id=org.id,
+        analysis_run_id=uuid4(),
+        datasource_id=datasource.id,
+        table_id=customer_id.table_id,
+        # The numbers the old derivation would read as a complete scan.
+        row_count_estimate=1_000,
+        sampled_row_count=1_000,
+        observation_scope="SAMPLE",
+        status="COMPLETED",
+    )
+    session.add(profile)
+    await session.flush()
+    session.add(
+        ColumnProfile(
+            organization_id=org.id,
+            table_profile_id=profile.id,
+            column_id=customer_id.id,
+            null_count=0,
+            non_null_count=1_000,
+            approximate_distinct_count=1_000,
+            effectively_unique=True,
+        )
+    )
+    candidate = RelationshipCandidate(
+        organization_id=org.id,
+        datasource_id=datasource.id,
+        target_datasource_id=datasource.id,
+        source_table_id=order_customer_id.table_id,
+        source_column_id=order_customer_id.id,
+        target_table_id=customer_id.table_id,
+        target_column_id=customer_id.id,
+        detection_rule="EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
+        confidence=0.9,
+        evidence={},
+        created_by="maker",
+    )
+    session.add(candidate)
+    await session.flush()
+    assert customers is not None and orders is not None
+
+    validation = await get_relationship_candidate_validation(
+        candidate.id, context=_context(org, "reviewer"), session=session, settings=Settings()
+    )
+
+    assert validation.target_observation is not None
+    assert validation.target_observation.scope == "SAMPLE"
+    assert validation.target_uniqueness.sample_bounded is True

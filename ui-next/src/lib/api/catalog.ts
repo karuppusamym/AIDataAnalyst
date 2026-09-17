@@ -29,6 +29,7 @@ import type {
   GovernanceReviewRead,
   MetadataBusinessAnnotationRead,
   Page,
+  TableProfileRead,
   UnownedAssetBacklogRouteRequest,
   UnownedAssetBacklogRouteResult,
   UnownedAssetEscalationRead,
@@ -133,6 +134,37 @@ export function fetchAssetEvidence(
     async () => {
       return get<AssetEvidenceRead>(`/v1/metadata/tables/${tableId}/evidence`, signal);
     },
+  );
+}
+
+/** `GET /v1/tables/{table_id}/profile` (R11-FP04) — the latest value-free
+ *  profile of one table: counts, uniqueness, distribution shape, and the
+ *  observation scope those statistics were measured under.
+ *
+ *  The route has existed and been gated for a long time and its response type
+ *  has been in `types.ts` all along, but nothing in this app ever called it,
+ *  so a statistic this platform computes on every discovery run had no way to
+ *  reach a screen. FP-04's own acceptance (module 05 §16.3) is that
+ *  "Catalog/Quality show statistical evidence **and sampling limitations**" —
+ *  which is one requirement, not two: `observation_scope` travels in the same
+ *  payload as the numbers it qualifies, and `ProfilePanel` refuses to render
+ *  the numbers without it.
+ *
+ *  No fixture branch, deliberately, unlike `fetchAssetEvidence` above: a
+ *  demo-mode profile would be invented statistics about invented data, and a
+ *  reader cannot tell those from measured ones. A 404 (no profile yet) is a
+ *  first-class state this panel renders, so the demo build shows that instead.
+ *
+ *  Resolves by `tableId` alone for the same reason `fetchAssetEvidence` does —
+ *  the pane it renders in is a permalink target.
+ */
+export function fetchTableProfile(
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<TableProfileRead> {
+  return get<TableProfileRead>(
+    `/v1/tables/${encodeURIComponent(tableId)}/profile`,
+    signal,
   );
 }
 

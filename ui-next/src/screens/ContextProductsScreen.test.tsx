@@ -13,6 +13,10 @@ import { ApiError } from "../lib/api";
 --------------------------------------------------------------------------- */
 
 const fetchOrgProjects = vi.fn<(organizationId: string, signal?: AbortSignal) => Promise<PageOf<ProjectRead>>>();
+/* R11-FP12 (F08): the screen now offers "Ask through this product", and Ask is
+   datasource-scoped -- so the row needs one of this project's own sources.
+   `useDatasourcePicker` reads them through this same module boundary. */
+const listOrgDatasources = vi.fn();
 const fetchContextProducts =
   vi.fn<(projectId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<ContextProductRead>>>();
 const createContextProduct =
@@ -63,6 +67,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchContextProductBindings: (...args: unknown[]) => fetchContextProductBindings(...args),
     setContextProductBinding: (...args: unknown[]) => setContextProductBinding(...args),
     removeContextProductBinding: (...args: unknown[]) => removeContextProductBinding(...args),
+    listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
     fetchContextProducts: (projectId: string, query: unknown, signal?: AbortSignal) =>
       fetchContextProducts(projectId, query, signal),
@@ -105,6 +110,21 @@ const DRAFT_PRODUCT: ContextProductRead = {
   created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
 };
 
+/** The same product, published -- the only status the ask path resolves. */
+const PUBLISHED_PRODUCT: ContextProductRead = {
+  ...DRAFT_PRODUCT,
+  latest_version: { ...DRAFT_PRODUCT.latest_version, status: "PUBLISHED", version: 2 },
+};
+
+/** One source, in this project. `project_id` is what ties it to the product. */
+const PROJECT_DATASOURCE = {
+  id: "ds_snowflake_prod", organization_id: "org1", line_of_business_id: "lob1",
+  data_domain_id: "dom1", project_id: "proj_core", name: "snowflake_prod",
+  connector_type: "SNOWFLAKE", dialect: "snowflake", environment: "PRODUCTION",
+  credential_reference: "vault://x", status: "ACTIVE", capabilities: {},
+  created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+};
+
 async function loadScreen() {
   const { ContextProductsScreen } = await import("./ContextProductsScreen");
   return ContextProductsScreen;
@@ -125,6 +145,8 @@ beforeEach(() => {
   ]) fn.mockReset();
   fetchContextProductRoutineOptions.mockResolvedValue([]);
   listOntologyVersions.mockResolvedValue([]);
+  listOrgDatasources.mockReset();
+  listOrgDatasources.mockResolvedValue({ items: [PROJECT_DATASOURCE], limit: 500, offset: 0, total: 1 });
 
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
   fetchCatalogRows.mockResolvedValue({ items: CATALOG_ROWS, limit: 200, offset: 0, total: CATALOG_ROWS.length });
@@ -214,6 +236,58 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     // single shared `#context-product-message` target does.
     await waitFor(() => expect(fetchContextProducts).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByText("1 governed product in this project.")).toBeInTheDocument());
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-FP12 (F08): asking through the product, from the product.
+
+     Rollout / Submit / Deprecate / Compile were the only actions here, so a
+     published product could be governed from this screen and not consumed from
+     it -- the one thing it exists for meant going to Ask and finding it in a
+     picker.
+  ------------------------------------------------------------------------- */
+
+  it("opens Ask on this product, carrying a source of its own project (F08)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1 });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    fireEvent.click(await screen.findByRole("button", { name: "Ask through this product" }));
+
+    // The datasource is what makes the picker land on this product rather than
+    // on a blank selection: Ask resolves its product list from the selected
+    // source's project.
+    expect(location.hash).toBe("#/analyst/analyst");
+    const params = new URLSearchParams(location.search);
+    expect(params.get("ds")).toBe("ds_snowflake_prod");
+    expect(params.get("product")).toBe("consumer-risk-context");
+  });
+
+  it("does not offer Ask for a version that is not published (F08)", async () => {
+    // Offering it for a DRAFT would be offering CONTEXT_PRODUCT_NOT_AVAILABLE:
+    // the ask path resolves a PUBLISHED version and nothing else.
+    fetchContextProducts.mockResolvedValue({ items: [DRAFT_PRODUCT], limit: 200, offset: 0, total: 1 });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "Ask through this product" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer Ask when the project has no source to ask against (F08)", async () => {
+    listOrgDatasources.mockResolvedValue({ items: [], limit: 500, offset: 0, total: 0 });
+    fetchContextProducts.mockResolvedValue({ items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1 });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    // A button that navigated to a picker with nothing in it would be worse
+    // than no button.
+    expect(screen.queryByRole("button", { name: "Ask through this product" })).not.toBeInTheDocument();
   });
 
   it("compiles the selected version through the real compile endpoint at the chosen target", async () => {

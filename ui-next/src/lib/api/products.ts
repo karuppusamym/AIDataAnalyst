@@ -229,6 +229,13 @@ export function fetchPortfolioAnalyticsTrends(
 export interface ContextProductQuery {
   limit?: number;
   offset?: number;
+  /** R11-FP12 (F08): only the products this caller could actually *ask through*
+   *  — PUBLISHED, and naming a consumer role the caller holds. The lifecycle
+   *  view a steward needs (drafts included) is the default and is unchanged;
+   *  this is the picker's question, which is a different one. Without it the
+   *  Ask picker offered a steward every draft in the project and the ask came
+   *  back `CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED`. */
+  askable?: boolean;
 }
 
 /** `GET /v1/projects/{project_id}/context-products` (`list_context_products`,
@@ -241,11 +248,14 @@ export function fetchContextProducts(
   signal?: AbortSignal,
 ): Promise<PageOf<ContextProductRead>> {
   return demoOr(
+    // The demo estate has no role bindings to filter on, so `askable` narrows
+    // nothing here; the caller keeps its own PUBLISHED filter for that reason.
     async (fixtures) => fixtures.makeFixtureContextProducts(projectId, query),
     async () => {
       const params = new URLSearchParams();
       params.set("limit", String(query.limit ?? 200));
       params.set("offset", String(query.offset ?? 0));
+      if (query.askable) params.set("askable", "true");
       return get<PageOf<ContextProductRead>>(
         `/v1/projects/${projectId}/context-products?${params}`,
         signal,

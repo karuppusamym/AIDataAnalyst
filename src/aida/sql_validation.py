@@ -53,6 +53,11 @@ FINDING_TABLE_VALUED_SOURCE_FORBIDDEN: Final = "TABLE_VALUED_SOURCE_FORBIDDEN"
 FINDING_LOCKING_READ_FORBIDDEN: Final = "LOCKING_READ_FORBIDDEN"
 FINDING_UNKNOWN_OR_UNAUTHORIZED_TABLE: Final = "UNKNOWN_OR_UNAUTHORIZED_TABLE"
 FINDING_UNKNOWN_COLUMN: Final = "UNKNOWN_COLUMN"
+# F01: the context-product boundary, which narrows the datasource allowlist
+# above rather than replacing it. See `aida.context_product_execution_scope`
+# for the resolution rule and why an unresolved reference is refused here.
+FINDING_CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: Final = "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE"
+FINDING_CONTEXT_PRODUCT_TABLE_UNRESOLVED: Final = "CONTEXT_PRODUCT_TABLE_UNRESOLVED"
 FINDING_COST_CEILING_EXCEEDED: Final = "COST_CEILING_EXCEEDED"
 FINDING_BYTE_BUDGET_EXCEEDED: Final = "BYTE_BUDGET_EXCEEDED"
 FINDING_ROW_LIMIT_APPLIED: Final = "ROW_LIMIT_APPLIED"
@@ -106,6 +111,13 @@ _GUARD_CODES: Final[frozenset[str]] = frozenset(
 
 _CATALOG_CODES: Final[frozenset[str]] = frozenset(
     {FINDING_UNKNOWN_OR_UNAUTHORIZED_TABLE, FINDING_UNKNOWN_COLUMN}
+)
+
+_CONTEXT_PRODUCT_CODES: Final[frozenset[str]] = frozenset(
+    {
+        FINDING_CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE,
+        FINDING_CONTEXT_PRODUCT_TABLE_UNRESOLVED,
+    }
 )
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +213,20 @@ class SqlValidationReport:
             return ", ".join(
                 f"{finding.code}:{finding.ref}" if finding.ref else finding.code
                 for finding in guard
+            )
+        # F01: ordered ahead of the catalog group deliberately. A statement
+        # asked through a context product that reads past it produces both a
+        # product finding and, for a name that resolves nowhere, the catalog's
+        # own `UNKNOWN_OR_UNAUTHORIZED_TABLE`. Reporting the catalog first named
+        # a datasource-wide fact for a refusal the product boundary actually
+        # made, which is the attribution the F01 review found missing. Both
+        # findings stay in `findings`/`codes()`, so nothing is hidden -- this
+        # decides only which one the single-line rejection message names.
+        product = [finding for finding in blocking if finding.code in _CONTEXT_PRODUCT_CODES]
+        if product:
+            return ", ".join(
+                f"{finding.code}:{finding.ref}" if finding.ref else finding.code
+                for finding in product
             )
         catalog = [finding for finding in blocking if finding.code in _CATALOG_CODES]
         if catalog:
@@ -400,6 +426,65 @@ def findings_from_catalog(
         for table in sorted(referenced_tables)
         if table.lower() not in allowed
     ]
+
+
+def findings_from_context_product_scope(
+    *,
+    out_of_scope: Sequence[str],
+    unresolved: Sequence[str],
+    product_version_id: str,
+    product_version: int,
+) -> list[SqlFinding]:
+    """F01: the context-product boundary, as blocking findings.
+
+    Expressed as findings rather than as a raised refusal so the product
+    boundary joins the one deterministic pipeline both entry points share
+    (review item N14): `validate` can tell an agent beforehand exactly what
+    `execute` will refuse, and -- because a blocking finding short-circuits the
+    phase that opens the connector -- the refusal happens before an execution
+    session exists, which is what F01's acceptance criterion asks for.
+
+    Takes names rather than a resolution object on purpose: this module holds
+    no database access (see the module docstring), so the resolution itself is
+    computed by `aida.context_product_execution_scope` and only its value-free
+    result crosses the line. `detail` carries the version receipt, so a run's
+    audit row says which published version made the decision (INV-6: ids and
+    numbers, never a source value).
+    """
+    receipt: dict[str, float | int | bool | str | None] = {
+        "context_product_version_id": product_version_id,
+        "context_product_version": product_version,
+    }
+    findings = [
+        SqlFinding(
+            code=FINDING_CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE,
+            severity=SEVERITY_ERROR,
+            ref=table,
+            hint=(
+                "this table is not named by the context product this request was "
+                "asked through; a product narrows the datasource's own allowlist "
+                "and never widens it"
+            ),
+            detail=dict(receipt),
+        )
+        for table in sorted(set(out_of_scope))
+    ]
+    findings.extend(
+        SqlFinding(
+            code=FINDING_CONTEXT_PRODUCT_TABLE_UNRESOLVED,
+            severity=SEVERITY_ERROR,
+            ref=table,
+            hint=(
+                "this reference does not resolve to exactly one active table in this "
+                "datasource, so it cannot be shown to be inside the context product; "
+                "qualify it, or see the catalog finding for the same name for whether "
+                "it exists at all"
+            ),
+            detail=dict(receipt),
+        )
+        for table in sorted(set(unresolved))
+    )
+    return findings
 
 
 def findings_from_columns(

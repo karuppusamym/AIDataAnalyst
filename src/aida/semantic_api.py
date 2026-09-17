@@ -38,6 +38,7 @@ from aida.description_withdrawal import (
     reject_description_withdrawal,
 )
 from aida.document_ingestion import apply_document_claim, reject_document_claim
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.events import record_audit, record_outbox
 from aida.governance_decision_contracts import (
     DecisionOutcome,
@@ -101,6 +102,10 @@ from aida.product_marketplace_api import approve_access_request
 from aida.quality_rule_proposals import decide_quality_rule_proposal
 from aida.query_history_miner import apply_query_history_metric_candidate_decision
 from aida.retrieval import hybrid_retrieve_cross_source
+from aida.routine_description_service import (
+    apply_routine_description_draft,
+    reject_routine_description_draft,
+)
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
     ApiModel,
@@ -2599,6 +2604,69 @@ async def _decide_column_description_draft(
     return TargetEffect(event_type, "column_description_draft", str(draft.id), payload)
 
 
+async def _decide_routine_description_draft(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one drafted routine description.
+
+    R11-FP08: the routine-level twin of `_decide_asset_description_draft` and
+    `_decide_column_description_draft`, and the **sole** call site that
+    publishes a routine description -- there is no direct-publish endpoint, for
+    the reason the other two have none. On top of the shared maker != checker
+    guard it carries the same editor rule: anyone recorded as having *edited* the
+    draft is refused as its approver, because editing is authorship. That rule
+    is the reason `routine_description_api.edit_routine_description_draft`
+    stamps `editors`; without this guard the stamp would be decoration.
+
+    Publishing belongs to `apply_routine_description_draft`, which additionally
+    refuses a draft whose routine has gone or been retired, whose body moved
+    after the draft was composed (`routine_definition_moved`), or whose
+    description version moved since -- all 409, so the review stays PENDING and
+    the reviewer can reject it instead of being handed a dead end.
+    """
+    draft = await session.get(RoutineDescriptionDraft, UUID(review.object_id))
+    if draft is None or draft.organization_id != review.organization_id:
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    published_version_id: str | None = None
+    if decision == "APPROVE":
+        evidence = draft.evidence or {}
+        if (
+            context.principal_id in evidence.get("editors", [])
+            or evidence.get("edited_by") == context.principal_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="A description editor cannot approve their own edits"
+            )
+        event_type, published_version = await apply_routine_description_draft(
+            session,
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+        published_version_id = str(published_version.id)
+    else:
+        event_type = await reject_routine_description_draft(
+            draft,
+            reviewer=context.principal_id,
+            now=now,
+        )
+    payload = {
+        "draft_id": str(draft.id),
+        "routine_id": str(draft.routine_id),
+        "datasource_id": str(draft.datasource_id),
+        "overall_score": draft.overall_score,
+        "published_version_id": published_version_id,
+        "review_id": str(review.id),
+    }
+    return TargetEffect(event_type, "routine_description_draft", str(draft.id), payload)
+
+
 async def _decide_document_claim(
     session: AsyncSession,
     review: GovernanceReview,
@@ -2870,6 +2938,9 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "CROSS_BOUNDARY_GRANT": _decide_cross_boundary_grant,
     "ASSET_DESCRIPTION_DRAFT": _decide_asset_description_draft,
     "COLUMN_DESCRIPTION_DRAFT": _decide_column_description_draft,
+    # R11-FP08: the third member of the description family, dispatched through
+    # the same registry rather than a second decision surface.
+    "ROUTINE_DESCRIPTION_DRAFT": _decide_routine_description_draft,
     "DOCUMENT_CLAIM": _decide_document_claim,
     "DESCRIPTION_WITHDRAWAL": _decide_description_withdrawal,
     "MODEL_IMPORT_BATCH": _decide_model_import_batch,

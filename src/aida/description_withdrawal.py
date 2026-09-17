@@ -52,6 +52,11 @@ from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
 )
+from aida.envelope_models import (
+    MetadataRoutine,
+    MetadataRoutineDefinitionVersion,
+    RoutineDocumentationVersion,
+)
 from aida.models import (
     AssetDocumentation,
     AssetDocumentationVersion,
@@ -64,6 +69,11 @@ from aida.models import (
     MetadataColumn,
     MetadataTable,
     ReviewAuditSample,
+)
+from aida.routine_description_service import (
+    current_routine_description,
+    latest_withdrawn_routine_version,
+    publish_routine_documentation_version,
 )
 
 #: The status a withdrawn version carries. Deliberately not `SUPERSEDED`: that
@@ -102,26 +112,37 @@ async def _current_annotation_version(
 
 async def current_description_version(
     session: AsyncSession, subject_type: str, subject_id: UUID
-) -> ColumnDocumentationVersion | AssetDocumentationVersion | None:
-    """The approved description a TABLE or COLUMN withdrawal would retire, if any.
+) -> ColumnDocumentationVersion | AssetDocumentationVersion | RoutineDocumentationVersion | None:
+    """The approved description a TABLE, COLUMN or ROUTINE withdrawal would retire.
 
     Public so a caller deciding whether to raise one -- the correction for a
     disputed agent decision (R11-C8) -- checks the same version the request
     will record, rather than re-deriving "current" its own way.
+
+    R11-FP08: `ROUTINE` reads `routine_description_service`'s own resolver rather
+    than repeating its join here, for the reason the two branches above already
+    delegate: the store that publishes a version has to be the one that decides
+    which version is current, or a withdrawal can name a row no reader resolves.
     """
     if subject_type == "COLUMN":
         return await _current_column_version(session, subject_id)
+    if subject_type == "ROUTINE":
+        return await current_routine_description(session, subject_id)
     return await _current_table_version(session, subject_id)
 
 
 async def _latest_withdrawn_version(
     session: AsyncSession, subject_type: str, subject_id: UUID
-) -> ColumnDocumentationVersion | AssetDocumentationVersion | None:
+) -> ColumnDocumentationVersion | AssetDocumentationVersion | RoutineDocumentationVersion | None:
     """The most recently withdrawn version for a subject, if any.
 
     What a reinstatement brings back. Ordered by version so the newest retired
     text wins -- reinstating anything older would be an edit dressed as an undo.
     """
+    if subject_type == "ROUTINE":
+        # R11-FP08: delegated for the reason `current_description_version`
+        # delegates -- the routine store owns the ordering of its own versions.
+        return await latest_withdrawn_routine_version(session, subject_id)
     rows: Sequence[ColumnDocumentationVersion] | Sequence[AssetDocumentationVersion]
     if subject_type == "COLUMN":
         rows = (
@@ -188,10 +209,29 @@ async def request_description_withdrawal(
     here: the better annotation is a new proposal. `sample` names the sampled
     agent decision a DISAGREED verdict raised this from, the edge bulk
     stewardship reversals already carry.
+
+    R11-FP08: `subject_type="ROUTINE"` withdraws a `RoutineDocumentationVersion`.
+    Unlike `ANNOTATION`, a routine **does** reinstate, and the asymmetry between
+    the two is not a preference. An annotation cannot be reinstated because
+    nothing can publish one back: there is no annotation publish helper on this
+    path, and the better annotation genuinely is a new proposal. A routine has a
+    real append-only store with a publish function of its own
+    (`publish_routine_documentation_version`), so a reinstatement is the same
+    fresh-publish-of-older-words this module already performs for a table and a
+    column, with the same reasoning -- "the withdrawal was wrong" is a real case
+    and re-authoring identical prose is not a better answer to it.
+
+    What a routine reinstatement additionally checks is the body. A description
+    of a procedure is a statement about a body, and the body can move while the
+    description sits retired; `_apply_reinstatement` refuses in that case rather
+    than republishing prose about a routine that no longer exists. That check is
+    only possible because `RoutineDocumentationVersion` names the definition
+    version it was written against.
     """
-    if subject_type not in ("TABLE", "COLUMN", "ANNOTATION"):
+    if subject_type not in ("TABLE", "COLUMN", "ANNOTATION", "ROUTINE"):
         raise HTTPException(
-            status_code=422, detail="subject_type must be TABLE, COLUMN or ANNOTATION"
+            status_code=422,
+            detail="subject_type must be TABLE, COLUMN, ANNOTATION or ROUTINE",
         )
     if request_type not in ("WITHDRAW", "REINSTATE"):
         raise HTTPException(
@@ -214,9 +254,21 @@ async def request_description_withdrawal(
             ColumnDocumentationVersion
             | AssetDocumentationVersion
             | MetadataBusinessAnnotationVersion
+            | RoutineDocumentationVersion
             | None
         ) = column_version
         text = column_version.description if column_version else None
+    elif subject_type == "ROUTINE":
+        # R11-FP08: a routine is labelled with its own name plus the kind, because
+        # `sp_load` in two schemas is common and a reviewer deciding a retraction
+        # needs to know which object the text is about.
+        routine = await session.get(MetadataRoutine, subject_id)
+        if routine is None or routine.organization_id != organization_id:
+            raise HTTPException(status_code=404, detail="routine not found")
+        label = f"{routine.name} ({routine.routine_type.strip().lower()})"
+        routine_version = await current_routine_description(session, routine.id)
+        version = routine_version
+        text = routine_version.description if routine_version else None
     elif subject_type == "ANNOTATION":
         annotation = await session.get(MetadataBusinessAnnotation, subject_id)
         if annotation is None or annotation.organization_id != organization_id:
@@ -258,10 +310,14 @@ async def request_description_withdrawal(
                 detail="there is no withdrawn description on this asset to reinstate",
             )
         version = retired
+        # R11-FP08: `RoutineDocumentationVersion` names its text `description`,
+        # as `ColumnDocumentationVersion` does; only the table store calls it
+        # `readme`. Matched on the type rather than on `subject_type` so the
+        # attribute a branch reads is the one the object actually has.
         text = (
-            retired.description
-            if isinstance(retired, ColumnDocumentationVersion)
-            else retired.readme
+            retired.readme
+            if isinstance(retired, AssetDocumentationVersion)
+            else retired.description
         )
     elif version is None or text is None:
         raise HTTPException(
@@ -347,12 +403,17 @@ async def apply_description_withdrawal(
         ColumnDocumentationVersion
         | AssetDocumentationVersion
         | MetadataBusinessAnnotationVersion
+        | RoutineDocumentationVersion
         | None
     )
     if withdrawal.subject_type == "COLUMN":
         current = await _current_column_version(session, subject_id)
     elif withdrawal.subject_type == "ANNOTATION":
         current = await _current_annotation_version(session, subject_id)
+    elif withdrawal.subject_type == "ROUTINE":
+        # R11-FP08: retirement is identical for this store too -- flip `status`,
+        # stamp `updated_at` -- so only the lookup needed a branch.
+        current = await current_routine_description(session, subject_id)
     else:
         current = await _current_table_version(session, subject_id)
 
@@ -393,13 +454,25 @@ async def _apply_reinstatement(
 
     # Someone described the asset again while this was pending; their text is
     # current and reinstating over it would silently replace it.
-    current: ColumnDocumentationVersion | AssetDocumentationVersion | None = (
-        await _current_column_version(session, subject_id)
-        if withdrawal.subject_type == "COLUMN"
-        else await _current_table_version(session, subject_id)
+    current: (
+        ColumnDocumentationVersion
+        | AssetDocumentationVersion
+        | RoutineDocumentationVersion
+        | None
     )
+    if withdrawal.subject_type == "COLUMN":
+        current = await _current_column_version(session, subject_id)
+    elif withdrawal.subject_type == "ROUTINE":
+        current = await current_routine_description(session, subject_id)
+    else:
+        current = await _current_table_version(session, subject_id)
     if current is not None:
         return "description.reinstatement.superseded.v1", False
+
+    if withdrawal.subject_type == "ROUTINE":
+        return await _reinstate_routine_description(
+            session, withdrawal, subject_id=subject_id, reviewer=reviewer, now=now
+        )
 
     if withdrawal.subject_type == "COLUMN":
         column = await session.get(MetadataColumn, subject_id)
@@ -428,6 +501,67 @@ async def _apply_reinstatement(
             approved_by=reviewer,
             approved_at=now,
         )
+    await session.flush()
+    return "description.reinstatement.approved.v1", True
+
+
+async def _reinstate_routine_description(
+    session: AsyncSession,
+    withdrawal: DescriptionWithdrawal,
+    *,
+    subject_id: UUID,
+    reviewer: str,
+    now: datetime,
+) -> tuple[str, bool]:
+    """Republish a withdrawn routine description -- but only while its body stands.
+
+    R11-FP08. A routine description is a statement *about a body*, and the body
+    can move in the window between the withdrawal and the reinstatement: a
+    rescan captures a redefined procedure, or the procedure is dropped. A table
+    or column reinstatement has no equivalent hazard, so neither branch above
+    checks for one; here it is checkable, because the withdrawn
+    `RoutineDocumentationVersion` names the definition version it was written
+    against (`source_definition_version_id`).
+
+    So this refuses in two further cases, both reported as
+    `description.reinstatement.superseded.v1` with `applied=False` -- the same
+    "approved, but nothing was republished" outcome the branches above already
+    report when someone described the subject again in the window:
+
+    * the routine is gone or retired -- there is nothing left to describe;
+    * its current captured definition is not the one the retired text was
+      written against -- republishing would put prose about a body that no
+      longer exists back in front of every reader, which is the harm the whole
+      version-naming edge exists to prevent.
+
+    A description written when no body had been captured
+    (`source_definition_version_id IS NULL`) reinstates only while that is still
+    true: a body captured since is exactly the change that makes "its body has
+    not been captured from the source" false.
+    """
+    routine = await session.get(MetadataRoutine, subject_id)
+    if routine is None or routine.status != "ACTIVE":
+        return "description.reinstatement.superseded.v1", False
+    retired = await session.get(RoutineDocumentationVersion, withdrawal.version_id)
+    current_definition_id = await session.scalar(
+        select(MetadataRoutineDefinitionVersion.id)
+        .where(MetadataRoutineDefinitionVersion.routine_id == routine.id)
+        .order_by(MetadataRoutineDefinitionVersion.version_number.desc())
+        .limit(1)
+    )
+    if retired is None or retired.source_definition_version_id != current_definition_id:
+        return "description.reinstatement.superseded.v1", False
+    await publish_routine_documentation_version(
+        session,
+        organization_id=withdrawal.organization_id,
+        datasource_id=routine.datasource_id,
+        routine_id=routine.id,
+        description=withdrawal.withdrawn_text,
+        created_by=withdrawal.requested_by,
+        approved_by=reviewer,
+        approved_at=now,
+        source_definition_version_id=current_definition_id,
+    )
     await session.flush()
     return "description.reinstatement.approved.v1", True
 

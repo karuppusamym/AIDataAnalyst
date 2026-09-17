@@ -9,6 +9,7 @@ never read.
 
 from __future__ import annotations
 
+import inspect
 import itertools
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -34,9 +35,11 @@ from aida.description_withdrawal import (
 )
 from aida.description_withdrawal_api import (
     DescriptionWithdrawalCreate,
+    _authorize_subject,
     create_description_withdrawal,
     list_description_withdrawals,
 )
+from aida.envelope_models import MetadataRoutine, MetadataRoutineDefinitionVersion
 from aida.models import (
     AssetDocumentation,
     AssetDocumentationVersion,
@@ -54,6 +57,10 @@ from aida.models import (
     MetadataTable,
     Organization,
     Project,
+)
+from aida.routine_description_service import (
+    current_routine_description,
+    publish_routine_documentation_version,
 )
 from aida.schemas import GovernanceDecisionRequest
 from aida.security import SecurityContext
@@ -976,3 +983,299 @@ async def test_reinstating_puts_the_description_back_on_the_row(session) -> None
     row = await _catalog_row(session, table)
     assert row.description == "Customer master, loaded nightly."
     assert row.description_is_proposed is False
+
+
+# ---------------------------------------------------------------------------
+# R11-FP08: a routine's description is withdrawn and reinstated the same way.
+#
+# Templated on `tests/test_r11c8_annotation_withdrawal.py`, which is this
+# repository's worked precedent for adding a subject type to this table. The
+# interesting part is where routines *diverge* from that precedent: an
+# annotation is withdrawn but never reinstated, because nothing on this path
+# can publish one back and the better annotation genuinely is a new proposal.
+# A routine has a real append-only store with its own publish function, so it
+# reinstates -- and, because a published routine description names the
+# definition version it was written against, a reinstatement can refuse to
+# republish prose about a body that moved while it sat retired. Neither the
+# table nor the column store can make that check.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_routine(session, table, *, source_description: str | None = None):
+    """One ACTIVE procedure in the same estate `_seed` built, with one captured
+    definition version -- the row a published description points at."""
+    routine = MetadataRoutine(
+        id=uuid4(),
+        organization_id=table.organization_id,
+        datasource_id=table.datasource_id,
+        schema_id=table.schema_id,
+        name="sp_load_customers",
+        signature="(p_as_of date)",
+        routine_type="PROCEDURE",
+        body_sql_redacted="CREATE PROCEDURE sp_load_customers() AS BEGIN SELECT ? END",
+        body_fingerprint="bf",
+        redaction_status="LEXICAL",
+        screening_status="CLEAN",
+        availability="AVAILABLE",
+        source_description=source_description,
+        status="ACTIVE",
+        fingerprint="f",
+    )
+    session.add(routine)
+    await session.flush()
+    session.add(
+        MetadataRoutineDefinitionVersion(
+            id=uuid4(),
+            organization_id=routine.organization_id,
+            datasource_id=routine.datasource_id,
+            routine_id=routine.id,
+            body_sql_redacted=routine.body_sql_redacted,
+            body_fingerprint=routine.body_fingerprint,
+            availability="AVAILABLE",
+            truncated=False,
+            redaction_status="LEXICAL",
+            screening_status="CLEAN",
+            version_number=1,
+            captured_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    return routine
+
+
+async def _describe_routine(session, routine, text="Loads the customer master nightly."):
+    return await publish_routine_documentation_version(
+        session,
+        organization_id=routine.organization_id,
+        datasource_id=routine.datasource_id,
+        routine_id=routine.id,
+        description=text,
+        created_by=_MAKER,
+        approved_by=_CHECKER,
+        approved_at=datetime.now(UTC),
+        source_definition_version_id=await session.scalar(
+            select(MetadataRoutineDefinitionVersion.id)
+            .where(MetadataRoutineDefinitionVersion.routine_id == routine.id)
+            .order_by(MetadataRoutineDefinitionVersion.version_number.desc())
+            .limit(1)
+        ),
+    )
+
+
+async def _request_routine(session, routine, *, request_type="WITHDRAW"):
+    return await request_description_withdrawal(
+        session,
+        organization_id=routine.organization_id,
+        subject_type="ROUTINE",
+        subject_id=routine.id,
+        reason="It describes the wrong procedure.",
+        requested_by=_MAKER,
+        request_type=request_type,
+    )
+
+
+async def test_a_routine_withdrawal_is_raised_against_the_exact_version(session) -> None:
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+    version = await _describe_routine(session, routine)
+
+    withdrawal, review = await _request_routine(session, routine)
+
+    assert (withdrawal.subject_type, withdrawal.version_id, withdrawal.status) == (
+        "ROUTINE",
+        version.id,
+        "PENDING_REVIEW",
+    )
+    assert withdrawal.withdrawn_text == "Loads the customer master nightly."
+    # The routine is named with its kind: `sp_load` in two schemas is common,
+    # and a reviewer deciding a retraction has to know which object it is about.
+    assert withdrawal.subject_label == "sp_load_customers (procedure)"
+    assert (review.object_type, review.requested_action) == (
+        "DESCRIPTION_WITHDRAWAL",
+        "WITHDRAW_DESCRIPTION",
+    )
+    # Nothing has happened to the description yet.
+    assert version.status == "APPROVED"
+
+
+async def test_approving_a_routine_withdrawal_keeps_the_text_and_stops_resolving_it(
+    session,
+) -> None:
+    """Withdrawal is not a delete: a run grounded on the text stays replayable
+    against exactly the words it saw. What changes is that the current-version
+    resolver stops returning it."""
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+    version = await _describe_routine(session, routine)
+    _withdrawal, review = await _request_routine(session, routine)
+    await session.commit()
+
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(routine.organization_id, _CHECKER),
+        session,
+    )
+
+    await session.refresh(version)
+    assert version.status == WITHDRAWN
+    assert version.description == "Loads the customer master nightly."
+    assert await current_routine_description(session, routine.id) is None
+
+
+async def test_a_routine_withdrawal_names_no_routine_body(session) -> None:
+    """The snapshot a reviewer reads is the description, never the procedure
+    body -- the largest indirect-injection surface in the estate."""
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+    await _describe_routine(session, routine)
+
+    withdrawal, _review = await _request_routine(session, routine)
+
+    assert "CREATE PROCEDURE" not in withdrawal.withdrawn_text
+    assert "SELECT" not in withdrawal.withdrawn_text
+
+
+async def test_a_routine_with_no_approved_description_cannot_be_withdrawn(session) -> None:
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+
+    with pytest.raises(HTTPException) as refused:
+        await _request_routine(session, routine)
+
+    assert refused.value.status_code == 409
+    assert "no approved description" in str(refused.value.detail)
+
+
+async def test_an_unknown_routine_is_a_404_not_a_missing_description(session) -> None:
+    table, _ = await _seed(session)
+    await _seed_routine(session, table)
+
+    with pytest.raises(HTTPException) as refused:
+        await request_description_withdrawal(
+            session,
+            organization_id=table.organization_id,
+            subject_type="ROUTINE",
+            subject_id=uuid4(),
+            reason="It describes the wrong procedure.",
+            requested_by=_MAKER,
+        )
+
+    assert refused.value.status_code == 404
+    assert "routine not found" in str(refused.value.detail)
+
+
+async def test_reinstating_a_routine_description_republishes_it_as_a_new_version(
+    session,
+) -> None:
+    """Never flips the WITHDRAWN row back: the chain has to go on recording that
+    the description was retired, or an audit of why a run cited text that "was
+    always approved" would be misled."""
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+    retired = await _describe_routine(session, routine)
+    _withdrawal, review = await _request_routine(session, routine)
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(routine.organization_id, _CHECKER),
+        session,
+    )
+
+    _reinstatement, reinstate_review = await _request_routine(
+        session, routine, request_type="REINSTATE"
+    )
+    await session.commit()
+    await decide_governance_review(
+        reinstate_review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(routine.organization_id, _CHECKER),
+        session,
+    )
+
+    await session.refresh(retired)
+    assert retired.status == WITHDRAWN
+    current = await current_routine_description(session, routine.id)
+    assert current is not None
+    assert (current.version, current.description) == (2, "Loads the customer master nightly.")
+    assert current.id != retired.id
+
+
+async def test_a_routine_reinstatement_is_refused_once_its_body_has_moved(session) -> None:
+    """The check only a routine can make. A description of a procedure is a
+    statement about a body, and the body can be redefined while the description
+    sits retired; republishing then would put prose about a routine that no
+    longer exists back in front of every reader. Reported as approved-but-not-
+    applied, the same outcome a table reinstatement reports when someone
+    described the asset again in the window."""
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+    await _describe_routine(session, routine)
+    _withdrawal, review = await _request_routine(session, routine)
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(routine.organization_id, _CHECKER),
+        session,
+    )
+    reinstatement, reinstate_review = await _request_routine(
+        session, routine, request_type="REINSTATE"
+    )
+    await session.commit()
+    # A rescan captured a redefined body: a new immutable definition version.
+    session.add(
+        MetadataRoutineDefinitionVersion(
+            id=uuid4(),
+            organization_id=routine.organization_id,
+            datasource_id=routine.datasource_id,
+            routine_id=routine.id,
+            body_sql_redacted="CREATE PROCEDURE sp_load_customers() AS BEGIN UPDATE ? END",
+            body_fingerprint="bf2",
+            availability="AVAILABLE",
+            truncated=False,
+            redaction_status="LEXICAL",
+            screening_status="CLEAN",
+            version_number=2,
+            change_class="STRUCTURAL",
+            captured_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+    event_type, applied = await apply_description_withdrawal(
+        session, reinstatement, reviewer=_CHECKER, now=datetime.now(UTC)
+    )
+
+    assert (event_type, applied) == ("description.reinstatement.superseded.v1", False)
+    assert await current_routine_description(session, routine.id) is None
+
+
+async def test_the_api_admits_a_routine_subject_and_gates_it_on_the_datasource(
+    session,
+) -> None:
+    """The one genuinely new authorization question this row raised. Every other
+    description write gates `resource_type="table"`, and a routine has no table;
+    this follows `ontology_api`'s own `ROUTINE` precedent and gates the
+    datasource instead."""
+    table, _ = await _seed(session)
+    routine = await _seed_routine(session, table)
+    await _describe_routine(session, routine)
+    await session.commit()
+
+    withdrawal = await create_description_withdrawal(
+        DescriptionWithdrawalCreate(
+            subject_type="ROUTINE",
+            subject_id=routine.id,
+            reason="It describes the wrong procedure.",
+        ),
+        _context(routine.organization_id, _MAKER),
+        session,
+        _SETTINGS,
+    )
+
+    assert (withdrawal.subject_type, withdrawal.status) == ("ROUTINE", "PENDING_REVIEW")
+    gate_source = inspect.getsource(_authorize_subject)
+    routine_branch = gate_source[gate_source.index('if body.subject_type == "ROUTINE"') :]
+    assert 'resource_type="datasource"' in routine_branch.split("return")[0]

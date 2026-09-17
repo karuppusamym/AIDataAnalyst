@@ -1,0 +1,3480 @@
+{
+  "dbt_coverage": [
+    {
+      "aspect": "macro definitions",
+      "evidence": "'macro' is not in dbt_artifacts.SUPPORTED_RESOURCE_TYPES and the manifest keys read are nodes, sources, exposures, metrics, semantic_models, saved_queries -- 'macros' is not among them, so no macro is stored, named or linked to the model it produced",
+      "reason": "ADAPTER_NOT_IMPLEMENTED",
+      "state": "UNSUPPORTED"
+    },
+    {
+      "aspect": "a model whose SQL a macro produced",
+      "evidence": "the model's own compiled SQL is parsed, so the relations the expansion resolved to are real lineage; the macro that produced it is not modelled, so nothing can say which macro, or report a macro whose expansion depends on warehouse state at compile time. ParsedDbtResource.macro_dependency_count carries the count per model, so a macro-produced model is visibly bounded rather than silently counted as understood",
+      "reason": "ADAPTER_NOT_IMPLEMENTED",
+      "state": "PARTIAL"
+    },
+    {
+      "aspect": "project hooks (on-run-start / on-run-end)",
+      "evidence": "dbt compiles these into `operation` nodes, which are not in SUPPORTED_RESOURCE_TYPES and are skipped; their SQL is never parsed, so any relation they read or write is invisible to lineage. ParsedDbtArtifact.project_hook_count reports how many the manifest holds",
+      "reason": "ADAPTER_NOT_IMPLEMENTED",
+      "state": "UNSUPPORTED"
+    },
+    {
+      "aspect": "model hooks (pre_hook / post_hook)",
+      "evidence": "a hook's SQL lives in the node's own config, not in its compiled code, and is never parsed -- a post-hook that writes another table produces no edge. ParsedDbtResource.pre_hook_count / post_hook_count report the counts so the gap is visible per model",
+      "reason": "ADAPTER_NOT_IMPLEMENTED",
+      "state": "UNSUPPORTED"
+    }
+  ],
+  "declared_gaps": [
+    "Triggers are not discovered on any adapter (UNSUPPORTED on PostgreSQL, Oracle and SQL Server; NOT_APPLICABLE elsewhere).",
+    "Sequences are not discovered on any adapter (UNSUPPORTED on PostgreSQL, Oracle, SQL Server and Snowflake; NOT_APPLICABLE on BigQuery and Databricks).",
+    "Databricks declares neither `views` nor `routines`, so its view definitions and routine bodies are UNSUPPORTED, and its dialect is refused by both lineage parsers.",
+    "PostgreSQL aggregate and window functions are not discovered: the routine query restricts itself to prokind 'f' and 'p'.",
+    "Schema-scope pushdown reaches the source's own queries on PostgreSQL and SQL Server only; the other four adapters filter after reading, so an excluded schema is still read.",
+    "The push-ingestion path applies no discovery selection and records no invisible-object count, so a pushed estate has no NOT_SELECTED or visibility evidence of its own.",
+    "There is no definition-history read route: metadata_routine_definition_version accumulates versions that no endpoint serves.",
+    "`count_invisible_objects` answers on PostgreSQL only; every other adapter inherits None, which is reported as unknown visibility rather than as nothing hidden.",
+    "Query history is declared False on all six adapters, including the two (Snowflake, BigQuery) whose method exists, because nothing consumes it.",
+    "Precise source mapping is unsupported: see the source-mapping record.",
+    "No facet carries a tested engine-version or deployment-variant range; the matrix key names both as not recorded."
+  ],
+  "engines": [
+    {
+      "adapter_version": "1.0.0",
+      "dialect": "bigquery",
+      "display_name": "Google BigQuery",
+      "engine": "bigquery",
+      "flags": {
+        "approximate_statistics": "SUPPORTED",
+        "catalogs": "SUPPORTED",
+        "constraints": "SUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "SUPPORTED",
+        "grants": "UNSUPPORTED",
+        "indexes": "UNSUPPORTED",
+        "object_comments": "SUPPORTED",
+        "partitions": "UNSUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "SUPPORTED",
+        "schemas": "SUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "SUPPORTED"
+      },
+      "implementation_status": "IMPLEMENTED",
+      "live_validation": "NOT_EXERCISED",
+      "maturity": "BETA",
+      "notes": "Pull discovery via region-qualified INFORMATION_SCHEMA (primary-key constraints only; foreign-key metadata honestly omitted, uncertified), dry-run byte estimation, and governed read execution bounded by the gateway's deterministic byte-budget gate.",
+      "overridden_methods": [
+        "get_query_history"
+      ],
+      "parser_dialect_supported": true
+    },
+    {
+      "adapter_version": "1.0.0",
+      "dialect": "databricks",
+      "display_name": "Databricks SQL",
+      "engine": "databricks",
+      "flags": {
+        "approximate_statistics": "SUPPORTED",
+        "catalogs": "SUPPORTED",
+        "constraints": "SUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "SUPPORTED",
+        "grants": "UNSUPPORTED",
+        "indexes": "UNSUPPORTED",
+        "object_comments": "SUPPORTED",
+        "partitions": "UNSUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "UNSUPPORTED",
+        "schemas": "SUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "UNSUPPORTED"
+      },
+      "implementation_status": "IMPLEMENTED",
+      "live_validation": "NOT_EXERCISED",
+      "maturity": "BETA",
+      "notes": "Pull discovery of Unity Catalog catalogs/schemas/tables/columns via per-catalog INFORMATION_SCHEMA, PRIMARY KEY/UNIQUE constraints, best-effort FOREIGN KEY discovery (degrades to none rather than failing on older metastores), table/column/schema/catalog comments, EXPLAIN COST-based query estimation, and bounded profiling. PAT auth only (no delegated/workload identity); view/routine/grant axes not yet implemented. Code complete; never exercised against a live Databricks workspace -- same honesty gap as the Snowflake, Oracle and BigQuery rows.",
+      "overridden_methods": [],
+      "parser_dialect_supported": false
+    },
+    {
+      "adapter_version": "0.0.0",
+      "dialect": "db2",
+      "display_name": "IBM Db2",
+      "engine": "db2",
+      "flags": {
+        "approximate_statistics": "UNSUPPORTED",
+        "catalogs": "UNSUPPORTED",
+        "constraints": "UNSUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "UNSUPPORTED",
+        "grants": "UNSUPPORTED",
+        "indexes": "UNSUPPORTED",
+        "object_comments": "UNSUPPORTED",
+        "partitions": "UNSUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "UNSUPPORTED",
+        "schemas": "UNSUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "UNSUPPORTED"
+      },
+      "implementation_status": "PLANNED",
+      "live_validation": "NOT_EXERCISED",
+      "maturity": "NOT_CERTIFIED",
+      "notes": "Canonical push ingestion is available; native pull adapter and certification are pending.",
+      "overridden_methods": [],
+      "parser_dialect_supported": false
+    },
+    {
+      "adapter_version": "1.0.0",
+      "dialect": "oracle",
+      "display_name": "Oracle Database",
+      "engine": "oracle",
+      "flags": {
+        "approximate_statistics": "SUPPORTED",
+        "catalogs": "SUPPORTED",
+        "constraints": "SUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "UNSUPPORTED",
+        "grants": "SUPPORTED",
+        "indexes": "SUPPORTED",
+        "object_comments": "SUPPORTED",
+        "partitions": "SUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "SUPPORTED",
+        "schemas": "SUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "SUPPORTED"
+      },
+      "implementation_status": "IMPLEMENTED",
+      "live_validation": "NOT_EXERCISED",
+      "maturity": "BETA",
+      "notes": "Pull discovery, constraints, bounded profiling, and governed read execution. Query-estimate enforcement remains intentionally unavailable until an Oracle explain path is certified.",
+      "overridden_methods": [],
+      "parser_dialect_supported": true
+    },
+    {
+      "adapter_version": "1.0.0",
+      "dialect": "postgres",
+      "display_name": "PostgreSQL",
+      "engine": "postgres",
+      "flags": {
+        "approximate_statistics": "SUPPORTED",
+        "catalogs": "SUPPORTED",
+        "constraints": "SUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "SUPPORTED",
+        "explain": "SUPPORTED",
+        "grants": "SUPPORTED",
+        "indexes": "SUPPORTED",
+        "object_comments": "SUPPORTED",
+        "partitions": "SUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "SUPPORTED",
+        "schemas": "SUPPORTED",
+        "value_range_profiling": "SUPPORTED",
+        "views": "SUPPORTED"
+      },
+      "implementation_status": "IMPLEMENTED",
+      "live_validation": "EXERCISED",
+      "maturity": "BETA",
+      "notes": "Pull discovery, constraints, bounded profiling, explain and governed queries.",
+      "overridden_methods": [
+        "scope_discovery",
+        "count_invisible_objects",
+        "discover_streaming",
+        "profile_column_values"
+      ],
+      "parser_dialect_supported": true
+    },
+    {
+      "adapter_version": "1.0.0",
+      "dialect": "snowflake",
+      "display_name": "Snowflake",
+      "engine": "snowflake",
+      "flags": {
+        "approximate_statistics": "SUPPORTED",
+        "catalogs": "SUPPORTED",
+        "constraints": "SUPPORTED",
+        "delegated_identity": "SUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "SUPPORTED",
+        "grants": "SUPPORTED",
+        "indexes": "UNSUPPORTED",
+        "object_comments": "SUPPORTED",
+        "partitions": "SUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "SUPPORTED",
+        "schemas": "SUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "SUPPORTED"
+      },
+      "implementation_status": "IMPLEMENTED",
+      "live_validation": "NOT_EXERCISED",
+      "maturity": "BETA",
+      "notes": "Pull discovery across multi-database catalogs via INFORMATION_SCHEMA, referential constraints, partition-pruned EXPLAIN cost estimation, approximate statistics profiling, and warehouse query ID traceability.",
+      "overridden_methods": [
+        "get_query_history"
+      ],
+      "parser_dialect_supported": true
+    },
+    {
+      "adapter_version": "1.0.0",
+      "dialect": "tsql",
+      "display_name": "Microsoft SQL Server",
+      "engine": "sqlserver",
+      "flags": {
+        "approximate_statistics": "SUPPORTED",
+        "catalogs": "SUPPORTED",
+        "constraints": "SUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "SUPPORTED",
+        "grants": "SUPPORTED",
+        "indexes": "UNSUPPORTED",
+        "object_comments": "SUPPORTED",
+        "partitions": "UNSUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "SUPPORTED",
+        "schemas": "SUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "SUPPORTED"
+      },
+      "implementation_status": "IMPLEMENTED",
+      "live_validation": "EXERCISED",
+      "maturity": "BETA",
+      "notes": "Pull discovery, constraints, bounded profiling, SHOWPLAN_XML-based cost estimation and governed queries.",
+      "overridden_methods": [
+        "scope_discovery"
+      ],
+      "parser_dialect_supported": true
+    },
+    {
+      "adapter_version": "0.0.0",
+      "dialect": "teradata",
+      "display_name": "Teradata",
+      "engine": "teradata",
+      "flags": {
+        "approximate_statistics": "UNSUPPORTED",
+        "catalogs": "UNSUPPORTED",
+        "constraints": "UNSUPPORTED",
+        "delegated_identity": "UNSUPPORTED",
+        "distribution_entropy_profiling": "UNSUPPORTED",
+        "explain": "UNSUPPORTED",
+        "grants": "UNSUPPORTED",
+        "indexes": "UNSUPPORTED",
+        "object_comments": "UNSUPPORTED",
+        "partitions": "UNSUPPORTED",
+        "query_history": "UNSUPPORTED",
+        "routines": "UNSUPPORTED",
+        "schemas": "UNSUPPORTED",
+        "value_range_profiling": "UNSUPPORTED",
+        "views": "UNSUPPORTED"
+      },
+      "implementation_status": "PLANNED",
+      "live_validation": "NOT_EXERCISED",
+      "maturity": "NOT_CERTIFIED",
+      "notes": "Canonical push ingestion is available; native pull adapter and certification are pending.",
+      "overridden_methods": [],
+      "parser_dialect_supported": false
+    }
+  ],
+  "facets": [
+    "inventory",
+    "definition_retrieval",
+    "parsing_lineage",
+    "profile_access",
+    "candidate_generation",
+    "execution"
+  ],
+  "matrix_key": [
+    "engine",
+    "engine_version (NOT RECORDED)",
+    "deployment_variant (NOT RECORDED)",
+    "adapter_version",
+    "native_object_kind",
+    "capability_facet"
+  ],
+  "parser_degradation_reasons": [
+    "DYNAMIC_SQL",
+    "NESTED_PROCEDURE_CALL",
+    "TABLE_FUNCTION_READ",
+    "UNSUPPORTED_STATEMENT_SHAPE",
+    "PARSE_ERROR",
+    "UNRESOLVED_CONTROL_FLOW"
+  ],
+  "rows": [
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "multi_table_blueprint.build_multi_table_blueprint drafts a single- or multi-table candidate; a join step requires an APPROVED relationship and is refused with UnjoinableTablesError otherwise",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "a base relation has no defining text; its columns are the fact",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').TABLE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a base relation has no defining text, so there is nothing to parse",
+          "facet": "parsing_lineage",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- bigquery declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- bigquery declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- bigquery declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": true,
+      "native_object_kind": "MATERIALIZED VIEW",
+      "note": "Its own selectable kind on PostgreSQL, Snowflake and BigQuery. Oracle has the concept (ALL_MVIEWS) and its adapter captures the definition with `is_materialized` set, but does not report it as a distinct kind; Databricks SQL has the concept and its adapter reads neither. Both are therefore UNSUPPORTED as a kind rather than absent as a concept. SQL Server has no such object at all: an indexed view is its own row below."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "bigquery has no native indexed view object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "bigquery has no native indexed view object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "bigquery has no native indexed view object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "bigquery has no native indexed view object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "bigquery has no native indexed view object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "bigquery has no native indexed view object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": false,
+      "native_object_kind": "INDEXED VIEW",
+      "note": "SQL Server only. Native identity is preserved rather than flattened: `sqlserver.py` reports OBJECTPROPERTY(..., 'IsIndexed') as `is_materialized` on a VIEW, so the object keeps its own native identity while sharing the MATERIALIZED_VIEW graph category with a PostgreSQL materialized view."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').PROCEDURE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('bigquery').FUNCTION.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "bigquery has no native package object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "bigquery has no native package object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "bigquery has no native package object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "bigquery has no native package object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "bigquery has no native package object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "bigquery has no native package object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE_CONTAINER",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE",
+      "note": "Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "bigquery has no native package member object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "bigquery has no native package member object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "bigquery has no native package member object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "bigquery has no native package member object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "bigquery has no native package member object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "bigquery has no native package member object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE MEMBER",
+      "note": "A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "bigquery has no native trigger object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "bigquery has no native trigger object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "bigquery has no native trigger object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "bigquery has no native trigger object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "bigquery has no native trigger object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "bigquery has no native trigger object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": false,
+      "native_object_kind": "TRIGGER",
+      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+    },
+    {
+      "engine": "bigquery",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "bigquery has no native sequence object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "bigquery has no native sequence object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "bigquery has no native sequence object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "bigquery has no native sequence object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "bigquery has no native sequence object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "bigquery has no native sequence object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": false,
+      "native_object_kind": "SEQUENCE",
+      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "multi_table_blueprint.build_multi_table_blueprint drafts a single- or multi-table candidate; a join step requires an APPROVED relationship and is refused with UnjoinableTablesError otherwise",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "a base relation has no defining text; its columns are the fact",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').TABLE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a base relation has no defining text, so there is nothing to parse",
+          "facet": "parsing_lineage",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- databricks declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_REFUSES_DIALECT",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- databricks declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway resolves every name against the catalog, so a kind this adapter does not inventory cannot be named in a governed statement: discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_REFUSES_DIALECT",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- databricks declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": true,
+      "native_object_kind": "MATERIALIZED VIEW",
+      "note": "Its own selectable kind on PostgreSQL, Snowflake and BigQuery. Oracle has the concept (ALL_MVIEWS) and its adapter captures the definition with `is_materialized` set, but does not report it as a distinct kind; Databricks SQL has the concept and its adapter reads neither. Both are therefore UNSUPPORTED as a kind rather than absent as a concept. SQL Server has no such object at all: an indexed view is its own row below."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "databricks has no native indexed view object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "databricks has no native indexed view object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "databricks has no native indexed view object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "databricks has no native indexed view object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "databricks has no native indexed view object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "databricks has no native indexed view object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": false,
+      "native_object_kind": "INDEXED VIEW",
+      "note": "SQL Server only. Native identity is preserved rather than flattened: `sqlserver.py` reports OBJECTPROPERTY(..., 'IsIndexed') as `is_materialized` on a VIEW, so the object keeps its own native identity while sharing the MATERIALIZED_VIEW graph category with a PostgreSQL materialized view."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').PROCEDURE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_REFUSES_DIALECT",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('databricks').FUNCTION.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_REFUSES_DIALECT",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "databricks has no native package object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "databricks has no native package object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "databricks has no native package object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "databricks has no native package object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "databricks has no native package object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "databricks has no native package object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE_CONTAINER",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE",
+      "note": "Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "databricks has no native package member object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "databricks has no native package member object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "databricks has no native package member object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "databricks has no native package member object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "databricks has no native package member object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "databricks has no native package member object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE MEMBER",
+      "note": "A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "databricks has no native trigger object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "databricks has no native trigger object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "databricks has no native trigger object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "databricks has no native trigger object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "databricks has no native trigger object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "databricks has no native trigger object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": false,
+      "native_object_kind": "TRIGGER",
+      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+    },
+    {
+      "engine": "databricks",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "databricks has no native sequence object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "databricks has no native sequence object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "databricks has no native sequence object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "databricks has no native sequence object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "databricks has no native sequence object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "databricks has no native sequence object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": false,
+      "native_object_kind": "SEQUENCE",
+      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+    },
+    {
+      "engine": "db2",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "db2",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "db2",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "db2",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares db2 PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "multi_table_blueprint.build_multi_table_blueprint drafts a single- or multi-table candidate; a join step requires an APPROVED relationship and is refused with UnjoinableTablesError otherwise",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "a base relation has no defining text; its columns are the fact",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "oracle declares explain=False, and the gateway will not run a statement it cannot cost first: QUERY_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR",
+          "facet": "execution",
+          "reason": "NO_QUERY_ESTIMATE",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').TABLE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a base relation has no defining text, so there is nothing to parse",
+          "facet": "parsing_lineage",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- oracle declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "oracle declares explain=False, and the gateway will not run a statement it cannot cost first: QUERY_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR",
+          "facet": "execution",
+          "reason": "NO_QUERY_ESTIMATE",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- oracle declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('oracle').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway resolves every name against the catalog, so a kind this adapter does not inventory cannot be named in a governed statement: discovery_selection.kind_capabilities('oracle').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: discovery_selection.kind_capabilities('oracle').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- oracle declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": true,
+      "native_object_kind": "MATERIALIZED VIEW",
+      "note": "Its own selectable kind on PostgreSQL, Snowflake and BigQuery. Oracle has the concept (ALL_MVIEWS) and its adapter captures the definition with `is_materialized` set, but does not report it as a distinct kind; Databricks SQL has the concept and its adapter reads neither. Both are therefore UNSUPPORTED as a kind rather than absent as a concept. SQL Server has no such object at all: an indexed view is its own row below."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "oracle has no native indexed view object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "oracle has no native indexed view object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "oracle has no native indexed view object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "oracle has no native indexed view object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "oracle has no native indexed view object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "oracle has no native indexed view object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": false,
+      "native_object_kind": "INDEXED VIEW",
+      "note": "SQL Server only. Native identity is preserved rather than flattened: `sqlserver.py` reports OBJECTPROPERTY(..., 'IsIndexed') as `is_materialized` on a VIEW, so the object keeps its own native identity while sharing the MATERIALIZED_VIEW graph category with a PostgreSQL materialized view."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').PROCEDURE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').FUNCTION.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint refuses a package with PACKAGE_NOT_CALLABLE before reading its body -- a container is not one callable thing",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').PACKAGE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('oracle').PACKAGE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a package body is parsed as one body by the same parser; its statements are not attributed to the member subprogram that contains them, and tool generation refuses the package outright",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE_CONTAINER",
+      "native_concept": true,
+      "native_object_kind": "PACKAGE",
+      "note": "Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code",
+          "facet": "candidate_generation",
+          "reason": "DEFINITION_HELD_BY_CONTAINER",
+          "state": "UNAVAILABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code",
+          "facet": "definition_retrieval",
+          "reason": "DEFINITION_HELD_BY_CONTAINER",
+          "state": "UNAVAILABLE"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "oracle.py reads ALL_PROCEDURES with SUBPROGRAM_ID/OVERLOAD; each member is its own routine keyed by (schema, package, name, signature)",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code",
+          "facet": "parsing_lineage",
+          "reason": "DEFINITION_HELD_BY_CONTAINER",
+          "state": "UNAVAILABLE"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PACKAGE MEMBER",
+      "note": "A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by oracle.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in oracle.py reads ALL_TRIGGERS, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by oracle.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "TRIGGER",
+      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+    },
+    {
+      "engine": "oracle",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by oracle.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in oracle.py reads ALL_SEQUENCES, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by oracle.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "SEQUENCE",
+      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "multi_table_blueprint.build_multi_table_blueprint drafts a single- or multi-table candidate; a join step requires an APPROVED relationship and is refused with UnjoinableTablesError otherwise",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "a base relation has no defining text; its columns are the fact",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').TABLE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a base relation has no defining text, so there is nothing to parse",
+          "facet": "parsing_lineage",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics from profile_table, plus ranges and top values from an overridden profile_column_values under the value_range_profiling flag (ADR-0014's opt-in)",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "SUPPORTED"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics from profile_table, plus ranges and top values from an overridden profile_column_values under the value_range_profiling flag (ADR-0014's opt-in)",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "SUPPORTED"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics from profile_table, plus ranges and top values from an overridden profile_column_values under the value_range_profiling flag (ADR-0014's opt-in)",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "SUPPORTED"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": true,
+      "native_object_kind": "MATERIALIZED VIEW",
+      "note": "Its own selectable kind on PostgreSQL, Snowflake and BigQuery. Oracle has the concept (ALL_MVIEWS) and its adapter captures the definition with `is_materialized` set, but does not report it as a distinct kind; Databricks SQL has the concept and its adapter reads neither. Both are therefore UNSUPPORTED as a kind rather than absent as a concept. SQL Server has no such object at all: an indexed view is its own row below."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "postgres has no native indexed view object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "postgres has no native indexed view object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "postgres has no native indexed view object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "postgres has no native indexed view object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "postgres has no native indexed view object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "postgres has no native indexed view object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": false,
+      "native_object_kind": "INDEXED VIEW",
+      "note": "SQL Server only. Native identity is preserved rather than flattened: `sqlserver.py` reports OBJECTPROPERTY(..., 'IsIndexed') as `is_materialized` on a VIEW, so the object keeps its own native identity while sharing the MATERIALIZED_VIEW graph category with a PostgreSQL materialized view."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').PROCEDURE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('postgres').FUNCTION.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "postgres has no native package object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "postgres has no native package object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "postgres has no native package object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "postgres has no native package object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "postgres has no native package object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "postgres has no native package object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE_CONTAINER",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE",
+      "note": "Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "postgres has no native package member object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "postgres has no native package member object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "postgres has no native package member object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "postgres has no native package member object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "postgres has no native package member object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "postgres has no native package member object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE MEMBER",
+      "note": "A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "postgres.py's routine query restricts itself to prokind ['f', 'p'], because pg_get_functiondef raises on a prokind 'a' routine",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "AGGREGATE FUNCTION",
+      "note": "PostgreSQL `prokind = 'a'`. Not discovered: `pg_get_functiondef` raises on an aggregate, so the routine query restricts itself to 'f' and 'p'. Listed for PostgreSQL only -- the other engines' equivalents are real concepts this repository has no code-level opinion about, and a blank NOT_APPLICABLE would be a claim."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "no eligible definition to draft from: the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "postgres.py's routine query restricts itself to prokind ['f', 'p'], because pg_get_functiondef raises on a prokind 'w' routine",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "WINDOW FUNCTION",
+      "note": "PostgreSQL `prokind = 'w'`; same exclusion and same reason as the aggregate row above."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in postgres.py reads pg_trigger, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "TRIGGER",
+      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+    },
+    {
+      "engine": "postgres",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in postgres.py reads pg_sequence, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "SEQUENCE",
+      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "multi_table_blueprint.build_multi_table_blueprint drafts a single- or multi-table candidate; a join step requires an APPROVED relationship and is refused with UnjoinableTablesError otherwise",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "a base relation has no defining text; its columns are the fact",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').TABLE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a base relation has no defining text, so there is nothing to parse",
+          "facet": "parsing_lineage",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- snowflake declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- snowflake declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- snowflake declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": true,
+      "native_object_kind": "MATERIALIZED VIEW",
+      "note": "Its own selectable kind on PostgreSQL, Snowflake and BigQuery. Oracle has the concept (ALL_MVIEWS) and its adapter captures the definition with `is_materialized` set, but does not report it as a distinct kind; Databricks SQL has the concept and its adapter reads neither. Both are therefore UNSUPPORTED as a kind rather than absent as a concept. SQL Server has no such object at all: an indexed view is its own row below."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "snowflake has no native indexed view object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "snowflake has no native indexed view object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "snowflake has no native indexed view object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "snowflake has no native indexed view object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "snowflake has no native indexed view object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "snowflake has no native indexed view object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": false,
+      "native_object_kind": "INDEXED VIEW",
+      "note": "SQL Server only. Native identity is preserved rather than flattened: `sqlserver.py` reports OBJECTPROPERTY(..., 'IsIndexed') as `is_materialized` on a VIEW, so the object keeps its own native identity while sharing the MATERIALIZED_VIEW graph category with a PostgreSQL materialized view."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').PROCEDURE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('snowflake').FUNCTION.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "snowflake has no native package object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "snowflake has no native package object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "snowflake has no native package object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "snowflake has no native package object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "snowflake has no native package object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "snowflake has no native package object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE_CONTAINER",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE",
+      "note": "Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "snowflake has no native package member object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "snowflake has no native package member object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "snowflake has no native package member object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "snowflake has no native package member object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "snowflake has no native package member object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "snowflake has no native package member object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE MEMBER",
+      "note": "A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "snowflake has no native trigger object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "snowflake has no native trigger object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "snowflake has no native trigger object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "snowflake has no native trigger object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "snowflake has no native trigger object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "snowflake has no native trigger object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": false,
+      "native_object_kind": "TRIGGER",
+      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+    },
+    {
+      "engine": "snowflake",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by snowflake.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in snowflake.py reads INFORMATION_SCHEMA.SEQUENCES, SHOW SEQUENCES, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by snowflake.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "SEQUENCE",
+      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "multi_table_blueprint.build_multi_table_blueprint drafts a single- or multi-table candidate; a join step requires an APPROVED relationship and is refused with UnjoinableTablesError otherwise",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "a base relation has no defining text; its columns are the fact",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').TABLE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "a base relation has no defining text, so there is nothing to parse",
+          "facet": "parsing_lineage",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- sqlserver declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').VIEW.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- sqlserver declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "sqlserver has no native materialized view object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "sqlserver has no native materialized view object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "sqlserver has no native materialized view object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "sqlserver has no native materialized view object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "sqlserver has no native materialized view object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "sqlserver has no native materialized view object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": false,
+      "native_object_kind": "MATERIALIZED VIEW",
+      "note": "Its own selectable kind on PostgreSQL, Snowflake and BigQuery. Oracle has the concept (ALL_MVIEWS) and its adapter captures the definition with `is_materialized` set, but does not report it as a distinct kind; Databricks SQL has the concept and its adapter reads neither. Both are therefore UNSUPPORTED as a kind rather than absent as a concept. SQL Server has no such object at all: an indexed view is its own row below."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
+          "facet": "candidate_generation",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "sys.views + sys.sql_modules.definition, as for any SQL Server view",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
+          "facet": "execution",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "inventory": {
+          "evidence": "inventoried as a VIEW carrying is_materialized from OBJECTPROPERTY(..., 'IsIndexed'); native identity kept on the object",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- sqlserver declares value_range_profiling=False, so ranges and top values are refused rather than approximated",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "PARTIAL"
+        }
+      },
+      "graph_category": "MATERIALIZED_VIEW",
+      "native_concept": true,
+      "native_object_kind": "INDEXED VIEW",
+      "note": "SQL Server only. Native identity is preserved rather than flattened: `sqlserver.py` reports OBJECTPROPERTY(..., 'IsIndexed') as `is_materialized` on a VIEW, so the object keeps its own native identity while sharing the MATERIALIZED_VIEW graph category with a PostgreSQL materialized view."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').PROCEDURE.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
+          "facet": "candidate_generation",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
+        },
+        "definition_retrieval": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "facet": "definition_retrieval",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').FUNCTION.inventory, derived from the adapter's own capability flags",
+          "facet": "inventory",
+          "reason": "",
+          "state": "SUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "facet": "parsing_lineage",
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "sqlserver has no native package object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "sqlserver has no native package object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "sqlserver has no native package object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "sqlserver has no native package object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "sqlserver has no native package object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "sqlserver has no native package object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE_CONTAINER",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE",
+      "note": "Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "sqlserver has no native package member object",
+          "facet": "candidate_generation",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "definition_retrieval": {
+          "evidence": "sqlserver has no native package member object",
+          "facet": "definition_retrieval",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "execution": {
+          "evidence": "sqlserver has no native package member object",
+          "facet": "execution",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "inventory": {
+          "evidence": "sqlserver has no native package member object",
+          "facet": "inventory",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "parsing_lineage": {
+          "evidence": "sqlserver has no native package member object",
+          "facet": "parsing_lineage",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        },
+        "profile_access": {
+          "evidence": "sqlserver has no native package member object",
+          "facet": "profile_access",
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": false,
+      "native_object_kind": "PACKAGE MEMBER",
+      "note": "A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by sqlserver.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in sqlserver.py reads sys.triggers, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by sqlserver.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "TRIGGER",
+      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+    },
+    {
+      "engine": "sqlserver",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "the kind is not inventoried by sqlserver.py, so no definition is read",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "no discovery query in sqlserver.py reads sys.sequences, and ConnectorCapabilities declares no flag for it",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "no text reaches the parser: the kind is not inventoried by sqlserver.py, so no definition is read",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "this kind holds no rows, so there is nothing to profile",
+          "facet": "profile_access",
+          "reason": "",
+          "state": "NOT_APPLICABLE"
+        }
+      },
+      "graph_category": "OTHER",
+      "native_concept": true,
+      "native_object_kind": "SEQUENCE",
+      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+    },
+    {
+      "engine": "teradata",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "TABLE",
+      "native_concept": true,
+      "native_object_kind": "TABLE",
+      "note": "Base relation. No definition text exists to retrieve or parse."
+    },
+    {
+      "engine": "teradata",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "VIEW",
+      "native_concept": true,
+      "native_object_kind": "VIEW",
+      "note": "A view is inventoried in the table roster on every adapter; its defining text is a separate read, gated by the `views` flag."
+    },
+    {
+      "engine": "teradata",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "PROCEDURE",
+      "note": ""
+    },
+    {
+      "engine": "teradata",
+      "facets": {
+        "candidate_generation": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "candidate_generation",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "definition_retrieval": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "definition_retrieval",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "execution": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "execution",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "inventory": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "inventory",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "parsing_lineage": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "parsing_lineage",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        },
+        "profile_access": {
+          "evidence": "registry declares teradata PLANNED / NOT_CERTIFIED with no factory; canonical push ingestion accepts an externally produced envelope, which is not adapter coverage of this facet",
+          "facet": "profile_access",
+          "reason": "ADAPTER_NOT_CERTIFIED",
+          "state": "UNSUPPORTED"
+        }
+      },
+      "graph_category": "ROUTINE",
+      "native_concept": true,
+      "native_object_kind": "FUNCTION",
+      "note": "SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one."
+    }
+  ],
+  "source_mapping": {
+    "evidence": "the only positional field on a parsed lineage fact is statement_ordinal; no line, column, character-offset or range field exists on ProcedureLineageEdgeRecord or on deep_procedure_lineage_edge",
+    "granularity": "statement_ordinal",
+    "rationale": "Recorded as unsupported rather than approximated. A character range would have to be an offset into the text the range describes, and Atlas does not hold that text: R11-D16 makes storage keep only a re-rendered or lexically scrubbed form of a routine body, never the source bytes, so an offset computed on stored text does not point at the customer's source, and an offset computed on the raw body cannot be stored because the raw body is not. Control-flow recognition compounds it -- the procedure parser peels IF/WHILE/LOOP bodies with text-level regexes before sqlglot ever sees a statement, so offsets would have to survive several slicing passes. A precise-looking number that points at the wrong text is worse than an honest statement ordinal, and publishing one would be exactly the marketed-vs-actual drift review \u00a75 names.",
+    "reason": "ADAPTER_NOT_IMPLEMENTED",
+    "state": "UNSUPPORTED"
+  },
+  "states": [
+    "SUPPORTED",
+    "PARTIAL",
+    "UNSUPPORTED",
+    "NOT_APPLICABLE",
+    "NOT_SELECTED",
+    "PERMISSION_DENIED",
+    "UNAVAILABLE",
+    "TRUNCATED",
+    "UNRESOLVED"
+  ]
+}

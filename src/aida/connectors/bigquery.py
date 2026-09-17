@@ -18,16 +18,28 @@ from datetime import datetime
 from typing import Any
 
 from aida.connectors.base import (
+    ENTROPY_NOT_IMPLEMENTED,
+    FACET_NOT_APPLICABLE,
+    FACET_REASON_TYPE_HAS_NO_TEXT_FORM,
+    FACET_REASON_TYPE_IS_REPEATED,
+    OBSERVATION_SCOPE_FULL,
+    PROFILE_FACET_DISTINCT,
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     DiscoveredRoutine,
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
+    ProfileFacetStatus,
     QueryEstimate,
     QueryLogEntry,
     QueryResult,
     TableProfileSnapshot,
+    bounded_scan_scope,
+    null_distribution_expressions,
+    read_value_free_distribution,
+    text_facets_not_applicable,
+    value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
     TableMap,
@@ -132,17 +144,29 @@ def _parse_credential_payload(payload: str) -> _CredentialConfig:
     )
 
 
+_NULL_INT64 = "CAST(NULL AS INT64)"
+
+
 def _profile_expressions(
     quoted_column: str, position: int, data_type: str, mode: str
 ) -> list[str]:
-    """Generate per-column aggregate expressions for bounded BigQuery profiling."""
+    """Generate per-column aggregate expressions for bounded BigQuery profiling.
+
+    R11-FP04 adds the value-free distribution aggregates (blank/whitespace
+    counts and per-length-bucket counts) to the scalar branch, and honest typed
+    NULLs to the two branches where the column has no text form at all --
+    `CAST(<ARRAY> AS STRING)` is an error in BigQuery, not a value. The aliases
+    exist in every branch so a batch's row shape does not change per column;
+    `_profile_facet_status` below says why each NULL is NULL.
+    """
     if mode == "REPEATED":
         return [
-            f"CAST(NULL AS INT64) AS n_{position}",
-            f"CAST(NULL AS INT64) AS nn_{position}",
+            f"{_NULL_INT64} AS n_{position}",
+            f"{_NULL_INT64} AS nn_{position}",
             f"CAST(0 AS INT64) AS d_{position}",
-            f"CAST(NULL AS INT64) AS minl_{position}",
-            f"CAST(NULL AS INT64) AS maxl_{position}",
+            f"{_NULL_INT64} AS minl_{position}",
+            f"{_NULL_INT64} AS maxl_{position}",
+            *null_distribution_expressions(position=position, null_literal=_NULL_INT64),
         ]
 
     upper_type = data_type.upper()
@@ -151,17 +175,53 @@ def _profile_expressions(
             f"SUM(CASE WHEN {quoted_column} IS NULL THEN 1 ELSE 0 END) AS n_{position}",
             f"COUNT({quoted_column}) AS nn_{position}",
             f"CAST(0 AS INT64) AS d_{position}",
-            f"CAST(NULL AS INT64) AS minl_{position}",
-            f"CAST(NULL AS INT64) AS maxl_{position}",
+            f"{_NULL_INT64} AS minl_{position}",
+            f"{_NULL_INT64} AS maxl_{position}",
+            *null_distribution_expressions(position=position, null_literal=_NULL_INT64),
         ]
 
+    text_form = f"CAST({quoted_column} AS STRING)"
     return [
         f"SUM(CASE WHEN {quoted_column} IS NULL THEN 1 ELSE 0 END) AS n_{position}",
         f"COUNT({quoted_column}) AS nn_{position}",
         f"APPROX_COUNT_DISTINCT({quoted_column}) AS d_{position}",
-        f"MIN(LENGTH(CAST({quoted_column} AS STRING))) AS minl_{position}",
-        f"MAX(LENGTH(CAST({quoted_column} AS STRING))) AS maxl_{position}",
+        f"MIN(LENGTH({text_form})) AS minl_{position}",
+        f"MAX(LENGTH({text_form})) AS maxl_{position}",
+        *value_free_distribution_expressions(
+            position=position,
+            text_form=text_form,
+            length_form=f"LENGTH({text_form})",
+            trimmed_form=f"TRIM({text_form})",
+        ),
     ]
+
+
+def _profile_facet_status(data_type: str, mode: str) -> tuple[ProfileFacetStatus, ...]:
+    """Which facets `_profile_expressions` just declined for this column, and why.
+
+    R11-FP04/INV-9. The two placeholder branches above already told the truth
+    by returning NULL instead of a fabricated zero; this says *which* kind of
+    absence it is, so "BigQuery cannot render a REPEATED column as text" never
+    reads like "Atlas has not got round to it" (which is what
+    `ENTROPY_NOT_IMPLEMENTED` genuinely is).
+    """
+    if mode == "REPEATED":
+        return (
+            *text_facets_not_applicable(FACET_REASON_TYPE_IS_REPEATED),
+            ProfileFacetStatus(
+                PROFILE_FACET_DISTINCT, FACET_NOT_APPLICABLE, FACET_REASON_TYPE_IS_REPEATED
+            ),
+            ENTROPY_NOT_IMPLEMENTED,
+        )
+    if data_type.upper() in _COMPLEX_SCALAR_TYPES:
+        return (
+            *text_facets_not_applicable(FACET_REASON_TYPE_HAS_NO_TEXT_FORM),
+            ProfileFacetStatus(
+                PROFILE_FACET_DISTINCT, FACET_NOT_APPLICABLE, FACET_REASON_TYPE_HAS_NO_TEXT_FORM
+            ),
+            ENTROPY_NOT_IMPLEMENTED,
+        )
+    return (ENTROPY_NOT_IMPLEMENTED,)
 
 
 # --- Envelope 1.1 (gap/02 N1) ------------------------------------------------
@@ -843,6 +903,10 @@ class BigQueryConnector(SqlExecutor):
                 )
 
                 for position, name in enumerate(batch):
+                    data_type, mode = schema_info.get(name, ("STRING", "NULLABLE"))
+                    blank, whitespace, buckets = read_value_free_distribution(
+                        position, row_dict.get
+                    )
                     snapshots.append(
                         ColumnProfileSnapshot(
                             name=name,
@@ -851,13 +915,31 @@ class BigQueryConnector(SqlExecutor):
                             approximate_distinct_count=int(row_dict.get(f"d_{position}") or 0),
                             min_length=row_dict.get(f"minl_{position}"),
                             max_length=row_dict.get(f"maxl_{position}"),
+                            blank_count=blank,
+                            whitespace_only_count=whitespace,
+                            length_bucket_counts=buckets,
+                            facet_status=_profile_facet_status(data_type, mode),
                         )
                     )
 
+            # R11-FP04: this used to return `row_count_estimate=sampled_row_count`,
+            # which made a `LIMIT`-bounded profile of a ten-million-row table
+            # arrive downstream as `sampled >= estimate` -- i.e. as a full scan,
+            # which then strengthened relationship-approval evidence that was in
+            # fact sample-bounded. The count above is only an estimate of the
+            # whole table when the bound never bit; past it, BigQuery was asked
+            # nothing about the table's size, so the honest answer is None and
+            # the scope is SAMPLE.
+            scope = bounded_scan_scope(
+                sampled_row_count=sampled_row_count, sample_rows=sample_rows
+            )
             return TableProfileSnapshot(
-                row_count_estimate=sampled_row_count,
+                row_count_estimate=(
+                    sampled_row_count if scope == OBSERVATION_SCOPE_FULL else None
+                ),
                 sampled_row_count=sampled_row_count,
                 columns=tuple(snapshots),
+                observation_scope=scope,
             )
 
         return await asyncio.to_thread(_profile)

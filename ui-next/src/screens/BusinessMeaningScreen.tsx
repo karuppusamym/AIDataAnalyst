@@ -6,6 +6,7 @@ import { listGlossaryTerms, type GlossaryTermRead } from "../lib/_api_append";
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker, datasourceName } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
+import { OntologyManager } from "../components/OntologyManager";
 import { AsyncState, Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./BusinessMeaningScreen.css";
@@ -537,6 +538,30 @@ export function BusinessMeaningScreen() {
   const [error, setError] = useState<string | null>(null);
   const [draftQ, setDraftQ] = useState(q);
 
+  /* R11-S13 (M4): the governed ontology is authored from here.
+   *
+   * `OntologyManager` had exactly one entry point in the whole app: a button
+   * in the Unified lineage header. Authoring the concepts, relations and
+   * catalog mappings that say what the business MEANS was therefore reachable
+   * only from a graph screen -- a steward looking for it would look here, on
+   * the screen whose entire subject is business meaning, and not find it.
+   *
+   * A DIALOG, NOT A FOURTH TAB. The `?view=` axis on this screen selects which
+   * READ is in front (annotations, the business map, the glossary). The
+   * ontology manager is a write surface with its own draft/submit/review
+   * lifecycle and its own version history; putting it on that axis would make
+   * "which view am I reading" and "am I editing" the same control, and would
+   * put an unsaved JSON draft behind a tab switch. The dialog is also what
+   * keeps this a MERGE rather than a relocation: the component is mounted
+   * unchanged, `key`ed on the organization exactly as the lineage screen keys
+   * it, so switching tenants cannot leave another org's draft on screen.
+   *
+   * The lineage screen KEEPS its button. The review asks for a contextual
+   * shortcut from the graph, and it is the right one: a mapping is from a
+   * concept to a catalog object, which is what the graph in front of you is
+   * made of. Two entry points, one component, one set of endpoints. */
+  const [ontologyOpen, setOntologyOpen] = useState(false);
+
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
 
@@ -629,12 +654,20 @@ export function BusinessMeaningScreen() {
             and grain, resolved to the current AT-6 approved version, not a model's proposal.
           </p>
         </div>
-        {total !== null ? (
-          <div className="bm__stats">
-            <span><b className="tnum">{total}</b> annotated table{total === 1 ? "" : "s"}{selectedDsName ? ` in ${selectedDsName}` : ""}</span>
-          </div>
-        ) : null}
+        <div className="bm__headactions">
+          {total !== null ? (
+            <div className="bm__stats">
+              <span><b className="tnum">{total}</b> annotated table{total === 1 ? "" : "s"}{selectedDsName ? ` in ${selectedDsName}` : ""}</span>
+            </div>
+          ) : null}
+          {/* R11-S13 (M4): the ontology authoring entry point. See the note at
+              `ontologyOpen` for why this is a dialog and not a fourth tab. */}
+          <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
+        </div>
       </header>
+      {ontologyOpen ? (
+        <OntologyManager key={ORG} organizationId={ORG} onClose={() => setOntologyOpen(false)} />
+      ) : null}
 
       <div className="bm__filters">
         <Field label="Datasource">

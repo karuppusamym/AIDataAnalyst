@@ -1199,6 +1199,18 @@ export interface ColumnProfileRead {
   approximate_distinct_count: number;
   min_length: number | null;
   max_length: number | null;
+  distinct_ratio?: number | null;
+  effectively_unique?: boolean | null;
+  cardinality_class?: string | null;
+  blank_count?: number | null;
+  whitespace_only_count?: number | null;
+  length_bucket_scheme?: string | null;
+  length_bucket_counts?: number[] | null;
+  frequency_entropy_bits?: number | null;
+  unavailable_facets?: ProfileFacetStatusRead[];
+  facets_withheld?: boolean;
+  withheld_marker?: string | null;
+  withheld_reason_code?: string | null;
 }
 
 export interface CompliancePackRead {
@@ -2255,6 +2267,69 @@ export interface EnforcementReadinessRead {
   workspaces: WorkspaceReadinessRead[];
   blockers: string[];
   ready: boolean;
+}
+
+/** What the connector registry says about one engine, and how far it is proven. */
+export interface EngineCapabilityEngineRead {
+  engine: string;
+  display_name: string;
+  dialect: string;
+  adapter_version: string;
+  implementation_status: string;
+  maturity: string;
+  parser_dialect_supported: boolean;
+  live_validation: string;
+  flags: Record<string, string>;
+  overridden_methods: string[];
+  notes: string;
+}
+
+/** One (engine, native object kind, facet) answer. */
+export interface EngineCapabilityFacetRead {
+  facet: string;
+  state: string;
+  reason: string;
+  evidence: string;
+}
+
+export interface EngineCapabilityMatrixRead {
+  matrix_key: string[];
+  facets: string[];
+  states: string[];
+  generated_at: string;
+  engines: EngineCapabilityEngineRead[];
+  rows: EngineCapabilityObjectKindRead[];
+  source_mapping: EngineSourceMappingRead;
+  dbt_coverage: EngineDbtCoverageRead[];
+  parser_degradation_reasons: string[];
+  declared_gaps: string[];
+}
+
+/** One native object kind on one engine, with its six facet answers. */
+export interface EngineCapabilityObjectKindRead {
+  engine: string;
+  native_object_kind: string;
+  graph_category: string;
+  native_concept: boolean;
+  note: string;
+  facets: EngineCapabilityFacetRead[];
+}
+
+/** Bounded coverage reporting for one dbt aspect (macros, hooks). */
+export interface EngineDbtCoverageRead {
+  aspect: string;
+  state: string;
+  reason: string;
+  evidence: string;
+}
+
+/** How precisely a parsed fact can be located in its source text. */
+export interface EngineSourceMappingRead {
+  granularity: string;
+  state: string;
+  reason: string;
+  evidence: string;
+  rationale: string;
 }
 
 export interface EntitlementOperation {
@@ -3386,8 +3461,8 @@ export interface NotificationTestResult {
 
 export interface ObjectKindCapabilityRead {
   kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE";
-  inventory: "SUPPORTED" | "UNSUPPORTED" | "NOT_APPLICABLE";
-  definition: "SUPPORTED" | "UNSUPPORTED" | "NOT_APPLICABLE";
+  inventory: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
+  definition: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
 }
 
 export interface OntologyCreate {
@@ -3901,6 +3976,13 @@ export interface ProcedureToolBlueprintRequest {
   allowed_roles: string[];
 }
 
+/** R11-FP04: one facet that is absent from a profile, and why. */
+export interface ProfileFacetStatusRead {
+  facet: string;
+  status: "UNSUPPORTED" | "NOT_APPLICABLE" | "PERMISSION_DENIED" | "UNAVAILABLE";
+  reason_code: string;
+}
+
 export interface ProfilingExceptionDecisionRequest {
   decision: "APPROVE" | "REJECT";
   reason?: string | null;
@@ -4014,6 +4096,7 @@ export interface QueryExecutionRequest {
   sql: string;
   max_rows?: number | null;
   semantic_version?: string | null;
+  context_product_key?: string | null;
   workspace_id?: string | null;
 }
 
@@ -4373,6 +4456,79 @@ export interface RiskTierDisagreementRateRead {
   pending: number;
   disagreement_rate: number | null;
   sufficient_sample: boolean;
+}
+
+export interface RoutineDescriptionDraftEdit {
+  drafted_text: string;
+  expected_text: string;
+}
+
+/** Draft descriptions for up to 100 routines at once. */
+export interface RoutineDescriptionDraftGenerate {
+  routine_ids: string[];
+  include_described?: boolean;
+}
+
+/** What a generation call did, and each thing it deliberately did not do. */
+export interface RoutineDescriptionDraftGenerateResult {
+  drafts: RoutineDescriptionDraftRead[];
+  created: number;
+  skipped_open: number;
+  skipped_described: number;
+  skipped_duplicate_rejected: number;
+  below_review_threshold: number;
+  routines_skipped: number;
+}
+
+export interface RoutineDescriptionDraftRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  routine_id: string;
+  routine_qualified_name: string;
+  routine_type: string;
+  drafted_text: string;
+  accuracy_score: number;
+  clarity_score: number;
+  style_score: number;
+  completeness_score: number;
+  overall_score: number;
+  reviewable: boolean;
+  evidence: Record<string, unknown>;
+  status: string;
+  base_description_version: number | null;
+  governance_review_id: string | null;
+  published_version_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A routine detail read's one description field, and where it came from. */
+export interface RoutineDescriptionRead {
+  routine_id: string;
+  routine_qualified_name: string;
+  description: string | null;
+  description_is_proposed: boolean;
+  documentation_withdrawn: boolean;
+  description_is_source_comment: boolean;
+}
+
+/** R11-FP07 / finding F06.4: how completely one routine body was understood. */
+export interface RoutineParseCoverageRead {
+  routine_id: string;
+  state: string;
+  parse_completed: boolean;
+  is_read_only: boolean;
+  statement_count: number;
+  unparsed_statement_count: number;
+  unparsed_reason_codes: string[];
+  dialect: string;
+  confidence: string;
+  source_mapping_granularity: string;
+  parsed_at: string;
 }
 
 /** R11-C8: the answers that relied on a sampled decision while it stood. */
@@ -4847,6 +5003,9 @@ export interface TableProfileRead {
   status: string;
   created_at: string;
   columns: ColumnProfileRead[];
+  observation_scope?: "FULL" | "SAMPLE" | "UNKNOWN" | null;
+  uncomputed_facets?: ProfileFacetStatusRead[];
+  withheld_column_count?: number;
 }
 
 /** A resolved table reference; the return type of ``resolve_canonical``. */

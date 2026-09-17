@@ -1,0 +1,88 @@
+# Prometheus scrape configuration for the local Atlas stack (R11-FP17).
+#
+# This is the plain-Prometheus form, written for `compose.yaml`'s network,
+# where every service is reachable by its Compose service name. The
+# Prometheus-Operator form of the same intent is ../k8s/servicemonitor.yaml
+# and ../k8s/podmonitor.yaml.
+#
+# Nothing in this repository starts Prometheus. `compose.yaml` and
+# `infra/k8s/base/*` are owned elsewhere and were deliberately not edited to
+# add a monitoring service -- see ../README.md for the exact wiring a
+# deployment has to add, and for what is still an operator's number rather
+# than a measured one.
+#
+# Two facts shape every job below, and both are decisions somebody already
+# made deliberately rather than oversights to paper over here:
+#
+#   1. Only `aida.main` (the `api` service) serves `/metrics` over HTTP. The
+#      fleet scheduler publishes the footprint gauges and the graph projector
+#      publishes the projection gauges, and until `worker_metrics_port` is set
+#      those processes expose no HTTP surface at all, so the gauges they
+#      publish exist inside a process nothing can reach. The
+#      `atlas-fleet-scheduler` and `atlas-graph-projector` jobs below scrape
+#      the listener `aida.worker_metrics.serve_worker_metrics` starts when
+#      that setting is non-zero; with the default of 0 they will report the
+#      target as down, which is the honest reading -- there is nothing there.
+#   2. `AIDA_WORKER_METRICS_PORT` has to be set for those two services for
+#      their jobs to have anything to scrape. ../README.md says where.
+
+global:
+  # 15s is Prometheus' own default and is not a measurement of anything here.
+  # It is chosen against the slowest producer: `footprint_metrics_interval_
+  # seconds` defaults to 300, so the footprint gauges change at most once per
+  # five minutes and any scrape interval at or under that loses nothing. The
+  # HTTP and retrieval histograms move continuously and are the reason not to
+  # relax it towards 300.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    # Replace with the estate's own environment name. Left as `local` rather
+    # than blank so a rule that groups by it does not silently collapse two
+    # environments into one series if this file is copied.
+    environment: local
+
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml
+
+scrape_configs:
+  # The FastAPI process. `/metrics` is `aida.main.metrics` (main.py:584), the
+  # only HTTP metrics endpoint that exists today. It carries
+  # `aida_http_*`, every `aida_retrieval_*` series, and -- because
+  # `prometheus_client` registers into one process-global registry -- any
+  # `aida_parser_*` / `aida_model_*` series produced on the request path.
+  - job_name: atlas-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          atlas_process: api
+
+  # The fleet scheduler: `run_footprint_metrics_pass`
+  # (workflows/scheduler.py) sets `aida_footprint_gaps`,
+  # `aida_footprint_oldest_pending_change_signal_seconds` and
+  # `aida_footprint_metrics_organizations` here, not in the API. Requires
+  # `AIDA_WORKER_METRICS_PORT=9108` on the `fleet-scheduler` service.
+  - job_name: atlas-fleet-scheduler
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["fleet-scheduler:9108"]
+        labels:
+          atlas_process: fleet-scheduler
+
+  # The graph projector: every `aida_graph_projection_*` series is published
+  # here. Requires `AIDA_WORKER_METRICS_PORT=9108` on the `graph-projector`
+  # service.
+  - job_name: atlas-graph-projector
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["graph-projector:9108"]
+        labels:
+          atlas_process: graph-projector
+
+  # Deliberately absent: `metadata-worker` and `outbox-publisher`. Neither
+  # publishes a Prometheus series today (grep for `prometheus_client` under
+  # `src/aida/workflows/worker.py` and `src/aida/projectors/
+  # outbox_publisher.py` returns nothing), so a job for them would create a
+  # permanently-down target that means nothing. Add them to this file at the
+  # same time as the first metric either process publishes -- not before.

@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final
 
+from aida.cost_metrics import ParseOutcome, Parser, classify_parse, parser_span
+
 try:
     import sqlglot
     from sqlglot import exp
@@ -679,6 +681,17 @@ def parse_view_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
 
     The SQL is never executed.  Literal values are redacted from hashes.
 
+    R11-FP17: instrumented here, at the public entry point, rather than in
+    `_parse_sql`.  Every caller in the platform goes through this function --
+    `lineage_agent`, `context_rebuild`, `dbt_column_lineage` -- while
+    `aida.procedure_lineage` reuses the private helpers directly and times
+    itself at its own call sites.  Metric publication only: `parser_span`
+    touches no database and holds nothing about the SQL but its length, so this
+    module stays the catalog- and database-free parser AT-D2 requires.  The
+    per-source half of parser cost cannot live here at all, because this module
+    deliberately does not know which source a definition came from; the callers
+    that do know record it (`cost_metrics.record_parser_spend`).
+
     Args:
         sql: The SQL view definition (e.g. CREATE VIEW v AS SELECT ...)
         dialect: Target SQL dialect (postgres, snowflake, bigquery, tsql, oracle)
@@ -686,11 +699,20 @@ def parse_view_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
     Returns:
         ParseResult with extracted edges and confidence level.
     """
-    if dialect not in _SQLGLOT_DIALECT_MAP:
-        return ParseResult(
-            confidence=Confidence.LOW.value,
-            dialect=dialect,
-            sql_hash=_compute_sql_hash(sql),
-            errors=[f"unsupported dialect: {dialect}"],
-        )
-    return _parse_sql(sql, dialect)
+    with parser_span(Parser.VIEW_LINEAGE, dialect=dialect, sql=sql) as span:
+        if dialect not in _SQLGLOT_DIALECT_MAP:
+            span.observed(ParseOutcome.UNSUPPORTED_DIALECT)
+            return ParseResult(
+                confidence=Confidence.LOW.value,
+                dialect=dialect,
+                sql_hash=_compute_sql_hash(sql),
+                errors=[f"unsupported dialect: {dialect}"],
+            )
+        result = _parse_sql(sql, dialect)
+        # One view definition is one statement, which is what this entry point
+        # is documented to take. The outcome is classified by the shared
+        # `classify_parse` rather than inline, so a missing sqlglot is counted
+        # as a deployment fault here and at the procedure-parse call sites
+        # alike instead of being buried in the expected UNPARSEABLE noise.
+        span.observed(classify_parse(result.errors, has_edges=bool(result.edges)))
+        return result

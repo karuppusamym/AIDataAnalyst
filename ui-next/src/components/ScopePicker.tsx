@@ -146,8 +146,9 @@ export function ScopePicker() {
       {/* `OrgSelection.error` was populated and read by nobody on this screen,
           so a refused organization list rendered as an empty dropdown -- which
           reads as "this tenant has no organizations", the one thing it does not
-          mean. `OrgPicker` has always shown it, but that component is not wired
-          into the shell; this one is. */}
+          mean. A second, never-mounted org picker did show it; this is the one
+          the shell renders, so this is where it has to be said (R11-S13 M6
+          deleted the other). */}
       {org.error ? (
         <p className="scopepicker__count scopepicker__count--warn" role="status">
           Organizations could not be loaded: {org.error}

@@ -54,7 +54,7 @@ import "./AdministrationScreen.css";
    `SemanticsScreen`/`SourcesScreen`) cover this screen's project and
    datasource lists; `fetchOrgLinesOfBusiness` (new, `api.py:463`) is the one
    read nothing existing exposed. All are scoped to `useOrgId()`, the same
-   shared organization selection every migrated screen reads (see `OrgPicker`
+   shared organization selection every migrated screen reads (see `ScopePicker`
    in the shell nav) -- unlike the legacy portal, this screen has no
    organization `<select>` of its own for the line-of-business/project/
    datasource forms; they act on the organization currently selected in the
@@ -78,7 +78,7 @@ import "./AdministrationScreen.css";
        Sources screen's `fetchDatasourceHealth`'s job to reflect, not this
        wizard's).
      - Newly created organizations are not retroactively added to the shell's
-       `OrgPicker` list: `OrgProvider` (`lib/org.tsx`) fetches `fetchOrganizations`
+       `ScopePicker` list: `OrgProvider` (`lib/org.tsx`) fetches `fetchOrganizations`
        once, on mount, with no exposed refetch -- an existing, honest limitation
        of that shared context this screen does not attempt to work around by
        duplicating org-list state. A freshly created organization becomes

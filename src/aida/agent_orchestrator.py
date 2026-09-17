@@ -64,6 +64,16 @@ from aida.business_annotation_versions import (
     resolve_annotation_version,
 )
 from aida.config import Settings
+from aida.context_product_execution_scope import (
+    CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE as _TABLE_OUT_OF_SCOPE,
+)
+from aida.context_product_execution_scope import (
+    CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE as _TOOL_DEPENDENCY_OUT_OF_SCOPE,
+)
+from aida.context_product_execution_scope import (
+    ContextProductExecutionScope,
+    resolve_scope_names,
+)
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import SCREENING_VERSION, screen_text
 from aida.model_gateway import (
@@ -100,7 +110,6 @@ from aida.orchestration_stages import (
     ValidatedStatement,
     trace_entry,
 )
-from aida.policy_resource_attributes import resolve_referenced_table_ids
 from aida.prompt_risk import DeterministicPromptRiskClassifier
 from aida.quality_coupling import (
     check_quality_gate,
@@ -377,7 +386,12 @@ def run_token_charge(evidence: ModelCallEvidence, attempt_count: int) -> RunToke
 
 CONTEXT_PRODUCT_UNAVAILABLE: Final = "CONTEXT_PRODUCT_NOT_AVAILABLE"
 CONTEXT_PRODUCT_FORBIDDEN: Final = "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"
-CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: Final = "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE"
+# F01: the boundary codes now belong to `aida.context_product_execution_scope`,
+# which is where the gateway reads them from too -- one vocabulary for a refusal
+# that two layers can make. Re-exported under the names this module has always
+# published, because callers and tests branch on them from here.
+CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: Final = _TABLE_OUT_OF_SCOPE
+CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE: Final = _TOOL_DEPENDENCY_OUT_OF_SCOPE
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,6 +434,22 @@ class ContextProductScope:
             semantic_model_version_ids=frozenset(
                 str(version_id) for version_id in version.semantic_model_version_ids
             ),
+        )
+
+    def execution_scope(self) -> ContextProductExecutionScope:
+        """The part of this scope the query gateway enforces (F01).
+
+        Only the table boundary and the version receipt cross into the gateway:
+        the retrieval axes above decide what an answer may be *grounded* in,
+        which is this module's business, while what a statement may *read* has
+        to be decided at the choke point every execution path shares. Handing
+        the gateway the whole scope would also point the dependency the wrong
+        way -- this module imports `aida.query_gateway`, not the reverse.
+        """
+        return ContextProductExecutionScope(
+            version_id=self.version_id,
+            version=self.version,
+            table_ids=self.table_ids,
         )
 
     def admits(self, hit: RetrievalHit) -> bool:
@@ -900,6 +930,7 @@ class GovernedAgentOrchestrator:
         requested_limit: int | None,
         agent_asset_version_id: UUID | None = None,
         context_product_key: str | None = None,
+        context_product_version: ContextProductVersion | None = None,
     ) -> AgentOrchestrationResult:
         """Compose the six governed stages; hold no rule of its own.
 
@@ -929,6 +960,7 @@ class GovernedAgentOrchestrator:
             requested_limit=requested_limit,
             agent_asset_version_id=agent_asset_version_id,
             context_product_key=context_product_key,
+            context_product_version=context_product_version,
         )
         ledger = await self._open_run(session, request)
 
@@ -1128,12 +1160,21 @@ class GovernedAgentOrchestrator:
             preferred_tool_version_id=request.preferred_tool_version_id,
         )
         scope: ContextProductScope | None = None
-        if request.context_product_key is not None:
+        if request.context_product_key is not None or request.context_product_version is not None:
             # R11-FP12: asked through a product, the answer stands on that product's own
             # references. A candidate it does not name is not evidence here, so it is dropped
             # before the retrieval limit rather than after -- the cap then fills with what the
             # product does name.
-            product_version = await _load_published_context_product(session, request)
+            #
+            # F01 (G1): a surface that already resolved a version hands it over rather than a
+            # key, so the tables are scoped to the same version its tool list was filtered by.
+            # The consumer-role check below still applies either way -- a pre-resolved version
+            # replaces the *lookup*, never a decision.
+            product_version = (
+                request.context_product_version
+                if request.context_product_version is not None
+                else await _load_published_context_product(session, request)
+            )
             if product_version is None:
                 await self._persist_rejection(
                     session, request, ledger, CONTEXT_PRODUCT_UNAVAILABLE
@@ -1311,7 +1352,7 @@ class GovernedAgentOrchestrator:
         plan = planned.plan
         if plan.strategy == "GOVERNED_TOOL" and plan.selected_tool_version_id:
             statement = await self._validate_governed_tool(
-                session, request, ledger, screened, plan
+                session, request, ledger, screened, plan, retrieved.context_product_scope
             )
         elif plan.strategy == "DEVELOPMENT_SQL" and request.candidate_sql:
             statement = await self._validate_development_sql(session, request, ledger)
@@ -1320,12 +1361,20 @@ class GovernedAgentOrchestrator:
                 session, request, ledger, screened, retrieved
             )
 
-        if retrieved.context_product_scope is not None and plan.strategy != "GOVERNED_TOOL":
+        if retrieved.context_product_scope is not None:
             # Scoping retrieval decides what the model was shown; it does not decide what it
             # wrote. A table the product does not name is out of scope however the statement
             # reached it, and the gateway's own allowlist is the whole datasource -- which is
-            # the boundary a product exists to narrow (R11-FP12). A governed tool needs no such
-            # check: the product declared that version eligible.
+            # the boundary a product exists to narrow (R11-FP12).
+            #
+            # F01 (G3): every strategy, including GOVERNED_TOOL. This clause used to exempt a
+            # governed tool on the ground that "the product declared that version eligible" --
+            # but nothing at any lifecycle point ever checked an eligible tool version's tables
+            # against the product's, so the exemption silently widened the boundary to whatever
+            # the tool happened to read. `_validate_governed_tool` now refuses a tool whose
+            # *declared* dependencies fall outside the product, and the rendered SQL reaches the
+            # same check as any other statement here. See
+            # `context_product_execution_scope.GOVERNED_TOOL_DEPENDENCY_CONTRACT`.
             await self._enforce_context_product_scope(
                 session, request, ledger, retrieved.context_product_scope, statement.sql
             )
@@ -1346,8 +1395,9 @@ class GovernedAgentOrchestrator:
         ledger: RunLedger,
         screened: ScreenOutcome,
         plan: AgentPlan,
+        scope: ContextProductScope | None = None,
     ) -> ValidatedStatement:
-        """Four fail-closed checks, then render. Any one of them refuses."""
+        """Five fail-closed checks, then render. Any one of them refuses."""
         assert plan.selected_tool_version_id is not None
         version = await session.get(GovernedToolVersion, UUID(plan.selected_tool_version_id))
         if version is None or version.status != "PUBLISHED":
@@ -1381,6 +1431,38 @@ class GovernedAgentOrchestrator:
         dependency_table_ids = await resolve_table_ids(
             session, datasource=request.datasource, table_names=version.referenced_tables
         )
+        # F01 (G3): an eligible tool version's approved dependencies have to fit
+        # the product's own table scope. `eligible_tool_version_ids` says which
+        # tools may be *selected*; it does not enlarge what may be read, and
+        # until F01 nothing anywhere compared the two -- not product version
+        # create/update (`context_product_api.validate_context_product_references`
+        # validates `table_ids` and `eligible_tool_version_ids` in two passes
+        # that never see each other), not product version approval, not tool
+        # version approval, and not tool draft creation (which authorises
+        # against the *datasource-wide* `allowed_tables`). The tool's declared
+        # dependencies are checked here, before rendering, because a refusal an
+        # author can act on should name the tool rather than the SQL it
+        # produced; the rendered statement then reaches the same boundary as
+        # every other strategy in `_stage_validate`. See
+        # `context_product_execution_scope.GOVERNED_TOOL_DEPENDENCY_CONTRACT`
+        # for the full contract, including why a view is not followed to its
+        # base tables.
+        if scope is not None:
+            tool_dependency_scope = await resolve_scope_names(
+                session,
+                request.datasource,
+                version.referenced_tables,
+                table_ids=scope.table_ids,
+            )
+            if not tool_dependency_scope.admitted:
+                await self._persist_rejection(
+                    session,
+                    request,
+                    ledger,
+                    f"{CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE}:"
+                    f"{','.join(tool_dependency_scope.refusal_names())}",
+                )
+                raise AgentPolicyRejected(CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE)
         dependency_incidents = await fetch_open_incidents(
             session,
             datasource=request.datasource,
@@ -1795,6 +1877,18 @@ class GovernedAgentOrchestrator:
                 sql=statement.sql,
                 requested_limit=request.requested_limit,
                 semantic_version=retrieved.semantic_version,
+                # F01: the gateway enforces the product boundary itself, inside the
+                # one pipeline every execution path shares and before a connector is
+                # opened. Passed even though `_stage_validate` already refused an
+                # out-of-scope statement above: that check runs against the statement
+                # as generated, this one against the statement as the guard normalises
+                # it for execution, and the whole point of pushing the boundary down is
+                # that it holds for callers who never run this stage at all.
+                context_product_scope=(
+                    None
+                    if retrieved.context_product_scope is None
+                    else retrieved.context_product_scope.execution_scope()
+                ),
             )
         except QueryRejected as exc:
             await self._persist_gateway_rejection(session, request, ledger, statement, exc)
@@ -2022,7 +2116,34 @@ class GovernedAgentOrchestrator:
         scope: ContextProductScope,
         sql: str,
     ) -> None:
-        """Refuse a generated statement that reads past the product it was asked through."""
+        """Refuse a statement that reads past the product it was asked through.
+
+        Kept after F01 pushed the same boundary into the gateway, and kept
+        deliberately: this refusal is an `AgentPolicyRejected` raised *before*
+        a `QueryExecution` row exists, which is the shape the Ask surface's
+        callers already branch on, and it is the check that can name the
+        product in the run's own refusal ledger. The gateway's pass is the one
+        every *other* surface gets. Defence in depth is this repo's pattern
+        here, and the two cannot drift silently because both resolve names
+        through `context_product_execution_scope.resolve_scope_names`.
+
+        F01 (G4/G5): resolution is schema-aware and accounted per name, so
+        `FROM nonexistent_schema.fact_orders` no longer resolves to an
+        in-scope `fact_orders` and pass, and `retail.orders` no longer refuses
+        because some `staging.orders` also exists. A name that cannot be
+        resolved to exactly one active table is refused rather than admitted:
+        the old test was `any(resolved_id not in scope)`, which is vacuously
+        false over an empty or partial resolution, so an unresolvable reference
+        walked through the boundary and was later refused -- if at all -- as a
+        datasource-wide `UNKNOWN_OR_UNAUTHORIZED_TABLE`.
+
+        A product whose `table_ids` is empty therefore refuses every statement
+        that reads any table, and that is intended, not an accident of the
+        expression: the table axis of a product is an allowlist, not a pinned
+        set (`ContextProductScope.admits` treats it the same way), so naming no
+        table means "this product grounds no data read". Only a table-less
+        statement (`SELECT 1`) survives it.
+        """
         guard_result = self.query_gateway.guard.validate(
             sql,
             dialect=request.datasource.dialect,
@@ -2034,10 +2155,13 @@ class GovernedAgentOrchestrator:
             # Not this rule's refusal to make: the gateway refuses it on its own terms, with its
             # own violation, a few lines later.
             return
-        table_ids = await resolve_referenced_table_ids(
-            session, request.datasource, guard_result.referenced_tables
+        resolution = await resolve_scope_names(
+            session,
+            request.datasource,
+            guard_result.referenced_tables,
+            table_ids=scope.table_ids,
         )
-        if any(str(table_id) not in scope.table_ids for table_id in table_ids):
+        if not resolution.admitted:
             await self._persist_rejection(
                 session, request, ledger, CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE
             )
@@ -2221,19 +2345,27 @@ class GovernedAgentOrchestrator:
             return f"VALIDATED_TABLE_NOT_ALLOWLISTED:{','.join(unauthorized)}"
         if scope is not None:
             # The allowlist above is the datasource's, which is the boundary a product narrows.
-            # The validate stage refuses an out-of-scope statement before a session is opened;
-            # this is the independent re-check on what execution actually touched, so a defect
-            # between the two is caught rather than trusted (R11-FP12, C3).
-            executed_table_ids = await resolve_referenced_table_ids(
-                session, datasource, gateway_result.execution.referenced_tables
+            # The validate stage refuses an out-of-scope statement before a session is opened,
+            # and the gateway refuses it again before it opens one (F01); this is the
+            # independent re-check on what execution actually *touched*, so a defect between
+            # any of them is caught rather than trusted (R11-FP12, C3).
+            #
+            # F01 (G5): resolved by name through the same schema-aware resolver the two
+            # pre-execution checks use, and reported by the name the execution recorded. It
+            # used to resolve through `resolve_referenced_table_ids` and report a bare uuid,
+            # which named a table the statement never read whenever a leaf name collided
+            # across schemas -- a post-execution denial over a false positive.
+            resolution = await resolve_scope_names(
+                session,
+                datasource,
+                gateway_result.execution.referenced_tables,
+                table_ids=scope.table_ids,
             )
-            outside = sorted(
-                str(table_id)
-                for table_id in executed_table_ids
-                if str(table_id) not in scope.table_ids
-            )
-            if outside:
-                return f"VALIDATED_TABLE_OUTSIDE_CONTEXT_PRODUCT:{','.join(outside)}"
+            if not resolution.admitted:
+                return (
+                    "VALIDATED_TABLE_OUTSIDE_CONTEXT_PRODUCT:"
+                    f"{','.join(resolution.refusal_names())}"
+                )
         return None
 
     def _checkpoint_costed(self, *, gateway_result: GatewayResult) -> str | None:

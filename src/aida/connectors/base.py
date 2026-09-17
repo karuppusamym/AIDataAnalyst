@@ -55,6 +55,18 @@ class ConnectorCapabilities:
     # reporting honestly (fail-closed, matching the `views`/`routines`/etc.
     # convention above) rather than silently claiming support it lacks.
     value_range_profiling: bool = False
+    # R11-FP04. The Shannon entropy of a column's *frequency distribution* --
+    # how evenly the rows spread over the distinct values. Deliberately a
+    # separate flag from `value_range_profiling` above and NOT an extension of
+    # it: entropy needs a `GROUP BY` over the column, but the group keys never
+    # leave the source. The engine returns one float and no value, no bucket
+    # edge and no exemplar, so it stays inside ADR-0014's value-free half and
+    # needs no `ProfilingExceptionPolicy`. The flag exists because the query
+    # shape is a per-column aggregate rather than one more expression on the
+    # shared scan, so an engine that has not implemented it must report the
+    # facet UNSUPPORTED (see `ProfileFacetStatus`) rather than return None and
+    # let a reader guess whether the column is simply constant.
+    distribution_entropy_profiling: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +265,301 @@ class QueryEstimate:
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
+# --------------------------------------------------------------------------
+# R11-FP04: observation scope, per-facet honesty, and value-free distribution
+# shape.
+#
+# Three separate problems, solved here because all three are the connector's
+# own knowledge and nothing above this layer can reconstruct them:
+#
+# 1. *How much of the table did this profile see?* Every consumer of a profile
+#    statistic needs it (`relationship_validation.ProfileBounds`, which decides
+#    whether a join's uniqueness evidence is sample-bounded, is the one that
+#    actually acts on it). It used to be re-derived downstream by comparing
+#    `sampled_row_count` with `row_count_estimate`, which is only a proxy: an
+#    engine that reports the sample as the estimate looks like a full scan, and
+#    an engine that scans fully but reports a nominal sample size looks
+#    sampled. Only the connector knows whether it issued a bound, so it now
+#    says so.
+# 2. *Which facets could this engine produce for this column, and if not, why
+#    not?* Following `DiscoveredViewDefinition`/`DiscoveredRoutine`'s
+#    `unavailable_reason` convention above: unavailable and empty are different
+#    states, and a reader must be able to tell "this engine cannot compute
+#    lengths" from "this type has no text form" from "the source refused".
+# 3. *Distribution shape without values.* ADR-0014/INV-6: a count is a
+#    statistic about values, a bucket edge or an exemplar is a value. So the
+#    bucket boundaries live here, in code, versioned by
+#    `LENGTH_BUCKET_SCHEME`, and only the per-bucket counts are ever returned
+#    or persisted.
+# --------------------------------------------------------------------------
+
+#: The profile aggregated every row of the table.
+OBSERVATION_SCOPE_FULL = "FULL"
+#: The profile aggregated a bounded subset; every statistic is sample-bounded.
+OBSERVATION_SCOPE_SAMPLE = "SAMPLE"
+#: Nothing was read (no columns, or the engine could not say), so no claim is made.
+OBSERVATION_SCOPE_UNKNOWN = "UNKNOWN"
+
+OBSERVATION_SCOPES = frozenset(
+    {OBSERVATION_SCOPE_FULL, OBSERVATION_SCOPE_SAMPLE, OBSERVATION_SCOPE_UNKNOWN}
+)
+
+
+def bounded_scan_scope(*, sampled_row_count: int, sample_rows: int) -> str:
+    """The observation scope of a profile whose scan carried a row bound.
+
+    A bound that never bit means the aggregate did see the whole table, so
+    `sampled_row_count < sample_rows` -- including the empty table, which is
+    fully observed at zero rows -- is honestly FULL. A bound that filled up
+    proves nothing about what lies past it: the table may have exactly
+    `sample_rows` rows or ten million, and SAMPLE is the only claim the
+    connector can support. Never the other way around, which is the R11-FP04
+    defect this replaces.
+    """
+    if sample_rows < 1:
+        return OBSERVATION_SCOPE_UNKNOWN
+    if sampled_row_count < sample_rows:
+        return OBSERVATION_SCOPE_FULL
+    return OBSERVATION_SCOPE_SAMPLE
+
+
+#: Facets a caller may ask about per column. Named so an engine can be honest
+#: about one while producing another.
+PROFILE_FACET_DISTINCT = "DISTINCT"
+PROFILE_FACET_LENGTH = "LENGTH"
+PROFILE_FACET_BLANKS = "BLANKS"
+PROFILE_FACET_LENGTH_DISTRIBUTION = "LENGTH_DISTRIBUTION"
+PROFILE_FACET_ENTROPY = "ENTROPY"
+PROFILE_FACET_PATTERN_CLASS = "PATTERN_CLASS"
+PROFILE_FACET_UNITS = "UNITS"
+
+PROFILE_FACETS = frozenset(
+    {
+        PROFILE_FACET_DISTINCT,
+        PROFILE_FACET_LENGTH,
+        PROFILE_FACET_BLANKS,
+        PROFILE_FACET_LENGTH_DISTRIBUTION,
+        PROFILE_FACET_ENTROPY,
+        PROFILE_FACET_PATTERN_CLASS,
+        PROFILE_FACET_UNITS,
+    }
+)
+
+#: The engine has no way to express this facet at all.
+FACET_UNSUPPORTED = "UNSUPPORTED"
+#: The engine could express it, but it means nothing for this column's type.
+FACET_NOT_APPLICABLE = "NOT_APPLICABLE"
+#: The source refused the read. Distinct from UNSUPPORTED: asking again with
+#: different credentials could succeed.
+FACET_PERMISSION_DENIED = "PERMISSION_DENIED"
+#: Supported and applicable, but this run did not get it (timeout, transient error).
+FACET_UNAVAILABLE = "UNAVAILABLE"
+
+FACET_STATUSES = frozenset(
+    {FACET_UNSUPPORTED, FACET_NOT_APPLICABLE, FACET_PERMISSION_DENIED, FACET_UNAVAILABLE}
+)
+
+#: Why a facet is missing, as a closed vocabulary rather than free text.
+#:
+#: INV-6, and the reason this is an enumeration instead of a `str` message:
+#: the honest-sounding implementation of an unavailable reason is to pass the
+#: driver's own error through, and a source driver's error text routinely
+#: quotes the offending row (`workflows.activities` carries the same rule for
+#: `analysis_run.error_message`). A code cannot carry a value. Anything not in
+#: this set is replaced with `FACET_REASON_UNRECORDED` at persist time.
+FACET_REASON_ENGINE_LACKS_FACET = "ENGINE_LACKS_FACET"
+FACET_REASON_TYPE_HAS_NO_TEXT_FORM = "TYPE_HAS_NO_TEXT_FORM"
+FACET_REASON_TYPE_IS_REPEATED = "TYPE_IS_REPEATED"
+FACET_REASON_SOURCE_DENIED_READ = "SOURCE_DENIED_READ"
+FACET_REASON_FACET_QUERY_FAILED = "FACET_QUERY_FAILED"
+#: The engine could express it; this platform does not ask for it yet. Kept
+#: distinct from ENGINE_LACKS_FACET so "we have not built it" is never read as
+#: "your warehouse cannot do it".
+FACET_REASON_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+#: The facet's only honest form would itself be a value (ADR-0014). A unit
+#: inferred from data is a data-inferred string, not a statistic about one.
+FACET_REASON_WOULD_CARRY_A_VALUE = "WOULD_CARRY_A_VALUE"
+#: A reason arrived that is not in this vocabulary; the reason is dropped, the
+#: fact that the facet is missing is kept.
+FACET_REASON_UNRECORDED = "UNRECORDED"
+
+FACET_REASON_CODES = frozenset(
+    {
+        FACET_REASON_ENGINE_LACKS_FACET,
+        FACET_REASON_TYPE_HAS_NO_TEXT_FORM,
+        FACET_REASON_TYPE_IS_REPEATED,
+        FACET_REASON_SOURCE_DENIED_READ,
+        FACET_REASON_FACET_QUERY_FAILED,
+        FACET_REASON_NOT_IMPLEMENTED,
+        FACET_REASON_WOULD_CARRY_A_VALUE,
+        FACET_REASON_UNRECORDED,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileFacetStatus:
+    """One facet this engine could *not* produce for one column, and why.
+
+    Only absent facets are reported: a facet with a populated statistic needs
+    no status, and listing every present one would make the common case the
+    verbose one. All three fields are closed vocabularies (`PROFILE_FACETS`,
+    `FACET_STATUSES`, `FACET_REASON_CODES`) so nothing here can carry a source
+    value (INV-6).
+    """
+
+    facet: str
+    status: str
+    reason_code: str
+
+
+#: The FP-04 facets the value-free half does not compute at all, with the
+#: reason each one is absent.
+#:
+#: Platform-wide and engine-independent, so these are *not* written onto every
+#: `ColumnProfile` row -- a constant repeated once per column would be storage
+#: spent on a fact that never varies. The read surface serves them alongside
+#: each column's own per-engine statuses, so "Atlas did not compute pattern
+#: evidence" and "this engine cannot compute lengths" reach a reader the same
+#: way and are still distinguishable.
+#:
+#: Units are listed as NOT_APPLICABLE rather than unimplemented on purpose: a
+#: unit inferred from the data is a data-inferred string, which ADR-0014 makes
+#: a value. The value-free half can never carry one, however it is built --
+#: only an owner-declared unit (FP-08's semantics, a different surface) can.
+UNCOMPUTED_FACET_STATUS: tuple[ProfileFacetStatus, ...] = (
+    ProfileFacetStatus(
+        PROFILE_FACET_PATTERN_CLASS, FACET_UNSUPPORTED, FACET_REASON_NOT_IMPLEMENTED
+    ),
+    ProfileFacetStatus(PROFILE_FACET_UNITS, FACET_NOT_APPLICABLE, FACET_REASON_WOULD_CARRY_A_VALUE),
+)
+
+
+#: Length buckets, as `(low, high_inclusive_or_None)` over the column's text
+#: length. R11-FP04/INV-6: the boundaries are code, versioned by the scheme
+#: name below, and only the counts are returned and persisted -- a persisted
+#: bucket edge is a value, and a reader that needs the edges reads them from
+#: the scheme.
+#:
+#: The empty string is deliberately not a bucket: it is `blank_count`, which a
+#: reader wants separately from "short".
+LENGTH_BUCKET_SCHEME = "length-buckets-v1"
+LENGTH_BUCKET_BOUNDS: tuple[tuple[int, int | None], ...] = (
+    (1, 8),
+    (9, 32),
+    (33, 128),
+    (129, 1024),
+    (1025, None),
+)
+
+
+def value_free_distribution_expressions(
+    *, position: int, text_form: str, length_form: str, trimmed_form: str
+) -> list[str]:
+    """The count-only distribution aggregates, in SQL every engine speaks.
+
+    R11-FP04. Rides on whichever bounded scan the caller has already opened --
+    these are more aggregates over the same rows, never a second sample, so a
+    profile's counts and its distribution always describe the same observation.
+
+    `SUM(CASE WHEN ...)` rather than `COUNT(*) FILTER (WHERE ...)`: the filter
+    clause is the nicer spelling and two of the six engines do not have it, and
+    a shared generator that is correct everywhere is worth more here than a
+    per-dialect one that drifts.
+
+    The three expressions are the engine's own, and are exactly the ones its
+    existing min/max-length aggregates are already built from: `text_form` is
+    the column rendered as text, `length_form` that text's length,
+    `trimmed_form` that text with surrounding whitespace removed. Passing them
+    in rather than composing them here is what keeps this helper from having a
+    dialect table of its own.
+    """
+    expressions = [
+        f"SUM(CASE WHEN {text_form} = '' THEN 1 ELSE 0 END) AS bl_{position}",
+        f"SUM(CASE WHEN {text_form} <> '' AND {trimmed_form} = '' THEN 1 ELSE 0 END) "
+        f"AS ws_{position}",
+    ]
+    for index, (low, high) in enumerate(LENGTH_BUCKET_BOUNDS):
+        predicate = (
+            f"{length_form} >= {low}"
+            if high is None
+            else f"{length_form} >= {low} AND {length_form} <= {high}"
+        )
+        expressions.append(f"SUM(CASE WHEN {predicate} THEN 1 ELSE 0 END) AS lb_{position}_{index}")
+    return expressions
+
+
+def null_distribution_expressions(*, position: int, null_literal: str) -> list[str]:
+    """Typed NULL placeholders in place of `value_free_distribution_expressions`.
+
+    For a column whose type has no text form at all -- an ARRAY, a STRUCT, a
+    LOB -- where `CAST(col AS STRING)` is an error rather than a value. The
+    aliases still have to exist or the batch's whole row shape changes per
+    column, and this is the same "honest static placeholder" the existing
+    length/distinct expressions already use for those types. `None` comes back
+    from `read_value_free_distribution`, and the connector pairs it with a
+    NOT_APPLICABLE `ProfileFacetStatus` so the absence has a reason.
+    """
+    aliases = [f"bl_{position}", f"ws_{position}"]
+    aliases.extend(f"lb_{position}_{index}" for index in range(len(LENGTH_BUCKET_BOUNDS)))
+    return [f"{null_literal} AS {alias}" for alias in aliases]
+
+
+#: Entropy, as every engine but PostgreSQL reports it. UNSUPPORTED rather than
+#: a silent None: `frequency_entropy_bits is None` also means "the column is
+#: entirely null", and the two must not be the same answer.
+ENTROPY_NOT_IMPLEMENTED = ProfileFacetStatus(
+    PROFILE_FACET_ENTROPY, FACET_UNSUPPORTED, FACET_REASON_NOT_IMPLEMENTED
+)
+
+
+def text_facets_not_applicable(reason_code: str) -> tuple[ProfileFacetStatus, ...]:
+    """Every facet that needs the column rendered as text, marked not applicable.
+
+    One helper because the three engines with a placeholder branch (BigQuery's
+    REPEATED and complex-scalar types, Oracle's LOBs) each withdraw exactly the
+    same set, and a per-connector list would drift the moment a facet is added.
+    """
+    return tuple(
+        ProfileFacetStatus(facet, FACET_NOT_APPLICABLE, reason_code)
+        for facet in (
+            PROFILE_FACET_LENGTH,
+            PROFILE_FACET_BLANKS,
+            PROFILE_FACET_LENGTH_DISTRIBUTION,
+        )
+    )
+
+
+def read_value_free_distribution(
+    position: int, read: Any
+) -> tuple[int | None, int | None, tuple[int, ...] | None]:
+    """Read back what `value_free_distribution_expressions` computed.
+
+    `read(alias)` is the caller's own row accessor, because the six engines
+    disagree about the case of a returned alias and about whether a missing one
+    raises or answers None. Any alias that comes back None (or absent) makes
+    the whole facet absent rather than zero: a zero count is a claim that the
+    engine looked and found none, which is not what a missing column means.
+    """
+
+    def _count(alias: str) -> int | None:
+        try:
+            raw = read(alias)
+        except (KeyError, IndexError):
+            return None
+        return None if raw is None else int(raw)
+
+    blank = _count(f"bl_{position}")
+    whitespace = _count(f"ws_{position}")
+    buckets: list[int] = []
+    for index in range(len(LENGTH_BUCKET_BOUNDS)):
+        value = _count(f"lb_{position}_{index}")
+        if value is None:
+            return blank, whitespace, None
+        buckets.append(value)
+    return blank, whitespace, tuple(buckets)
+
+
 @dataclass(frozen=True, slots=True)
 class ColumnProfileSnapshot:
     name: str
@@ -261,6 +568,18 @@ class ColumnProfileSnapshot:
     approximate_distinct_count: int
     min_length: int | None
     max_length: int | None
+    # R11-FP04, all value-free and all optional so a connector that has not
+    # implemented a facet keeps compiling and keeps reporting honestly (the
+    # `views`/`routines` convention on `ConnectorCapabilities`). `None` means
+    # "no claim"; `facet_status` says which of the four kinds of no-claim it
+    # is. Note what is *not* here and must never be: a bucket edge, a mode, an
+    # exemplar or a pattern literal (ADR-0014; `tests/test_inv6_value_freedom.py`
+    # asserts it positively rather than by naming convention alone).
+    blank_count: int | None = None
+    whitespace_only_count: int | None = None
+    length_bucket_counts: tuple[int, ...] | None = None
+    frequency_entropy_bits: float | None = None
+    facet_status: tuple[ProfileFacetStatus, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +587,11 @@ class TableProfileSnapshot:
     row_count_estimate: int | None
     sampled_row_count: int
     columns: tuple[ColumnProfileSnapshot, ...]
+    # R11-FP04. Defaulted to UNKNOWN rather than required: an in-tree double or
+    # a connector that has not been taught to say makes no claim, which is the
+    # honest reading, instead of inheriting whichever of FULL/SAMPLE happened
+    # to be the constructor's first argument.
+    observation_scope: str = OBSERVATION_SCOPE_UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)

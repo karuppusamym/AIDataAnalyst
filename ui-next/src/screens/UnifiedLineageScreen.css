@@ -102,6 +102,13 @@
 
 .ult--maximized{position:fixed;inset:0;z-index:1000;background:var(--surface);box-sizing:border-box}
 .ult__layout--wide{grid-template-columns:minmax(0,1fr)}
+/* R11-S13 (M1): the Impact view of the merged lineage destination. One column,
+   impact first (in the DOM too -- see `impactPane` in the screen), graph
+   beneath it as the way to change which node is in focus. The 360px rail this
+   replaces is what made "who breaks if I change this" the hardest question to
+   read on a screen that already had the answer. */
+.ult__layout--impactled{grid-template-columns:minmax(0,1fr)}
+.ult__layout--impactled .ult__impact{max-height:none;overflow-y:visible}
 .ult__impact[hidden]{display:none}
 .ult__viewtools{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px;flex:none}
 .ult__viewtools label{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}

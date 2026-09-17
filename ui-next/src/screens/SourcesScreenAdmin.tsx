@@ -55,10 +55,34 @@ import { DiscoveryScope } from "./SourcesScreenDiscoveryScope";
    confirmation, validation and re-read cycle.
 --------------------------------------------------------------------------- */
 
-/** Roles `test_datasource` accepts (`connectivity/router.py`, surface matrix). */
-const CONNECTION_ROLES = ["PlatformAdmin", "DataAdmin"];
+/** Roles `test_datasource` accepts (`connectivity/router.py`, surface matrix).
+ *
+ *  R11-S13 (M5): exported because `create_datasource` (`api.py:1021`) accepts
+ *  the same two roles, and `SourcesScreen` now mounts the registration form
+ *  beside this pane. One constant, so the gate on "register a source" and the
+ *  gate on "test the source you just registered" cannot drift apart into a
+ *  screen that offers step one and hides step two. */
+export const CONNECTION_ROLES = ["PlatformAdmin", "DataAdmin"];
 /** Roles the scan, resume and scan-policy writes accept. */
 const SCAN_ROLES = ["PlatformAdmin", "MetadataAdmin", "DataAdmin"];
+
+/**
+ * Whether a session holding `roles` may use a surface `accepted` guards.
+ *
+ * `undefined` is "the session has not answered yet", NOT "no roles": this
+ * deliberately fails OPEN while `GET /v1/me` is in flight, so a slow identity
+ * request does not render as a permissions problem. The server's 403 is the
+ * authority; this only decides what is worth offering.
+ *
+ * R11-S13 (M5): lifted out of the pane below so the registration form in
+ * `SourcesScreen` applies the identical rule rather than a second copy of it.
+ */
+export function roleAllows(
+  roles: readonly string[] | undefined,
+  accepted: readonly string[],
+): boolean {
+  return roles === undefined || roles.some((role) => accepted.includes(role));
+}
 
 /** The server's own retry gate, copied from `aida.api.resume_analysis_run`.
  *  A status outside this set is refused with a 409 — so the button is not
@@ -275,7 +299,7 @@ export function SourceAdministration({
   // the workbook gate this pane already uses: offer the action and let the
   // server's 403 be the authority, rather than hiding it on a guess.
   const allowed = useCallback(
-    (accepted: string[]) => roles === undefined || roles.some((role) => accepted.includes(role)),
+    (accepted: readonly string[]) => roleAllows(roles, accepted),
     [roles],
   );
   const mayTest = allowed(CONNECTION_ROLES);

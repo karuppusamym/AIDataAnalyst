@@ -176,7 +176,7 @@ export type AgentAskErrorKind =
   | "DATASOURCE_DISABLED"
   | "NOT_AUTHORIZED"
   | "POLICY_REJECTED"
-  | "CONTEXT_PRODUCT_REFUSED"
+  | AgentAskContextProductKind
   | "MODEL_UNAVAILABLE"
   | "MODEL_THROTTLED"
   | "CLARIFICATION_NEEDED"
@@ -186,12 +186,27 @@ export type AgentAskErrorKind =
 /** R11-FP12: the three ways asking *through* a context product is refused, all 422s carrying a
  *  stable code. They are not "the generated query was rejected by policy": the question never
  *  reached a query, and what the person can do about each differs -- pick another product, ask
- *  for access to this one, or ask something the product's tables can answer. */
-const CONTEXT_PRODUCT_REFUSALS = new Set([
-  "CONTEXT_PRODUCT_NOT_AVAILABLE",
-  "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED",
-  "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE",
-]);
+ *  for access to this one, or ask something the product's tables can answer.
+ *
+ *  F08: they are three KINDS, not one. Collapsed into a single
+ *  `CONTEXT_PRODUCT_REFUSED` they shared one title and showed the server's raw token as the
+ *  detail, so a person whose role is not a consumer of the product read the literal string
+ *  `CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED` under "this product cannot answer that question" --
+ *  a remedy-free sentence describing the wrong problem. The three remedies this comment already
+ *  named are only reachable if the classification keeps them apart. */
+export type AgentAskContextProductKind =
+  | "CONTEXT_PRODUCT_UNAVAILABLE"
+  | "CONTEXT_PRODUCT_ROLE_REQUIRED"
+  | "CONTEXT_PRODUCT_OUT_OF_SCOPE";
+
+/** The server's own stable tokens (`agent_orchestrator.py:378-380`) mapped to the kind whose
+ *  remedy matches. Keyed by the wire value so an unrecognised token stays a plain
+ *  `POLICY_REJECTED` rather than being guessed into one of these. */
+const CONTEXT_PRODUCT_REFUSALS: Readonly<Record<string, AgentAskContextProductKind>> = {
+  CONTEXT_PRODUCT_NOT_AVAILABLE: "CONTEXT_PRODUCT_UNAVAILABLE",
+  CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED: "CONTEXT_PRODUCT_ROLE_REQUIRED",
+  CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: "CONTEXT_PRODUCT_OUT_OF_SCOPE",
+};
 
 export interface AgentAskErrorAlternative {
   businessNodeId: string;
@@ -289,8 +304,9 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
   // them to support rather than to whoever grants access. R11-B11's browser
   // journey found it on the denied-access case.
   if (status === 403) return { kind: "NOT_AUTHORIZED", status, detail, ...NO_CLARIFICATION };
-  if (status === 422 && CONTEXT_PRODUCT_REFUSALS.has(detail)) {
-    return { kind: "CONTEXT_PRODUCT_REFUSED", status, detail, ...NO_CLARIFICATION };
+  const contextProductKind = status === 422 ? CONTEXT_PRODUCT_REFUSALS[detail] : undefined;
+  if (contextProductKind !== undefined) {
+    return { kind: contextProductKind, status, detail, ...NO_CLARIFICATION };
   }
   if (status === 422) return { kind: "POLICY_REJECTED", status, detail, ...NO_CLARIFICATION };
   if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, ...NO_CLARIFICATION };

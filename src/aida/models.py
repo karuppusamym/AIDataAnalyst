@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -1728,8 +1729,17 @@ class DescriptionWithdrawal(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("governance_review_id"),
         # R11-C8: ANNOTATION withdraws a business annotation version.
+        # R11-FP08: ROUTINE withdraws (or reinstates) a
+        # `RoutineDocumentationVersion` -- the routine-level description store,
+        # which until then did not exist. This table is one of exactly two that
+        # genuinely discriminate on a subject type across the description
+        # family (the other is `GovernanceReview.object_type`), which is why
+        # extending the family widens it rather than adding a parallel
+        # `routine_description_withdrawal`: the decision shape is identical --
+        # this subject, this exact version, this reason, decided by someone
+        # other than the requester -- and every column below already serves it.
         CheckConstraint(
-            "subject_type IN ('TABLE', 'COLUMN', 'ANNOTATION')",
+            "subject_type IN ('TABLE', 'COLUMN', 'ANNOTATION', 'ROUTINE')",
             name="withdrawal_subject_type_is_supported",
         ),
         CheckConstraint(
@@ -1867,6 +1877,18 @@ class ModelImportChange(Base, TimestampMixin):
     __tablename__ = "model_import_change"
     __table_args__ = (
         Index("ix_model_import_change_batch_status", "batch_id", "status"),
+        # R11-FP08 deliberately left this narrow. Routine descriptions joined
+        # the description family, and the two shared tables that discriminate on
+        # a subject type were widened for them (`DescriptionWithdrawal` above,
+        # `GovernanceReview.object_type`) -- this one was not. The model
+        # workbook is a spreadsheet of the *data model*: one sheet of tables,
+        # one of columns, exported and re-imported by a steward editing
+        # business names, descriptions and owners. A procedure is not a row in
+        # that model, there is no routine sheet to export it into, and adding
+        # `ROUTINE` here would admit a subject the exporter never writes and the
+        # applier has no publish path for. Recorded as a decision rather than
+        # left as an omission: if routines ever belong in the workbook, that is
+        # a sheet and an exporter, not a widened check.
         CheckConstraint(
             "subject_type IN ('TABLE', 'COLUMN')", name="import_subject_type_is_supported"
         ),
@@ -4869,6 +4891,8 @@ class DocumentMapping(Base, TimestampMixin):
     __tablename__ = "document_mapping"
     __table_args__ = (
         UniqueConstraint("document_section_id"),
+        # R11-FP08 deliberately left this narrow, for the reason stated on
+        # `DocumentClaim` below: a data dictionary describes tables and columns.
         CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
         CheckConstraint(
             "mapping_kind IN ('STRUCTURAL', 'SUGGESTED', 'UNMATCHED')",
@@ -4921,6 +4945,18 @@ class DocumentClaim(Base, TimestampMixin):
     __tablename__ = "document_claim"
     __table_args__ = (
         UniqueConstraint("governance_review_id"),
+        # R11-FP08 deliberately left this narrow. Routine descriptions joined
+        # the description family, and the shared tables that discriminate on a
+        # subject type were widened for them -- this one was not, and the scope
+        # cut is recorded here so it reads as a decision rather than an
+        # oversight. A `DocumentClaim` is a sentence lifted out of an uploaded
+        # *data dictionary*, and a data dictionary describes the tables and
+        # columns a reader queries. No dictionary format this platform ingests
+        # has a procedure section, `resolve_structural_mappings` has no name
+        # resolution for one, and admitting `ROUTINE` here would create a claim
+        # shape nothing can produce and `apply_document_claim` cannot publish.
+        # If routine documentation ever arrives as an upload, that is a mapping
+        # resolver and a publish branch, not a widened check.
         CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
         CheckConstraint("predicate IN ('DESCRIBES')", name="predicate_is_supported"),
         Index("ix_document_claim_org_status", "organization_id", "status"),
@@ -5199,6 +5235,105 @@ class AgentBudgetWindow(Base, TimestampMixin):
     reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     #: How many runs contributed, for reconciliation diagnostics. Not a cap.
     run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class TenantUsageWindow(Base, TimestampMixin):
+    """One organization's consumption of one metered dimension inside one UTC day (R11-FP17).
+
+    Sibling of `AgentBudgetWindow` above, and deliberately the same shape for the
+    same reason: a quota that is enforced by reading a total and then deciding
+    cannot bound concurrent work, because two callers that both read a day's
+    consumption before either writes will both pass a cap they jointly break.
+    `used` is moved by a *conditional* UPDATE carrying the cap in its own
+    `WHERE`, so the database decides who fits. See `aida.usage_quotas`.
+
+    It is a second table rather than a `datasource_id`-nullable column on
+    `SourceUsageWindow` because PostgreSQL treats NULLs as distinct in a unique
+    constraint, so one table serving both scopes would not actually enforce one
+    row per scope per day -- and a duplicated window row is a quota that counts
+    half the traffic. Two tables, two honest unique constraints.
+
+    **Not a cost record.** `used` is a count of the dimension's own unit --
+    tokens, statements, runs -- never money. `aida.cost_showback`'s `COST_BASIS`
+    holds for these rows too: nothing here is a reconciled dollar figure, and the
+    token counts distinguish provider-reported from estimated only in the metric
+    series, not in this accumulator, because a quota has to bound both alike.
+    """
+
+    __tablename__ = "tenant_usage_window"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "dimension",
+            "window_date",
+            name="uq_tenant_usage_window_scope",
+        ),
+        Index("ix_tenant_usage_window_org_date", "organization_id", "window_date"),
+        CheckConstraint("used >= 0", name="ck_tenant_usage_window_non_negative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: A `aida.usage_quotas.UsageDimension` value. Stored as its string so a
+    #: dimension added later needs no migration, and constrained in code rather
+    #: than by a DB enum for the same reason `AgentRun.status` is.
+    dimension: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The UTC day, as a plain date -- stored rather than derived so the
+    #: conditional UPDATE has an equality predicate to match on.
+    window_date: Mapped[date] = mapped_column(Date, nullable=False)
+    #: `BigInteger`, unlike `AgentBudgetWindow.reserved_tokens`: a whole
+    #: organization's daily model tokens across every agent and every source can
+    #: exceed a signed 32-bit integer in a large estate, and a quota accumulator
+    #: that silently overflows fails *open*.
+    used: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    #: How many consumption events contributed. Diagnostics, not a cap.
+    event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class SourceUsageWindow(Base, TimestampMixin):
+    """One datasource's consumption of one metered dimension inside one UTC day (R11-FP17).
+
+    The per-source half of the same mechanism as `TenantUsageWindow`, and the
+    place per-source cost attribution actually lives. The review's ask ("parser
+    and model cost metrics per source") cannot be answered by a Prometheus label
+    -- a datasource id on a high-frequency series is the unbounded cardinality
+    F17 records the cost of -- so the source dimension is carried here, in rows
+    the database bounds, and the metric surface stays a small fixed set of
+    series. `aida.cost_metrics` explains that trade in full.
+
+    `organization_id` is present as well as `datasource_id`, and every statement
+    in `aida.usage_quotas` restates it in its predicate. It is redundant as a
+    lookup key and is not redundant as an invariant: INV-5 is that tenant
+    isolation is total, and a quota statement that matched on `datasource_id`
+    alone would be one caller's bad id away from moving another tenant's row.
+    """
+
+    __tablename__ = "source_usage_window"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "datasource_id",
+            "dimension",
+            "window_date",
+            name="uq_source_usage_window_scope",
+        ),
+        Index("ix_source_usage_window_source_date", "datasource_id", "window_date"),
+        CheckConstraint("used >= 0", name="ck_source_usage_window_non_negative"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dimension: Mapped[str] = mapped_column(String(40), nullable=False)
+    window_date: Mapped[date] = mapped_column(Date, nullable=False)
+    used: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class AgentTask(Base, TimestampMixin):

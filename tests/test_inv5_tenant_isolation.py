@@ -70,6 +70,15 @@ _TENANT_FREE_ROUTES: dict[str, str] = {
         "no session parameter, no datasource_id, reads no governed table; identical "
         "for every tenant, same as the connector capability matrix above"
     ),
+    "GET /v1/engines/capability-matrix": (
+        "review 2026-09-16 §5: what each engine's adapter can do per facet, built "
+        "by aida.engine_capability_matrix.build_engine_capability_matrix from the "
+        "connector registry, the adapters' own capability flags and method "
+        "overrides, and the parsers' dialect map -- no session parameter, no "
+        "datasource_id, reads no governed table; identical for every tenant, the "
+        "same class as the two capability matrices above. Role-gated all the same, "
+        "because which engines exist is still product information"
+    ),
     "POST /v1/context-compiler/validate": (
         "pure validation of a caller-supplied artifact; takes no session and "
         "persists nothing"

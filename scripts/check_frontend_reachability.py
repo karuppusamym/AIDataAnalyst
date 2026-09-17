@@ -125,15 +125,13 @@ ALLOWLIST: dict[str, str] = {
         "place. A permanent exception while the build owns the decision, not a "
         "backlog item; it goes away only if the policy moves back into the app."
     ),
-    "components/OrgPicker.tsx": (
-        "Docs/review-2026-09-05/POINTS-TRACKER.md D01: named by the review "
-        "(REVIEW.md line 301) alongside ProposalCard as unreached from main. Unlike "
-        "ProposalCard it was deliberately KEPT -- the shell's active org control is "
-        "`ScopePicker`, and `AdministrationScreen` documents `OrgPicker` as the "
-        "shell-nav org control this screen deliberately does not duplicate. It is a "
-        "decision with an owner (D01), recorded here rather than hidden: wire it "
-        "into the shell nav or delete it, and remove this entry either way."
-    ),
+    # R11-S13 (M6): `components/OrgPicker.tsx` was the third entry. D01 recorded
+    # the decision as "wire it into the shell nav or delete it, and remove this
+    # entry either way"; the shell's org control is `ScopePicker`, which has been
+    # the mounted one throughout, so the second branch was taken. The component
+    # and its test are gone and this entry goes with them -- an allow-list row
+    # for a deleted file is the stale reference
+    # `test_allowlist_has_no_stale_entries` exists to fail on.
 }
 
 

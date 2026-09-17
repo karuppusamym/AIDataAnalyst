@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# R11-FP17: the monitoring resources for the metrics the platform already
+# publishes, as a kustomize base of its own.
+#
+# It is separate from `../../k8s/base` rather than folded into it for two
+# reasons, and both matter:
+#
+#   1. **Different prerequisites.** Everything in `../../k8s/base` is core
+#      Kubernetes and applies to any cluster. Everything here needs the
+#      Prometheus Operator CRDs (`monitoring.coreos.com/v1`), and a
+#      `kubectl apply -k` of a base containing them fails outright on a cluster
+#      without the operator -- taking the API Deployment down with it. Keeping
+#      them apart means an estate without the operator can still apply the
+#      platform, and can use `../prometheus/prometheus.yml` instead.
+#   2. **Different owner.** `infra/k8s/base/*` is being edited by another
+#      change. This directory adds no file there and patches nothing in it; the
+#      ServiceMonitor selects the existing Service purely by the labels it
+#      already carries.
+#
+# Apply with:
+#     kubectl apply -k infra/monitoring/k8s
+#
+# `kubectl kustomize infra/monitoring/k8s` renders it without a cluster, which
+# is the only validation available here -- there is no cluster in this sandbox,
+# and neither this base nor `../../k8s/base` has ever been reconciled by a real
+# operator. See `../README.md` for exactly what was and was not verified.
+
+namespace: aida
+
+resources:
+  - servicemonitor.yaml
+  - podmonitor.yaml
+  - prometheusrule.yaml
+
+# Deliberately NOT listed here: nothing from `../prometheus/`. Those files are
+# the plain-Prometheus form of the same intent, mounted into a Prometheus
+# container as a ConfigMap or a file; they are not Kubernetes objects and
+# kustomize cannot build them. Pick one form or the other, never both against
+# the same Prometheus, or every alert fires twice.

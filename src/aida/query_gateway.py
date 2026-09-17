@@ -16,6 +16,10 @@ from aida.config import Settings
 from aida.connectors.base import QueryEstimate
 from aida.connectors.execution_access import open_execution_session
 from aida.connectors.sql_execution import SqlExecutor
+from aida.context_product_execution_scope import (
+    ContextProductExecutionScope,
+    resolve_scope_names,
+)
 from aida.entitlements import blocking_product_revocation
 from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
@@ -50,6 +54,7 @@ from aida.sql_validation import (
     build_report,
     findings_from_catalog,
     findings_from_columns,
+    findings_from_context_product_scope,
     findings_from_estimate,
     findings_from_guard,
     locally_defined_names,
@@ -398,6 +403,7 @@ class QueryExecutionGateway:
         datasource: DataSource,
         requested_limit: int | None,
         guard_result: SqlValidationResult,
+        context_product_scope: ContextProductExecutionScope | None = None,
     ) -> _ValidationOutcome:
         """The one deterministic validation pipeline (review item N14).
 
@@ -421,6 +427,19 @@ class QueryExecutionGateway:
         freshness attributes onto the gate call (`policy_resource_attributes`)
         -- so the parse happens once, before authorization, and its result is
         threaded through rather than re-parsed after the fact.
+
+        `context_product_scope` (F01) is the optional published-product
+        boundary. It is enforced *here*, inside the pipeline every execution
+        path shares, rather than at each caller: `open_execution_session` is
+        the provable choke point (INV-2, `pyproject.toml`'s
+        "connector SQL execution is reachable only from the query gateway"
+        contract), so a boundary applied here cannot be reached around by a new
+        surface the way the MCP tool-call handler and the direct-SQL endpoint
+        both reached around the orchestrator's own check. It can only
+        *intersect*: the product's findings are appended to the datasource
+        allowlist's, never substituted for them, so no existing refusal is
+        removed and a caller that passes `None` sees the identical pipeline it
+        always did.
         """
         dialect = datasource.dialect
         findings: list[SqlFinding] = findings_from_guard(guard_result)
@@ -465,6 +484,30 @@ class QueryExecutionGateway:
                     local_names=locally_defined_names(normalized_sql, dialect=dialect),
                 )
             )
+            if context_product_scope is not None:
+                # F01: the product boundary, in the same phase as the
+                # datasource allowlist and before the phase below opens a
+                # connector. Resolved with this module's own schema-aware,
+                # per-name resolver rather than
+                # `policy_resource_attributes.resolve_referenced_table_ids` --
+                # that function's documented permissiveness is correct for the
+                # ABAC axes it feeds and wrong for a set-membership test, in
+                # both directions (see
+                # `aida.context_product_execution_scope`).
+                resolution = await resolve_scope_names(
+                    session,
+                    datasource,
+                    guard_result.referenced_tables,
+                    table_ids=context_product_scope.table_ids,
+                )
+                findings.extend(
+                    findings_from_context_product_scope(
+                        out_of_scope=resolution.out_of_scope,
+                        unresolved=resolution.unresolved,
+                        product_version_id=str(context_product_scope.version_id),
+                        product_version=context_product_scope.version,
+                    )
+                )
 
         if normalized_sql is not None and not blocked():
             dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
@@ -552,6 +595,7 @@ class QueryExecutionGateway:
         sql: str,
         requested_limit: int | None,
         workspace_id: UUID | None = None,
+        context_product_scope: ContextProductExecutionScope | None = None,
     ) -> SqlValidationReport:
         """Run the full deterministic pipeline and return findings, without executing.
 
@@ -662,6 +706,7 @@ class QueryExecutionGateway:
             datasource=datasource,
             requested_limit=requested_limit,
             guard_result=guard_result,
+            context_product_scope=context_product_scope,
         )
         report = outcome.report
         sql_hash = await self._sign_sql(sql)
@@ -772,7 +817,18 @@ class QueryExecutionGateway:
         requested_limit: int | None,
         semantic_version: str | None,
         workspace_id: UUID | None = None,
+        context_product_scope: ContextProductExecutionScope | None = None,
     ) -> GatewayResult:
+        """Validate, cost and run one statement; `context_product_scope` narrows it.
+
+        F01: when the caller asked through a published context product, the
+        boundary is enforced inside `_run_validation` below -- before the phase
+        that opens a connector -- so a statement reading past the product is
+        refused without an execution session ever existing. The refusal is a
+        `QueryRejected` carrying the product finding, which is the same
+        rejection path every other blocking finding takes, so no caller grows a
+        second branch. Passing `None` is the pre-F01 behaviour, unchanged.
+        """
         execution = QueryExecution(
             organization_id=datasource.organization_id,
             datasource_id=datasource.id,
@@ -866,6 +922,7 @@ class QueryExecutionGateway:
                 datasource=datasource,
                 requested_limit=requested_limit,
                 guard_result=guard_result,
+                context_product_scope=context_product_scope,
             )
             report = outcome.report
             execution.normalized_sql = report.normalized_sql

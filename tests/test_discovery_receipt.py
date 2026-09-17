@@ -18,6 +18,11 @@ from temporalio.testing import ActivityEnvironment
 
 import aida.task_tracking as task_tracking
 import aida.workflows.activities as activities
+from aida.capability_states import (
+    REASON_FACET_QUERY_FAILED,
+    REASON_SOURCE_DENIED_READ,
+    CapabilityState,
+)
 from aida.config import Settings
 from aida.connectors.base import (
     Connector,
@@ -31,7 +36,7 @@ from aida.connectors.base import (
     TableProfileSnapshot,
 )
 from aida.db import Base
-from aida.discovery_receipt import DiscoveryReceipt
+from aida.discovery_receipt import FACET_OBJECT_VISIBILITY, DiscoveryReceipt
 from aida.models import AnalysisRun, DataDomain, DataSource, LineOfBusiness, Organization, Project
 
 
@@ -96,14 +101,23 @@ def test_the_receipt_counts_kinds_and_keeps_withheld_code_apart_from_captured() 
     assert body["kinds"]["TABLE"] == {"discovered": 1, "excluded": 0, "invisible": None}
     assert body["kinds"]["VIEW"] == {"discovered": 3, "excluded": 2, "invisible": None}
     assert body["kinds"]["PROCEDURE"] == {"discovered": 1, "excluded": 0, "invisible": None}
+    # Review 2026-09-16 §5 added `state` and `reason` beside the counters, in the shared
+    # vocabulary (`aida.capability_states`). The four keys that were here before keep their
+    # names and their values, which is what makes receipt version 3 purely additive.
     assert body["facets"]["view_definitions"] == {
         "support": "SUPPORTED",
         "captured": 2,
         "withheld": 1,
         "truncated": 1,
+        "state": "TRUNCATED",
+        "reason": "SOURCE_TEXT_TRUNCATED",
     }
     assert body["facets"]["routine_bodies"]["withheld"] == 1
-    assert body["facets"]["grants"] == {"support": "UNSUPPORTED"}
+    assert body["facets"]["grants"] == {
+        "support": "UNSUPPORTED",
+        "state": "UNSUPPORTED",
+        "reason": None,
+    }
     assert body["reconciliation"] == {"performed": False, "reason": "INCREMENTAL_MODE"}
 
 
@@ -265,3 +279,167 @@ def test_what_the_login_may_not_see_is_counted_apart_from_what_it_returned() -> 
     }
     # Asked and told none is zero, which is a different answer from never asked.
     assert body["kinds"]["VIEW"]["invisible"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-16 §5: a facet whose read did not complete is recorded rather
+# than failing the run, and a refusal is told apart from a failure.
+#
+# Tracker R11-FP01 and R11-FP02 both name this as remaining: PERMISSION_DENIED
+# existed nowhere in code, so a facet the source refused either failed the
+# whole scan or was indistinguishable from one that came back empty. A login
+# granted one schema of five should produce a receipt that says so.
+# ---------------------------------------------------------------------------
+
+
+def test_a_refused_facet_is_recorded_rather_than_failing_the_run() -> None:
+    receipt = DiscoveryReceipt(
+        mode="FULL",
+        selection_fingerprint=None,
+        capabilities={"views": True, "routines": True, "grants": True},
+    )
+    receipt.observe_batch(_batch("retail"), {})
+    receipt.record_facet_outcome(
+        "grants", state=CapabilityState.PERMISSION_DENIED, reason=REASON_SOURCE_DENIED_READ
+    )
+
+    body = receipt.as_json("COMPLETE")
+
+    assert body["facets"]["grants"]["state"] == "PERMISSION_DENIED"
+    assert body["facets"]["grants"]["reason"] == "SOURCE_DENIED_READ"
+    # The run still finished, and everything else it read is still counted.
+    assert body["stream"]["state"] == "COMPLETE"
+    assert body["kinds"]["TABLE"]["discovered"] == 1
+
+
+def test_a_refusal_is_not_confused_with_an_unimplemented_axis() -> None:
+    """UNSUPPORTED outranks a recorded outcome: an adapter that does not collect
+    the facet had no read to refuse, and saying PERMISSION_DENIED would send a
+    source administrator to grant access that would change nothing."""
+    receipt = DiscoveryReceipt(
+        mode="FULL",
+        selection_fingerprint=None,
+        capabilities={"views": True, "routines": True, "grants": False},
+    )
+    receipt.record_facet_outcome(
+        "grants", state=CapabilityState.PERMISSION_DENIED, reason=REASON_SOURCE_DENIED_READ
+    )
+    assert receipt.as_json("COMPLETE")["facets"]["grants"]["state"] == "UNSUPPORTED"
+
+
+def test_a_free_text_reason_never_reaches_a_receipt() -> None:
+    """INV-6: a source's own explanation of what it withheld routinely quotes a
+    row, so the reason passes through a closed vocabulary first."""
+    receipt = DiscoveryReceipt(
+        mode="FULL",
+        selection_fingerprint=None,
+        capabilities={"views": True},
+    )
+    receipt.record_facet_outcome(
+        "view_definitions",
+        state=CapabilityState.PERMISSION_DENIED,
+        reason="permission denied for relation customers where ssn = '123-45-6789'",
+    )
+    body = receipt.as_json("COMPLETE")
+    assert body["facets"]["view_definitions"]["reason"] == "UNRECORDED"
+    assert "123-45-6789" not in str(body)
+
+
+def test_a_code_facets_state_follows_its_counters() -> None:
+    """The state a reader sees is derived from the counts already there, by a
+    documented precedence: refusal, then truncation, then a withheld share."""
+    partial = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={"routines": True}
+    )
+    partial.routine_bodies.update({"captured": 3, "withheld": 1})
+    assert partial.as_json("COMPLETE")["facets"]["routine_bodies"]["state"] == "PARTIAL"
+
+    nothing = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={"routines": True}
+    )
+    nothing.routine_bodies.update({"withheld": 4})
+    assert nothing.as_json("COMPLETE")["facets"]["routine_bodies"]["state"] == "UNAVAILABLE"
+
+    whole = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={"routines": True}
+    )
+    whole.routine_bodies.update({"captured": 4})
+    assert whole.as_json("COMPLETE")["facets"]["routine_bodies"]["state"] == "SUPPORTED"
+
+
+def test_the_visibility_facet_separates_refused_from_unaskable() -> None:
+    """`count_invisible_objects` answers None on every adapter but PostgreSQL's,
+    which is "we cannot ask" -- not a refusal, and not a false zero."""
+    unaskable = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={}, invisible=None
+    )
+    facet = unaskable.as_json("COMPLETE")["facets"]["object_visibility"]
+    assert facet == {
+        "state": "UNAVAILABLE",
+        "reason": "ADAPTER_NOT_IMPLEMENTED",
+        "asked": False,
+    }
+
+    asked = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={}, invisible={"TABLE": 0}
+    )
+    assert asked.as_json("COMPLETE")["facets"]["object_visibility"] == {
+        "state": "SUPPORTED",
+        "reason": None,
+        "asked": True,
+    }
+
+    refused = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={}, invisible=None
+    )
+    refused.record_facet_outcome(
+        FACET_OBJECT_VISIBILITY,
+        state=CapabilityState.PERMISSION_DENIED,
+        reason=REASON_SOURCE_DENIED_READ,
+    )
+    assert refused.as_json("COMPLETE")["facets"]["object_visibility"]["state"] == (
+        "PERMISSION_DENIED"
+    )
+
+
+def test_the_receipt_version_records_the_additive_change() -> None:
+    body = DiscoveryReceipt(
+        mode="FULL", selection_fingerprint=None, capabilities={}
+    ).as_json("COMPLETE")
+    assert body["receipt_version"] == 3
+
+
+async def test_a_source_that_refuses_the_visibility_question_does_not_fail_the_run() -> None:
+    """The wiring, not just the receipt: `_count_invisible` classifies a refusal
+    by SQLSTATE and records it, and the run goes on reading what it may."""
+    outcome: dict[str, tuple[CapabilityState, str]] = {}
+
+    class _Refusing:
+        async def count_invisible_objects(self) -> dict[str, int] | None:
+            raise _PrivilegeError
+
+    assert await activities._count_invisible(_Refusing(), outcome) is None  # type: ignore[arg-type]
+    assert outcome[FACET_OBJECT_VISIBILITY] == (
+        CapabilityState.PERMISSION_DENIED,
+        REASON_SOURCE_DENIED_READ,
+    )
+
+
+async def test_a_failure_that_is_not_a_refusal_is_recorded_as_unavailable() -> None:
+    """Under-claiming is the correct direction (INV-9): a driver that reports no
+    SQLSTATE gets "we did not get it", never a guess at the source's intent."""
+    outcome: dict[str, tuple[CapabilityState, str]] = {}
+
+    class _Failing:
+        async def count_invisible_objects(self) -> dict[str, int] | None:
+            raise TimeoutError("statement timeout")
+
+    assert await activities._count_invisible(_Failing(), outcome) is None  # type: ignore[arg-type]
+    assert outcome[FACET_OBJECT_VISIBILITY] == (
+        CapabilityState.UNAVAILABLE,
+        REASON_FACET_QUERY_FAILED,
+    )
+
+
+class _PrivilegeError(Exception):
+    sqlstate = "42501"

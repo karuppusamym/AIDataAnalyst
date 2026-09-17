@@ -1,0 +1,95 @@
+{
+  "acceptance_thresholds_are_not_set": "Every `minimum` below is null on purpose. Tracker row R11-FP13 records acceptance thresholds as the domain owner's decision, to be made before the answer-correctness run, and `scripts/answer_evaluation_benchmark.py` supplies no default: a metric with a null minimum reports `no threshold set` and cannot pass or fail. Filling in a minimum and the `sign_off` block below is all that is required to make the gate enforce it -- no code change. Do not copy a measurement out of `metrics` into a `minimum`: a measurement is what happened, a threshold is what is acceptable, and conflating them makes the benchmark grade itself.",
+  "corpus": "tests/fixtures/quality_benchmark_corpus/answer_evaluation_corpus.json",
+  "corpus_cases": 8,
+  "estate": "core-warehouse",
+  "generated_at": "2026-09-16T12:50:25.246121+00:00",
+  "live_run": {
+    "command": "uv run python scripts/answer_evaluation_benchmark.py --live --i-understand-this-costs-money --base-url http://localhost:8000 --org sample-bank",
+    "has_been_run": false,
+    "note": "The live evaluation places one paid model call per non-refusal case and has not been run. Until it has, `metrics` holds only what the no-provider mode can measure honestly: evidence support over the enriched footprint, and the refusals the platform decides before retrieval. Answer tables, answer text and result sets are null there, meaning not measured -- not zero, and not a pass."
+  },
+  "metrics": {
+    "answer_table_pass_rate": {
+      "case_count": 0,
+      "value": null
+    },
+    "answer_text_pass_rate": {
+      "case_count": 0,
+      "value": null
+    },
+    "answer_verdict_pass_rate": {
+      "case_count": 3,
+      "value": 1.0
+    },
+    "evidence_support_rate": {
+      "case_count": 5,
+      "value": 1.0
+    },
+    "overall_case_pass_rate": {
+      "case_count": 8,
+      "value": 1.0
+    },
+    "refusal_reason_code_pass_rate": {
+      "case_count": 3,
+      "value": 1.0
+    },
+    "result_set_match_rate": {
+      "case_count": 0,
+      "value": null
+    },
+    "unapproved_evidence_avoidance_rate": {
+      "case_count": 1,
+      "value": 1.0
+    }
+  },
+  "mode": "OFFLINE_NO_PROVIDER",
+  "sign_off": {
+    "note": "Who set the thresholds below, and when. Left null until the domain owner (tracker row R11-FP13: AI quality lead) signs them off.",
+    "signed_off_at": null,
+    "signed_off_by": null
+  },
+  "thresholds": {
+    "answer_table_pass_rate": {
+      "minimum": null,
+      "note": "Share of cases whose generated SQL referenced every table the case requires and none it forbids. Needs the live run; the no-provider mode cannot measure it."
+    },
+    "answer_text_pass_rate": {
+      "minimum": null,
+      "note": "Share of cases whose explanation contains what the case requires and excludes what it forbids. Needs the live run."
+    },
+    "answer_verdict_pass_rate": {
+      "minimum": null,
+      "note": "Share of cases that were answered when they should be answered and refused when they should be refused. A refusal is an expected verdict here, not an outcome bucket."
+    },
+    "evidence_support_rate": {
+      "minimum": null,
+      "note": "Share of cases whose retrieved context contained every enriched-footprint object the answer is expected to stand on. Measured without a provider."
+    },
+    "overall_case_pass_rate": {
+      "minimum": null,
+      "note": "Share of cases where every sub-score that could be measured passed. Cases where nothing could be measured are excluded from the denominator rather than counted as passes."
+    },
+    "refusal_reason_code_pass_rate": {
+      "minimum": null,
+      "note": "Share of refused cases that refused with the reason code the case names. A refusal for the wrong reason is not a correct refusal."
+    },
+    "result_set_match_rate": {
+      "minimum": null,
+      "note": "Share of cases carrying gold_sql whose answer returned an equivalent result set. Needs the live run against an estate holding real rows."
+    },
+    "unapproved_evidence_avoidance_rate": {
+      "minimum": null,
+      "note": "Share of gap cases where the answer did not reach an object whose only path is lineage nobody approved. The answer-level counterpart of the retrieval half's gap preservation."
+    }
+  },
+  "token_basis": "Tokens only; no dollar amount. `provider_reported_tokens` is what the provider said it billed for the attempt that answered (ProviderUsage, via the run's plan_evidence.model_call_evidence). `estimated_tokens` is the gateway's 4-bytes-per-token heuristic across the attempt chain, which is the figure the agent contract's caps were checked against before the call. `charged_tokens` and `basis` come from agent_orchestrator.run_token_charge, the same function that reconciles AgentBudgetWindow, so this report and the budget window cannot disagree. The two kinds are not interchangeable and are never summed together into one number. No dollar cost is derived: per cost_showback.py this platform has no billing integration and no reconciled spend figure, and a price-list multiplication would be an invention, not a measurement.",
+  "tokens": {
+    "basis": "NO_MODEL_CALL",
+    "cases_with_model_call": 0,
+    "cases_with_provider_reported_usage": 0,
+    "charged_tokens": 0,
+    "estimated_tokens": 0,
+    "provider_reported_tokens": null
+  }
+}

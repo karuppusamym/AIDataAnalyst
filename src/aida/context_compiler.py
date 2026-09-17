@@ -28,6 +28,14 @@ class ResolvedRoutineReference:
     product does not cover says nothing about that table, not even that it exists.
     `definition_digest` is a SHA-256 of the stored value-free text, so a consumer can tell the
     definition changed without Atlas publishing a digest of the literal-bearing original.
+
+    R11-FP08 added `description` and `description_state`. Until then a routine in a context
+    product shipped a digest and no *meaning*: a reader was told that a procedure exists, what
+    its signature is and which of the product's tables it touches, but nothing about what it is
+    for -- while the tables beside it carried their approved descriptions. `description` is the
+    approved `RoutineDocumentationVersion` text and nothing else: a pending draft is not what
+    the platform asserts, and a source comment is the source speaking, so both resolve to
+    `None` here with `description_state` saying which. Never the body, under any state.
     """
 
     routine_id: str
@@ -41,6 +49,13 @@ class ResolvedRoutineReference:
     reads_table_ids: tuple[str, ...]
     writes_table_ids: tuple[str, ...]
     definition_digest: str | None
+    #: The approved Atlas-authored description, or `None`. R11-FP08.
+    description: str | None = None
+    #: `APPROVED`, `PROPOSED` (a draft awaits review), `WITHDRAWN` (one was approved and
+    #: retired) or `NONE`. Said rather than left to be inferred from a null `description`,
+    #: because "nobody has described this yet" and "a reviewer retired the description" are
+    #: different facts and a consumer acts differently on them.
+    description_state: str = "NONE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +220,12 @@ def coverage_section(
     routines: list[ResolvedRoutineReference], views: list[ResolvedViewCoverage]
 ) -> dict[str, Any]:
     """R11-FP12: the routines and views a product covers, and how completely. Public: MCP's
-    context-product read renders the same section, so the two doors cannot disagree."""
+    context-product read renders the same section, so the two doors cannot disagree.
+
+    R11-FP08 added `description`/`description_state` to each routine here rather than only to
+    the compiled payload, for exactly that reason: MCP's resource read renders this same
+    function's output, so a routine's meaning appears at both doors or at neither.
+    """
     return {
         "routines": sorted(
             (
@@ -221,6 +241,10 @@ def coverage_section(
                     "reads_table_ids": sorted(routine.reads_table_ids),
                     "writes_table_ids": sorted(routine.writes_table_ids),
                     "definition_digest": routine.definition_digest,
+                    # R11-FP08: what the routine is *for*, when a reviewer has approved a
+                    # statement of it. Never the body.
+                    "description": routine.description,
+                    "description_state": routine.description_state,
                 }
                 for routine in routines
             ),

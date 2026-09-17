@@ -402,6 +402,10 @@ async def generate_column_description_drafts(
                 thin=thin,
                 sibling_names=[column.name for column in plan.columns],
                 table_context=await table_context_for(session, table.id),
+                # R11-FP17: the source whose columns are being described, so the
+                # call's token spend is attributed to it and not only to the
+                # tenant. Known here because the plan is per table.
+                datasource_id=table.datasource_id,
             )
             asked_model = {evidence.column_id for evidence in thin}
             model_results = {result.column_id: result for result in outcome.results}

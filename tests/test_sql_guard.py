@@ -74,6 +74,84 @@ def test_cte_alias_is_not_reported_as_physical_table() -> None:
     assert result.referenced_tables == ("retail.customer",)
 
 
+# --- F01 (G6): CTE visibility is scoped, not statement-wide -----------------
+#
+# `cte_aliases` was one flat set over every `exp.CTE` in the statement, so a CTE
+# declared inside a subquery's own `WITH` shadowed an identically-named physical
+# table referenced unqualified *anywhere else*, and that table vanished from
+# `referenced_tables`. Every control downstream reads only that list -- the
+# catalog allowlist, the ABAC axes, the context-product boundary, the
+# orchestrator's post-execution re-check -- so one dropped name escaped all of
+# them at once. Nothing covered this shape.
+
+
+def test_a_cte_inside_a_subquery_does_not_hide_a_physical_table_elsewhere() -> None:
+    result = guard().validate(
+        "SELECT c.customer_id FROM customer AS c "
+        "JOIN (WITH customer AS (SELECT 1 AS k) SELECT k FROM customer) AS s "
+        "ON s.k = c.customer_id",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    # The physical `customer` the outer query reads is reported; the inner CTE
+    # reference of the same name is not a table and is not.
+    assert result.referenced_tables == ("customer",)
+
+
+def test_a_qualified_name_matching_a_cte_is_still_a_physical_table() -> None:
+    """`public.active` reads the schema's table; only a bare name can be shadowed."""
+    result = guard().validate(
+        "WITH active AS (SELECT customer_id FROM retail.customer) "
+        "SELECT customer_id FROM public.active",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("public.active", "retail.customer")
+
+
+def test_a_cte_shadows_a_bare_name_within_the_query_it_is_attached_to() -> None:
+    """The narrowing must not overshoot: a CTE still shadows its own query's body,
+    including a subquery nested inside that body."""
+    result = guard().validate(
+        "WITH active AS (SELECT customer_id FROM retail.customer) "
+        "SELECT s.customer_id FROM (SELECT customer_id FROM active) AS s",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("retail.customer",)
+
+
+def test_a_later_sibling_cte_does_not_shadow_an_earlier_bodys_reference() -> None:
+    """SQL's own rule, and the conservative direction: a non-recursive CTE body cannot
+    see a sibling declared after it, so `b` there is a physical table -- which the
+    catalog allowlist then gets the chance to refuse."""
+    result = guard().validate(
+        "WITH a AS (SELECT customer_id FROM b), "
+        "b AS (SELECT customer_id FROM retail.customer) "
+        "SELECT customer_id FROM a",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("b", "retail.customer")
+
+
+def test_a_recursive_ctes_self_reference_is_not_a_physical_table() -> None:
+    result = guard().validate(
+        "WITH RECURSIVE walk AS ("
+        "SELECT customer_id FROM retail.customer "
+        "UNION ALL SELECT customer_id FROM walk"
+        ") SELECT customer_id FROM walk",
+        dialect="postgres",
+    )
+
+    assert result.valid
+    assert result.referenced_tables == ("retail.customer",)
+
+
 def test_forbidden_database_function_is_rejected() -> None:
     result = guard().validate("SELECT pg_sleep(5)", dialect="postgres")
 

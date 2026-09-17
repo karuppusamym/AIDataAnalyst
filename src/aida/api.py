@@ -21,11 +21,13 @@ from aida.agent_orchestrator import (
     ModelRouteUnavailable,
 )
 from aida.agent_run_replay import resolve_grounding
-from aida.authorization_gate import gate_read
+from aida.authorization_gate import AuthorizationDenied, gate, gate_read
 from aida.classification import SENSITIVE_CLASSES
 from aida.classification_feed import ExternalClassificationRecord, ingest_classification_feed
 from aida.config import Settings, get_settings
+from aida.connectors.base import OBSERVATION_SCOPES, UNCOMPUTED_FACET_STATUS
 from aida.context import get_correlation_id
+from aida.context_product_execution_scope import load_execution_scope
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
@@ -87,6 +89,7 @@ from aida.schemas import (
     OrganizationIntegrationPolicyRead,
     OrganizationIntegrationPolicyWrite,
     Page,
+    ProfileFacetStatusRead,
     ProfilingExceptionDecisionRequest,
     ProfilingExceptionPolicyCreate,
     ProfilingExceptionPolicyRead,
@@ -102,6 +105,7 @@ from aida.secrets import SecretResolver
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_guard import SqlGuard
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
+from atlas.modules.profiling.facets import WITHHELD_BY_POLICY, facet_status_from_stored
 
 router = APIRouter(prefix="/v1")
 
@@ -1076,6 +1080,65 @@ async def get_latest_table_profile(
             .order_by(MetadataColumn.ordinal_position)
         )
     ).all()
+    withheld_reasons = await _withheld_profile_classifications(
+        session,
+        context,
+        settings,
+        datasource_id=table.datasource_id,
+        classifications=frozenset(column.classification for _, column in profile_rows),
+    )
+    columns: list[ColumnProfileRead] = []
+    for column_profile, column in profile_rows:
+        reason_code = withheld_reasons.get(column.classification)
+        base = {
+            "column_id": column.id,
+            "column_name": column.name,
+            "classification": column.classification,
+            "null_count": column_profile.null_count,
+            "non_null_count": column_profile.non_null_count,
+            "approximate_distinct_count": column_profile.approximate_distinct_count,
+            "min_length": column_profile.min_length,
+            "max_length": column_profile.max_length,
+        }
+        if reason_code is not None:
+            # R11-FP04: the column still appears, with a marker and a reason.
+            # Dropping it would let a reader conclude something about the table
+            # from a fact about their own entitlement, and dropping only its
+            # facets silently would be indistinguishable from an engine that
+            # could not compute them.
+            #
+            # The four counts above are deliberately still served: they are the
+            # payload this route has always returned under this same table-level
+            # gate, and narrowing them here would be a breaking response change
+            # (`scripts/openapi_diff.py`) rather than part of gating the new
+            # egress. The facets this task adds are the new egress, and they are
+            # what the classification decision governs.
+            columns.append(
+                ColumnProfileRead(
+                    **base,
+                    facets_withheld=True,
+                    withheld_marker=WITHHELD_BY_POLICY,
+                    withheld_reason_code=reason_code,
+                )
+            )
+            continue
+        columns.append(
+            ColumnProfileRead(
+                **base,
+                distinct_ratio=column_profile.distinct_ratio,
+                effectively_unique=column_profile.effectively_unique,
+                cardinality_class=column_profile.cardinality_class,
+                blank_count=column_profile.blank_count,
+                whitespace_only_count=column_profile.whitespace_only_count,
+                length_bucket_scheme=column_profile.length_bucket_scheme,
+                length_bucket_counts=column_profile.length_bucket_counts,
+                frequency_entropy_bits=column_profile.frequency_entropy_bits,
+                unavailable_facets=[
+                    ProfileFacetStatusRead(**entry)
+                    for entry in facet_status_from_stored(column_profile.unavailable_facets)
+                ],
+            )
+        )
     return TableProfileRead(
         id=profile.id,
         analysis_run_id=profile.analysis_run_id,
@@ -1085,20 +1148,64 @@ async def get_latest_table_profile(
         profile_version=profile.profile_version,
         status=profile.status,
         created_at=profile.created_at,
-        columns=[
-            ColumnProfileRead(
-                column_id=column.id,
-                column_name=column.name,
-                classification=column.classification,
-                null_count=column_profile.null_count,
-                non_null_count=column_profile.non_null_count,
-                approximate_distinct_count=column_profile.approximate_distinct_count,
-                min_length=column_profile.min_length,
-                max_length=column_profile.max_length,
+        columns=columns,
+        # R11-FP04: the sampling limitation travels with the statistics, never
+        # separately. `None` here means the profile predates the facet, which
+        # is not the same claim as UNKNOWN.
+        observation_scope=(
+            profile.observation_scope if profile.observation_scope in OBSERVATION_SCOPES else None
+        ),
+        uncomputed_facets=[
+            ProfileFacetStatusRead(
+                facet=status.facet, status=status.status, reason_code=status.reason_code
             )
-            for column_profile, column in profile_rows
+            for status in UNCOMPUTED_FACET_STATUS
         ],
+        withheld_column_count=sum(1 for column in columns if column.facets_withheld),
     )
+
+
+async def _withheld_profile_classifications(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    datasource_id: UUID,
+    classifications: frozenset[str],
+) -> dict[str, str]:
+    """R11-FP04: which classifications this principal may not read profile facets for.
+
+    One `gate` call per distinct classification present on the table, with
+    `classifications=` populated -- which is the whole point: the table-level
+    `gate_read` above cannot carry a classification, so a MASK or DENY rule
+    written against `RESTRICTED` columns had nothing to act on and the new
+    aggregate facets would have gone out for every column or none.
+
+    Per classification rather than per column because the policy decision is a
+    function of the classification, so a wide table costs a handful of
+    decisions rather than one per column.
+
+    A refusal is not an error here. It withholds that classification's facets
+    and the read continues, because the alternative -- 403 for the whole table
+    because one column is restricted -- would make the statistics unusable on
+    exactly the tables they are most needed for, and FP-04 has to "remain
+    useful when row sampling is disabled" (module 05 §16.3).
+    """
+    withheld: dict[str, str] = {}
+    for classification in sorted(classifications):
+        try:
+            await gate(
+                session,
+                context,
+                settings=settings,
+                action="READ_METADATA",
+                resource_type="column",
+                datasource_id=datasource_id,
+                classifications=frozenset({classification}),
+            )
+        except AuthorizationDenied as exc:
+            withheld[classification] = exc.reason_code
+    return withheld
 
 
 # ---------------------------------------------------------------------------
@@ -1530,6 +1637,25 @@ async def execute_query(
         ensure_datasource_enabled(datasource)
     except RunAdmissionRejected as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # F01: this route takes arbitrary caller SQL, and until now it had no product
+    # concept at all -- so the principal who was product-scoped through Ask could
+    # submit the identical statement here unscoped, and the acceptance criterion
+    # names "direct SQL" explicitly. The key is optional, so a request that omits
+    # it is unchanged; a request that supplies one is held to that product's
+    # tables by the gateway, which refuses before an execution session opens.
+    # 404 for an unknown, unpublished or role-forbidden product, matching
+    # `load_execution_scope`'s single answer -- distinguishing them would report
+    # which products exist to a caller who cannot read them.
+    context_product_scope = None
+    if body.context_product_key is not None:
+        context_product_scope = await load_execution_scope(
+            session,
+            organization_id=datasource.organization_id,
+            product_key=body.context_product_key,
+            roles=context.roles,
+        )
+        if context_product_scope is None:
+            raise HTTPException(status_code=404, detail="context product not found")
     gateway = QueryExecutionGateway(settings)
     try:
         result = await gateway.execute(
@@ -1541,6 +1667,7 @@ async def execute_query(
             requested_limit=body.max_rows,
             semantic_version=body.semantic_version,
             workspace_id=body.workspace_id,
+            context_product_scope=context_product_scope,
         )
     except AuthorizationRejected as exc:
         # Before `QueryRejected`, which it subclasses. 403 rather than 422 because the

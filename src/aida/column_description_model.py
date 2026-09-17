@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.catalog_read_model import _business_annotations, _latest_approved_documentation
 from aida.column_description_service import ORIGIN_MODEL_INFERRED, ColumnEvidence
 from aida.config import Settings
+from aida.cost_metrics import record_model_spend
 from aida.ingest_screening import SCREENING_VERSION, screen_text
 from aida.model_gateway import (
     ApprovedModelRoute,
@@ -357,6 +358,7 @@ async def draft_thin_columns(
     thin: list[ColumnEvidence],
     sibling_names: list[str],
     table_context: str | None,
+    datasource_id: UUID | None = None,
 ) -> ModelDraftOutcome:
     """Ask the model about one table's thin columns, in bounded calls.
 
@@ -364,6 +366,15 @@ async def draft_thin_columns(
     a call that failed -- simply has no result here; the caller falls back to
     its evidence draft. A gateway refusal stops the calls for the rest of the
     request, since every later call would be refused for the same reason.
+
+    R11-FP17: `datasource_id` attributes each call's token spend to the source
+    whose columns are being described (`cost_metrics.record_model_spend`). It is
+    optional and defaults to `None` rather than being required, because the
+    gateway itself is only ever given an organization and a route -- a caller
+    that cannot name one source honestly passes nothing and the spend is
+    recorded against the tenant, counted as unattributed rather than dropped.
+    Every drafting call here does know its source, so every one of them passes
+    it.
     """
     outcome = ModelDraftOutcome()
     for start in range(0, len(thin), MODEL_COLUMNS_PER_CALL):
@@ -390,6 +401,16 @@ async def draft_thin_columns(
         except ModelGatewayError as exc:
             outcome.note = outcome.note or str(exc)
             continue
+        # R11-FP17: recorded per call rather than per request, because a request
+        # that stops half way through its chunks still spent what it spent, and
+        # a figure only written on the happy path would understate exactly the
+        # tables that are expensive because the model keeps refusing them.
+        await record_model_spend(
+            session,
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            evidence=call,
+        )
         results, quarantined = validate_model_drafts(output, request, call=_call_record(call))
         outcome.withheld += quarantined
         outcome.results.extend(results)

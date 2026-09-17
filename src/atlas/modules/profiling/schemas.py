@@ -183,6 +183,21 @@ class ClassificationFeedIngestResponse(ApiModel):
     unmatched: list[str]
 
 
+class ProfileFacetStatusRead(ApiModel):
+    """R11-FP04: one facet that is absent from a profile, and why.
+
+    Three closed vocabularies (`aida.connectors.base`' `PROFILE_FACETS`,
+    `FACET_STATUSES`, `FACET_REASON_CODES`), which is what lets this be served
+    at all: the natural implementation of a reason is the driver's own message,
+    and a source driver's error text routinely quotes the offending row. A code
+    cannot carry a value (INV-6).
+    """
+
+    facet: str
+    status: Literal["UNSUPPORTED", "NOT_APPLICABLE", "PERMISSION_DENIED", "UNAVAILABLE"]
+    reason_code: str
+
+
 class ColumnProfileRead(ApiModel):
     column_id: UUID
     column_name: str
@@ -192,6 +207,34 @@ class ColumnProfileRead(ApiModel):
     approximate_distinct_count: int
     min_length: int | None
     max_length: int | None
+    # -- R11-FP04 value-free aggregate facets ------------------------------
+    #
+    # Every one is optional, because every one is genuinely absent for some
+    # (engine, column type, profile age) combination and `unavailable_facets`
+    # is where a reader learns which. None is never "zero".
+    #
+    # `length_bucket_counts` is positionally aligned to the code-defined
+    # scheme `length_bucket_scheme` names (`LENGTH_BUCKET_BOUNDS`). The
+    # boundaries are deliberately not in this payload: a bucket edge is a
+    # value (ADR-0014), and a client that needs the edges reads the named
+    # scheme rather than being handed a histogram of the data.
+    distinct_ratio: float | None = None
+    effectively_unique: bool | None = None
+    cardinality_class: str | None = None
+    blank_count: int | None = None
+    whitespace_only_count: int | None = None
+    length_bucket_scheme: str | None = None
+    length_bucket_counts: list[int] | None = None
+    frequency_entropy_bits: float | None = None
+    unavailable_facets: list[ProfileFacetStatusRead] = Field(default_factory=list)
+    # Set when an access policy withheld this column's facets rather than the
+    # engine failing to produce them. The column still appears, with its
+    # marker and its reason code: a read that silently dropped the column
+    # would let a reader conclude something about the table from a fact about
+    # their own entitlement.
+    facets_withheld: bool = False
+    withheld_marker: str | None = None
+    withheld_reason_code: str | None = None
 
 
 class TableProfileRead(ApiModel):
@@ -204,6 +247,25 @@ class TableProfileRead(ApiModel):
     status: str
     created_at: datetime
     columns: list[ColumnProfileRead]
+    # -- R11-FP04 ----------------------------------------------------------
+    #
+    # How much of the table this profile saw, as the connector itself reported
+    # it. `None` is a third state and not a synonym for UNKNOWN: it means the
+    # profile predates the facet, so nothing recorded a scope, whereas UNKNOWN
+    # means a connector recorded that it could not say. The design authority
+    # requires the read surface to carry "statistical evidence **and sampling
+    # limitations**", and a statistic whose scope is unstated is the limitation
+    # going unsaid.
+    observation_scope: Literal["FULL", "SAMPLE", "UNKNOWN"] | None = None
+    # Facets FP-04 names that the value-free half does not compute at all,
+    # engine-independent (`aida.connectors.base.UNCOMPUTED_FACET_STATUS`).
+    # Served per table rather than repeated on every column because the answer
+    # never varies by column.
+    uncomputed_facets: list[ProfileFacetStatusRead] = Field(default_factory=list)
+    # How many of `columns` had their facets withheld by policy. The count is
+    # the half of the withheld convention a client can act on without walking
+    # the list.
+    withheld_column_count: int = 0
 
 
 class ProfilingExceptionPolicyCreate(ApiModel):

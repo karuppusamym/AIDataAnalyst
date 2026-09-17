@@ -8,6 +8,7 @@ import {
   submitContextProductVersion,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { navigateTo } from "../lib/navigate";
 import { useOrgId } from "../lib/org";
 import { VirtualList } from "../components/VirtualList";
@@ -72,6 +73,7 @@ function ProductRow({
   onDeprecate,
   onCompile,
   onRollout,
+  onAsk,
 }: {
   product: ContextProductRead;
   busy: string | null;
@@ -80,6 +82,9 @@ function ProductRow({
   onDeprecate: () => void;
   onCompile: () => void;
   onRollout: () => void;
+  /** R11-FP12 (F08): open Ask on this product, or `null` when there is nothing
+   *  to ask it against -- see `askDatasourceId` below. */
+  onAsk: (() => void) | null;
 }) {
   const v = product.latest_version;
   const isBusy = busy === v.id;
@@ -115,6 +120,18 @@ function ProductRow({
         <Button onClick={onRollout} title="Pin named consumers to a specific version">
           {selected ? "Rollout ✓" : "Rollout"}
         </Button>
+        {/* R11-FP12 (F08): the consumer's own door. A published product was
+            something you could roll out, deprecate and compile from here, with
+            no way to actually ask a question through it -- so demonstrating one
+            meant knowing to go to Ask and find it in a picker. Offered only for
+            PUBLISHED, because that is the only status the ask path resolves
+            (`_load_published_context_product`, agent_orchestrator.py:487); a
+            SUPPORTED version is readable but not askable. */}
+        {v.status === "PUBLISHED" && onAsk ? (
+          <Button onClick={onAsk} title="Open Ask with this product preselected">
+            Ask through this product
+          </Button>
+        ) : null}
         {v.status === "DRAFT" ? (
           <Button disabled={isBusy} onClick={onSubmit}>
             {isBusy ? "Submitting…" : "Submit"}
@@ -164,6 +181,22 @@ export function ContextProductsScreen() {
 
   const lifecycle = useVersionLifecycle(channel, reloadRegistry);
   const compiler = useCompiler(channel);
+
+  /* R11-FP12 (F08): Ask is scoped to a DATASOURCE and resolves its product list
+     from that datasource's project, so "ask through this product" has to hand it
+     one -- a link carrying the key alone would land on a picker that offers
+     nothing and a blank selection, which is worse than no link at all. This
+     project's own sources are what can be asked; under the shell's scope layer
+     `useDatasourcePicker` reads them from context rather than issuing a request
+     (see its header comment), so the entry point costs nothing to offer.
+
+     `null` when the project has no source yet: the button is then not shown,
+     rather than shown and broken. */
+  const { datasources } = useDatasourcePicker(ORG);
+  const askDatasourceId = useMemo(
+    () => datasources.find((d) => d.project_id === projectId)?.id ?? null,
+    [datasources, projectId],
+  );
 
   const [rolloutProduct, setRolloutProduct] = useState<ContextProductRead | null>(null);
   const rollout = useRollout(rolloutProduct, channel);
@@ -264,6 +297,15 @@ export function ContextProductsScreen() {
                     }
                     onCompile={() => void compiler.compile(p.latest_version.id)}
                     onRollout={() => setRolloutProduct((current) => (current?.id === p.id ? null : p))}
+                    onAsk={
+                      askDatasourceId
+                        ? () =>
+                            navigateTo("analyst", {
+                              ds: askDatasourceId,
+                              product: p.product_key,
+                            })
+                        : null
+                    }
                   />
                 )}
               />

@@ -31,7 +31,13 @@ from aida.agent_runtime import RuntimeStage, RuntimeState
 if TYPE_CHECKING:
     from aida.agent_intelligence import AgentPlan, RetrievalHit
     from aida.agent_orchestrator import ContextProductScope
-    from aida.models import AgentContract, AgentRun, DataSource, ToolExecution
+    from aida.models import (
+        AgentContract,
+        AgentRun,
+        ContextProductVersion,
+        DataSource,
+        ToolExecution,
+    )
     from aida.prompt_risk import PromptRiskAssessment
     from aida.query_gateway import GatewayResult
     from aida.security import SecurityContext
@@ -73,6 +79,15 @@ class OrchestrationRequest:
     agent_asset_version_id: UUID | None = None
     #: The published context product this question is asked through, if any.
     context_product_key: str | None = None
+    #: F01: an already-resolved product version, for a surface that resolved one
+    #: itself. MCP's `contextProductUri` pins an exact version number and admits
+    #: a SUPPORTED one inside its support window, and it filters tool
+    #: eligibility against that version -- so re-resolving "the published
+    #: version" from a key would scope the tables to a *different* version than
+    #: the one the tool list was filtered by. The surface hands over what it
+    #: resolved; the orchestrator still applies its own consumer-role check to
+    #: it. Set at most one of these two.
+    context_product_version: ContextProductVersion | None = None
 
     @property
     def organization_id(self) -> UUID:

@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.capability_states import parse_coverage_state
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.envelope_models import MetadataRoutine
@@ -29,12 +30,13 @@ from aida.events import record_audit
 from aida.models import DataSource
 from aida.procedure_capability_matrix import build_capability_matrix
 from aida.procedure_lineage import ProcedureLineageEdgeRecord, parse_procedure_lineage
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, RoutineParseCoverage
 from aida.resource_scope import load_datasource_in_scope
 from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
     RoutineNotEligibleError,
     persist_routine_edges,
+    record_routine_parse_coverage,
     require_eligible_routine_body,
 )
 from aida.schemas import (
@@ -42,6 +44,7 @@ from aida.schemas import (
     DeepProcedureLineageParseResponse,
     ProcedureCapabilityConstructRead,
     ProcedureCapabilityMatrixRead,
+    RoutineParseCoverageRead,
 )
 from aida.security import SecurityContext, require_roles
 from atlas.platform.config import get_settings
@@ -125,6 +128,19 @@ async def parse_deep_procedure_lineage_endpoint(
         threshold=settings.lineage_high_confidence_auto_active_threshold,
         created_by=context.principal_id,
     )
+    # F06.4: record how completely this body was understood, per object, in the
+    # same transaction as the edges it produced. Without it, the only trace of
+    # `is_fully_parsed` is this response and the audit entry below -- and
+    # "which routines are not fully understood?" would have to be re-derived
+    # from UNPARSED edges, which answers a different question once a re-parse
+    # under review mode has replaced them.
+    await record_routine_parse_coverage(
+        session,
+        datasource=datasource,
+        routine=routine,
+        result=result,
+        measured_by=context.principal_id,
+    )
     record_audit(
         session,
         context,
@@ -202,6 +218,64 @@ async def list_deep_procedure_lineage(
         )
         for row in rows
     ]
+
+
+@router.get(
+    "/datasources/{datasource_id}/procedures/{routine_id}/parse-coverage",
+    response_model=RoutineParseCoverageRead,
+)
+async def get_routine_parse_coverage(
+    datasource_id: UUID,
+    routine_id: UUID,
+    context: SecurityContext = Depends(require_roles(*_LINEAGE_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> RoutineParseCoverageRead:
+    """How completely this routine's body was understood, as last measured.
+
+    Finding F06.4: an object being inventoried is not the same as every path
+    through it being understood, and this is the stored answer rather than one
+    re-derived by scanning for `UNPARSED` edges. 404 when no parse has
+    measured this routine yet -- "not measured" is a different answer from
+    "fully understood", and returning a zeroed row would collapse them.
+
+    `state` is the reporting-boundary rendering of the two stored booleans
+    (`aida.capability_states.parse_coverage_state`); the row itself keeps them
+    as booleans, so no sentinel string ever stands where a real value would.
+    """
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    await _load_routine(session, datasource, routine_id)
+    coverage = (
+        await session.scalars(
+            select(RoutineParseCoverage).where(
+                RoutineParseCoverage.datasource_id == datasource.id,
+                RoutineParseCoverage.routine_id == routine_id,
+            )
+        )
+    ).first()
+    if coverage is None:
+        raise HTTPException(
+            status_code=404, detail="no parse has measured this routine's coverage yet"
+        )
+    return RoutineParseCoverageRead(
+        routine_id=coverage.routine_id,
+        state=parse_coverage_state(
+            parse_completed=coverage.parse_completed,
+            statement_count=coverage.statement_count,
+        ).value,
+        parse_completed=coverage.parse_completed,
+        is_read_only=coverage.is_read_only,
+        statement_count=coverage.statement_count,
+        unparsed_statement_count=coverage.unparsed_statement_count,
+        unparsed_reason_codes=(
+            coverage.unparsed_reason_codes.split(",")
+            if coverage.unparsed_reason_codes
+            else []
+        ),
+        dialect=coverage.dialect,
+        confidence=coverage.confidence,
+        source_mapping_granularity=coverage.source_mapping_granularity,
+        parsed_at=coverage.parsed_at,
+    )
 
 
 @router.get(

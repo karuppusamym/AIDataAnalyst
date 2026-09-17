@@ -92,3 +92,108 @@ data:
   # --- Model generation is off by default; flip only with a real approved
   # route (Settings requires model_route when model_generation_enabled).
   AIDA_MODEL_GENERATION_ENABLED: "false"
+
+  # --- The maintenance loop (review F04) ----------------------------------
+  # Every interval here ships at 0, and 0 means never: the pass returns
+  # before it opens a database session (`aida.workflows.scheduler`). That is
+  # a recorded product decision, not an omission -- each is an Opt-in in
+  # `scripts/configuration_decisions.py`, machine-checked by
+  # `tests/test_configuration_inventory.py`. They are therefore left
+  # commented, carrying the intended production value and what enabling each
+  # one costs. Uncommenting one is a deliberate act with a runbook:
+  # `Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md`.
+  #
+  # These reach the fleet-scheduler Deployment, not just the API: the
+  # scheduler is the process that runs the passes. A value set only on the
+  # API ConfigMap changes nothing.
+  #
+  # ORDER MATTERS, because of DQ-3: an open CRITICAL incident fails governed
+  # tools closed. The two passes that OPEN incidents are the freshness and
+  # change-signal passes below, and setting an interval back to 0 does NOT
+  # close incidents it already opened -- only a person working the incident
+  # queue does. Enable them after the contracts they evaluate are approved.
+  #
+  # Watermark contracts per datasource. Opens CRITICAL freshness incidents
+  # for a table nobody has observed, holding the governed tools over it
+  # (R11-B8). Intended production value: "60".
+  # AIDA_FRESHNESS_EVALUATION_INTERVAL_MINUTES: "60"
+  #
+  # PENDING metadata change signals turned into holds and re-examination. A
+  # redefined view or a retired table opens a CRITICAL incident (R11-FP16).
+  # Signals accumulate while this is 0 and are processed oldest first once it
+  # is on -- but a deployment that has never rescanned a *changed* source has
+  # an empty `metadata_change_signal` table, so this consumes nothing until a
+  # rescan observes a change. Intended production value: "15".
+  # AIDA_CHANGE_SIGNAL_PROCESSING_INTERVAL_MINUTES: "15"
+  #
+  # Rebuilds what a source change made stale -- regenerated tools,
+  # descriptions and context product versions -- as DRAFTS in their review
+  # queues, and releases source-change holds once approved. Opens no
+  # incidents; it creates human review load. Enable after change-signal
+  # processing, which produces the staleness it acts on. Intended production
+  # value: "30".
+  # AIDA_CONTEXT_REBUILD_INTERVAL_MINUTES: "30"
+  #
+  # Classification proposals filed for review on a cadence. Proposals, not
+  # changes. Intended production value: "1440".
+  # AIDA_CLASSIFICATION_PROPAGATION_INTERVAL_MINUTES: "1440"
+  #
+  # The four scheduled task agents (ADR-0029). An interval alone does
+  # nothing: nothing runs until an APPROVED AGENT-kind contract version
+  # exists for that agent's principal (`agent:steward`, `agent:lineage`,
+  # `agent:quality`, `agent:tool`). Every run stays bounded by the matching
+  # `_max_proposals_per_run` / `_max_pending_proposals` defaults, and every
+  # proposal is T2 -- it waits for a person. Intended production value:
+  # "1440" each, once those contracts exist.
+  # AIDA_STEWARD_AGENT_INTERVAL_MINUTES: "1440"
+  # AIDA_LINEAGE_AGENT_INTERVAL_MINUTES: "1440"
+  # AIDA_QUALITY_AGENT_INTERVAL_MINUTES: "1440"
+  # AIDA_TOOL_AGENT_INTERVAL_MINUTES: "1440"
+  #
+  # Not a setting: rescan cadence is a per-datasource `ScanPolicy` row, read
+  # and written through `GET`/`PUT /v1/datasources/{datasource_id}/scan-policy`.
+  # A policy at 525600 minutes (one year) is effectively disabled, and
+  # enabling one queues real discovery runs against the source.
+
+  # --- Outbound delivery (review F05) -------------------------------------
+  # The single switch that lets anything leave this deployment, and the
+  # governance notifications that would fill its queue. Both off, so an
+  # upgrade cannot start sending traffic to a destination by surprise.
+  #
+  # Intended production value: "true" for both -- but only AFTER the
+  # destination has been verified reachable
+  # (`Docs/40-engineering/12-notification-delivery-runbook.md` §3). Queued
+  # intents keep their attempt counts while the worker is off, so enabling it
+  # against a still-unreachable destination spends the remaining attempts and
+  # moves those intents to DEAD_LETTER, which is terminal. Read
+  # `delivery_backlog.detail` from `/health/ready` and
+  # `python scripts/delivery_history.py` before flipping either.
+  # AIDA_DELIVERY_WORKER_ENABLED: "true"
+  # AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED: "true"
+
+  # --- Authorization posture (ADR-0018 / review F11) ----------------------
+  # Both ship at the migration values: workspace decisions are LOGGED and NOT
+  # enforced, and a request whose workspace cannot be resolved proceeds
+  # undecided. `/health/ready` reports `controls.workspace_authorization`, so
+  # a deployment always says which of these is true.
+  #
+  # The migration to enforcement is four ordered steps, recorded in
+  # `atlas.platform.config`. Do not set either line below before steps 1-2:
+  #
+  #   1. drive `authorization.workspace_unresolved` (the gate's warning log)
+  #      to zero for this environment -- it counts the callers not yet
+  #      passing a workspace id;
+  #   2. flip each workspace SHADOW -> ENFORCE, deciding each one on
+  #      `GET /v1/organizations/{organization_id}/enforcement-readiness`
+  #      (`aida.workspace_access.enforcement_readiness`), which is read-only;
+  #   3. AIDA_UNRESOLVED_WORKSPACE_POSTURE: "DENY";
+  #   4. AIDA_WORKSPACE_AUTHORIZATION_POSTURE: "ENFORCING", the step that
+  #      makes 1-3 permanently checked rather than remembered -- Settings
+  #      refuses to construct without step 3, and
+  #      `aida.authorization_posture.assert_startup_posture` refuses to start
+  #      the API if any ACTIVE workspace is not in ENFORCE. Setting it early,
+  #      or regressing 1-3 later, is a Deployment that will not become ready.
+  AIDA_WORKSPACE_AUTHORIZATION_POSTURE: "OBSERVING"
+  AIDA_UNRESOLVED_WORKSPACE_POSTURE: "SHADOW"
+  # AIDA_UNRESOLVED_WORKSPACE_POSTURE: "DENY"
+  # AIDA_WORKSPACE_AUTHORIZATION_POSTURE: "ENFORCING"

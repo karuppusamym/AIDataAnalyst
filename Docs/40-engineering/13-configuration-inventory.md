@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**262 settings.** 0 are read nowhere. 54 more ship switched off, empty or zero.
+**270 settings.** 0 are read nowhere. 61 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -58,6 +58,12 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `neo4j_password` | `str` | `''` | 4 | Supplied: only for an organization served from Neo4j |
 | `object_store_secret_key` | `str` | `''` | 1 | Supplied: the object store credential |
 | `sql_guard_allowed_functions` | `list[str]` | `list` | 5 | Supplied: the user-defined functions a deployment has reviewed for effects; empty refuses every function the SQL guard does not recognise as a built-in (R11-FP14) |
+| `analysis_run_daily_quota_per_organization` | `int | None` | `None` | 1 | Supplied: R11-FP17: analysis runs one tenant may consume per UTC day; the two `max_active_runs_per_*` concurrency limits still apply when unset |
+| `analysis_run_daily_quota_per_datasource` | `int | None` | `None` | 1 | Supplied: R11-FP17: analysis runs one source may consume per UTC day, which bounds a repeatedly-rescanned source that the one-at-a-time concurrency limit does not |
+| `model_token_daily_quota_per_organization` | `int | None` | `None` | 1 | Supplied: R11-FP17: model tokens one tenant may consume per UTC day, across every agent and every source -- wider than `AgentContract.daily_token_cap`, which is per contract |
+| `model_token_daily_quota_per_datasource` | `int | None` | `None` | 1 | Supplied: R11-FP17: model tokens attributable to one source per UTC day; counts provider-reported and estimated tokens alike, since a cap that only counted billed tokens could be walked past by a provider that reports nothing |
+| `parser_statement_daily_quota_per_organization` | `int | None` | `None` | 1 | Supplied: R11-FP17: SQL statements one tenant may put through the lineage parsers per UTC day |
+| `parser_statement_daily_quota_per_datasource` | `int | None` | `None` | 1 | Supplied: R11-FP17: SQL statements one source may put through the lineage parsers per UTC day -- the compute a change burst over that source actually spends |
 | `reaper_retention_overrides` | `str | None` | `None` | 1 | Opt-in: per-rule retention; the rule defaults apply when unset |
 | `lineage_cache_enabled` | `bool` | `False` | 5 | Opt-in: needs the optional Redis service (`--profile cache`); a Redis error is a cache miss |
 | `lineage_neo4j_read_enabled` | `bool` | `False` | 1 | Off by design: INV-9: Neo4j reads wait for the projection rebuild drill (E5) |
@@ -82,6 +88,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `principal_reconciliation_enabled` | `bool` | `False` | 1 | Opt-in: useful only once an identity source emits principal lifecycle events |
 | `vector_index_url` | `str | None` | `None` | 2 | Supplied: the persisted vector index; the vector channel embeds live when unset (R11-B2) |
 | `embedding_credential_reference` | `str` | `''` | 1 | Supplied: the embedding provider credential |
+| `worker_metrics_port` | `int` | `0` | 1 | Opt-in: R11-FP17: the fleet scheduler and graph projector publish their gauges into their own process registry, which only this port exposes; 0 opens no port, because opening one changes a deployment's network surface and belongs with whoever configures the scrape (`infra/monitoring/README.md`) |
 | `entitlement_webhook_url` | `str | None` | `None` | 4 | Supplied: the entitlement fulfilment target |
 | `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 | Supplied: the entitlement webhook credential |
 | `dq_itsm_webhook_url` | `str | None` | `None` | 2 | Supplied: the ITSM target; setting it is the opt-in (R11-S9 retired the separate switch) |
@@ -171,6 +178,13 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `profile_value_top_n` | `int` | `10` | 1 |
 | `profiling_exception_purge_batch_size` | `int` | `500` | 1 |
 | `max_active_runs_per_organization` | `int` | `100` | 1 |
+| `max_active_runs_per_datasource` | `int` | `1` | 1 |
+| `analysis_run_daily_quota_per_organization` | `int | None` | `None` | 1 |
+| `analysis_run_daily_quota_per_datasource` | `int | None` | `None` | 1 |
+| `model_token_daily_quota_per_organization` | `int | None` | `None` | 1 |
+| `model_token_daily_quota_per_datasource` | `int | None` | `None` | 1 |
+| `parser_statement_daily_quota_per_organization` | `int | None` | `None` | 1 |
+| `parser_statement_daily_quota_per_datasource` | `int | None` | `None` | 1 |
 | `scheduler_poll_seconds` | `int` | `10` | 2 |
 | `scheduler_batch_size` | `int` | `100` | 3 |
 | `outbox_max_attempts` | `int` | `10` | 1 |
@@ -291,6 +305,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `vector_index_rebuild_batch_size` | `int` | `25` | 1 |
 | `footprint_metrics_enabled` | `bool` | `True` | 1 |
 | `footprint_metrics_interval_seconds` | `int` | `300` | 1 |
+| `worker_metrics_port` | `int` | `0` | 1 |
 | `model_route_health_enabled` | `bool` | `True` | 2 |
 | `model_route_health_interval_seconds` | `int` | `21600` | 1 |
 | `model_route_health_batch_size` | `int` | `50` | 1 |

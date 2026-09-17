@@ -19,6 +19,19 @@
 #                    removed response field, narrowed enum, ...) fails CI
 #                    unless acknowledged with an API version bump. See
 #                    `scripts/openapi_diff.py`.
+#   deployment-parity -- review F03: the missing comparison. Every gate above
+#                    compares source against source, so all of them stay green
+#                    while a deployment runs an image older than the reviewed
+#                    commit against a database one migration behind. This one
+#                    compares a *running deployment* to this tree: the deployed
+#                    `alembic_version` against the source heads, the live
+#                    `/openapi.json` against the committed baseline, readiness,
+#                    and the deployed image's `Settings` field list. Manually
+#                    triggered with a `parity_base_url` input, because CI has
+#                    no deployment to reach; the source-side half is a blocking
+#                    step in `migrations` plus tests/test_deployment_parity.py.
+#                    See `scripts/check_deployment_parity.py` and
+#                    Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md.
 #   ui-types-diff -- tracker UX-14: `ui-next/src/lib/types.ts` is generated
 #                    from `app.openapi()`'s `components.schemas` by
 #                    `scripts/generate_ui_types.py`; a drift between it and
@@ -174,6 +187,14 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      parity_base_url:
+        description: >-
+          Base URL of a running deployment to compare against this commit
+          (review F03). Leave blank to skip the deployment-parity job.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -255,6 +276,79 @@ jobs:
             echo "Resolve with a merge revision before this can deploy."
             exit 1
           fi
+
+      # review F03: the source-side half of the deployment-parity gate, which
+      # is the only half a GitHub runner can have. There is no deployment here,
+      # so every comparison reports NOT MEASURED and `--check` exits 0 -- and
+      # that is exactly what this step asserts. It is blocking because what it
+      # proves is source-side: the script imports, reads this tree's Alembic
+      # heads and the committed OpenAPI baseline, and honours its own CI
+      # contract that an unreachable deployment never fails a build and never
+      # reads as parity either. A regression in that contract would make the
+      # `deployment-parity` job below either useless or permanently red, and
+      # nobody would notice until the day it mattered.
+      #
+      # 127.0.0.1:1 is chosen to be refused immediately rather than to time
+      # out. `--skip-settings` because `docker exec` needs a container.
+      - name: The parity gate reports "not measured" rather than failing with no deployment
+        run: |
+          uv run python scripts/check_deployment_parity.py \
+            --check --base-url http://127.0.0.1:1 --skip-settings --timeout 5
+
+  deployment-parity:
+    name: Deployment parity gate (review F03)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Manually triggered, and only when a base URL is supplied. Every other
+    # gate in this workflow compares source against source, which is why F03
+    # -- an image and a database older than the reviewed commit, with the API
+    # answering 200 to everything -- went unnoticed while CI was green. This
+    # job is the comparison nothing performed, and it needs the one thing a
+    # GitHub runner does not have: a deployment.
+    #
+    # It is deliberately NOT on push or pull_request. A job that needs a
+    # deployment and runs on every push either fails constantly or is given a
+    # `continue-on-error: true` that makes it invisible; both end with it
+    # switched off. The source-side half that CAN run on every push is a
+    # blocking step in the `migrations` job above, plus
+    # `tests/test_deployment_parity.py` in the `tests` job.
+    #
+    # `--check` so an unreachable deployment exits 0 with a NOT MEASURED
+    # banner rather than failing the build; real drift still fails it.
+    # `--skip-settings` because comparing the deployed `Settings` needs exec
+    # access into the running process -- run that comparison from an operator
+    # shell (`docker exec`, or `kubectl exec` piped into `--settings-json`),
+    # per `Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md`.
+    if: github.event_name == 'workflow_dispatch' && inputs.parity_base_url != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Compare the named deployment against this commit
+        run: >
+          uv run python scripts/check_deployment_parity.py
+          --check
+          --base-url "${{ inputs.parity_base_url }}"
+          --skip-settings
+          --json parity.json
+
+      - name: Upload the parity findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-parity
+          path: parity.json
+          retention-days: 30
 
   openapi-diff:
     name: OpenAPI diff gate

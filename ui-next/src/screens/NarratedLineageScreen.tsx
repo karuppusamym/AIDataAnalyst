@@ -154,7 +154,23 @@ export function NarratedLineageScreen() {
   const dsId = params.get("ds") ?? preferredDatasourceId;
   const nodeId = params.get("node");
   const depth = Number(params.get("depth") ?? "5");
-  const view = params.get("view") === "graph" ? "graph" : "narrated";
+  /* R11-S13 (M1): this screen no longer owns `?view=`.
+   *
+   * It used to have a two-tab axis on that field -- "Narrated" and "Graph
+   * (supporting view)" -- and `?view=` is now the merged lineage
+   * destination's own discriminator (`explain | graph | impact`, see
+   * `LineageWorkspace.tsx`). Two readers of one field, one of them a shell
+   * and one of them a tab bar inside it, is the collision that made the merge
+   * worth being careful about.
+   *
+   * The tab bar is gone rather than moved to a new field: the shell's Graph
+   * view is the merged graph, which is a strict superset of what the tab
+   * opened, so keeping a second graph tab INSIDE this view is exactly the
+   * duplication the review asked to remove. What survives is the bounded
+   * diagram itself, rendered beneath the narration when there is a focus node
+   * -- it is the picture of the sentences above it, and its own Diagram/Table
+   * toggle (local state inside `LineageGraph`) is what keeps those edges
+   * readable without a mouse. */
 
   const [search, setSearch] = useState("");
   const [candidates, setCandidates] = useState<CatalogRowRead[]>([]);
@@ -322,43 +338,8 @@ export function NarratedLineageScreen() {
         </div>
       ) : null}
 
-      {dsId ? (
-        <div className="narrscreen__tabs" role="tablist">
-          <button
-            role="tab"
-            aria-selected={view === "graph"}
-            className={`narrscreen__tab${view === "graph" ? " narrscreen__tab--active" : ""}`}
-            onClick={() => setParams({ view: "graph" })}
-          >
-            Graph (supporting view)
-          </button>
-          <button
-            role="tab"
-            aria-selected={view === "narrated"}
-            className={`narrscreen__tab${view === "narrated" ? " narrscreen__tab--active" : ""}`}
-            onClick={() => setParams({ view: null })}
-          >
-            Narrated
-          </button>
-        </div>
-      ) : null}
-
       {!dsId ? (
         <Empty title="Pick a datasource to begin" hint="The unified-lineage endpoints are scoped per datasource." />
-      ) : view === "graph" ? (
-        graphError ? (
-          <ErrorState title="The lineage graph could not be loaded" detail={graphError} onRetry={() => setGraphRevision((value) => value + 1)} />
-        ) : graphLoading || !graph ? (
-          <div className="narrscreen__skeleton" role="status" aria-live="polite">Building the bounded lineage graphâ€¦</div>
-        ) : graph.nodes.length === 0 ? (
-          <Empty title="No graph evidence yet" hint="Ingest constraints, dbt artifacts or OpenLineage events to connect this source's assets." />
-        ) : (
-          <LineageGraph
-            graph={graph}
-            focusNodeId={nodeId}
-            onSelectNode={(id) => setParams({ node: id, view: null })}
-          />
-        )
       ) : !nodeId ? (
         <Empty title="Choose an asset for impact" hint="Search above, or open the relationship graph and select any table or model." />
       ) : error ? (
@@ -384,6 +365,33 @@ export function NarratedLineageScreen() {
               Truncated at this depth/node limit — narrower search or a smaller depth shows more of the true chain.
             </p>
           ) : null}
+
+          {/* R11-S13 (M1): the picture of the sentences above, not a tab you
+              have to find. `LineageGraph` carries its own Diagram/Table
+              toggle, which is what keeps these edges readable without a
+              mouse (review 2026-09-05, F21). */}
+          {graphError ? (
+            <ErrorState
+              title="The lineage graph could not be loaded"
+              detail={graphError}
+              onRetry={() => setGraphRevision((value) => value + 1)}
+            />
+          ) : graphLoading || !graph ? (
+            <div className="narrscreen__skeleton" role="status" aria-live="polite">
+              Building the bounded lineage graph…
+            </div>
+          ) : graph.nodes.length === 0 ? (
+            <Empty
+              title="No graph evidence yet"
+              hint="Ingest constraints, dbt artifacts or OpenLineage events to connect this source's assets."
+            />
+          ) : (
+            <LineageGraph
+              graph={graph}
+              focusNodeId={nodeId}
+              onSelectNode={(id) => setParams({ node: id })}
+            />
+          )}
         </>
       )}
     </div>

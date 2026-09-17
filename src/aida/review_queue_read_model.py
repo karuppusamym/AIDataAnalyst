@@ -61,11 +61,17 @@ Confidence and evidence per proposal type
     `.confidence`; one evidence item per key in `.evidence` (matched label,
     match strategy, annotation version -- `stewardship_api`'s
     `GlossaryLinkProposal.evidence` payload).
-``SEMANTIC_METRIC_PROPOSAL`` / ``ASSET_DESCRIPTION_DRAFT``
+``SEMANTIC_METRIC_PROPOSAL`` / ``ASSET_DESCRIPTION_DRAFT`` /
+``COLUMN_DESCRIPTION_DRAFT`` / ``ROUTINE_DESCRIPTION_DRAFT``
     `.overall_score` as the numeric confidence (GL-9's evidence-scored gate,
-    the same score that gates submission -- `ensure_reviewable`); one evidence
-    item per key in `.evidence` (`metric_suggestion_service.evidence_payload`
-    / `asset_description_service.evidence_payload`).
+    the same score that gates submission -- `ensure_reviewable`, one threshold
+    for all three description kinds); the proposed text as the first evidence
+    item, because a description draft has no field diff and the row would
+    otherwise show a reviewer nothing to read, then one item per key in
+    `.evidence` (`metric_suggestion_service.evidence_payload` /
+    `asset_description_service.evidence_payload` /
+    `column_description_service.column_evidence_payload` /
+    `routine_description_service.routine_evidence_payload`).
 ``TERM_SEMANTIC_BINDING``
     No confidence field -- a steward's own request, not a scored proposal
     (`confidence=None`); evidence is the binding's own term/object identity.
@@ -97,6 +103,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.models import (
     AssetDescriptionDraft,
     ColumnDescriptionDraft,
@@ -175,6 +182,26 @@ async def _column_description_drafts_by_id(
         return {}
     rows = await session.scalars(
         select(ColumnDescriptionDraft).where(ColumnDescriptionDraft.id.in_(ids))
+    )
+    return {row.id: row for row in rows.all()}
+
+
+async def _routine_description_drafts_by_id(
+    session: AsyncSession, ids: Sequence[UUID]
+) -> dict[UUID, RoutineDescriptionDraft]:
+    """R11-FP08: one batched read for the routine drafts on this page.
+
+    Loaded here, beside the table and column draft loaders, rather than left to
+    the generic fallback. Without it a routine draft would still get a queue row
+    -- and the row would carry `confidence=None`, `evidence=[]` and no diff,
+    because a description draft has no field diff to render. That is the exact
+    defect the comment in `ReviewQueueScreen.renderRowExtras` names: a reviewer
+    asked to approve text the queue never showed them.
+    """
+    if not ids:
+        return {}
+    rows = await session.scalars(
+        select(RoutineDescriptionDraft).where(RoutineDescriptionDraft.id.in_(ids))
     )
     return {row.id: row for row in rows.all()}
 
@@ -665,6 +692,9 @@ async def compose_review_queue(
     column_drafts = await _column_description_drafts_by_id(
         session, ids_by_type.get("COLUMN_DESCRIPTION_DRAFT", [])
     )
+    routine_drafts = await _routine_description_drafts_by_id(
+        session, ids_by_type.get("ROUTINE_DESCRIPTION_DRAFT", [])
+    )
     term_bindings = await _term_semantic_bindings_by_id(
         session, ids_by_type.get("TERM_SEMANTIC_BINDING", [])
     )
@@ -730,6 +760,29 @@ async def compose_review_queue(
                         column_draft.evidence,
                         category="DESCRIPTION_DRAFT",
                         source=f"column_description_draft:{column_draft.id}.evidence",
+                    ),
+                ]
+        elif review.object_type == "ROUTINE_DESCRIPTION_DRAFT" and object_id is not None:
+            # R11-FP08: the proposed text first, as for the other two draft
+            # types, because a description draft has no field diff -- the queue
+            # would otherwise ask a reviewer to approve prose it never showed
+            # them. The evidence keys that follow are what
+            # `routine_description_service.routine_evidence_payload` writes, and
+            # `body_state` is among them deliberately: a reviewer needs to see
+            # that the draft was composed with the body withheld, which the
+            # prose says but the score alone does not.
+            routine_draft = routine_drafts.get(object_id)
+            if routine_draft is not None:
+                confidence = routine_draft.overall_score
+                evidence = [
+                    _proposed_text_item(
+                        routine_draft.drafted_text,
+                        source=f"routine_description_draft:{routine_draft.id}.drafted_text",
+                    ),
+                    *_dict_evidence_items(
+                        routine_draft.evidence,
+                        category="DESCRIPTION_DRAFT",
+                        source=f"routine_description_draft:{routine_draft.id}.evidence",
                     ),
                 ]
         elif review.object_type == "TERM_SEMANTIC_BINDING" and object_id is not None:

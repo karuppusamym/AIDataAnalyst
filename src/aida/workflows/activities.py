@@ -21,6 +21,12 @@ from aida.analysis_tasks import (
     TASK_TYPE_PROFILE_DATASOURCE,
     TASK_TYPE_PROFILE_TABLE,
 )
+from aida.capability_states import (
+    REASON_FACET_QUERY_FAILED,
+    REASON_SOURCE_DENIED_READ,
+    CapabilityState,
+    is_permission_refusal,
+)
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signals import (
     CHANGE_COLUMNS_ADDED,
@@ -54,6 +60,7 @@ from aida.connectors.base import (
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.discovery_receipt import (
+    FACET_OBJECT_VISIBILITY,
     STREAM_COMPLETE,
     STREAM_IN_PROGRESS,
     STREAM_INTERRUPTED,
@@ -104,6 +111,10 @@ from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 from aida.task_tracking import finish_task, heartbeat_task, start_task
 from aida.workflows.continuation import clamp_page_size
+from atlas.modules.profiling.facets import (
+    derived_column_facets,
+    persistable_observation_scope,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -1247,17 +1258,41 @@ async def _mark_run_cancelled(run_uuid: UUID) -> None:
         await session.commit()
 
 
-async def _count_invisible(connector: Connector) -> dict[str, int] | None:
+async def _count_invisible(
+    connector: Connector, receipt_outcome: dict[str, tuple[CapabilityState, str]]
+) -> dict[str, int] | None:
     """R11-FP02: ask the source how much of itself this login may not see, or give up quietly.
 
     A connector that cannot ask answers `None`, and so does one whose attempt fails: the run
     goes on reading what it is allowed to, and the receipt says UNKNOWN rather than claiming
     nothing is hidden. The failure is logged, because "we could not ask" is worth knowing.
+
+    Review 2026-09-16 §5: a failure is no longer one undifferentiated `None`. If the source
+    *refused* the read, that is recorded as `PERMISSION_DENIED` on the `object_visibility`
+    facet -- a different fact from "this adapter has no unfiltered catalog to ask", and one
+    a source administrator can act on by granting access. `receipt_outcome` collects it here
+    because the receipt is built from this call's own result.
+
+    The refusal is judged by SQLSTATE (`capability_states.is_permission_refusal`), never by
+    reading the driver's message: a message can quote a value (INV-6), no two drivers spell
+    one the same way, and a guess about the source's intent is worse than an honest
+    "we did not get it". Anything else is `UNAVAILABLE`, which is the under-claiming
+    direction INV-9 requires.
     """
     try:
         return await connector.count_invisible_objects()
-    except Exception:  # noqa: BLE001 -- asking is best-effort; a run must not fail over it
+    except Exception as exc:  # noqa: BLE001 -- asking is best-effort; a run must not fail over it
         logger.warning("discovery_invisible_count_failed", exc_info=True)
+        if is_permission_refusal(exc):
+            receipt_outcome[FACET_OBJECT_VISIBILITY] = (
+                CapabilityState.PERMISSION_DENIED,
+                REASON_SOURCE_DENIED_READ,
+            )
+        else:
+            receipt_outcome[FACET_OBJECT_VISIBILITY] = (
+                CapabilityState.UNAVAILABLE,
+                REASON_FACET_QUERY_FAILED,
+            )
         return None
 
 
@@ -1365,6 +1400,9 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             include_schemas=list(selection.include_schemas),
             exclude_schemas=list(selection.exclude_schemas),
         )
+        # Review 2026-09-16 §5: a facet read that did not complete is recorded on the
+        # receipt rather than failing the run, and a refusal is told apart from a failure.
+        visibility_outcome: dict[str, tuple[CapabilityState, str]] = {}
         receipt = DiscoveryReceipt(
             mode=run_mode,
             selection_fingerprint=selection.fingerprint(),
@@ -1374,8 +1412,10 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             # source that cannot answer leaves it None, which the receipt reports as UNKNOWN
             # rather than as nothing hidden; a failure to ask is the same answer, and never
             # fails a run that can still read what it is allowed to.
-            invisible=await _count_invisible(connector),
+            invisible=await _count_invisible(connector, visibility_outcome),
         )
+        for facet, (facet_state, facet_reason) in visibility_outcome.items():
+            receipt.record_facet_outcome(facet, state=facet_state, reason=facet_reason)
         created_objects_total = 0
         changed_objects_total = 0
         batch_index = 0
@@ -1720,6 +1760,7 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
                     schema_fingerprint=table.fingerprint,
                     row_count_estimate=snapshot.row_count_estimate,
                     sampled_row_count=snapshot.sampled_row_count,
+                    observation_scope=persistable_observation_scope(snapshot.observation_scope),
                 )
                 session.add(profile)
                 await session.flush()
@@ -1735,6 +1776,7 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
                             approximate_distinct_count=(column_snapshot.approximate_distinct_count),
                             min_length=column_snapshot.min_length,
                             max_length=column_snapshot.max_length,
+                            **derived_column_facets(column_snapshot),
                         )
                     )
                 await session.commit()
@@ -2144,6 +2186,7 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                 schema_fingerprint=table.fingerprint,
                 row_count_estimate=snapshot.row_count_estimate,
                 sampled_row_count=snapshot.sampled_row_count,
+                observation_scope=persistable_observation_scope(snapshot.observation_scope),
             )
             session.add(profile)
             await session.flush()
@@ -2159,6 +2202,7 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                     approximate_distinct_count=column_snapshot.approximate_distinct_count,
                     min_length=column_snapshot.min_length,
                     max_length=column_snapshot.max_length,
+                    **derived_column_facets(column_snapshot),
                 )
                 session.add(column_profile)
                 value_snapshot = value_snapshots_by_name.get(column_snapshot.name)

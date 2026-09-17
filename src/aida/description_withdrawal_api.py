@@ -30,6 +30,7 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.description_withdrawal import request_description_withdrawal
+from aida.envelope_models import MetadataRoutine
 from aida.events import record_audit, record_outbox
 from aida.models import DescriptionWithdrawal, MetadataColumn, MetadataTable
 from aida.schemas import ApiModel, Page
@@ -44,7 +45,14 @@ _WITHDRAW_READ_ROLES = (*_WITHDRAW_WRITE_ROLES, "Reviewer", "Analyst", "Viewer",
 
 
 class DescriptionWithdrawalCreate(ApiModel):
-    subject_type: str = Field(pattern="^(TABLE|COLUMN)$")
+    #: R11-FP08: `ROUTINE` retires (or reinstates) a `RoutineDocumentationVersion`.
+    #: `ANNOTATION` is still deliberately absent from this endpoint: an annotation
+    #: withdrawal is only ever raised as the compensating action for a disputed
+    #: reviewer-agent decision (`agent_contract_api._raise_annotation_withdrawal`),
+    #: never asked for directly, so admitting it here would open a surface with no
+    #: caller. A routine description is asked for directly, exactly as a table's
+    #: and a column's are.
+    subject_type: str = Field(pattern="^(TABLE|COLUMN|ROUTINE)$")
     subject_id: UUID
     #: WITHDRAW retires the current approved description; REINSTATE republishes
     #: a previously withdrawn one as a new version. Defaults to WITHDRAW so
@@ -84,7 +92,37 @@ async def _authorize_subject(
     Loaded and gated here rather than inside the service so the service stays
     a pure state transition, matching how every other publish path in this
     codebase splits authorization from application.
+
+    **R11-FP08: a routine is gated on its datasource, not on a table.** Every
+    other description write in this family gates `resource_type="table"`,
+    because every other subject either is a table or hangs off one. A routine
+    hangs off a schema and has no table, so there is no table id to hand the
+    gate -- the one genuinely new authorization question this row raised. It is
+    answered by following the precedent that already solved it rather than
+    inventing a rule: `ontology_api._authorize_mapping_reads` gates a `ROUTINE`
+    mapping subject on `resource_type="datasource"`, which is the granularity at
+    which routine access is actually expressed in this platform (a source
+    binding is per datasource, and `procedure_lineage_api` scopes every routine
+    read by datasource). Picking the routine's schema instead would invent a
+    resource type the policy engine has no rules for, and picking a table the
+    routine happens to touch would make the gate depend on parsed lineage.
     """
+    if body.subject_type == "ROUTINE":
+        routine = await session.get(MetadataRoutine, body.subject_id)
+        if routine is None:
+            raise HTTPException(status_code=404, detail="routine not found")
+        enforce_organization(context, routine.organization_id)
+        await gate_read(
+            session,
+            context,
+            settings,
+            action="READ_METADATA",
+            resource_type="datasource",
+            resource_id=str(routine.datasource_id),
+            datasource_id=routine.datasource_id,
+        )
+        return
+
     if body.subject_type == "COLUMN":
         column = await session.get(MetadataColumn, body.subject_id)
         if column is None:

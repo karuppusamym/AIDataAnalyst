@@ -47,12 +47,14 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -74,6 +76,15 @@ UNAVAILABLE = "UNAVAILABLE"
 #: directly, and two homes for one fact is how they diverge. Column comments
 #: lived here only because `models.py` was off-limits to the N1 workstream that
 #: added this table -- IN-5e closed that gap once `models.py` ownership allowed it.
+#:
+#: `ROUTINE` is deliberately absent too, and R11-FP08 kept it that way rather
+#: than widening this on its way past. A routine already owns its source comment
+#: directly (`MetadataRoutine.source_description`, above), exactly as a table and
+#: a column do, so this table has nothing to add for one; and what R11-FP08
+#: needed was not a *source* description but an Atlas-authored one, which is a
+#: different kind of fact with a different lifecycle and lives on
+#: `RoutineDocumentationVersion` at the foot of this module. Recorded here so the
+#: scope cut is a decision rather than an omission.
 DESCRIBABLE_OBJECT_TYPES = ("CATALOG", "SCHEMA")
 
 
@@ -403,3 +414,199 @@ class MetadataSourceGrant(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# R11-FP08: an Atlas-authored description for a routine.
+#
+# Tables and views already have the whole description lifecycle -- a draft, an
+# append-only versioned store, a review type, a withdrawal and a reinstatement.
+# A routine had none of it: `AssetDocumentation` is keyed by `table_id` and a
+# routine is not a table, so the only thing the platform could say about a
+# procedure was the source's own comment (`MetadataRoutine.source_description`,
+# re-derived and overwritten by every rescan).
+#
+# **What was decided, and what was not.** R11-S4 freezes new governed-artifact
+# *families*; the review authorises exactly the narrow extension here, which is
+# one more parallel pair plus one draft table in the established shape, sharing
+# the two tables that genuinely discriminate on a subject type
+# (`GovernanceReview` and `DescriptionWithdrawal`). It is deliberately *not* the
+# broad consolidation into one polymorphic description store that R11-S4 defers:
+# nothing below is polymorphic, every foreign key names one real parent, and a
+# deleted routine takes its description with it rather than leaving a row
+# pointing at nothing.
+#
+# **Why these three live here and not in `aida.models`.** The same reason the
+# 1.1 axes above do (see the module docstring): `models.py` is a single
+# 5,300-line module under concurrent edit, and this module already owns the
+# routine axis -- `MetadataRoutine`, its definition versions and its parameters
+# are all declared above, and every signal a routine description stands on is
+# read from them. Declaring these against the same `aida.db.Base` registers them
+# on the same `MetaData`, so Alembic autogenerate and
+# `Base.metadata.create_all` see them exactly as if they were declared there.
+# ---------------------------------------------------------------------------
+
+
+class RoutineDocumentation(Base, TimestampMixin):
+    """Identity/pointer row for one routine's Atlas-authored description of record.
+
+    The routine-level counterpart to `models.AssetDocumentation` (tables) and
+    `models.ColumnDocumentation` (columns), on the same parent-identity /
+    versioned-content split: content lives on the append-only
+    `RoutineDocumentationVersion` below, never here, because an `AgentRun`
+    grounded on a routine description has to stay replayable against exactly the
+    text it saw, which in-place mutation would destroy.
+
+    `MetadataRoutine.source_description` is a *different* thing and stays where
+    it is: that is the source system's own comment, overwritten by every
+    rediscovery pass. This is authored, reviewed content rediscovery must never
+    touch -- the distinction `ColumnDocumentation` already draws against
+    `MetadataColumn.source_description`.
+    """
+
+    __tablename__ = "routine_documentation"
+    __table_args__ = (UniqueConstraint("routine_id", name="uq_routine_documentation_routine_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: Denormalized from `MetadataRoutine.datasource_id` so the datasource-scoped
+    #: reads (the routine pane, a context product's coverage section) filter
+    #: without a second join through `metadata_routine`; `routine_id` is the key.
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+
+class RoutineDocumentationVersion(Base, TimestampMixin):
+    """Append-only content history for a `RoutineDocumentation`.
+
+    One row per approved description. The previously `APPROVED` row (if any) is
+    flipped to `SUPERSEDED` in the same transaction that inserts the new
+    `APPROVED` one -- see
+    `routine_description_service.publish_routine_documentation_version` -- and
+    never mutated for content. A withdrawal moves it to `WITHDRAWN` instead,
+    which a reader must be able to tell from a replacement
+    (`aida.description_withdrawal`).
+
+    **`source_definition_version_id` is the one thing this pair has that the
+    table and column pairs do not.** A routine has a real immutable
+    definition-version table (`MetadataRoutineDefinitionVersion`, above) that a
+    view lacks, so a published routine description can *name* the body it was
+    written against rather than only carrying a digest of it. Two consequences,
+    both load-bearing: drift is detected by comparing a named version id rather
+    than re-deriving and re-hashing text (stronger, because a digest collides
+    across a retire-and-recapture cycle that produces identical text, and
+    cheaper, because it is one integer comparison); and a reinstatement can
+    refuse to republish prose about a body that has since moved. Nullable
+    because a routine whose body was never captured has no version to name, and
+    a description of such a routine is exactly the case that says so.
+    """
+
+    __tablename__ = "routine_documentation_version"
+    __table_args__ = (
+        UniqueConstraint("documentation_id", "version"),
+        Index(
+            "ix_routine_documentation_version_org_status",
+            "organization_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    documentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("routine_documentation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="APPROVED", nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The captured definition this text describes, when there was one. SET NULL
+    #: on delete rather than CASCADE: losing the provenance edge must not delete
+    #: a governed description.
+    source_definition_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine_definition_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RoutineDescriptionDraft(Base, TimestampMixin):
+    """Deterministically drafted routine description; always routed through review.
+
+    The routine-level sibling of `models.AssetDescriptionDraft` (GL-9) and
+    `models.ColumnDescriptionDraft`, on the same contract: composed from
+    catalog evidence already in this database, evidence-scored, and published
+    only by an independent APPROVE on its `GovernanceReview`
+    (`semantic_api._decide_routine_description_draft`). No model call anywhere
+    on the path. Rejected drafts are retained as negative knowledge, so
+    identical text is not proposed again for the same routine.
+
+    **The body is never quoted.** A procedure body is the largest
+    indirect-injection surface envelope 1.1 introduced (see the note on
+    `MetadataRoutine.body_sql_redacted`), and a description is prose that every
+    reader of the routine will read. `drafted_text` therefore says what *state*
+    the body is in -- captured, truncated, quarantined, withheld, not captured
+    -- and never a fragment of it. `tests/test_routine_description_body_states.py`
+    asserts that, per state.
+
+    `base_description_version` is the routine's description version when the
+    draft was composed (None when it had none), copied from
+    `ColumnDescriptionDraft` rather than from `AssetDescriptionDraft`, which
+    lacks it: approval re-checks it, so a draft written against v2 cannot
+    silently replace a v3 published since.
+
+    `uq_routine_description_draft_open` allows one open draft per routine, for
+    the reason the column index carries: two would split one routine's review
+    into two decisions about the same text, and whichever was approved second
+    would be refused on the version check anyway.
+    """
+
+    __tablename__ = "routine_description_draft"
+    __table_args__ = (
+        Index("ix_routine_description_draft_org_status", "organization_id", "status"),
+        Index(
+            "uq_routine_description_draft_open",
+            "routine_id",
+            unique=True,
+            postgresql_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+            sqlite_where=text("status IN ('DRAFT', 'PENDING_APPROVAL')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    drafted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    base_description_version: Mapped[int | None] = mapped_column(Integer)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("routine_documentation_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

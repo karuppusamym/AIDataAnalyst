@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CONTEXT_FIELDS,
   RETIRED_SCREEN_ALIASES,
   SCREEN_IDS,
   SCREEN_JOURNEY,
@@ -10,6 +11,7 @@ import {
   canonicalPath,
   isScreenId,
   resolveHash,
+  resolveScreenRef,
   screenFromHash,
 } from "./routes";
 
@@ -77,6 +79,37 @@ describe("buildLink", () => {
         "?ds=ds_1",
       ),
     ).toBe("?node=t_1#/analyst/lineage");
+  });
+
+  /* ---------------------------------------------------------------------------
+     R11-FP12 (F08): the context product Ask asked through must survive being
+     shared. `product` was undeclared for `analyst`, so `buildSearch` dropped it
+     from every link the app built -- a permalink to "the answer this curated
+     product gave" reopened as a question against the whole datasource.
+  --------------------------------------------------------------------------- */
+
+  it("keeps the context product in a link to Ask", () => {
+    const link = buildLink(
+      { screen: "analyst", params: { run: "run_1", product: "customer-revenue" } },
+      BASE,
+    );
+    expect(link).toBe(
+      "https://atlas.example/?product=customer-revenue&run=run_1#/analyst/analyst",
+    );
+  });
+
+  it("does not inherit the context product across screens", () => {
+    // `product` names a marketplace listing on Marketplace and a context
+    // product on Ask. Carrying Ask's key there would put one screen's
+    // identifier into another screen's differently-meant field, so it is
+    // screen-local rather than estate context -- see SCREEN_QUERY_FIELDS.
+    expect(buildRelativeLink({ screen: "marketplace" }, "?product=customer-revenue")).toBe(
+      "#/consumer/marketplace",
+    );
+    expect(CONTEXT_FIELDS).not.toContain("product");
+    // `normalizeLocation` (lib/location.ts) filters a pasted non-canonical URL
+    // through this same declaration, which is what keeps the key on the link.
+    expect(SCREEN_QUERY_FIELDS.analyst).toContain("product");
   });
 
   it("never carries an organization: a link is a request, not an authorization", () => {
@@ -154,6 +187,11 @@ describe("journey-grouped routes keep every old route working", () => {
       ["lineage-agent", "task-agents", { agent: "lineage" }],
       ["quality-agent", "task-agents", { agent: "quality" }],
       ["parsed-lineage-review", "governance", { queue: "parsed-lineage" }],
+      // R11-S13 (M3): three steps of documenting an estate, one workspace.
+      ["description-drafts", "worklist", { view: "drafts" }],
+      ["data-dictionaries", "worklist", { view: "imports" }],
+      // R11-S13 (M1): two routes over one lineage question, one destination.
+      ["unified-lineage", "lineage", { view: "graph" }],
     ];
 
     for (const [old, screen, params] of retired) {
@@ -175,6 +213,36 @@ describe("journey-grouped routes keep every old route working", () => {
     }
   });
 
+  /* -------------------------------------------------------------------------
+     R11-S13 — an IN-APP link to a merged-away screen still opens it.
+
+     `resolveHash` covers the pasted URL. This covers the other door:
+     `navigateTo` and `App.navigate` both take a `string`, because
+     `components/CrossLinks.tsx` is deliberately not a router, so the compiler
+     cannot catch a link that names a screen which has since been merged away.
+     The old check was `isScreenId`, which answers "is this LIVE" -- and under
+     it `EvidencePane`'s "Impact" cross-link, which names `unified-lineage`,
+     landed on Overview.
+  ------------------------------------------------------------------------- */
+  it("resolves a merged-away screen id handed over as a plain string", () => {
+    for (const [id, alias] of Object.entries(RETIRED_SCREEN_ALIASES)) {
+      const resolved = resolveScreenRef(id);
+      expect(resolved).not.toBeNull();
+      expect(resolved!.screen).toBe(alias.screen);
+      // Not Overview: the whole point of the table.
+      expect(resolved!.screen).not.toBe("home");
+      expect(resolved!.params).toEqual(alias.params);
+    }
+  });
+
+  it("resolves a live screen id unchanged, and an invented one to null", () => {
+    for (const id of SCREEN_IDS) {
+      expect(resolveScreenRef(id)).toEqual({ screen: id });
+    }
+    // A caller bug, and reported as one rather than silently opening something.
+    expect(resolveScreenRef("catalogue")).toBeNull();
+  });
+
   it("keeps a retired route's own filters alongside the ones it implies", () => {
     // `#/parsed-lineage-review?type=ROUTINE` was a real, linkable view: the
     // lineage agent built exactly this link for a procedure proposal.
@@ -185,6 +253,30 @@ describe("journey-grouped routes keep every old route working", () => {
     // `lib/location.ts`, which is what folds the two together.
     expect(SCREEN_QUERY_FIELDS.governance).toContain("type");
     expect(SCREEN_QUERY_FIELDS.governance).toContain("queue");
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-S13 — the field every retired route implies must be DECLARED by the
+     screen that absorbed it.
+
+     This is the quiet half of a merge. `normalizeLocation` filters a pasted
+     link through `allowedFieldsFor(target)` before it rewrites it, so an alias
+     that implies `view=drafts` onto a screen which does not declare `view`
+     resolves to the right screen and then drops the very field that chose the
+     tab -- the bookmark opens the workspace's default view and nothing warns.
+     Asserted over the whole table rather than per merge, so the next merge
+     inherits the check.
+  ------------------------------------------------------------------------- */
+  it("declares every field a retired route's alias implies", () => {
+    for (const [route, alias] of Object.entries(RETIRED_SCREEN_ALIASES)) {
+      const declared = SCREEN_QUERY_FIELDS[alias.screen];
+      for (const field of Object.keys(alias.params ?? {})) {
+        expect(
+          declared,
+          `#/${route} implies "${field}", which screen "${alias.screen}" does not declare`,
+        ).toContain(field);
+      }
+    }
   });
 
   it("gives every screen a journey", () => {

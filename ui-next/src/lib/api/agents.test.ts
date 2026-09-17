@@ -29,6 +29,31 @@ describe("classifyAgentAskError", () => {
     expect(classifyAgentAskError(new ApiError(502, "boom")).kind).toBe("SERVER_ERROR");
   });
 
+  /* R11-FP12 (F08): the three context-product refusals were one kind, so the
+     screen had one title and one remedy for three different problems -- and the
+     server's raw token as the message. Each is its own kind now; the screen's
+     own test asserts the three sentences. */
+  it("tells the three context-product refusals apart", () => {
+    expect(classifyAgentAskError(new ApiError(422, "CONTEXT_PRODUCT_NOT_AVAILABLE")).kind).toBe(
+      "CONTEXT_PRODUCT_UNAVAILABLE",
+    );
+    expect(
+      classifyAgentAskError(new ApiError(422, "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED")).kind,
+    ).toBe("CONTEXT_PRODUCT_ROLE_REQUIRED");
+    expect(
+      classifyAgentAskError(new ApiError(422, "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE")).kind,
+    ).toBe("CONTEXT_PRODUCT_OUT_OF_SCOPE");
+  });
+
+  it("does not guess an unrecognised 422 into a context-product refusal", () => {
+    // The mapping is keyed by the server's own stable tokens
+    // (`agent_orchestrator.py:378-380`); anything else is the ordinary policy
+    // rejection it has always been.
+    expect(classifyAgentAskError(new ApiError(422, "CONTEXT_PRODUCT_SOMETHING_NEW")).kind).toBe(
+      "POLICY_REJECTED",
+    );
+  });
+
   it("leaves a genuinely unrecognised status as UNKNOWN", () => {
     // The fallback must stay a fallback: adding the 403 branch should not have
     // turned every unmapped status into an authorization story.

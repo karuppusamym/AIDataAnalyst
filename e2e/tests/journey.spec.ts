@@ -71,8 +71,14 @@ test.describe("3. describe an asset -- DataSteward", () => {
   test.use({ identity: "steward" });
 
   test("submits a description draft for review through the proxy", async ({ page, api }) => {
+    /* R11-S13 (M3): the saved route, deliberately. `#/description-drafts` was
+       merged into the documentation workspace and resolves through
+       `RETIRED_SCREEN_ALIASES` to `#/steward/worklist?view=drafts` -- so this
+       step both exercises the journey and proves the alias works against a
+       real browser and a real backend, which jsdom cannot. */
     await page.goto("/#/description-drafts");
-    await expectScreen(page, "description-drafts");
+    await expectScreen(page, "worklist");
+    await expect(page).toHaveURL(/view=drafts/);
 
     const list = page.getByRole("list", { name: "Description drafts" });
     await expect(list.getByText("public.orders")).toBeVisible();
@@ -123,6 +129,84 @@ test.describe("5. Ask -- Analyst", () => {
 
     await api.waitForCall("POST", /^\/v1\/datasources\/[^/]+\/agent-analyses$/, 200);
     await expect(page.getByLabel(/^Answer for run /)).toBeVisible();
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-FP12 (F08): the same step, asked THROUGH a published context product.
+
+     The picker was unreachable from this harness -- the stub served no
+     `/v1/projects/{id}/context-products` route, so the generic synthesiser
+     answered with an empty page and the control was permanently disabled. The
+     product half of Ask therefore had no real-backend coverage at all: the
+     browser could not select a product, so nothing proved the selection
+     reaches the wire, nor that the answer says which version stood behind it.
+  ------------------------------------------------------------------------- */
+
+  test("asks through a published context product and says which version answered", async ({
+    page,
+    api,
+  }) => {
+    await page.goto("/#/analyst");
+    await expectScreen(page, "analyst");
+
+    await page.getByLabel("Datasource").selectOption({ label: "Journey warehouse" });
+
+    // The picker's own read, through the proxy. It is scoped to the selected
+    // source's PROJECT, which is why this is a different route from every other
+    // call this step makes.
+    await api.waitForCall("GET", /^\/v1\/projects\/[^/]+\/context-products$/, 200);
+    await page.getByLabel("Context product").selectOption({ label: "Journey orders" });
+    // The choice is in the URL, so a reload or a shared link keeps asking
+    // through the same product rather than widening back to the datasource.
+    await expect(page).toHaveURL(/product=journey-orders/);
+
+    const asked = page.waitForRequest(
+      (request) => request.method() === "POST" && /\/agent-analyses$/.test(request.url()),
+    );
+    await page
+      .getByRole("textbox", { name: "Question" })
+      .fill("what was net revenue by month last quarter?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+
+    // 1. the selection actually reached the wire ...
+    const body = JSON.parse((await asked).postData() ?? "{}");
+    expect(body).toMatchObject({ context_product_key: "journey-orders" });
+    await api.waitForCall("POST", /^\/v1\/datasources\/[^/]+\/agent-analyses$/, 200);
+
+    // 2. ... and the answer names the product AND the published version it
+    // stood on, read from the run's own RESOLVED step rather than from the
+    // request that was sent.
+    await expect(page.getByLabel(/^Answer for run /)).toBeVisible();
+    await expect(page.getByText("Journey orders · version 2")).toBeVisible();
+  });
+
+  test("refuses an out-of-product question in the product's own words", async ({ page, api }) => {
+    await page.goto("/#/analyst");
+    await expectScreen(page, "analyst");
+
+    await page.getByLabel("Datasource").selectOption({ label: "Journey warehouse" });
+    await api.waitForCall("GET", /^\/v1\/projects\/[^/]+\/context-products$/, 200);
+    await page.getByLabel("Context product").selectOption({ label: "Journey orders" });
+
+    await page
+      .getByRole("textbox", { name: "Question" })
+      .fill("how many people are on the payroll ledger?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+
+    // The server's refusal is a 422 carrying a stable token, and the screen has
+    // to render the product's own story rather than the generic policy
+    // rejection every other 422 gets -- the remedy is different.
+    await api.waitForCall("POST", /^\/v1\/datasources\/[^/]+\/agent-analyses$/, 422);
+    const refusal = page.getByRole("alert", { name: "Context product refusal" });
+    await expect(refusal).toBeVisible();
+    await expect(
+      refusal.getByText("This product's tables cannot answer that question"),
+    ).toBeVisible();
+    await expect(page.getByText("The generated query was rejected by policy")).toHaveCount(0);
+    // A 422 the UI renders as its own token is a 422 the UI did not understand.
+    await expect(page.getByText("CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE")).toHaveCount(0);
+    // No answer panel: a refusal is not an answer.
+    await expect(page.getByLabel(/^Answer for run /)).toHaveCount(0);
   });
 });
 

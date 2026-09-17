@@ -283,6 +283,24 @@ ROUTE_RULES: list[Rule] = [
         ("AgentDeveloper", "Analyst", "PlatformAdmin"),
         "POST /v1/datasources/{datasource_id}/agent-analyses",
     ),
+    # R11-FP12 (F08): the Ask screen's context-product picker. Without this the
+    # journey could not select a product at all -- the generic synthesiser
+    # answered the route with an empty page, so the picker was permanently
+    # disabled and the whole product half of step 5 was unobservable.
+    Rule(
+        "GET",
+        rf"^/v1/projects/{_SEG}/context-products/?$",
+        (
+            "Analyst",
+            "Auditor",
+            "DataSteward",
+            "PlatformAdmin",
+            "Reviewer",
+            "SemanticAdmin",
+            "Viewer",
+        ),
+        "GET /v1/projects/{project_id}/context-products",
+    ),
     Rule(
         "GET",
         rf"^/v1/datasources/{_SEG}/agent-runs/?$",
@@ -505,8 +523,22 @@ TABLE_ID = "00000000-0000-0000-0000-0000000000e1"
 DRAFT_ID = "00000000-0000-0000-0000-0000000000f1"
 REVIEW_ID = "00000000-0000-0000-0000-00000000a001"
 AGENT_RUN_ID = "00000000-0000-0000-0000-00000000b001"
+CONTEXT_PRODUCT_ID = "00000000-0000-0000-0000-00000000e001"
+CONTEXT_PRODUCT_VERSION_ID = "00000000-0000-0000-0000-00000000e002"
 
 DATASOURCE_NAME = "Journey warehouse"
+# R11-FP12 (F08): the one published context product step 5 asks through. The
+# key is what the request must carry and the name is what the answer's
+# provenance must show, so both are pinned here rather than synthesised.
+CONTEXT_PRODUCT_KEY = "journey-orders"
+CONTEXT_PRODUCT_NAME = "Journey orders"
+CONTEXT_PRODUCT_VERSION = 2
+# The stub has no planner, so it cannot decide out-of-scope from generated SQL
+# the way `_enforce_context_product_scope` does. It keys on a word naming a
+# table this product does not include instead, and says so: what step 5 is
+# testing is that the SCREEN renders the product's own refusal rather than a
+# generic policy rejection, not how the server reaches it.
+OUT_OF_PRODUCT_WORD = "payroll"
 
 # The principal each seat presents as. `requested_by` on the review proposal
 # below is deliberately none of these: `ReviewQueueScreen` hides Approve/Reject
@@ -568,8 +600,18 @@ def _analysis_run(status: str) -> dict[str, Any]:
     }
 
 
-def _overrides(method: str, path: str, identity: str) -> Any | None:
-    """A hand-written body for a route the browser suite asserts on."""
+def _overrides(method: str, path: str, identity: str, body: Any) -> Any | None:
+    """A hand-written body for a route the browser suite asserts on.
+
+    Returns the payload, or `(status, payload)` when the route's own refusal is
+    the thing being rendered -- step 5's context-product refusal is a 422, and a
+    stub that could only answer 200 could not produce it.
+
+    `body` is the decoded request body (`{}` when there was none). Only the Ask
+    branch reads it, and only to answer differently for a question asked
+    *through a product* than for one asked against the whole datasource -- which
+    is the distinction the step exists to observe.
+    """
     # --- test control ------------------------------------------------------
     #
     # The scan step is a state change, so the suite must be able to put this
@@ -792,14 +834,43 @@ def _overrides(method: str, path: str, identity: str) -> Any | None:
         }
     if method == "GET" and re.fullmatch(rf"/v1/agent-runs/{_SEG}/?", path):
         return _agent_run()
+    if method == "GET" and re.fullmatch(rf"/v1/projects/{_SEG}/context-products/?", path):
+        # One published product, so the picker has something to select. The real
+        # route narrows this to PUBLISHED plus the caller's own consumer role
+        # when the client sends `askable=true`; every seat that reaches here
+        # holds `Analyst`, which is this product's consumer role, so the answer
+        # is the same either way and the stub does not have to model bindings.
+        return _page([_context_product()], limit=200)
     if method == "POST" and re.fullmatch(rf"/v1/datasources/{_SEG}/agent-analyses/?", path):
+        asked_through = body.get("context_product_key") if isinstance(body, dict) else None
+        question = str(body.get("question", "")) if isinstance(body, dict) else ""
+        if asked_through and OUT_OF_PRODUCT_WORD in question.lower():
+            # The orchestrator's own stable token, verbatim
+            # (`agent_orchestrator.py:380`): the screen tells the three
+            # context-product refusals apart by it.
+            return 422, {"detail": "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE"}
         return {
             "agent_run_id": AGENT_RUN_ID,
             "status": "COMPLETED",
             "generation_source": "GOVERNED_TOOL",
             "semantic_version": None,
             "policy_version": "v1",
-            "step_trace": [],
+            # The RESOLVED step is where the real run records which published
+            # version scoped the answer (`agent_orchestrator.py:1182-1183`), and
+            # it is where the answer panel reads its provenance from.
+            "step_trace": (
+                [
+                    {
+                        "stage": "RESOLVED",
+                        "details": {
+                            "context_product_version_id": CONTEXT_PRODUCT_VERSION_ID,
+                            "context_product_version": CONTEXT_PRODUCT_VERSION,
+                        },
+                    }
+                ]
+                if asked_through
+                else []
+            ),
             "retrieval_evidence": [],
             "plan_evidence": {},
             "execution": {
@@ -868,6 +939,64 @@ def _governance_review(status: str) -> dict[str, Any]:
     }
 
 
+def _context_product() -> dict[str, Any]:
+    """`ContextProductRead` at its latest version, as the list route returns it.
+
+    The picker reads `product_key`, `latest_version.status` and
+    `latest_version.name`; the rest is present because a body of a shape the
+    real API could not send is exactly what this file exists not to serve.
+    """
+    return {
+        "id": CONTEXT_PRODUCT_ID,
+        "organization_id": ORG_ID,
+        "project_id": PROJECT_ID,
+        "product_key": CONTEXT_PRODUCT_KEY,
+        "lifecycle_status": "ACTIVE",
+        "created_by": "journey-steward",
+        "latest_version": {
+            "id": CONTEXT_PRODUCT_VERSION_ID,
+            "organization_id": ORG_ID,
+            "product_id": CONTEXT_PRODUCT_ID,
+            "product_key": CONTEXT_PRODUCT_KEY,
+            "version": CONTEXT_PRODUCT_VERSION,
+            "status": "PUBLISHED",
+            "name": CONTEXT_PRODUCT_NAME,
+            "description": "Everything needed to answer questions about orders.",
+            "purpose": "Answer order and revenue questions for the retail packet.",
+            "owner_type": "GROUP",
+            "owner_principal": "journey-stewards",
+            "table_ids": [TABLE_ID],
+            "semantic_model_version_ids": [],
+            "glossary_term_version_ids": [],
+            "eligible_tool_version_ids": [],
+            "routine_ids": [],
+            "ontology_version_ids": [],
+            "allowed_consumer_roles": ["Analyst"],
+            "lineage_depth": 2,
+            "quality_requirements": {"minimum_score": 80, "deny_on_critical_incident": True},
+            "policy_summary": {
+                "source_values": "GATEWAY_ONLY",
+                "retention": "NO_RAW_CONTEXT",
+                "permitted_actions": ["READ_CONTEXT"],
+            },
+            "support_window_days": None,
+            "fingerprint": "a" * 64,
+            "created_by": "journey-steward",
+            "approved_by": "journey-reviewer",
+            "approved_at": NOW,
+            "published_at": NOW,
+            "based_on_version_id": None,
+            "created_at": NOW,
+            "updated_at": NOW,
+            "superseded_at": None,
+            "support_window_ends_at": None,
+            "superseded_by_version_id": None,
+        },
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+
+
 def _agent_run() -> dict[str, Any]:
     return {
         "id": AGENT_RUN_ID,
@@ -930,8 +1059,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        raw = self.rfile.read(length) if length else b""
+        # The body has to be READ either way to keep the connection usable; it
+        # is decoded because step 5 answers differently for a question asked
+        # through a context product. A body that is not JSON is simply no body:
+        # this is a stub, and refusing it would fail a request for a reason the
+        # real API would not.
+        body: Any = {}
+        if raw:
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                body = {}
         path = self.path.split("?", 1)[0]
 
         identity = self._identity()
@@ -951,9 +1090,13 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
 
-        override = _overrides(method, path, name)
+        override = _overrides(method, path, name, body)
         if override is not None:
-            self._send(200, override)
+            if isinstance(override, tuple):
+                status, payload = override
+                self._send(status, payload)
+            else:
+                self._send(200, override)
             return
         self._send(200, self.examples.body_for(method, path))
 

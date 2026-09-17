@@ -8,7 +8,8 @@ import {
 } from "../lib/api";
 import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
 import { WorkbookImport } from "../components/WorkbookImport";
-import { SourceAdministration } from "./SourcesScreenAdmin";
+import { SourceAdministration, CONNECTION_ROLES, roleAllows } from "./SourcesScreenAdmin";
+import { RegisterDatasourceForm } from "./AdministrationForms";
 import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { useScopeSelection } from "../lib/scope";
 import { useSession } from "../lib/session";
@@ -18,6 +19,11 @@ import { CrossLinks } from "../components/CrossLinks";
 import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
+/* R11-S13 (M5): `RegisterDatasourceForm` draws itself in `adminpanel` chrome.
+   Reusing the component means reusing its stylesheet too -- importing the
+   markup and re-describing it in `SourcesScreen.css` would be a second copy of
+   the thing this merge exists to stop having two of. */
+import "./AdministrationScreen.css";
 import "./SourcesScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -375,6 +381,28 @@ export function SourcesScreen() {
   const [projectGenerating, setProjectGenerating] = useState<"markdown" | "json" | null>(null);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
 
+  /* R11-S13 (M5): registering a source is the first step of the journey this
+     screen owns the rest of, and it used to be on a different screen entirely
+     -- an operator had to open Administration to create a source, then find
+     their way back here to test its connection and schedule its first scan.
+     `RegisterDatasourceForm` is mounted, not re-implemented: it is the same
+     component Administration renders, which is why this merge adds a form and
+     no second POST path.
+
+     Administration KEEPS its copy. Org/project/workspace administration is a
+     sequence -- organization, line of business, project, source, binding --
+     and lifting the fourth step out of it would leave a wizard with a hole in
+     the middle. Two mount points, one component, one endpoint.
+
+     Gated on `CONNECTION_ROLES`, imported from the pane below rather than
+     re-listed here, because `create_datasource` and `test_datasource` accept
+     the same two roles: an operator who is offered "register" must also be
+     offered the "test connection" that follows it. Per-view, not per-screen --
+     the rest of Sources is a read model and stays open to everyone. Fails open
+     while the session is unresolved; the server's 403 is the authority. */
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const mayRegister = roleAllows(useSession().me?.roles, CONNECTION_ROLES);
+
   /* The fleet, through the one shared picker (R11-D7). `search` is the
      screen's `?q=` sent to the route's own `q=`, not a filter over a loaded
      page: on a fleet past the page budget the two answer differently, and
@@ -498,6 +526,50 @@ export function SourcesScreen() {
           {projectNotice && <span className="srcscreen__projectnotice">{projectNotice}</span>}
         </div>
       )}
+
+      {mayRegister ? (
+        <div className="srcscreen__register">
+          {/* The disclosure pattern `ScopePicker` already uses in this shell:
+              a real button carrying `aria-expanded`/`aria-controls` over a
+              `hidden` panel, so the form is one Tab and one Enter away and is
+              absent from the tab order while it is closed. Collapsed by
+              default because this screen's job is the fleet; registering is
+              the step you arrive here to do once. */}
+          <button
+            type="button"
+            className="srcscreen__registertoggle"
+            aria-expanded={registerOpen}
+            aria-controls="sources-register"
+            onClick={() => setRegisterOpen((open) => !open)}
+          >
+            <span aria-hidden="true">{registerOpen ? "−" : "+"}</span>
+            Register a data source
+          </button>
+          <div id="sources-register" hidden={!registerOpen}>
+            <RegisterDatasourceForm
+              projects={scope?.projects ?? []}
+              onCreated={(ds) => {
+                /* Three reads, no optimistic row. `scope.refresh()` because the
+                   new source belongs in every other screen's picker too; `load()`
+                   because this screen's fleet is the server's list, not a local
+                   array; `?source=` because the next step -- Test connection --
+                   lives in the detail pane that field opens. Registration
+                   deliberately does not chain `POST /datasources/{id}/test`
+                   (`AdministrationScreen.tsx`'s stated scope cut); this hands the
+                   operator to the screen that does own it instead. */
+                scope?.refresh();
+                load();
+                setParams({ source: ds.id });
+              }}
+            />
+            <p className="srcscreen__registernote">
+              Registering does not test the connection. The new source is selected in
+              the fleet below — open <b>Source administration</b> in its detail pane to
+              test it and schedule its first scan.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className="srcscreen__filters">
         <Field label="Search">

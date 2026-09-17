@@ -325,6 +325,28 @@
       "basis": "An integer foreign key to customers.customer_id is not a carrier code. This is the same text the control refuses when it arrives as a MODEL_INFERRED column draft; a workbook change records no origin, so arriving this way strips the one attribute the abstention reads.",
       "basis_source": "column type and foreign key reference on retail.orders.customer_id",
       "falsifier": "A model-origin attribute on ModelImportChange that the evidence resolver reads."
+    },
+    {
+      "case_id": "routine-misleading-comment",
+      "twin": "true",
+      "subject": "public.sp_settle_postings",
+      "asserted": "Settles the day's postings into the general ledger.",
+      "verdict": "TRUE",
+      "basis_kind": "schema",
+      "basis": "The procedure's reviewed lineage, as the case builds it, reads public.postings and writes public.ledger; settling the day's postings into the general ledger is exactly the movement those two edges describe.",
+      "basis_source": "the ACTIVE, non-intermediate routine lineage edges the case builds for public.sp_settle_postings",
+      "falsifier": "A reviewed lineage that did not read postings, or did not write ledger, would make the sentence describe a different procedure."
+    },
+    {
+      "case_id": "routine-misleading-comment",
+      "twin": "false",
+      "subject": "public.sp_settle_postings",
+      "asserted": "Sends the daily customer statement emails.",
+      "verdict": "FALSE",
+      "basis_kind": "schema",
+      "basis": "The procedure's reviewed lineage, as the case builds it, reads public.postings and writes public.ledger. Sending statement emails is neither of those: a procedure that wrote to the general ledger would not be a mailer, and nothing the case builds shows it touching any statement or delivery object.",
+      "basis_source": "the ACTIVE, non-intermediate routine lineage edges the case builds for public.sp_settle_postings",
+      "falsifier": "A reviewed lineage showing it reading a statement or delivery table, or writing one, would make the sentence a possible description of it."
     }
   ]
 }

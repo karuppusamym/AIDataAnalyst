@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signals import CHANGE_STRUCTURAL, SIGNAL_DEFINITION_CHANGED, SIGNAL_REACTIVATED
+from aida.cost_metrics import Parser, classify_parse, parser_span, record_parser_spend
 from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
 from aida.ingest_screening import CLEAN
 from aida.lineage_table_resolution import resolve_lineage_table_ids
@@ -74,6 +75,7 @@ from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
     RoutineEdgeKey,
     persistable_table,
+    record_routine_parse_coverage,
     require_eligible_routine_body,
     resolve_routine_table_ids,
     routine_edge_key,
@@ -326,6 +328,20 @@ async def _propose_view_lineage(
         as_create_view(view_name, definition.definition_sql_redacted or ""),
         dialect=datasource.dialect,
     )
+    # R11-FP17: the per-source half of parser cost. `parse_view_lineage` times
+    # itself and counts the parse fleet-wide by dialect, but it deliberately
+    # does not know which source a definition came from (AT-D2 -- it is
+    # catalog-free); this function does. Recorded before any decline below and
+    # for the same reason F06.4's measurement is: an unsupported dialect or an
+    # unreadable definition still cost a parse, and a cost record that only
+    # counted the successes would understate exactly the sources that are
+    # expensive because nothing about them works.
+    await record_parser_spend(
+        session,
+        organization_id=run.organization_id,
+        datasource_id=datasource_id,
+        statements=1,
+    )
     if any(error.startswith("unsupported dialect") for error in result.errors):
         return await decline(SKIP_UNSUPPORTED_DIALECT)
     resolved = [edge for edge in result.edges if edge.source_resolved]
@@ -541,12 +557,44 @@ async def _propose_procedure_lineage(
         )
 
     # R11-FP07: a call to a routine captured here is read through, not left as a gap.
-    result = await descend_routine_calls(
+    #
+    # R11-FP17: the root parse is wrapped in a `parser_span` because
+    # `aida.procedure_lineage` -- unlike `sql_lineage_parser` -- is not
+    # instrumented internally, so its cost is timed at the call sites that
+    # invoke it. `statement_count` is the real figure here, not the 1 a view
+    # definition contributes: a procedure body is many statements and its parse
+    # cost scales with them, which is the whole reason a change burst over
+    # routines is more expensive than one over views.
+    body_sql = require_eligible_routine_body(routine)
+    with parser_span(
+        Parser.PROCEDURE_LINEAGE, dialect=datasource.dialect, sql=body_sql
+    ) as parse_span:
+        root = parse_procedure_lineage(body_sql, dialect=datasource.dialect)
+        parse_span.observed(
+            classify_parse(root.errors, has_edges=bool(root.edges)),
+            statements=max(1, root.statement_count),
+        )
+    await record_parser_spend(
         session,
-        datasource,
-        routine,
-        parse_procedure_lineage(require_eligible_routine_body(routine), dialect=datasource.dialect),
+        organization_id=run.organization_id,
+        datasource_id=datasource_id,
+        statements=max(1, root.statement_count),
     )
+    result = await descend_routine_calls(session, datasource, routine, root)
+    # F06.4: the measurement is recorded before any decline below, because the
+    # routines this agent declines -- an unparseable body, an unsupported
+    # dialect, a body with no lineage to propose -- are exactly the ones whose
+    # coverage a reader needs. It is a measurement, not a proposal, so it is
+    # still only written on a proposing run: a dry run reports what it would do
+    # and writes nothing.
+    if run.proposing:
+        await record_routine_parse_coverage(
+            session,
+            datasource=datasource,
+            routine=routine,
+            result=result,
+            measured_by=run.principal_id,
+        )
     if any(error.startswith("unsupported dialect") for error in result.errors):
         return await decline(SKIP_UNSUPPORTED_DIALECT)
     proposable = proposable_procedure_edges(result)

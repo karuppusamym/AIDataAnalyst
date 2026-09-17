@@ -22,11 +22,14 @@ executor returning rows full of sentinels. Everything that path persists (the
 is then searched for those sentinels.
 
 That is narrower than the specced fixture in one specific way, stated plainly: it
-proves the *query* path is value-free, not the ingestion and profiling pipelines,
-which cannot run without a source. The structural tests below cover the rest by
-enumeration instead -- every mapped column, every profile snapshot field, every
-dialect -- so a value-bearing column added tomorrow fails immediately even though
-no fixture exercises it.
+proves the *query* path is value-free end to end, and it proves the *profiling*
+path is value-free from the connector boundary inwards -- the profiling activity
+is driven against a fake connector (`_SentinelFacetConnector`, R11-FP04), which
+is where source values would enter, but there is no real warehouse behind it.
+Ingestion is covered the same way, one helper down. The structural tests below
+cover the rest by enumeration -- every mapped column, every profile snapshot
+field, every dialect -- so a value-bearing column added tomorrow fails
+immediately even though no fixture exercises it.
 """
 
 import json
@@ -40,7 +43,12 @@ from sqlalchemy import inspect as sqlalchemy_inspect
 
 from aida import models
 from aida.config import Settings
-from aida.connectors.base import ColumnProfileSnapshot, TableProfileSnapshot
+from aida.connectors.base import (
+    ColumnProfileSnapshot,
+    ConnectorCapabilities,
+    ProfileFacetStatus,
+    TableProfileSnapshot,
+)
 from aida.connectors.registry import connector_registry
 from aida.models import AuditEvent, DataSource, OutboxEvent, QueryExecution
 from aida.query_gateway import (
@@ -171,6 +179,16 @@ async def test_no_source_values_in_control_plane(monkeypatch: pytest.MonkeyPatch
         "the sentinel never reached the result set, so the scan above proved nothing"
     )
 
+    # R11-FP04 widened the profiling path: ten new facet columns on
+    # `column_profile`/`table_profile`. The same scan has to cover them, and
+    # the interesting part is that only *one* of them can hold a string a
+    # connector chose -- a facet's reason code. That is the field the obvious
+    # implementation fills with the driver's own message, which routinely quotes
+    # the offending row (the rule this file already enforces for
+    # `analysis_run.error_message`). So the profiling half of this scan plants a
+    # sentinel exactly there.
+    await _scan_the_profiling_path_for_sentinels(monkeypatch)
+
 
 async def test_the_control_plane_scan_would_notice_a_leak(
     monkeypatch: pytest.MonkeyPatch,
@@ -296,7 +314,13 @@ def test_sql_audit_digest_is_keyed_and_does_not_carry_the_statement() -> None:
 
 # --- profiles contain statistics only ---------------------------------------
 
-_STATISTIC_ONLY_TYPES = (TableProfileSnapshot, ColumnProfileSnapshot)
+# R11-FP04 added `ProfileFacetStatus` -- the per-column register of facets an
+# engine could not produce. It belongs in this ratchet for the same reason the
+# two snapshots do: it travels the profiling path, it is the newest place a
+# field could be added, and a `mode_value` or `example` on it would reach
+# `column_profile.unavailable_facets` as JSON, where the mapped-column ratchet
+# below cannot see it.
+_STATISTIC_ONLY_TYPES = (TableProfileSnapshot, ColumnProfileSnapshot, ProfileFacetStatus)
 
 # Field names that would carry a source value rather than a statistic about one.
 _VALUE_BEARING_FIELD_FRAGMENTS = (
@@ -817,6 +841,266 @@ async def test_the_worker_scan_would_notice_a_leak() -> None:
     assert SENTINEL_DRIVER_DETAIL in str(excinfo.value), (
         "the fixture connector's exception does not even carry the sentinel; the "
         "positive test above would pass regardless of whether the fix works"
+    )
+
+
+# --- R11-FP04: the widened profiling path -----------------------------------
+#
+# The value-free aggregate half of FP-04 added ten facet columns to
+# `column_profile`/`table_profile`. Nine of them can only ever hold a number, a
+# boolean or a code this codebase defines. Two are `String` columns a *connector*
+# fills in -- `table_profile.observation_scope` and each entry's `reason_code` in
+# `column_profile.unavailable_facets` -- and a connector is precisely where a
+# source driver's own text is in scope. The honest-looking implementation of an
+# unavailable reason forwards the driver's message, which is the same mistake
+# AU-4 fixed one column over.
+#
+# So both are closed vocabularies, and the write path drops anything else
+# (`atlas.modules.profiling.facets.persistable_facet_status` /
+# `persistable_observation_scope`). These drive the real activity to prove it.
+
+SENTINEL_FACET_REASON = "ZZQ-SENTINEL-FACETREASON-2f6b"
+SENTINEL_SCOPE = "ZZQ-SENTINEL-SCOPE-b840"
+_PROFILING_SENTINELS = (SENTINEL_FACET_REASON, SENTINEL_SCOPE)
+
+
+class _SentinelFacetConnector:
+    """A connector that answers with value-bearing text in every string it controls.
+
+    Shaped like a plausible mistake rather than an implausible attack: a driver
+    that could not group by a column raises quoting the offending row, and an
+    adapter author who passes that message through as the facet's
+    `unavailable_reason` has written something that looks careful and leaks.
+    """
+
+    capabilities = ConnectorCapabilities()
+
+    async def profile_table(self, *args: Any, **kwargs: Any) -> Any:
+        return TableProfileSnapshot(
+            row_count_estimate=1000,
+            sampled_row_count=1000,
+            columns=(
+                ColumnProfileSnapshot(
+                    name="account_no",
+                    null_count=0,
+                    non_null_count=1000,
+                    approximate_distinct_count=1000,
+                    min_length=3,
+                    max_length=40,
+                    blank_count=0,
+                    whitespace_only_count=0,
+                    length_bucket_counts=(0, 1000, 0, 0, 0),
+                    frequency_entropy_bits=9.97,
+                    facet_status=(
+                        ProfileFacetStatus(
+                            "ENTROPY",
+                            "UNAVAILABLE",
+                            f"GROUP BY failed on (account_no)=({SENTINEL_FACET_REASON})",
+                        ),
+                    ),
+                ),
+            ),
+            observation_scope=SENTINEL_SCOPE,
+        )
+
+
+async def _scan_the_profiling_path_for_sentinels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the real `profile_table_task` and scan every row it persisted.
+
+    Called from `test_no_source_values_in_control_plane` so that the one test
+    named for this invariant covers the profiling path too rather than only the
+    query path -- which is the gap that let envelope 1.1's tables sit outside
+    this file's scan entirely (see the ingestion test above).
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import ColumnProfile, TableProfile
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, table = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_FP04_SENTINEL"
+            )
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_FP04_SENTINEL", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry,
+                "create",
+                lambda *a, **k: _SentinelFacetConnector(),
+            )
+
+            result = await activities.profile_table_task(
+                {"run_id": str(run.id), "table_id": str(table.id)}
+            )
+            assert result["profiled_columns"] == 1, (
+                "the activity did not persist a column profile, so the scan below "
+                "would be looking at nothing"
+            )
+
+            rows: list[Any] = [
+                *(await session.scalars(select(TableProfile))).all(),
+                *(await session.scalars(select(ColumnProfile))).all(),
+                *(await session.scalars(select(AuditEvent))).all(),
+                *(await session.scalars(select(OutboxEvent))).all(),
+            ]
+            leaks = [
+                f"{type(row).__name__}: {rendered[:200]}"
+                for row in rows
+                for rendered in _persisted_values(row)
+                for sentinel in _PROFILING_SENTINELS
+                if sentinel in rendered
+            ]
+            assert leaks == [], f"a connector's own text reached a profile row: {leaks}"
+
+            # Not merely absent: the facet is still recorded as unavailable, with
+            # the reason replaced. A write path that dropped the whole entry
+            # would pass the scan above while losing the honesty the facet
+            # register exists for.
+            profile = (await session.scalars(select(ColumnProfile))).one()
+            assert profile.unavailable_facets == [
+                {"facet": "ENTROPY", "status": "UNAVAILABLE", "reason_code": "UNRECORDED"}
+            ]
+            table_profile = (await session.scalars(select(TableProfile))).one()
+            assert table_profile.observation_scope is None, (
+                "an unrecognised scope must store NULL ('not recorded'), which is "
+                "also what stops it silently re-enabling the derivation R11-FP04 replaced"
+            )
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+
+async def test_the_profiling_sentinel_scan_would_notice_a_leak() -> None:
+    """Negative control for `_scan_the_profiling_path_for_sentinels`.
+
+    Proves the fixture connector really does hand the write path value-bearing
+    text in both strings it controls. Without this, a fixture that quietly
+    stopped carrying a sentinel -- a renamed field, a changed default -- would
+    leave the scan passing forever while checking nothing.
+    """
+    snapshot = await _SentinelFacetConnector().profile_table()
+
+    assert snapshot.observation_scope == SENTINEL_SCOPE
+    assert SENTINEL_FACET_REASON in snapshot.columns[0].facet_status[0].reason_code
+
+
+async def test_no_profile_facet_reaches_a_trace_span_or_an_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-FP04's egress axes, in one pass: spans, audit, outbox, error_message.
+
+    The profiling activity is driven inside a real `@traced` call so a span
+    genuinely exists -- otherwise the span half of this assertion would be
+    vacuous, which is the failure mode `test_the_trace_span_scan_would_notice_a
+    _leak` exists to name. The connector both carries a sentinel facet reason
+    *and* raises with a sentinel in its message, so one run exercises the
+    success-path persistence and the failure-path `error_message` rule together.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.observability as observability_module
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import AnalysisRun
+    from aida.observability import TracingConfig, configure_tracing, traced
+
+    if not observability_module._tracer_configured:
+        assert configure_tracing(TracingConfig(enabled=True, exporter="console")) is True
+    exporter = InMemorySpanExporter()
+    trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+
+    class _FacetAndFailureConnector(_SentinelFacetConnector):
+        async def profile_table(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError(
+                "could not compute the entropy facet: GROUP BY failed on "
+                f"(account_no)=({SENTINEL_FACET_REASON})"
+            )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, table = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_FP04_EGRESS"
+            )
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_FP04_EGRESS", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry,
+                "create",
+                lambda *a, **k: _FacetAndFailureConnector(),
+            )
+
+            @traced
+            async def profile_under_a_span(organization_id: str) -> None:
+                await activities.profile_table_task(
+                    {"run_id": str(run.id), "table_id": str(table.id)}
+                )
+
+            with pytest.raises(RuntimeError, match="entropy facet"):
+                await profile_under_a_span(organization_id=str(run.organization_id))
+
+            failed = await session.get(AnalysisRun, run.id)
+            assert failed is not None and failed.error_message is not None
+            assert SENTINEL_FACET_REASON not in failed.error_message
+
+            rows: list[Any] = [
+                failed,
+                *(await session.scalars(select(AuditEvent))).all(),
+                *(await session.scalars(select(OutboxEvent))).all(),
+            ]
+            leaks = [
+                f"{type(row).__name__}: {rendered[:200]}"
+                for row in rows
+                for rendered in _persisted_values(row)
+                if SENTINEL_FACET_REASON in rendered
+            ]
+            assert leaks == [], f"a facet reason reached an audit or event payload: {leaks}"
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+    spans = exporter.get_finished_spans()
+    assert spans, "no span was exported, so the span half of this test proved nothing"
+    span_text: list[str] = []
+    for span in spans:
+        span_text.append(span.name)
+        span_text.extend(str(value) for value in (span.attributes or {}).values())
+        for event in span.events:
+            span_text.append(event.name)
+            span_text.extend(str(value) for value in (event.attributes or {}).values())
+    assert not any(SENTINEL_FACET_REASON in text for text in span_text), (
+        "the facet reason reached an exported span; `observability.traced` records "
+        "only error_class for exactly this reason (TS-3)"
     )
 
 

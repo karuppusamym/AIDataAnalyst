@@ -87,8 +87,15 @@ from aida.context_product_api import (
     replace_context_product_role_bindings,
     validate_context_product_references,
 )
+from aida.cost_metrics import record_parser_spend
 from aida.document_ingestion import remap_document
-from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataViewDefinition,
+    RoutineDescriptionDraft,
+    RoutineDocumentationVersion,
+)
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import CLEAN
 from aida.lineage_agent import as_create_view
@@ -123,6 +130,15 @@ from aida.procedure_tool_blueprint import (
 )
 from aida.query_gateway import catalog_columns
 from aida.relationship_drift import check_relationship_drift, relationship_drift_pending
+from aida.routine_description_service import (
+    ROUTINE_DESCRIPTION_DRAFT_OBJECT_TYPE,
+    compose_routine_draft_text,
+    gather_routine_evidence,
+    routine_definition_moved,
+    routine_evidence_payload,
+    routine_refusal_reason,
+    score_routine_evidence,
+)
 from aida.routine_lineage_edges import RoutineNotEligibleError
 from aida.schemas import GovernedToolVersionCreate, ToolParameterDefinition
 from aida.security import SecurityContext
@@ -388,6 +404,17 @@ async def _supersede_lineage(
         result = parse_view_lineage(
             as_create_view(f"{schema.name}.{view.name}", definition.definition_sql_redacted or ""),
             dialect=datasource.dialect,
+        )
+        # R11-FP17: attributed to the source, because this is the change-burst
+        # path. A rescan that redefines a hundred views makes this loop parse a
+        # hundred definitions, and that burst is the parser spend the review
+        # asks to see per source -- `parse_view_lineage` times it fleet-wide by
+        # dialect but cannot know whose source it was.
+        await record_parser_spend(
+            session,
+            organization_id=organization_id,
+            datasource_id=datasource.id,
+            statements=1,
         )
         if not result.edges:
             # A definition the parser cannot read says nothing about which edges are gone.
@@ -757,6 +784,154 @@ async def _rebuild_descriptions(
             continue
         except Exception:  # noqa: BLE001 -- one rebuild must not stop the pass
             logger.exception("context_rebuild_description_failed", table_id=str(table_id))
+            outcome.failed += 1
+            continue
+        outcome.descriptions_drafted += 1
+
+
+async def _current_approved_routine_description(
+    session: AsyncSession, organization_id: UUID, routine_id: UUID
+) -> RoutineDescriptionDraft | None:
+    """The approved draft whose text is the routine's current published description."""
+    draft: RoutineDescriptionDraft | None = await session.scalar(
+        select(RoutineDescriptionDraft)
+        .join(
+            RoutineDocumentationVersion,
+            RoutineDocumentationVersion.id == RoutineDescriptionDraft.published_version_id,
+        )
+        .where(
+            RoutineDescriptionDraft.organization_id == organization_id,
+            RoutineDescriptionDraft.routine_id == routine_id,
+            RoutineDescriptionDraft.status == "APPROVED",
+            RoutineDocumentationVersion.status == "APPROVED",
+        )
+        .order_by(RoutineDescriptionDraft.reviewed_at.desc())
+        .limit(1)
+    )
+    return draft
+
+
+async def _regenerate_routine_description(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    routine: MetadataRoutine,
+    previous_id: UUID,
+) -> None:
+    evidence = await gather_routine_evidence(session, routine)
+    drafted_text = compose_routine_draft_text(evidence)
+    payload = routine_evidence_payload(evidence)
+    refusal = await routine_refusal_reason(
+        session, routine.id, drafted_text=drafted_text, payload=payload
+    )
+    if refusal is not None:
+        raise _RebuildRefused(f"DESCRIPTION_REFUSED_{refusal}")
+    scores = score_routine_evidence(evidence)
+    if scores.overall < MINIMUM_EVIDENCE_FOR_REVIEW:
+        raise _RebuildRefused("DESCRIPTION_BELOW_EVIDENCE_BAR")
+    draft = RoutineDescriptionDraft(
+        organization_id=organization_id,
+        datasource_id=routine.datasource_id,
+        routine_id=routine.id,
+        drafted_text=drafted_text,
+        text_fingerprint=text_fingerprint(drafted_text),
+        accuracy_score=scores.accuracy,
+        clarity_score=scores.clarity,
+        style_score=scores.style,
+        completeness_score=scores.completeness,
+        overall_score=scores.overall,
+        evidence={**payload, "origin": "REBUILD", "rebuilds_draft_id": str(previous_id)},
+        status="PENDING_APPROVAL",
+        base_description_version=evidence.current_description_version,
+        created_by=CONTEXT_REBUILD_PRINCIPAL,
+    )
+    session.add(draft)
+    await session.flush()
+    review = await _open_review(
+        session,
+        context,
+        organization_id,
+        object_type=ROUTINE_DESCRIPTION_DRAFT_OBJECT_TYPE,
+        object_id=draft.id,
+        details={"rebuilds_draft_id": str(previous_id), "overall_score": scores.overall},
+    )
+    draft.governance_review_id = review.id
+
+
+async def _rebuild_routine_descriptions(
+    session: AsyncSession,
+    organization_id: UUID,
+    context: SecurityContext,
+    outcome: RebuildOutcome,
+) -> None:
+    """R11-FP08: redraft a published routine description whose body has moved.
+
+    The routine half of `_rebuild_descriptions`, and it exists for the same
+    reason: a description of a procedure is a statement about a body, and the
+    change signals that say the body moved already run end to end
+    (`change_signal_models.MetadataChangeSignal` carries a `ROUTINE` subject
+    kind, `ingestion` records the signal on a fingerprint or availability move,
+    and `change_signal_processing` routes it). Without this pass a routine
+    redefined after its description was approved would keep serving prose about
+    a body that no longer exists, and nothing would ever propose the
+    replacement -- the drift `routine_definition_moved` detects at approval time
+    but cannot fix for an already-published version.
+
+    Drift is asked of `routine_definition_moved`, not re-derived here, so the
+    pass and the approval guard cannot disagree about what "moved" means. A
+    routine with a draft already open is left alone: somebody is on it.
+    """
+    routine_ids = list(
+        await session.scalars(
+            select(RoutineDescriptionDraft.routine_id)
+            .join(MetadataRoutine, MetadataRoutine.id == RoutineDescriptionDraft.routine_id)
+            .where(
+                RoutineDescriptionDraft.organization_id == organization_id,
+                RoutineDescriptionDraft.status == "APPROVED",
+                MetadataRoutine.status == "ACTIVE",
+            )
+            .distinct()
+        )
+    )
+    for routine_id in routine_ids:
+        routine = await session.get(MetadataRoutine, routine_id, populate_existing=True)
+        if routine is None:
+            continue
+        approved = await _current_approved_routine_description(
+            session, organization_id, routine_id
+        )
+        if approved is None or await routine_definition_moved(session, approved) is None:
+            continue
+        waiting = await session.scalar(
+            select(RoutineDescriptionDraft.id)
+            .where(
+                RoutineDescriptionDraft.routine_id == routine_id,
+                RoutineDescriptionDraft.status.in_(_OPEN_DESCRIPTION_STATUSES),
+            )
+            .limit(1)
+        )
+        if waiting is not None:
+            continue
+        previous_id = approved.id
+        try:
+            async with session.begin_nested():
+                await _regenerate_routine_description(
+                    session, organization_id, context, routine, previous_id
+                )
+        except _RebuildRefused as refused:
+            # Identical reasoning to the table branch above: a reviewer already
+            # refused these words on this evidence, so no pass can move it on.
+            # The published description is still written against a body that
+            # moved, and that is what a hold is for.
+            if refused.code in _DESCRIPTION_REJECTED_CODES:
+                outcome.wait(WAIT_DESCRIPTION_AWAITING_AUTHOR)
+            else:
+                outcome.block(refused.code)
+            continue
+        except Exception:  # noqa: BLE001 -- one rebuild must not stop the pass
+            logger.exception(
+                "context_rebuild_routine_description_failed", routine_id=str(routine_id)
+            )
             outcome.failed += 1
             continue
         outcome.descriptions_drafted += 1
@@ -1834,6 +2009,10 @@ async def run_context_rebuild(
     await _supersede_lineage(session, organization_id, outcome, effective_now)
     await _rebuild_tools(session, organization_id, context, settings, outcome)
     await _rebuild_descriptions(session, organization_id, context, outcome)
+    # R11-FP08: the same pass for routine descriptions. A separate function
+    # rather than a widened one: the two read different stores and different
+    # drift checks, and the only thing they share is the outcome counter.
+    await _rebuild_routine_descriptions(session, organization_id, context, outcome)
     await _rebuild_document_claims(session, organization_id, context, outcome, effective_now)
     await _propose_deprecations(session, organization_id, context, settings, outcome)
     await _rebuild_products(session, organization_id, context, outcome)

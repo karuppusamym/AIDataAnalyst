@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
+from aida.cost_metrics import observe_model_call
 from aida.models import KillSwitchState
 from aida.secrets import SecretResolutionError, SecretResolver
 
@@ -625,6 +626,13 @@ class ProviderNeutralModelGateway:
             provider_input_tokens=usage.input_tokens if usage is not None else None,
             provider_output_tokens=usage.output_tokens if usage is not None else None,
         )
+        # R11-FP17: one place, so every caller of this gateway is counted once and
+        # none of them has to remember to. Pure metric publication -- no session
+        # is touched and no row is written, so this adds no database work to the
+        # model path. Per-source attribution needs a datasource this gateway is
+        # never given (it receives an organization and a route), and lives in
+        # `cost_metrics.record_model_spend`, called by the callers that know it.
+        observe_model_call(evidence)
         return output, evidence
 
 

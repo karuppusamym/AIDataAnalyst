@@ -75,6 +75,22 @@ const DATASOURCE: DataSourceRead = {
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
 };
 
+/** A second source in ANOTHER project, which is what makes a selected product
+ *  unhonourable rather than merely unselected (F08). */
+const DATASOURCE_OTHER_PROJECT: DataSourceRead = {
+  ...DATASOURCE,
+  id: "ds_2",
+  project_id: "proj2",
+  name: "bigquery_eu",
+};
+
+/** The list route's answer, per project: `proj1` offers the published product,
+ *  `proj2` offers nothing. */
+function productsByProject(projectId: string): PageOf<ContextProductRead> {
+  const items = projectId === "proj1" ? [PUBLISHED_PRODUCT] : [];
+  return { items, limit: 200, offset: 0, total: items.length };
+}
+
 const ANALYSIS_RESPONSE: AgentAnalysisResponse = {
   agent_run_id: "run_fresh_1",
   status: "SUCCEEDED",
@@ -416,21 +432,186 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
       preferred_tool_version_id: "tv_orders_lookup_1",
     });
 
-    // The answer says which published version it stood on.
-    expect(await screen.findByText("version 2")).toBeInTheDocument();
+    // The answer says which product answered and which published version of it
+    // stood behind the answer (F08: `version 2` alone named neither).
+    expect(await screen.findByText("Customer revenue · version 2")).toBeInTheDocument();
     // …and the choice survives a reload or a shared link.
     expect(new URLSearchParams(location.search).get("product")).toBe("customer-revenue");
   });
 
-  it("renders a context-product refusal as its own state rather than a policy rejection (R11-FP12)", async () => {
-    fetchContextProducts.mockResolvedValue({
-      items: [PUBLISHED_PRODUCT],
-      limit: 200,
-      offset: 0,
-      total: 1,
+  /* -------------------------------------------------------------------------
+     F08 — the seven gaps around asking through a product.
+  ------------------------------------------------------------------------- */
+
+  it("asks the list route for only the products this caller could ask through (F08)", async () => {
+    // Filtering by status client-side offered a lifecycle reader every published
+    // product in the project, including the ones whose consumer roles exclude
+    // them -- and the ask then refused with CONSUMER_ROLE_REQUIRED. "Which roles
+    // do I hold" is not in the listing, so only the server can answer this.
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    await waitFor(() =>
+      expect(fetchContextProducts).toHaveBeenCalledWith(
+        "proj1",
+        { limit: 200, askable: true },
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("puts the product in the answer's own permalink (F08)", async () => {
+    // Without it a shared link reopened the run beside a picker set to the whole
+    // datasource, so the next question asked from that link was wider than the
+    // one being shared.
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: ANALYSIS_RESPONSE.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
     });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(await screen.findByLabelText("Context product"), {
+      target: { value: "customer-revenue" },
+    });
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    // `CopyLinkButton` titles itself with the URL it would copy.
+    const permalink = await screen.findByRole("button", { name: "Copy permalink" });
+    expect(permalink.getAttribute("title")).toContain("product=customer-revenue");
+    expect(permalink.getAttribute("title")).toContain("run=run_fresh_1");
+    expect(permalink.getAttribute("title")).toContain("#/analyst/analyst");
+  });
+
+  it("drops a product the new datasource's project does not offer, and stops sending it (F08)", async () => {
+    // The picker rendered blank (no matching option) while the request still
+    // carried the key: the screen said "no product" and the ask said otherwise.
+    listOrgDatasources.mockResolvedValue({
+      items: [DATASOURCE, DATASOURCE_OTHER_PROJECT],
+      limit: 500,
+      offset: 0,
+      total: 2,
+    });
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
+    runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: ANALYSIS_RESPONSE.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
+    });
+    history.replaceState(null, "", "/?ds=ds_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const picker = await screen.findByLabelText("Context product");
+    await waitFor(() => expect(picker).toHaveValue("customer-revenue"));
+
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_2" } });
+
+    await waitFor(() => expect(new URLSearchParams(location.search).get("product")).toBeNull());
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalled());
+    expect(runAgentAnalysis.mock.calls[0]![1]).toEqual({ question: "net revenue please" });
+  });
+
+  it("says the product list could not be read rather than that there are none (F08)", async () => {
+    // Both used to render as "No published product on this project", so a 403 or
+    // a dropped connection read as a settled fact about the estate.
+    const { ApiError } = await import("../lib/api");
+    fetchContextProducts.mockRejectedValue(new ApiError(403, "one of these roles is required: Analyst"));
+    runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: ANALYSIS_RESPONSE.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
+    });
+    history.replaceState(null, "", "/?ds=ds_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent(/could not be listed/);
+    expect(failure).toHaveTextContent(/one of these roles is required: Analyst/);
+    expect(failure).toHaveTextContent(/not the same as there being none/);
+    expect(screen.queryByText("No published product you can ask through")).not.toBeInTheDocument();
+
+    // The key stays in the URL -- the next load may honour it -- but a key the
+    // picker cannot show as selected is not sent.
+    expect(new URLSearchParams(location.search).get("product")).toBe("customer-revenue");
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalled());
+    expect(runAgentAnalysis.mock.calls[0]![1]).toEqual({ question: "net revenue please" });
+  });
+
+  /* Three refusals, three remedies (F08). Collapsed into one kind they shared
+     one title and showed the server's raw token as the message. */
+  const REFUSALS: ReadonlyArray<readonly [string, string, RegExp]> = [
+    [
+      "CONTEXT_PRODUCT_NOT_AVAILABLE",
+      "That context product cannot be asked through",
+      /no published version/,
+    ],
+    [
+      "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED",
+      "You are not one of this product's consumers",
+      /no self-service access request/,
+    ],
+    [
+      "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE",
+      "This product's tables cannot answer that question",
+      /a table the product does not name/,
+    ],
+  ];
+
+  for (const [token, title, remedy] of REFUSALS) {
+    it(`renders ${token} as its own refusal with its own remedy (F08)`, async () => {
+      fetchContextProducts.mockImplementation(async (projectId: string) =>
+        productsByProject(projectId),
+      );
+      runAgentAnalysis.mockRejectedValue(new (await import("../lib/api")).ApiError(422, token));
+
+      const AskScreen = await loadScreen();
+      render(<AskScreen />);
+      await pickDatasource();
+      fireEvent.change(await screen.findByLabelText("Context product"), {
+        target: { value: "customer-revenue" },
+      });
+      fireEvent.change(screen.getByLabelText("Question"), { target: { value: "something else" } });
+      fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+      const refusal = await screen.findByRole("alert", { name: "Context product refusal" });
+      expect(within(refusal).getByText(title)).toBeInTheDocument();
+      expect(refusal).toHaveTextContent(remedy);
+      // Not a policy rejection, and never the server's own token as the message.
+      expect(screen.queryByText("The generated query was rejected by policy")).not.toBeInTheDocument();
+      expect(refusal).not.toHaveTextContent(token);
+    });
+  }
+
+  it("offers clearing the product as the one action a refusal actually has (F08)", async () => {
+    // Deliberately not a "request access" button: there is no request-access
+    // route for a context product, and a button that went nowhere would be worse
+    // than the sentence that says where a consumer role comes from.
+    fetchContextProducts.mockImplementation(async (projectId: string) =>
+      productsByProject(projectId),
+    );
     runAgentAnalysis.mockRejectedValue(
-      new (await import("../lib/api")).ApiError(422, "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE"),
+      new (await import("../lib/api")).ApiError(422, "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"),
     );
 
     const AskScreen = await loadScreen();
@@ -442,12 +623,12 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "something else" } });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
 
-    expect(
-      await screen.findByText("This context product cannot answer that question"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText("The generated query was rejected by policy"),
-    ).not.toBeInTheDocument();
+    const refusal = await screen.findByRole("alert", { name: "Context product refusal" });
+    expect(within(refusal).queryByRole("button", { name: /request access/i })).not.toBeInTheDocument();
+    fireEvent.click(within(refusal).getByRole("button", { name: "Choose another product" }));
+
+    await waitFor(() => expect(new URLSearchParams(location.search).get("product")).toBeNull());
+    expect(screen.queryByRole("alert", { name: "Context product refusal" })).not.toBeInTheDocument();
   });
 
   it("distinguishes a disabled-datasource 409 from the AT-9 ambiguity 409", async () => {

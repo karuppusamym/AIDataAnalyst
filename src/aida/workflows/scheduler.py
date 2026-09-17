@@ -58,6 +58,7 @@ from aida.stewardship_api import (
 )
 from aida.task_agent_schedule import run_task_agent_schedule_pass
 from aida.vector_index_service import run_vector_index_rebuild_pass
+from aida.worker_metrics import serve_worker_metrics
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
 logger = structlog.get_logger(__name__)
@@ -1045,6 +1046,12 @@ async def reconcile_cancellation_requests(client: Client, settings: Settings) ->
 async def run_scheduler() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
+    # R11-FP17: before anything else that can block. `run_footprint_metrics_pass`
+    # below publishes the footprint gauges into *this* process's registry, and
+    # `aida.main`'s `/metrics` cannot see them; without this listener they are set
+    # where no scrape can reach. A no-op unless `worker_metrics_port` is set, and
+    # never fatal -- see `aida.worker_metrics`.
+    serve_worker_metrics(settings, process="fleet-scheduler")
     client = await Client.connect(
         settings.temporal_address,
         namespace=settings.temporal_namespace,

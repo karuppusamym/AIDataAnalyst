@@ -525,6 +525,64 @@ describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
     expect(screen.getByText(/confidence 88%/, { selector: ".prop__extra" })).toBeInTheDocument();
   });
 
+  /* R11-FP08: routines gained an Atlas-authored description reviewed through
+     this same queue. Without ROUTINE_DESCRIPTION_DRAFT in OBJECT_TYPES the
+     drafts still arrived but no reviewer could filter to them, and the row
+     fell through to the bare object id. */
+  it("ROUTINE_DESCRIPTION_DRAFT row names the routine and says when the body was not captured", async () => {
+    const routineDraft: ReviewQueueRead["proposals"][number] = {
+      ...PENDING_PROPOSAL,
+      review_id: "rq_routine",
+      object_type: "ROUTINE_DESCRIPTION_DRAFT",
+      object_id: "d7b1f0c2-0000-4000-8000-000000000001",
+      confidence: 0.61,
+      evidence: [
+        // Claim format is `"<key>: <value>"`, exactly as `_proposed_text_item`
+        // and `_dict_evidence_items` emit it in `review_queue_read_model.py`.
+        {
+          category: "DESCRIPTION_DRAFT",
+          claim: "proposed_description: Settles the day's postings into the general ledger.",
+          source: "routine_description_draft:d7b1.drafted_text",
+        },
+        {
+          category: "DESCRIPTION_DRAFT",
+          claim: "signature: SETTLE_LEDGER(IN p_date DATE)",
+          source: "routine_description_draft:d7b1.evidence",
+        },
+        {
+          category: "DESCRIPTION_DRAFT",
+          claim: "body_state: WITHHELD",
+          source: "routine_description_draft:d7b1.evidence",
+        },
+      ],
+      diff: {
+        review_id: "rq_routine",
+        object_type: "ROUTINE_DESCRIPTION_DRAFT",
+        object_id: "d7b1f0c2-0000-4000-8000-000000000001",
+        diffable: false,
+        entries: [],
+      },
+    };
+    fetchReviewQueue.mockResolvedValue(queueOf([routineDraft]));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+
+    // The routine is named by its signature, not by the draft's uuid.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Describe routine SETTLE_LEDGER/, { selector: ".prop__title" }),
+      ).toBeInTheDocument(),
+    );
+    // A draft composed without the body is a weaker claim than one composed
+    // from it, and the score alone does not say which happened.
+    expect(screen.getByText(/body withheld/, { selector: ".prop__extra" })).toBeInTheDocument();
+    // The proposed prose is shown: a description draft has no field diff, so
+    // without it the row asks a reviewer to approve text it never displayed.
+    expect(
+      screen.getByText(/Settles the day's postings/, { selector: ".prop__extra" }),
+    ).toBeInTheDocument();
+  });
+
   it("GLOSSARY_TERM_VERSION row shows the term name in the title and the definition diff below", async () => {
     fetchReviewQueue.mockResolvedValue(queueOf([TERM_VERSION]));
     const ReviewQueueScreen = await loadScreen();

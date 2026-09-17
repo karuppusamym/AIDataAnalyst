@@ -146,6 +146,7 @@ from atlas.modules.profiling.schemas import (  # noqa: E402, I001
     ClassificationFeedIngestResponse as ClassificationFeedIngestResponse,
     ClassificationFeedRecord as ClassificationFeedRecord,
     ColumnProfileRead as ColumnProfileRead,
+    ProfileFacetStatusRead as ProfileFacetStatusRead,
     ProfilingExceptionDecisionRequest as ProfilingExceptionDecisionRequest,
     ProfilingExceptionPolicyCreate as ProfilingExceptionPolicyCreate,
     ProfilingExceptionPolicyRead as ProfilingExceptionPolicyRead,
@@ -458,6 +459,14 @@ class QueryExecutionRequest(ApiModel):
     sql: str = Field(min_length=1, max_length=200_000)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
     semantic_version: str | None = Field(default=None, max_length=100)
+    #: F01: submit this statement through a published context product, so it is
+    #: held to the tables that product names. Optional, and omitting it is the
+    #: pre-F01 behaviour exactly -- but until it existed, the same principal who
+    #: was product-scoped through Ask could submit the same SQL here with no
+    #: product at all, which made the boundary a property of the surface rather
+    #: than of the request. Same field name and meaning as
+    #: `AgentAnalysisRequest.context_product_key`.
+    context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
     # Which workspace is asking (ADR-0018). Optional while the estate migrates: a
     # datasource with exactly one live binding resolves without it. It stops being
     # optional when `unresolved_workspace_posture` flips to DENY, and the request
@@ -1898,6 +1907,129 @@ class ColumnDescriptionDraftBulkSubmitResult(ApiModel):
     #: catalog evidence, not prose -- so a human-written description for such
     #: a column goes through the model workbook instead.
     skipped_below_threshold: int
+
+
+# --- R11-FP08: routine description drafts ----------------------------------
+#
+# The third member of the description family, in the shape the two above
+# already have so one client can render all three. Declared here beside them
+# rather than in `routine_description_api` for the reason every other draft DTO
+# is here: `scripts/generate_ui_types.py` reads `aida.schemas` to emit
+# `ui-next/src/lib/types.ts`, and a DTO declared in a router is a type the UI
+# has to hand-write.
+
+
+class RoutineDescriptionDraftGenerate(ApiModel):
+    """Draft descriptions for up to 100 routines at once.
+
+    Named `routine_ids`, not `schema_ids`: a routine is the unit a description
+    is about, and a schema-wide request would silently include the packages this
+    path refuses (`routine_description_service.ensure_routine_is_describable`).
+    """
+
+    routine_ids: list[UUID] = Field(min_length=1, max_length=100)
+    #: Also draft for routines that already carry an approved description, or
+    #: had one retired through review. Off by default, for the reason the column
+    #: flag carries: generation is for gaps, and a draft over a reviewed (or
+    #: deliberately retired) description is a proposed *replacement* a steward
+    #: should ask for on purpose rather than receive as a side effect.
+    include_described: bool = False
+
+    @model_validator(mode="after")
+    def validate_routine_ids(self) -> "RoutineDescriptionDraftGenerate":
+        if len(set(self.routine_ids)) != len(self.routine_ids):
+            raise ValueError("routine_ids must be unique")
+        return self
+
+
+class RoutineDescriptionDraftRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    routine_id: UUID
+    #: `catalog.schema.routine`, so a reviewer can tell two same-named
+    #: procedures apart without a second read.
+    routine_qualified_name: str
+    routine_type: str
+    drafted_text: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    #: Whether `overall_score` clears the bar a draft must reach to be
+    #: submitted for review. Computed server-side so no client mirrors the
+    #: threshold constant and drifts from it.
+    reviewable: bool
+    evidence: dict[str, Any]
+    status: str
+    #: The routine's description version when this draft was composed (null
+    #: when it had none). Approval refuses if it has moved since.
+    base_description_version: int | None
+    governance_review_id: UUID | None
+    published_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RoutineDescriptionDraftGenerateResult(ApiModel):
+    """What a generation call did, and each thing it deliberately did not do."""
+
+    drafts: list[RoutineDescriptionDraftRead]
+    created: int
+    #: A draft for the routine is already open (DRAFT or PENDING_APPROVAL).
+    skipped_open: int
+    #: The routine already has an approved description, or had one retired
+    #: through review, and `include_described` was false.
+    skipped_described: int
+    #: The would-be draft is identical to one a reviewer already rejected, or
+    #: to text that was approved once and then withdrawn.
+    skipped_duplicate_rejected: int
+    #: Created, but on too little catalog evidence to be submitted for review.
+    below_review_threshold: int
+    #: Requested routines that do not exist, are not ACTIVE, belong to another
+    #: organization, or are not readable by the caller. Counted together on
+    #: purpose: telling "unreadable" apart from "absent" would disclose which
+    #: ids exist.
+    routines_skipped: int
+
+
+class RoutineDescriptionDraftEdit(ApiModel):
+    drafted_text: str = Field(min_length=10, max_length=20_000)
+    #: The text the editor started from. A mismatch means someone else edited
+    #: or submitted the draft in the meantime, and the edit is refused rather
+    #: than silently overwriting theirs.
+    expected_text: str = Field(max_length=20_000)
+
+
+class RoutineDescriptionRead(ApiModel):
+    """A routine detail read's one description field, and where it came from.
+
+    The precedence chain
+    (`routine_description_service.resolve_routine_description`) collapses an
+    approved version, a pending draft and the source system's own comment into
+    one field, exactly as the catalog row does for a table. The flags are what
+    keep that collapse honest: without them a reader cannot tell prose this
+    platform asserts from a proposal nobody has approved.
+    """
+
+    routine_id: UUID
+    routine_qualified_name: str
+    description: str | None
+    #: True when `description` is a draft awaiting review. Never presented as
+    #: something the platform asserts.
+    description_is_proposed: bool
+    #: True when an approved description was retired through review, so a reader
+    #: can be told "described once, retired" rather than shown a blank.
+    documentation_withdrawn: bool
+    #: True when `description` is the source system's own comment rather than
+    #: authored Atlas content. It deliberately still shows after a withdrawal:
+    #: withdrawal returns the routine to the state it was in before anyone here
+    #: described it, and Atlas has no authority over observed source metadata.
+    description_is_source_comment: bool
 
 
 class CoverageDimensionRead(ApiModel):
@@ -3937,3 +4069,120 @@ class ParsedLineageEdgeBulkDecisionResultRead(ApiModel):
     succeeded_count: int
     failed_count: int
     results: list[ParsedLineageEdgeBulkDecisionItemRead]
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-16 §5: the engine x native-object-kind x facet capability
+# matrix, served live by `GET /v1/engines/capability-matrix`. Every field is
+# derived at request time by `aida.engine_capability_matrix`, from the same
+# code `scripts/generate_engine_capability_matrix.py` publishes
+# `Docs/90-reference/engine-capability-matrix.md` from -- so the published
+# page is backed by a live, callable source rather than only a script.
+# ---------------------------------------------------------------------------
+
+
+class EngineCapabilityFacetRead(ApiModel):
+    """One (engine, native object kind, facet) answer.
+
+    `state` is one of `aida.capability_states.CapabilityState`; `reason` is a
+    code from that module's closed vocabulary, or empty where the state needs
+    none. Both are plain strings rather than enums so that adding a state or a
+    reason code stays a backward-compatible widening for every existing
+    consumer.
+    """
+
+    facet: str
+    state: str
+    reason: str
+    evidence: str
+
+
+class EngineCapabilityObjectKindRead(ApiModel):
+    """One native object kind on one engine, with its six facet answers.
+
+    Keyed by the **native** kind, never by the graph category it collapses
+    into: an Oracle PACKAGE, a PostgreSQL materialized view and a SQL Server
+    indexed view each keep their own row even where `graph_category` is shared.
+    """
+
+    engine: str
+    native_object_kind: str
+    graph_category: str
+    native_concept: bool
+    note: str
+    facets: list[EngineCapabilityFacetRead]
+
+
+class EngineCapabilityEngineRead(ApiModel):
+    """What the connector registry says about one engine, and how far it is proven.
+
+    `live_validation` is deliberately separate from every facet state: a state
+    says a code path exists, and that is not the same fact as the adapter
+    having been exercised against a live instance of the engine.
+    """
+
+    engine: str
+    display_name: str
+    dialect: str
+    adapter_version: str
+    implementation_status: str
+    maturity: str
+    parser_dialect_supported: bool
+    live_validation: str
+    flags: dict[str, str]
+    overridden_methods: list[str]
+    notes: str
+
+
+class EngineSourceMappingRead(ApiModel):
+    """How precisely a parsed fact can be located in its source text."""
+
+    granularity: str
+    state: str
+    reason: str
+    evidence: str
+    rationale: str
+
+
+class EngineDbtCoverageRead(ApiModel):
+    """Bounded coverage reporting for one dbt aspect (macros, hooks)."""
+
+    aspect: str
+    state: str
+    reason: str
+    evidence: str
+
+
+class EngineCapabilityMatrixRead(ApiModel):
+    matrix_key: list[str]
+    facets: list[str]
+    states: list[str]
+    generated_at: str
+    engines: list[EngineCapabilityEngineRead]
+    rows: list[EngineCapabilityObjectKindRead]
+    source_mapping: EngineSourceMappingRead
+    dbt_coverage: list[EngineDbtCoverageRead]
+    parser_degradation_reasons: list[str]
+    declared_gaps: list[str]
+
+
+class RoutineParseCoverageRead(ApiModel):
+    """R11-FP07 / finding F06.4: how completely one routine body was understood.
+
+    Persisted per object rather than re-derived by hunting for `UNPARSED`
+    edges, so "was this routine fully understood?" is a stored answer.
+    `state` is the reporting-boundary rendering of `parse_completed` and
+    `statement_count`; the booleans stay the stored truth.
+    """
+
+    routine_id: UUID
+    state: str
+    parse_completed: bool
+    is_read_only: bool
+    statement_count: int
+    unparsed_statement_count: int
+    unparsed_reason_codes: list[str]
+    dialect: str
+    confidence: str
+    source_mapping_granularity: str
+    parsed_at: datetime

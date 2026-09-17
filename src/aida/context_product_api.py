@@ -618,6 +618,13 @@ async def list_context_products(
     project_id: UUID,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    # Only the products this caller could ask a question through: PUBLISHED, and naming a
+    # consumer role the caller holds. False -- the lifecycle view -- is what every existing
+    # caller gets. A plain literal default rather than `Query(default=False)` (the style the
+    # paging parameters above use for their bounds) because this handler is also called
+    # directly by tests: a `Query` object as the default would arrive as a truthy value on
+    # every such call, silently switching them to the askable view.
+    askable: bool = False,
     context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -638,7 +645,22 @@ async def list_context_products(
     count_statement = select(func.count(func.distinct(ContextProduct.id))).select_from(
         ContextProduct
     ).join(ContextProductVersion, ContextProductVersion.product_id == ContextProduct.id)
-    if _can_read_lifecycle(context):
+    # R11-FP12 (F08): `askable` answers a different question from the lifecycle view -- not
+    # "what does this project contain" but "what could I ask a question through". A lifecycle
+    # reader (steward, reviewer, auditor) must keep seeing drafts here, because this listing is
+    # their authoring surface; the Ask picker built on that same listing was offering products
+    # the ask itself refuses, because the ask admits a product only when it is PUBLISHED and
+    # names a consumer role the caller holds (`agent_orchestrator.py:1131-1148`). So this is a
+    # caller-chosen mode on one route rather than a narrowed default: a client that sends
+    # nothing sees exactly what it saw before.
+    lifecycle_view = _can_read_lifecycle(context) and not askable
+    # The ask path exempts PlatformAdmin from the consumer-role check
+    # (`agent_orchestrator.py:1144`), so the askable listing exempts it too. Applying the
+    # binding filter to an administrator would hide products they can in fact ask through,
+    # which is the same class of disagreement between picker and endpoint as the defect above,
+    # only in the other direction.
+    consumer_roles_apply = not (askable and "PlatformAdmin" in context.roles)
+    if lifecycle_view:
         latest_version = (
             select(func.max(ContextProductVersion.version))
             .where(ContextProductVersion.product_id == ContextProduct.id)
@@ -648,6 +670,8 @@ async def list_context_products(
         visibility: tuple[ColumnElement[bool], ...] = (
             ContextProductVersion.version == latest_version,
         )
+    elif not consumer_roles_apply:
+        visibility = (ContextProductVersion.status == "PUBLISHED",)
     else:
         statement = statement.join(
             ContextProductRoleBinding,

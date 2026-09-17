@@ -4,7 +4,7 @@ The first task agent (`aida.task_agent`): a workload identity -- `agent:steward`
 by default -- that works the stewardship backlog under its own `AgentContract`.
 `Docs/10-architecture/adr/ADR-0029-steward-agent.md` records why it exists.
 
-Its three capabilities:
+Its four capabilities:
 
 * **TABLE_DESCRIPTION.** Tables come from the AT-5 documentation worklist in
   its default priority order (`usage x impact x deficit`), so the agent works
@@ -21,6 +21,14 @@ Its three capabilities:
   over without an item: a table's worth of them would bury the run's list, and
   the column drafts screen lists every one. Text a reviewer rejected for a
   column is never raised again.
+* **ROUTINE_DESCRIPTION** (R11-FP08). The describable routines in scope --
+  procedures and functions, never packages -- that have no approved
+  description, were not deliberately retired and have no draft open. Each gets
+  `routine_description_service`'s evidence-composed draft, which says what
+  state the routine's body is in and never quotes a line of it. Unlike the two
+  above there is no worklist ordering, because no usage signal in this codebase
+  is keyed by routine; see `_undescribed_routines` for why an invented one
+  would be worse than name order.
 * **GLOSSARY_LINK.** GL-8's approved-label exact matches
   (`glossary_link_candidates`), each proposed and submitted. A link a reviewer
   rejected is never raised again.
@@ -28,7 +36,7 @@ Its three capabilities:
 Authority, the kill switch, the tier ceiling, budgets, the one write path, the
 ledger and the outcome measure belong to the shared runtime, not to this
 module, so they cannot differ between agents. What is here is only *what* this
-agent proposes and *how it chooses*. Nothing here calls a model: all three
+agent proposes and *how it chooses*. Nothing here calls a model: all four
 producers are deterministic functions of catalog rows.
 """
 
@@ -68,12 +76,27 @@ from aida.column_documentation import current_descriptions_by_column_id
 from aida.description_withdrawal import withdrawn_column_versions
 from aida.documentation_worklist import rank_documentation_worklist
 from aida.documentation_worklist_signals import gather_documentation_worklist_signals
+from aida.envelope_models import MetadataRoutine, RoutineDescriptionDraft
 from aida.glossary_link_candidates import (
     GlossaryLinkCandidate,
     build_glossary_link_proposal,
     find_glossary_link_candidates,
 )
 from aida.models import AssetDescriptionDraft, ColumnDescriptionDraft, MetadataColumn, MetadataTable
+from aida.routine_description_service import (
+    OPEN_DRAFT_STATUSES as _ROUTINE_OPEN_DRAFT_STATUSES,
+)
+from aida.routine_description_service import (
+    ROUTINE_DESCRIPTION_DRAFT_OBJECT_TYPE,
+    compose_routine_draft_text,
+    current_routine_descriptions,
+    gather_routine_evidence,
+    is_describable_routine,
+    latest_withdrawn_routine_version,
+    routine_evidence_payload,
+    routine_refusal_reason,
+    score_routine_evidence,
+)
 from aida.security import SecurityContext
 from aida.task_agent import (
     ACTION_PROPOSED,
@@ -92,6 +115,7 @@ from atlas.platform.config import Settings
 
 CAPABILITY_TABLE_DESCRIPTION: Final = "TABLE_DESCRIPTION"
 CAPABILITY_COLUMN_DESCRIPTION: Final = "COLUMN_DESCRIPTION"
+CAPABILITY_ROUTINE_DESCRIPTION: Final = "ROUTINE_DESCRIPTION"
 CAPABILITY_GLOSSARY_LINK: Final = "GLOSSARY_LINK"
 
 STEWARD_AGENT: Final = TaskAgentSpec(
@@ -109,6 +133,20 @@ STEWARD_AGENT: Final = TaskAgentSpec(
             object_type=COLUMN_DESCRIPTION_DRAFT_OBJECT_TYPE,
             intent="steward.propose_column_description",
             producer="column_description_service: evidence-scored column draft, no model",
+        ),
+        # R11-FP08: the third description capability. T0 like the two above,
+        # because `review_risk_tiers` registers `ROUTINE_DESCRIPTION_DRAFT`
+        # there -- had it been left to the unknown-type fallback it would have
+        # been T3 and this capability would be outside every ceiling, which is
+        # why the tier registration is not optional.
+        TaskAgentCapability(
+            key=CAPABILITY_ROUTINE_DESCRIPTION,
+            object_type=ROUTINE_DESCRIPTION_DRAFT_OBJECT_TYPE,
+            intent="steward.propose_routine_description",
+            producer=(
+                "routine_description_service: evidence-scored routine draft, no model, "
+                "no body text"
+            ),
         ),
         TaskAgentCapability(
             key=CAPABILITY_GLOSSARY_LINK,
@@ -520,6 +558,204 @@ async def _draft_column_description(
 
 
 # ---------------------------------------------------------------------------
+# ROUTINE_DESCRIPTION (R11-FP08)
+# ---------------------------------------------------------------------------
+
+
+async def _undescribed_routines(run: TaskAgentRun) -> list[MetadataRoutine]:
+    """Describable, active routines in scope with nothing said about them yet.
+
+    Three exclusions, each matching the column capability's reasoning:
+
+    * a package is not a callable unit, so there is nothing to describe
+      (`is_describable_routine`);
+    * a routine with an approved description is not a gap;
+    * a routine whose description was *retired* through review is not a gap
+      either -- it is a decision, and drafting over it would quietly re-propose
+      what a reviewer retired.
+
+    There is deliberately no ranking. The table and column capabilities order
+    their work by the AT-5 documentation worklist, which ranks on query volume
+    and retrieval demand per *table*; no equivalent usage signal is keyed by
+    routine anywhere in this codebase, and inventing one (routine name length,
+    parameter count, lineage breadth) would be a priority order that looks
+    measured and is not. Name order, bounded by the run's own limit, is the
+    honest answer until a real routine-demand signal exists.
+    """
+    session = run.session
+    filters: list[Any] = [
+        MetadataRoutine.organization_id == run.organization_id,
+        MetadataRoutine.status == "ACTIVE",
+    ]
+    if run.datasource_id is not None:
+        filters.append(MetadataRoutine.datasource_id == run.datasource_id)
+    routines = [
+        routine
+        for routine in (
+            await session.scalars(
+                select(MetadataRoutine)
+                .where(*filters)
+                .order_by(MetadataRoutine.name, MetadataRoutine.id)
+                .limit(run.outcome.limit * _EXAMINE_FACTOR)
+            )
+        ).all()
+        if is_describable_routine(routine)
+    ]
+    if not routines:
+        return []
+    routine_ids = [routine.id for routine in routines]
+    described = await current_routine_descriptions(session, routine_ids)
+    candidates = [routine for routine in routines if routine.id not in described]
+    retired = {
+        routine.id
+        for routine in candidates
+        if await latest_withdrawn_routine_version(session, routine.id) is not None
+    }
+    return [routine for routine in candidates if routine.id not in retired]
+
+
+async def _routine_descriptions(run: TaskAgentRun) -> None:
+    session = run.session
+    routines = await _undescribed_routines(run)
+    if not routines:
+        return
+    open_drafts = set(
+        (
+            await session.scalars(
+                select(RoutineDescriptionDraft.routine_id).where(
+                    RoutineDescriptionDraft.organization_id == run.organization_id,
+                    RoutineDescriptionDraft.routine_id.in_([r.id for r in routines]),
+                    RoutineDescriptionDraft.status.in_(_ROUTINE_OPEN_DRAFT_STATUSES),
+                )
+            )
+        ).all()
+    )
+    proposed = 0
+    for routine in routines:
+        if proposed >= run.outcome.limit:
+            return
+        if routine.id in open_drafts:
+            run.add(
+                run.item(
+                    CAPABILITY_ROUTINE_DESCRIPTION,
+                    action=ACTION_SKIPPED,
+                    subject_id=routine.id,
+                    subject_name=routine.name,
+                    reason=SKIP_OPEN_DRAFT,
+                )
+            )
+            continue
+        if not await run.may_continue():
+            return
+        item = run.add(
+            await run.guarded(
+                CAPABILITY_ROUTINE_DESCRIPTION,
+                subject_id=routine.id,
+                subject_name=routine.name,
+                work=partial(_draft_routine_description, run, routine),
+            )
+        )
+        if item.action in (ACTION_PROPOSED, ACTION_WOULD_PROPOSE):
+            proposed += 1
+
+
+async def _draft_routine_description(
+    run: TaskAgentRun, routine: MetadataRoutine
+) -> TaskAgentItem:
+    capability = CAPABILITY_ROUTINE_DESCRIPTION
+    session = run.session
+    routine_id, routine_name = routine.id, routine.name
+    evidence = await gather_routine_evidence(session, routine)
+    drafted_text = compose_routine_draft_text(evidence)
+    fingerprint = text_fingerprint(drafted_text)
+    payload = routine_evidence_payload(evidence)
+    # Negative knowledge, as for tables and columns: these words -- or the
+    # machine text they were edited from, or a proposal on exactly this evidence
+    # -- were already refused, or were approved once and withdrawn (R11-FP10).
+    refusal = await routine_refusal_reason(
+        session, routine_id, drafted_text=drafted_text, payload=payload
+    )
+    if refusal is not None:
+        return run.item(
+            capability,
+            action=ACTION_SKIPPED,
+            subject_id=routine_id,
+            subject_name=routine_name,
+            reason=SKIP_WITHDRAWN_BEFORE if refusal == REFUSED_WITHDRAWN else SKIP_REJECTED_BEFORE,
+        )
+    scores = score_routine_evidence(evidence)
+    # The shared submission bar (`ensure_reviewable`). A draft under it could
+    # never be submitted, so the agent does not create one -- and for routines
+    # this is the usual outcome: a procedure with a withheld body, no parsed
+    # lineage and no source comment scores well below it, which is the point.
+    if scores.overall < MINIMUM_EVIDENCE_FOR_REVIEW:
+        return run.item(
+            capability,
+            action=ACTION_SKIPPED,
+            subject_id=routine_id,
+            subject_name=routine_name,
+            reason=SKIP_BELOW_EVIDENCE_BAR,
+            confidence=scores.overall,
+        )
+    if not run.proposing:
+        return run.item(
+            capability,
+            action=ACTION_WOULD_PROPOSE,
+            subject_id=routine_id,
+            subject_name=routine_name,
+            confidence=scores.overall,
+        )
+    draft = RoutineDescriptionDraft(
+        organization_id=run.organization_id,
+        datasource_id=routine.datasource_id,
+        routine_id=routine_id,
+        drafted_text=drafted_text,
+        text_fingerprint=fingerprint,
+        accuracy_score=scores.accuracy,
+        clarity_score=scores.clarity,
+        style_score=scores.style,
+        completeness_score=scores.completeness,
+        overall_score=scores.overall,
+        evidence={
+            **payload,
+            "origin": ORIGIN_METADATA,
+            "agent_run": run.outcome.run_id,
+        },
+        # Submitted as it is created: the agent's draft *is* its request for
+        # review, the transition a steward makes with
+        # `submit_routine_description_draft`.
+        status="PENDING_APPROVAL",
+        base_description_version=evidence.current_description_version,
+        created_by=run.principal_id,
+    )
+    session.add(draft)
+    await session.flush()
+    review = await run.open_review(
+        capability,
+        object_id=draft.id,
+        requested_action="PUBLISH",
+        details={
+            "routine_id": str(routine_id),
+            "overall_score": scores.overall,
+        },
+    )
+    draft.governance_review_id = review.id
+    return await run.proposed(
+        capability,
+        review=review,
+        object_id=draft.id,
+        subject_id=routine_id,
+        subject_name=routine_name,
+        inputs={
+            "capability": capability,
+            "routine_id": str(routine_id),
+            "text_fingerprint": fingerprint,
+        },
+        confidence=scores.overall,
+    )
+
+
+# ---------------------------------------------------------------------------
 # GLOSSARY_LINK
 # ---------------------------------------------------------------------------
 
@@ -604,6 +840,7 @@ async def _propose_glossary_link(
 STEWARD_WORK: Final[Mapping[str, CapabilityWork]] = {
     CAPABILITY_TABLE_DESCRIPTION: _table_descriptions,
     CAPABILITY_COLUMN_DESCRIPTION: _column_descriptions,
+    CAPABILITY_ROUTINE_DESCRIPTION: _routine_descriptions,
     CAPABILITY_GLOSSARY_LINK: _glossary_links,
 }
 

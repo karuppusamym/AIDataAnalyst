@@ -52,6 +52,13 @@ run    model                separated  agreement  declined  label-      of the 9
 4      3.6-flash (route)    7          19         7         2           7 / 1 / 1
 =====  ===================  =========  =========  ========  ==========  ==========
 
+*These four runs were measured against the 14-pair corpus of 2026-09-12 and are
+left exactly as recorded.* R11-FP08 added a fifteenth pair on 2026-09-16
+(`routine-misleading-comment`) with its subject facts below, so a rerun issues
+30 calls and its denominators are 15 and 30. Re-scaling the readings above to
+the larger corpus would be inventing a measurement nobody took; the table says
+what was run, when, and against what.
+
 "Separated" is SUPPORTED for the true twin and CONTRADICTED for the false one.
 The last column is the decision-relevant one: of the **9 false twins the
 control approves**, how many the judge Contradicted, Declined to judge, and
@@ -262,6 +269,19 @@ SUBJECT_FACTS: dict[str, str] = {
     "workbook-one-row-unattributed-text": (
         "Column retail.orders.customer_id, physical type integer, not null. "
         "It references customers.customer_id."
+    ),
+    # R11-FP08, added 2026-09-16 with the routine description type. The facts
+    # are the routine's declaration and the tables a reviewed parse of its body
+    # says it reads and writes -- never the body, which is the one thing a
+    # routine description may not carry and which this payload therefore must
+    # not either.
+    "routine-misleading-comment": (
+        "Stored procedure public.sp_settle_postings, declared as (p_as_of date), "
+        "returning nothing, written in plpgsql. A reviewed parse of its body shows "
+        "it reads from the table public.postings and writes to the table "
+        "public.ledger, and touches no other table. public.ledger is the bank's "
+        "general ledger. There is no statement, message, email or delivery object "
+        "in this schema."
     ),
 }
 

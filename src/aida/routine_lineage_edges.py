@@ -12,12 +12,17 @@ without importing one:
   `lineage_table_resolution` -- the router's identical private copy of that
   resolver is gone;
 * `persist_routine_edges`, a person's parse, written under ADR-0026's review
-  mode the way every other parser's already is.
+  mode the way every other parser's already is;
+* `record_routine_parse_coverage`, the per-object coverage measurement both
+  writers record (review 2026-09-16, finding F06.4) so that "was this routine
+  fully understood?" is a stored answer rather than something re-derived by
+  hunting the edge table for `UNPARSED` rows.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, or_, select
@@ -33,10 +38,20 @@ from aida.procedure_lineage import (
     UNPARSED_TRANSFORMATION_TYPE,
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
+    UnparsedReason,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, RoutineParseCoverage
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
+
+#: The positional precision a coverage record's unparsed statements are located
+#: to. A statement index, and deliberately nothing finer -- see the engine
+#: capability matrix's source-mapping record for why a character range would be
+#: an offset into text this platform does not keep.
+SOURCE_MAPPING_GRANULARITY = "STATEMENT_ORDINAL"
+
+#: Cap on the joined reason-code summary, matching the column's own width.
+_MAX_REASON_CODES_LENGTH = 400
 
 #: The table's natural key within one routine: statement ordinal, source,
 #: target, transformation, and the temp table a transitive edge runs through.
@@ -167,6 +182,86 @@ def routine_edge_row(
         review_status=review_status,
         created_by=created_by,
     )
+
+
+def unparsed_reason_codes(result: ProcedureParseResult) -> tuple[str, ...]:
+    """The distinct `UnparsedReason` codes one parse produced, sorted.
+
+    `ProcedureParseResult.errors` holds each unparsed chunk's reason as a
+    prefix plus, where useful, a short suffix carrying the specific detail --
+    a parse-error message, a node type name, a callee name. Only the prefix is
+    taken here, matched against the real enum rather than split on a
+    separator, so a summary can never carry the detail: a callee name is a
+    source identifier and a parse-error text can quote a value (INV-6).
+
+    A reason that matches no enum member is dropped rather than stored as
+    free text. The count of unparsed statements is recorded separately, so
+    dropping an unrecognised code loses the label, never the gap.
+    """
+    known = {reason.value for reason in UnparsedReason}
+    found = {
+        reason
+        for error in result.errors
+        for reason in known
+        if error == reason or error.startswith(f"{reason}:") or error.startswith(f"{reason} ")
+    }
+    return tuple(sorted(found))
+
+
+async def record_routine_parse_coverage(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    routine: MetadataRoutine,
+    result: ProcedureParseResult,
+    measured_by: str | None,
+) -> RoutineParseCoverage:
+    """Store how completely `routine`'s body was understood by this parse.
+
+    One row per routine, replaced in place on a re-parse: this is a
+    measurement of the body as last read, not a history. Both writers of
+    procedure lineage call it -- a person's parse and the lineage agent -- so
+    the answer does not depend on which of them last looked at the routine.
+
+    The row keeps `parse_completed` and `is_read_only` as the booleans
+    `ProcedureParseResult` computes. Nothing here writes a state string:
+    `capability_states.parse_coverage_state` renders the pair at the reporting
+    boundary, which is the rule that keeps a stored sentinel from ever standing
+    in for a real value.
+    """
+    codes = unparsed_reason_codes(result)
+    unparsed_count = sum(
+        1
+        for edge in result.edges
+        if edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+    )
+    existing = (
+        await session.scalars(
+            select(RoutineParseCoverage).where(
+                RoutineParseCoverage.datasource_id == datasource.id,
+                RoutineParseCoverage.routine_id == routine.id,
+            )
+        )
+    ).first()
+    row = existing or RoutineParseCoverage(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        routine_id=routine.id,
+    )
+    row.parse_completed = result.is_fully_parsed
+    row.is_read_only = result.is_read_only
+    row.statement_count = result.statement_count
+    row.unparsed_statement_count = unparsed_count
+    row.unparsed_reason_codes = ",".join(codes)[:_MAX_REASON_CODES_LENGTH]
+    row.dialect = result.dialect
+    row.confidence = result.confidence
+    row.sql_hash = result.sql_hash
+    row.source_mapping_granularity = SOURCE_MAPPING_GRANULARITY
+    row.parsed_at = datetime.now(UTC)
+    row.measured_by = measured_by
+    if existing is None:
+        session.add(row)
+    return row
 
 
 async def persist_routine_edges(

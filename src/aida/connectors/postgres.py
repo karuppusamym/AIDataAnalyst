@@ -12,6 +12,9 @@ from aida.connectors.base import (
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    bounded_scan_scope,
+    read_value_free_distribution,
+    value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
     append_aggregated_constraint_rows,
@@ -31,6 +34,39 @@ from aida.connectors.sql_execution import SqlExecutor
 
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
+
+
+def _entropy_expression(quoted_column: str, position: int) -> str:
+    """R11-FP04: Shannon entropy of one column's frequency distribution, in bits.
+
+    The whole point is what does *not* come back. The inner query groups by the
+    column -- so PostgreSQL sees every value -- and projects only each group's
+    share of the non-null rows; the outer aggregate collapses those shares to
+    one float. No group key, no ordering, no mode, no exemplar crosses the
+    wire, so this stays inside ADR-0014's value-free half and needs no
+    `ProfilingExceptionPolicy` (which governs actual ranges and top values, a
+    different query class that does return values).
+
+    An uncorrelated scalar subquery over the caller's own `bounded_sample` CTE,
+    not a second statement: the CTE is referenced more than once, so PostgreSQL
+    materializes it and every facet in the profile describes the same rows. A
+    second statement would re-run an unordered `LIMIT` and quietly mix two
+    different samples into one profile row.
+
+    `SUM(COUNT(*)) OVER ()` is the non-null total without a second scan.
+    Entirely-null column: the grouped query returns no rows, the outer `SUM` is
+    NULL, and the facet is honestly absent rather than 0.0 -- which would read
+    as "one value repeated", a different fact.
+    """
+    share = "COUNT(*)::numeric / SUM(COUNT(*)) OVER () AS p"
+    grouped = (
+        f"SELECT {share} FROM bounded_sample "  # noqa: S608 -- identifier is ANSI-quoted above
+        f"WHERE {quoted_column} IS NOT NULL GROUP BY {quoted_column}"
+    )
+    return (
+        f"CAST((SELECT -SUM(f.p * LOG(2::numeric, f.p)) FROM ({grouped}) f) "  # noqa: S608 -- the only interpolation is an ANSI-quoted identifier and a generated integer alias
+        f"AS double precision) AS en_{position}"
+    )
 
 
 # Envelope 1.1 (gap/02 N1). `pg_get_viewdef` returns the complete reconstructed
@@ -668,6 +704,15 @@ class PostgresConnector(SqlExecutor):
         # implementation below -- every other connector stays honestly
         # unsupported (default False) rather than simulating this capability.
         value_range_profiling=True,
+        # R11-FP04: `_entropy_expression` below is the query behind this flag,
+        # and INV-9 is what requires the flag to be backed by one. Postgres
+        # only: `log(numeric, numeric)` plus an aggregate under a window is the
+        # combination that makes the whole facet one more expression on the
+        # bounded scan rather than a round trip per column, and it is the
+        # engine whose profiling path this repo can actually exercise. Every
+        # other connector reports ENTROPY UNSUPPORTED per column instead of
+        # returning None and letting a reader read "constant" into it.
+        distribution_entropy_profiling=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -1072,6 +1117,19 @@ class PostgresConnector(SqlExecutor):
                                 f"MAX(LENGTH({quoted}::text))::integer AS maxl_{position}",
                             )
                         )
+                        # R11-FP04: value-free distribution shape, on the same
+                        # bounded scan -- counts per code-defined length bucket
+                        # plus blank/whitespace-only counts. No boundary, mode
+                        # or exemplar is read back (ADR-0014).
+                        expressions.extend(
+                            value_free_distribution_expressions(
+                                position=position,
+                                text_form=f"{quoted}::text",
+                                length_form=f"LENGTH({quoted}::text)",
+                                trimmed_form=f"BTRIM({quoted}::text)",
+                            )
+                        )
+                        expressions.append(_entropy_expression(quoted, position))
                     profile_sql = (
                         f"WITH bounded_sample AS (SELECT {selected} FROM {qualified_table} "  # noqa: S608 -- identifiers are ANSI-quoted and limits are validated integers
                         f"LIMIT {int(sample_rows)}) SELECT {', '.join(expressions)} "
@@ -1082,6 +1140,10 @@ class PostgresConnector(SqlExecutor):
                         continue
                     sampled_row_count = max(sampled_row_count, int(row["sampled_row_count"]))
                     for position, name in enumerate(batch):
+                        blank, whitespace, buckets = read_value_free_distribution(
+                            position, row.__getitem__
+                        )
+                        entropy = row[f"en_{position}"]
                         snapshots.append(
                             ColumnProfileSnapshot(
                                 name=name,
@@ -1090,6 +1152,12 @@ class PostgresConnector(SqlExecutor):
                                 approximate_distinct_count=int(row[f"d_{position}"]),
                                 min_length=row[f"minl_{position}"],
                                 max_length=row[f"maxl_{position}"],
+                                blank_count=blank,
+                                whitespace_only_count=whitespace,
+                                length_bucket_counts=buckets,
+                                frequency_entropy_bits=(
+                                    None if entropy is None else float(entropy)
+                                ),
                             )
                         )
         finally:
@@ -1100,6 +1168,13 @@ class PostgresConnector(SqlExecutor):
             ),
             sampled_row_count=sampled_row_count,
             columns=tuple(snapshots),
+            # R11-FP04: the `LIMIT` above is the bound, so the scope follows
+            # from whether it bit -- never from comparing the sample with
+            # `pg_class.reltuples`, which is an estimate that can sit either
+            # side of the truth.
+            observation_scope=bounded_scan_scope(
+                sampled_row_count=sampled_row_count, sample_rows=sample_rows
+            ),
         )
 
     async def profile_column_values(

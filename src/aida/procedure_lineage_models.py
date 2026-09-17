@@ -148,3 +148,94 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
         ForeignKey("deep_procedure_lineage_edge.id", ondelete="SET NULL")
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class RoutineParseCoverage(Base, TimestampMixin):
+    """How completely one routine's body was understood, per object.
+
+    **Why this table exists.** `ProcedureParseResult.is_fully_parsed` and
+    `.is_read_only` are the platform's only "every branch accounted for"
+    signals, and they lived entirely in memory: they reached the parse
+    endpoint's response and the agent's ledger entry, and then were gone. No
+    column recorded them, so "was this routine fully understood?" had to be
+    re-derived by scanning `deep_procedure_lineage_edge` for `UNPARSED` rows --
+    which answers a subtly different question. A routine whose parse produced
+    no edges at all, or whose markers were replaced by a later re-parse under
+    review mode, reads the same as one that was fully understood.
+
+    Finding F06.4 (review 2026-09-16) is exactly that risk stated as a rule:
+    never label every path understood merely because an object was inventoried.
+    This is where the answer is kept, so the engine capability matrix and the
+    footprint gap register can both report coverage without re-deriving it.
+
+    **What it does not duplicate.** `unparsed_reason` is already persisted per
+    edge, and stays there: that is where a reason belongs, beside the statement
+    it describes. This row carries only the distinct
+    `procedure_lineage.UnparsedReason` *prefixes* the body produced -- a sorted,
+    comma-joined set of codes with no per-statement detail and no suffix, so it
+    is a summary of that column rather than a second copy of it, and cannot
+    carry the callee name or parse-error text a suffix can (INV-6).
+
+    One row per routine, replaced on each re-parse: this is a measurement of
+    the body as last read, not an append-only history. The definition history
+    that *is* append-only is `metadata_routine_definition_version`.
+    """
+
+    __tablename__ = "routine_parse_coverage"
+    __table_args__ = (
+        # One measurement per routine. A re-parse updates it in place, so a
+        # reader never has to work out which of several rows is current.
+        UniqueConstraint(
+            "datasource_id", "routine_id", name="uq_routine_parse_coverage_routine"
+        ),
+        Index("ix_routine_parse_coverage_org_completed", "organization_id", "parse_completed"),
+        # The gap register's own question: which routines in this source are
+        # not fully understood?
+        Index("ix_routine_parse_coverage_datasource", "datasource_id", "parse_completed"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    routine_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: `ProcedureParseResult.is_fully_parsed`: every statement chunk resolved to
+    #: a concrete shape or was recognised as genuinely lineage-free. Stored as
+    #: the boolean it is -- `capability_states.parse_coverage_state` renders it
+    #: as SUPPORTED/PARTIAL at the reporting boundary, and nothing writes a
+    #: state string here.
+    parse_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: `ProcedureParseResult.is_read_only`: fully parsed *and* proven to touch
+    #: no write statement. Never inferred from an empty edge list.
+    is_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    statement_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: How many of those statements ended in an UNPARSED marker. Zero exactly
+    #: when `parse_completed` is true, which is the invariant that makes the
+    #: pair readable without consulting the edge table.
+    unparsed_statement_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: The distinct `UnparsedReason` codes this body produced, sorted and
+    #: comma-joined. Empty string for a body with none; never NULL, so "no
+    #: reasons" and "not recorded" do not read alike.
+    unparsed_reason_codes: Mapped[str] = mapped_column(
+        String(400), nullable=False, default="", server_default=""
+    )
+    dialect: Mapped[str] = mapped_column(String(50), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(30), nullable=False)
+    sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: The positional precision the unparsed statements above are located to.
+    #: `STATEMENT_ORDINAL` today, and recorded per row rather than only in the
+    #: published matrix so a consumer reading one coverage record knows how
+    #: precisely it can point at the source -- see the engine capability
+    #: matrix's source-mapping record for why a character range is not offered.
+    source_mapping_granularity: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="STATEMENT_ORDINAL",
+        server_default="STATEMENT_ORDINAL",
+    )
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: The principal or agent whose parse produced this measurement.
+    measured_by: Mapped[str | None] = mapped_column(String(255))

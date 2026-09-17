@@ -401,7 +401,12 @@ export interface DescriptionWithdrawalRead {
  *  reader resolves until a *different* principal approves the review this
  *  creates, on the Review queue. There is deliberately no approve call here. */
 export async function requestDescriptionWithdrawal(
-  subjectType: "TABLE" | "COLUMN",
+  /* R11-FP08: ROUTINE joined the withdrawal subjects when routines gained an
+     Atlas-authored description. The route's own contract is
+     `^(TABLE|COLUMN|ROUTINE)$` (`description_withdrawal_api.py`), and the
+     service resolves a routine subject against its datasource rather than a
+     parent table, so this union was the last narrow link in the chain. */
+  subjectType: "TABLE" | "COLUMN" | "ROUTINE",
   subjectId: string,
   reason: string,
   requestType: "WITHDRAW" | "REINSTATE" = "WITHDRAW",

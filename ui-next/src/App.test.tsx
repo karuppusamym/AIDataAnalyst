@@ -127,8 +127,9 @@ describe("App shell persona gating", () => {
       "Semantic layer",
       "Tool registry",
       "Tool plans",
+      // R11-S13 (M1): "Unified lineage" was the seventh item here. It is a
+      // view of "Lineage" now, not a peer destination.
       "Lineage",
-      "Unified lineage",
     ]);
     expect(within(section).getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
 
@@ -315,6 +316,116 @@ describe("old routes still work", () => {
     await waitFor(() => expect(location.hash).toBe("#/steward/task-agents"));
     expect(new URLSearchParams(location.search).get("agent")).toBe("quality");
     expect(await screen.findByRole("region", { name: "Task agents" })).toBeInTheDocument();
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-S13 (M3) — the two documentation routes that were merged away.
+
+     The hard requirement is the same one R11-S10 set: a link somebody saved
+     opens the page they saved, not the dashboard and not the merged screen's
+     default tab. Both are asserted -- the screen AND the tab -- because
+     landing on the workspace with the wrong view in front is the failure mode
+     an alias that forgot to declare `view` produces, and it looks like a pass
+     if you only check the screen.
+  ------------------------------------------------------------------------- */
+  it("opens a saved description-drafts link on the Drafts tab of the workspace", async () => {
+    history.replaceState(null, "", "/#/description-drafts");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/worklist"));
+    expect(new URLSearchParams(location.search).get("view")).toBe("drafts");
+    const region = await screen.findByRole("region", { name: "Documentation" });
+    expect(region).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Drafts" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("opens a saved data-dictionaries link on the Imports tab, keeping its document selection", async () => {
+    // `?document=` was `data-dictionaries`' own field. It survives because the
+    // workspace declares it; an undeclared field would be filtered out by
+    // `normalizeLocation` and the permalink would lose the document it named.
+    history.replaceState(null, "", "/?document=doc_7#/data-dictionaries");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/worklist"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("view")).toBe("imports");
+    expect(params.get("document")).toBe("doc_7");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Imports" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-S13 (M1) — the second lineage route, and its own undeclared fields.
+  ------------------------------------------------------------------------- */
+  it("opens a saved unified-lineage link on the Graph view, keeping scope, node and tab", async () => {
+    // Every field `unified-lineage` declared, on one link. All of them are
+    // declared by the merged screen, so `normalizeLocation` keeps them.
+    history.replaceState(null, "", "/?scope=domain&dom=dom_1&node=n_7&tab=edges#/unified-lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/analyst/lineage"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("view")).toBe("graph");
+    expect(params.get("scope")).toBe("domain");
+    expect(params.get("dom")).toBe("dom_1");
+    expect(params.get("node")).toBe("n_7");
+    expect(params.get("tab")).toBe("edges");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("keeps depth and direction on a pasted lineage link", async () => {
+    /* THE LATENT BUG THIS MERGE FIXED. `UnifiedLineageScreen` reads `depth`
+       and `direction` and its graph-question form writes all of `node`,
+       `depth` and `direction` -- and `unified-lineage` declared neither. So
+       pasting the link that button produced into a fresh tab normalized both
+       fields away, and the impact query silently reverted to depth 5 in both
+       directions. The flat form is used deliberately: it is non-canonical, so
+       `normalizeLocation` rewrites it, which is where the fields were lost. */
+    history.replaceState(null, "", "/?node=n_7&depth=3&direction=downstream#/unified-lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/analyst/lineage"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("depth")).toBe("3");
+    expect(params.get("direction")).toBe("downstream");
+  });
+
+  it("opens the legacy ?view=graph spelling on the merged Graph view", async () => {
+    // `#/lineage?view=graph` was the retired two-tab bar's graph tab. The
+    // value is kept and the destination improved: the merged graph is a
+    // superset of the bounded one that tab opened.
+    history.replaceState(null, "", "/?view=graph#/analyst/lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("opens the legacy ?view=narrated spelling on Explain", async () => {
+    history.replaceState(null, "", "/?view=narrated#/analyst/lineage");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Explain" })).toHaveAttribute("aria-selected", "true"),
+    );
   });
 });
 

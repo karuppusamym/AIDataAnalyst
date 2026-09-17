@@ -1,6 +1,6 @@
 # Quality benchmark results (AG-8)
 
-Generated 2026-09-12T13:29:52.052398+00:00 by `scripts/quality_benchmark.py`. Reproduce with `uv run python scripts/quality_benchmark.py` (requires `AIDA_ENVIRONMENT` set, e.g. `development`). Every number below comes from a real run of the live retrieval/planning code against the deterministic seeded catalog in that script's `seed_catalog` -- not hand-typed.
+Generated 2026-09-17T01:06:28.146720+00:00 by `scripts/quality_benchmark.py`. Reproduce with `uv run python scripts/quality_benchmark.py` (requires `AIDA_ENVIRONMENT` set, e.g. `development`). Every number below comes from a real run of the live retrieval/planning code against the deterministic seeded catalog in that script's `seed_catalog` -- not hand-typed.
 
 Scope: this is the quality/accuracy counterpart to PF-3's latency ratchet (`Docs/90-reference/perf-baseline.json`), not the bank-scale 1M-object benchmark tracked separately as RT-8/PF-1, which this sandbox has no infrastructure for.
 
@@ -11,13 +11,13 @@ Scope: this is the quality/accuracy counterpart to PF-3's latency ratchet (`Docs
 | Metric | Value | Baseline | Change |
 |---|---|---|---|
 | `retrieval_hit_at_1_rate` | 0.5882 | 0.5882 | +0.00 pts |
-| `retrieval_recall_within_bound_rate` | 0.7059 | 0.7059 | +0.00 pts |
-| `retrieval_mrr` | 0.6373 | 0.6373 | +0.00 pts |
+| `retrieval_recall_within_bound_rate` | 0.7647 | 0.7059 | +5.88 pts |
+| `retrieval_mrr` | 0.6471 | 0.6373 | +0.98 pts |
 
 | Case | Question | Expected | Rank | Hit@1 | Within bound |
 |---|---|---|---|---|---|
 | orders-lexical-top1 | show me customer orders | TABLE:fact_orders | 1 | yes | yes |
-| customer-lookup-tool-outranks | who is the customer | TABLE:dim_customer | 2 | no | yes |
+| customer-lookup-tool-outranks | who is the customer | TABLE:dim_customer | 3 | no | yes |
 | product-catalog-top1 | product catalog details | TABLE:dim_product | 1 | yes | yes |
 | payments-top1 | payment transactions history | TABLE:fact_payments | 1 | yes | yes |
 | branch-top1 | bank branch information | TABLE:dim_branch | 1 | yes | yes |
@@ -31,10 +31,34 @@ Scope: this is the quality/accuracy counterpart to PF-3's latency ratchet (`Docs
 | semantic-deposits-not-balances | what funds does each depositor have at close of business | TABLE:fact_account_balances | not found | no | no |
 | semantic-suspicious-not-fraud | suspicious activity flagged for investigation | TABLE:fact_fraud_alerts | not found | no | no |
 | semantic-highstreet-not-branch | where are our high street offices | TABLE:dim_branch | not found | no | no |
-| semantic-borrow-not-loan | who has asked to borrow money from us | TABLE:fact_loan_applications | not found | no | no |
+| semantic-borrow-not-loan | who has asked to borrow money from us | TABLE:fact_loan_applications | 3 | no | yes |
 | semantic-vendors-not-merchant | vendors we process purchases for | TABLE:dim_merchant | not found | no | no |
 
 Vector-similarity signal: available and exercised.
+
+## Footprint enrichment (R11-FP13)
+
+The same `footprint_enrichment_corpus.json` cases against the same seeded catalog, run once as seeded and once after `enrich_footprint` adds routines with reviewed and undecided lineage and a published ontology concept. Every question's wording misses its target table's name and description, so only the enrichment can reach it. Gap cases must stay unreached: their only path is lineage nobody approved.
+
+| Measure | Before enrichment | After enrichment |
+|---|---|---|
+| Recall within bound (4 cases) | 0.0000 | 1.0000 |
+| Gap preservation (1 cases) | — | 1.0000 |
+
+| Metric | Value | Baseline | Change |
+|---|---|---|---|
+| `footprint_recall_within_bound_rate` | 1.0000 | 1.0000 | +0.00 pts |
+| `footprint_gap_preservation_rate` | 1.0000 | 1.0000 | +0.00 pts |
+
+| Case | Question | Expected | Rank before | Rank after |
+|---|---|---|---|---|
+| concept-found-by-alias | closing position | ONTOLOGY_CONCEPT:end_of_day_position | not found | 1 |
+| concept-alias-reaches-mapped-table | closing position | TABLE:fact_account_balances | not found | 3 |
+| routine-found-by-name | nightly settlement rollup | ROUTINE:nightly_settlement_rollup | not found | 1 |
+| routine-lineage-reaches-written-table | nightly settlement rollup | TABLE:fact_account_balances | not found | 4 |
+| gap-proposed-lineage-steers-nothing | quarterly fee accrual | TABLE:fact_fraud_alerts (must stay absent) | not found | not found |
+
+Not measured here: whether answers over enriched context are *correct*. That is `execution_match_benchmark.py` against a live model route (paid calls), and the acceptance thresholds for both are for the domain owner to set before that run.
 
 ## Tool / generation-path selection quality
 

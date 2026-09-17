@@ -6,7 +6,7 @@ import type {
   AgentRunRead,
   ContextProductRead,
 } from "../lib/types";
-import type { AgentAskError, AgentAskErrorKind } from "../lib/api";
+import type { AgentAskContextProductKind, AgentAskError, AgentAskErrorKind } from "../lib/api";
 import {
   ApiError,
   classifyAgentAskError,
@@ -47,7 +47,10 @@ import "./AskScreen.css";
    status-for-status.
 
    Same Catalog pattern (UX-11) as every other migrated screen:
-     1. URL state       ds (datasource), run (the open answer/history item)
+     1. URL state       ds (datasource), product (the context product being
+                        asked through), run (the open answer/history item) --
+                        all three declared on `analyst` in `lib/routes.ts`, so
+                        a screen change and a pasted link keep them
      2. abortable fetch  one in-flight ask at a time; history paged
                          independently
      3. virtualization   `VirtualList` for the history list
@@ -75,17 +78,80 @@ const statusTone = (status: string): Tone => {
   return "mute";
 };
 
-const ERROR_TITLE: Record<Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION">, string> = {
+const ERROR_TITLE: Record<
+  Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION" | AgentAskContextProductKind>,
+  string
+> = {
   DATASOURCE_DISABLED: "This datasource is disabled",
   NOT_AUTHORIZED: "You do not have access to answer questions here",
   POLICY_REJECTED: "The generated query was rejected by policy",
-  CONTEXT_PRODUCT_REFUSED: "This context product cannot answer that question",
   MODEL_UNAVAILABLE: "No model route is available right now",
   MODEL_THROTTLED: "The model provider is throttling us — try again in a moment",
   CLARIFICATION_NEEDED: "This question needs more information",
   SERVER_ERROR: "The analysis failed on the server",
   UNKNOWN: "The question could not be answered",
 };
+
+/* ---------------------------------------------------------------------------
+   R11-FP12 (F08): one state per context-product refusal, because the three
+   have three different remedies.
+
+   All three were one kind with one title ("this context product cannot answer
+   that question") and the server's own stable token as the body text, so a
+   person who is simply not a consumer of the product read the literal string
+   `CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED` under a sentence about their
+   question -- describing the wrong problem, and naming no way out of it.
+
+   `remedy` is deliberately the honest one. There is NO request-access route
+   for a context product (`POST /v1/marketplace/products/{version_id}/
+   access-requests` grants a marketplace listing, which is a different object
+   and one this screen holds no id for), so the role refusal says where a
+   consumer role actually comes from rather than offering a button that would
+   go nowhere.
+--------------------------------------------------------------------------- */
+
+const CONTEXT_PRODUCT_REFUSAL: Record<
+  AgentAskContextProductKind,
+  { title: string; lede: string; remedy: string; clearLabel: string; offerRetry: boolean }
+> = {
+  CONTEXT_PRODUCT_UNAVAILABLE: {
+    title: "That context product cannot be asked through",
+    lede:
+      "It has no published version. A product is answerable only while a version of it is " +
+      "PUBLISHED, so this one has been deprecated, retired or superseded since the link that " +
+      "named it was made.",
+    remedy: "Pick a product the picker is offering, or ask the whole datasource instead.",
+    clearLabel: "Choose another product",
+    offerRetry: false,
+  },
+  CONTEXT_PRODUCT_ROLE_REQUIRED: {
+    title: "You are not one of this product's consumers",
+    lede:
+      "The product answers only for the consumer roles its owner listed on the published " +
+      "version, and none of your roles is among them. The question itself was never run.",
+    remedy:
+      "There is no self-service access request for a context product: a consumer role is added " +
+      "to the version by its owner, on the Context products screen. Ask the product's owner, or " +
+      "pick a product you can already ask through.",
+    clearLabel: "Choose another product",
+    offerRetry: false,
+  },
+  CONTEXT_PRODUCT_OUT_OF_SCOPE: {
+    title: "This product's tables cannot answer that question",
+    lede:
+      "Answering it would have meant reading a table the product does not name, so it was " +
+      "refused rather than quietly widened to the rest of the datasource.",
+    remedy:
+      "Ask something the product's own tables cover, or drop the product and ask the datasource " +
+      "as a whole.",
+    clearLabel: "Ask without this product",
+    offerRetry: true,
+  },
+};
+
+function isContextProductRefusal(kind: AgentAskErrorKind): kind is AgentAskContextProductKind {
+  return kind in CONTEXT_PRODUCT_REFUSAL;
+}
 
 /** AT-9's refusal, rendered as a real, informative state -- both competing
  *  definitions (and their owners) when the detail carries them, never a
@@ -140,12 +206,29 @@ function ClarificationForm({
   );
 }
 
-function AskRefusal({ error, onRetry, onClarify, busy }: {
+function AskRefusal({ error, onRetry, onClarify, onClearProduct, busy }: {
   error: AgentAskError;
   onRetry: () => void;
   onClarify: (values: Record<string, string>) => void;
+  /** Drop the context product from the URL, which is the one action a
+   *  context-product refusal actually has available. */
+  onClearProduct: () => void;
   busy: boolean;
 }) {
+  if (isContextProductRefusal(error.kind)) {
+    const refusal = CONTEXT_PRODUCT_REFUSAL[error.kind];
+    return (
+      <div className="askrefusal" role="alert" aria-label="Context product refusal">
+        <div className="askrefusal__t">{refusal.title}</div>
+        <p className="askrefusal__lede">{refusal.lede}</p>
+        <p className="askrefusal__lede">{refusal.remedy}</p>
+        <div className="askscreen__submitrow">
+          <Button onClick={onClearProduct}>{refusal.clearLabel}</Button>
+          {refusal.offerRetry ? <Button onClick={onRetry}>Rephrase and ask again</Button> : null}
+        </div>
+      </div>
+    );
+  }
   if (error.kind === "AMBIGUOUS_DEFINITION") {
     return (
       <div className="askrefusal" role="alert" aria-label="Ambiguous term refusal">
@@ -228,6 +311,7 @@ function AnswerPanel({
   runId,
   askResult,
   askedAt,
+  contextProduct,
   detail,
   receipts,
   loading,
@@ -239,6 +323,10 @@ function AnswerPanel({
   /** When this session received `askResult`. The response carries no
    *  timestamp, and a run reopened from history has no result to date. */
   askedAt: Date | null;
+  /** The context product this screen is currently asking through, or `null`.
+   *  Used for the fresh answer's provenance and for the permalink -- the run
+   *  record itself carries the version, never the key (see below). */
+  contextProduct: { key: string; name: string } | null;
   detail: AgentRunRead | null;
   receipts: AgentRunGroundingReceiptsRead | null;
   loading: boolean;
@@ -267,6 +355,13 @@ function AnswerPanel({
     }
     return null;
   })();
+  // F08: *which* product, not only which version of it. "version 2" alone does not say what
+  // answered, and two products' v2 have nothing to do with each other. The name comes from this
+  // session's own selection because the run records the version id and number
+  // (`agent_orchestrator.py:1182-1183`) and not the product key -- so a run reopened from
+  // history says the version and stops, rather than attributing the answer to whatever the
+  // picker happens to be showing now.
+  const askedThroughProduct = isFresh ? contextProduct : null;
   // Provenance the run pinned its answer to — which published semantic model
   // and policy version grounded it, and (for a stored run) which approved model
   // route generated the SQL. The fresh POST response omits the route, so it is
@@ -400,7 +495,9 @@ function AnswerPanel({
                 <dd>
                   {contextProductVersion === null
                     ? "not asked through one"
-                    : `version ${contextProductVersion}`}
+                    : askedThroughProduct
+                      ? `${askedThroughProduct.name} · version ${contextProductVersion}`
+                      : `version ${contextProductVersion} · product not recorded on the run`}
                 </dd>
               </div>
               <div>
@@ -528,15 +625,40 @@ function AnswerPanel({
 {/* The copied link names the screen that resolves this selection.
             Built as `origin + pathname + '?' + id` it carried no `#/analyst`,
             so a fresh tab landed on the persona default and the id was read by
-            nobody (review 2026-09-05, F08). */}
+            nobody (review 2026-09-05, F08).
+
+            It also names the context product (R11-FP12, F08). Without it a
+            shared permalink re-opened the same run beside a picker set to
+            "everything this datasource governs", so the next question asked
+            from that link was silently wider than the one being shared. */}
         <CopyLinkButton
-          target={{ screen: "analyst", params: { run: runId } }}
+          target={{
+            screen: "analyst",
+            params: { run: runId, product: contextProduct?.key ?? null },
+          }}
           label="Copy permalink"
         />
       </footer>
     </aside>
   );
 }
+
+/**
+ * What this project's askable products are, as four distinguishable answers
+ * rather than one list that is empty for four different reasons (F08).
+ *
+ * `idle` is "no datasource picked, so there is no project to ask"; `error`
+ * carries the server's own reason, because "the list could not be read" and
+ * "there are none" send a reader to different places.
+ */
+type ProductOffer =
+  | { state: "idle" }
+  | { state: "loading" }
+  | { state: "loaded"; items: ContextProductRead[] }
+  | { state: "error"; detail: string };
+
+const NO_PROJECT: ProductOffer = { state: "idle" };
+const NO_PRODUCTS: ContextProductRead[] = [];
 
 export function AskScreen() {
   const ORG = useOrgId();
@@ -552,28 +674,71 @@ export function AskScreen() {
   // same product rather than silently widening back to the whole datasource.
   const productKey = params.get("product");
   const projectId = datasources.find((d) => d.id === dsId)?.project_id ?? null;
-  const [products, setProducts] = useState<ContextProductRead[]>([]);
+  const [offer, setOffer] = useState<ProductOffer>(NO_PROJECT);
 
   useEffect(() => {
     if (!projectId) {
-      setProducts([]);
+      setOffer(NO_PROJECT);
       return;
     }
     const ac = new AbortController();
+    setOffer({ state: "loading" });
     void (async () => {
       try {
-        const page = await fetchContextProducts(projectId, { limit: 200 }, ac.signal);
-        // Only a product with a published version can be asked through; the server refuses the
-        // rest, so offering them would be offering a refusal.
-        setProducts(page.items.filter((p) => p.latest_version?.status === "PUBLISHED"));
-      } catch {
-        // A product list that cannot be read is not a reason to block asking: Ask without one
-        // behaves exactly as it always has.
-        setProducts([]);
+        // F08: `askable` is the server applying the ask path's own admission rule -- PUBLISHED,
+        // and naming a consumer role this caller holds. The screen used to filter the lifecycle
+        // listing by status alone, which is only half of it: a steward was offered every
+        // published product in the project and the ask then refused the ones whose consumer
+        // roles did not include theirs. Filtering that client-side was never possible, because
+        // "which roles do I hold" is not in the listing.
+        const page = await fetchContextProducts(
+          projectId,
+          { limit: 200, askable: true },
+          ac.signal,
+        );
+        if (ac.signal.aborted) return;
+        // The status filter is kept as well, for demo/fixture mode: it serves the listing from
+        // a local estate that has no role bindings to apply `askable` against.
+        setOffer({
+          state: "loaded",
+          items: page.items.filter((p) => p.latest_version?.status === "PUBLISHED"),
+        });
+      } catch (e) {
+        if ((e as Error)?.name === "AbortError" || ac.signal.aborted) return;
+        // F08: a list that could not be read is NOT "this project publishes none". Both used to
+        // render as "No published product on this project", so a 403 or a dropped connection
+        // read as a settled fact about the estate. Asking without a product still works either
+        // way -- which is why this does not block the form -- but the two say so differently,
+        // because one is fixed by retrying or by being granted access and the other by
+        // publishing a product.
+        setOffer({
+          state: "error",
+          detail: e instanceof ApiError ? e.detail : (e as Error).message,
+        });
       }
     })();
     return () => ac.abort();
   }, [projectId]);
+
+  const products = offer.state === "loaded" ? offer.items : NO_PRODUCTS;
+  /* F08: only a product the picker is actually showing as selected may be sent. The URL can
+     name one this project does not offer -- moving to a datasource in another project keeps
+     `product`, and so does a link built elsewhere -- and the old code sent the key anyway while
+     the `<select>` matched no option and rendered blank: the screen said "no product" and the
+     request said otherwise. */
+  const selectedProduct = products.find((p) => p.product_key === productKey) ?? null;
+  const askedThroughKey = selectedProduct?.product_key ?? null;
+
+  /* …and once the list that decides is actually in, the stale key is removed from the URL, so a
+     link copied from here cannot carry a product this screen is not honouring. Deliberately not
+     done on the datasource change itself: the loaded list is what knows whether the new
+     project offers it, and while the list is loading or unreadable the key is kept (the next
+     load may honour it) but not sent. */
+  useEffect(() => {
+    if (offer.state !== "loaded" || productKey === null) return;
+    if (offer.items.some((p) => p.product_key === productKey)) return;
+    setParams({ product: null });
+  }, [offer, productKey, setParams]);
 
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -603,7 +768,7 @@ export function AskScreen() {
       // A retry after a clarification pins the tool the server already chose:
       // re-running retrieval could select a different one, and the answer would
       // then come from a tool the person never supplied inputs for.
-      const askedThrough = productKey ? { context_product_key: productKey } : {};
+      const askedThrough = askedThroughKey ? { context_product_key: askedThroughKey } : {};
       const response = await runAgentAnalysis(
         dsId,
         clarification
@@ -641,7 +806,7 @@ export function AskScreen() {
       if (seq === askSeq.current) setAsking(false);
     }
   },
-    [dsId, productKey, question, setParams],
+    [dsId, askedThroughKey, question, setParams],
   );
 
   // Switching datasources leaves any open answer behind -- it belonged to
@@ -787,6 +952,10 @@ export function AskScreen() {
         }}
       >
         <Field label="Datasource">
+          {/* `product` is deliberately not cleared here: the new datasource's own
+              project decides whether it can still be honoured, and that answer
+              arrives with the list, not with the click (see the reconciling
+              effect above). Until it does, the key is not sent. */}
           <select
             value={dsId ?? ""}
             onChange={(e) => setParams({ ds: e.target.value || null, run: null })}
@@ -805,14 +974,18 @@ export function AskScreen() {
         <Field label="Context product">
           <select
             aria-label="Context product"
-            value={productKey ?? ""}
+            value={askedThroughKey ?? ""}
             disabled={!dsId || products.length === 0}
             onChange={(e) => setParams({ product: e.target.value || null, run: null })}
           >
             <option value="">
-              {products.length === 0
-                ? "No published product on this project"
-                : "Everything this datasource governs"}
+              {offer.state === "loading"
+                ? "Loading this project's products…"
+                : offer.state === "error"
+                  ? "The product list could not be read"
+                  : products.length === 0
+                    ? "No published product you can ask through"
+                    : "Everything this datasource governs"}
             </option>
             {products.map((p) => (
               <option key={p.id} value={p.product_key}>
@@ -820,6 +993,12 @@ export function AskScreen() {
               </option>
             ))}
           </select>
+          {offer.state === "error" ? (
+            <p className="askscreen__pickerr" role="alert">
+              This project's context products could not be listed ({offer.detail}), so none can be
+              offered — this is not the same as there being none. Asking without one still works.
+            </p>
+          ) : null}
           <p className="askscreen__hint">
             A product answers from the tables it names and the tool versions it declares
             eligible; anything else is refused rather than quietly used.
@@ -860,6 +1039,10 @@ export function AskScreen() {
           onClarify={(values) =>
             void submitQuestion({ toolParameters: values, toolVersionId: askError.toolVersionId })
           }
+          onClearProduct={() => {
+            setParams({ product: null, run: null });
+            setAskError(null);
+          }}
           busy={asking}
         />
       ) : null}
@@ -907,6 +1090,14 @@ export function AskScreen() {
             runId={runId}
             askResult={askResult}
             askedAt={askedAt}
+            contextProduct={
+              selectedProduct
+                ? {
+                    key: selectedProduct.product_key,
+                    name: selectedProduct.latest_version?.name ?? selectedProduct.product_key,
+                  }
+                : null
+            }
             detail={panelDetail}
             receipts={panelReceipts}
             loading={panelLoading}

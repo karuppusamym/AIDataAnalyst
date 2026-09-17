@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **482**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 429, SDK 1
+- Surfaces covered: **489**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 436, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -176,6 +176,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/model-imports` | REST | `aida.model_import_api.list_model_imports` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/openlineage-events` | REST | `aida.openlineage_api.list_openlineage_run_events` | Auditor, DataAdmin, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage` | REST | `aida.procedure_lineage_api.list_deep_procedure_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/procedures/{routine_id}/parse-coverage` | REST | `aida.procedure_lineage_api.get_routine_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/profiling-exception-policies` | REST | `aida.api.list_profiling_exception_policies` | DataAdmin, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/quality-incidents` | REST | `aida.quality_api.list_quality_incidents` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/quality-observations` | REST | `aida.quality_api.list_quality_observations` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -202,6 +203,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/documents/{document_id}/mappings` | REST | `aida.document_ingestion_api.list_document_mappings` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/documents/{document_id}/sections` | REST | `aida.document_ingestion_api.list_document_sections` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/documents/{document_id}` | REST | `aida.document_ingestion_api.get_document` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/engines/capability-matrix` | REST | `aida.engine_capability_api.get_engine_capability_matrix` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/glossary-term-versions/{version_id}/consumers` | REST | `aida.glossary_api.get_glossary_term_version_consumers` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/glossary-terms/{term_id}/semantic-bindings` | REST | `aida.semantic_api.list_term_semantic_bindings` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/queue/summary` | REST | `aida.review_queue_api.get_review_queue_summary` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
@@ -283,6 +285,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/downstream-impact` | REST | `aida.agent_contract_api.get_sample_downstream_impact` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent/samples` | REST | `aida.agent_contract_api.list_audit_samples` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/reviewer-agent` | REST | `aida.agent_contract_api.get_reviewer_agent_state` | AgentDeveloper, Auditor, DataSteward, ModelRiskManager, Operations, PlatformAdmin, Reviewer | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/routine-description-drafts` | REST | `aida.routine_description_api.list_routine_description_drafts` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/steward-agent` | REST | `aida.steward_agent_api.get_steward_agent_state` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/stewardship/coverage/snapshots` | REST | `aida.stewardship_api.list_stewardship_coverage_snapshots` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/stewardship/coverage` | REST | `aida.stewardship_api.get_stewardship_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -310,6 +313,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/query-executions/{execution_id}/lineage` | REST | `aida.api.get_query_lineage` | AgentDeveloper, Analyst, Auditor, MetadataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/relationship-candidates/confidence-calibration` | REST | `aida.intelligence_api.get_relationship_candidate_confidence_calibration` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/relationship-candidates/{candidate_id}/validation` | REST | `aida.relationship_validation_api.get_relationship_candidate_validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/routines/{routine_id}/description` | REST | `aida.routine_description_api.get_routine_description` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/schemas/{schema_id}/table-family-candidates` | REST | `aida.table_family_api.list_table_family_candidates_for_schema` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/search/suggest` | REST | `aida.search_api.search_suggest` | Analyst, DataAdmin, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/search` | REST | `aida.search_api.global_search` | Analyst, DataAdmin, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -464,6 +468,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/reviewer-agent/resume` | REST | `aida.agent_contract_api.resume_reviewer_agent` | MetadataReviewer, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/reviewer-agent/samples/{sample_id}/resolve` | REST | `aida.agent_contract_api.resolve_sample` | MetadataReviewer, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/reviewer-agent/suspend` | REST | `aida.agent_contract_api.suspend_reviewer_agent` | MetadataReviewer, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
+| `POST /v1/organizations/{organization_id}/routine-description-drafts/generate` | REST | `aida.routine_description_api.generate_routine_description_drafts` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/stewardship/coverage/snapshots` | REST | `aida.stewardship_api.snapshot_stewardship_coverage` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/stewardship/leaver-reassignment` | REST | `aida.stewardship_api.request_leaver_reassignment` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/stewardship/unowned-backlog/route` | REST | `aida.stewardship_api.route_unowned_asset_backlog` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
@@ -491,6 +496,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/query/validate` | REST | `aida.api.validate_query` | AgentDeveloper, Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/relationship-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_relationship_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/rename-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_rename_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/routine-description-drafts/{draft_id}/submit` | REST | `aida.routine_description_api.submit_routine_description_draft` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/schemas/{schema_id}/table-family-candidates/discover` | REST | `aida.table_family_api.discover_table_family_candidates` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/security/tokens/detokenize` | REST | `aida.detokenization_api.detokenize_value` | none declared | yes | no | writes | yes | not cancellable |
 | `POST /v1/security/tokens/revoke` | REST | `aida.token_revocation_api.revoke_token` | none declared | yes | no | writes | yes | not cancellable |
@@ -539,5 +545,6 @@ graph. Nothing here is hand-maintained.
 | `PUT /v1/notification-rules/{rule_id}` | REST | `aida.notification_api.update_notification_rule` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/organizations/{organization_id}/agents/{ai_asset_version_id}/contract` | REST | `aida.agent_contract_api.put_agent_contract` | AgentDeveloper, ModelRiskManager, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `PUT /v1/organizations/{organization_id}/integration-policy` | REST | `aida.api.update_organization_integration_policy` | OrganizationAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `PUT /v1/routine-description-drafts/{draft_id}` | REST | `aida.routine_description_api.edit_routine_description_draft` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `PUT /v1/semantic-metric-versions/{version_id}` | REST | `aida.semantic_api.edit_metric_draft` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `SDK aida_tool_sdk.ToolDraftClient.submit_draft` | SDK | `aida.tool_api.create_tool_version` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | yes | writes | yes | not cancellable |

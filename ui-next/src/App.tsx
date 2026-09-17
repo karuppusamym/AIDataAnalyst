@@ -28,7 +28,7 @@ import { beginSignIn, canStartSignIn, signOut } from "./lib/oidcClient";
 import { OrgProvider } from "./lib/org";
 import { ScopeProvider } from "./lib/scope";
 import { normalizeLocation, pushLocation, replaceLocation } from "./lib/location";
-import { SCREEN_IDS, SCREEN_JOURNEY, type ScreenId } from "./lib/routes";
+import { resolveScreenRef, SCREEN_IDS, SCREEN_JOURNEY, type ScreenId } from "./lib/routes";
 import { describeSession, SessionProvider, useSession } from "./lib/session";
 import { useAppLocation, useCurrentScreen } from "./lib/useUrlState";
 import { asIdentityProvider, asPersona } from "./lib/ui-types";
@@ -43,8 +43,6 @@ import { useUnsavedNavigationGuard } from "./lib/unsavedChanges";
 import "./App.css";
 
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
-const DescriptionDraftsScreen = lazy(() => import("./screens/DescriptionDraftsScreen").then((module) => ({ default: module.DescriptionDraftsScreen })));
-const DataDictionariesScreen = lazy(() => import("./screens/DataDictionariesScreen").then((module) => ({ default: module.DataDictionariesScreen })));
 /* R11-S10: one review surface. The parsed-lineage queue is a tab inside this
    screen now, and lazily loaded from there -- it is no longer a route of its
    own, so the shell no longer names it. */
@@ -52,7 +50,10 @@ const ReviewQueueScreen = lazy(() => import("./screens/ReviewQueueScreen").then(
 const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then((module) => ({ default: module.MarketplaceScreen })));
 const LineageRefusalScreen = lazy(() => import("./screens/LineageRefusalScreen").then((module) => ({ default: module.LineageRefusalScreen })));
 const StudioChangeSetsScreen = lazy(() => import("./screens/StudioChangeSetsScreen").then((module) => ({ default: module.StudioChangeSetsScreen })));
-const NarratedLineageScreen = lazy(() => import("./screens/NarratedLineageScreen").then((module) => ({ default: module.NarratedLineageScreen })));
+/* R11-S13 (M1): one lineage destination. The narrated traversal and the merged
+   graph were two routes over one question; they are three views of one screen
+   now, each still its own lazy chunk, loaded from the workspace. */
+const LineageWorkspace = lazy(() => import("./screens/LineageWorkspace").then((module) => ({ default: module.LineageWorkspace })));
 const CrossSourceScreen = lazy(() => import("./screens/CrossSourceScreen").then((module) => ({ default: module.CrossSourceScreen })));
 const AskScreen = lazy(() => import("./screens/AskScreen").then((module) => ({ default: module.AskScreen })));
 const RelationshipsScreen = lazy(() => import("./screens/RelationshipsScreen").then((module) => ({ default: module.RelationshipsScreen })));
@@ -67,7 +68,6 @@ const ContextProductsScreen = lazy(() => import("./screens/ContextProductsScreen
 const AgentGatewayScreen = lazy(() => import("./screens/AgentGatewayScreen").then((module) => ({ default: module.AgentGatewayScreen })));
 const AdministrationScreen = lazy(() => import("./screens/AdministrationScreen").then((module) => ({ default: module.AdministrationScreen })));
 const ToolRegistryScreen = lazy(() => import("./screens/ToolRegistryScreen").then((module) => ({ default: module.ToolRegistryScreen })));
-const UnifiedLineageScreen = lazy(() => import("./screens/UnifiedLineageScreen").then((module) => ({ default: module.UnifiedLineageScreen })));
 const AiGovernanceScreen = lazy(() => import("./screens/AiGovernanceScreen").then((module) => ({ default: module.AiGovernanceScreen })));
 const TransformationsScreen = lazy(() => import("./screens/TransformationsScreen").then((module) => ({ default: module.TransformationsScreen })));
 const StewardshipScreen = lazy(() => import("./screens/StewardshipScreen").then((module) => ({ default: module.StewardshipScreen })));
@@ -82,7 +82,11 @@ const PlaybooksScreen = lazy(() => import("./screens/PlaybooksScreen").then((mod
 const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
 const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
-const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
+/* R11-S13 (M3): one documentation workspace. The worklist, the description
+   drafts and the dictionary imports were three routes over three steps of one
+   job; they are three tabs now, each still its own lazy chunk, loaded from the
+   workspace rather than named here. */
+const DocumentationWorkspace = lazy(() => import("./screens/DocumentationWorkspace").then((module) => ({ default: module.DocumentationWorkspace })));
 /* R11-S10: the steward, lineage and quality agent consoles were three routes
    over one component with a different `kind`. They are one screen with the
    agent as a filter. */
@@ -127,8 +131,11 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: "semantics", label: "Semantic layer", icon: "ƒ", keywords: "metrics models measures" },
   { id: "tools", label: "Tool registry", icon: "⛭", keywords: "sql tool version execute registry" },
   { id: "tool-plans", label: "Tool plans", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
-  { id: "lineage", label: "Lineage", icon: "↗", keywords: "impact upstream downstream narrated" },
-  { id: "unified-lineage", label: "Unified lineage", icon: "⇄", keywords: "graph impact upstream downstream unified" },
+  /* R11-S13 (M1): one lineage destination with three views. The keywords of
+     the entry it absorbed are merged in, so an analyst searching "unified
+     lineage" or "graph" in the palette is still offered the page that now
+     answers for them. */
+  { id: "lineage", label: "Lineage", icon: "↗", keywords: "impact upstream downstream narrated explain graph unified topology nodes edges dbt openlineage foreign key domain cross boundary grant blast radius" },
   // --- Consumer: use what has been approved -------------------------------
   { id: "marketplace", label: "Marketplace", icon: "◇", keywords: "products access request" },
   { id: "portfolio-analytics", label: "Portfolio analytics", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
@@ -143,7 +150,11 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: "developer", label: "Agent gateway", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
   // --- Steward: make the estate mean something ----------------------------
   { id: "stewardship", label: "Stewardship", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
-  { id: "worklist", label: "Documentation worklist", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
+  /* R11-S13 (M3): one destination for documenting the estate. The keywords of
+     the two entries it absorbed are merged in, so a steward searching "csv
+     import" or "description draft" in the palette is still offered the page
+     that now answers for them. */
+  { id: "worklist", label: "Documentation", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next asset description draft drafts generate submit steward data dictionary dictionaries csv import upload column table descriptions claims workspace" },
   /* R11-S10: one console for all three task agents. The keywords of the three
      routes it replaces are merged, so searching "quality agent" or "lineage
      agent" in the palette still finds the page that now answers for them. */
@@ -151,8 +162,6 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: "playbooks", label: "Playbooks", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
   { id: "negative-knowledge", label: "Negative knowledge", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", icon: "Aa", keywords: "glossary terms annotations" },
-  { id: "description-drafts", label: "Description drafts", icon: "✎", keywords: "asset description draft generate submit steward" },
-  { id: "data-dictionaries", label: "Data dictionaries", icon: "⇪", keywords: "data dictionary csv import upload column table descriptions document claims" },
   { id: "relationships", label: "Relationships", icon: "⌁", keywords: "keys graph links" },
   { id: "cross-source", label: "Cross-source", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
   { id: "transformations", label: "Transformations", icon: "▤", keywords: "dbt models sql transforms manifest" },
@@ -223,13 +232,11 @@ function Screen({
   switch (view) {
     case "catalog": return <CatalogScreen />;
     case "governance": return <ReviewQueueScreen />;
-    case "description-drafts": return <DescriptionDraftsScreen />;
-    case "data-dictionaries": return <DataDictionariesScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;
     case "reviewer-agent": return <ReviewerAgentScreen />;
     case "studio": return <StudioChangeSetsScreen />;
-    case "lineage": return <NarratedLineageScreen />;
+    case "lineage": return <LineageWorkspace />;
     case "analyst": return <AskScreen />;
     case "relationships": return <RelationshipsScreen />;
     case "cross-source": return <CrossSourceScreen />;
@@ -245,12 +252,11 @@ function Screen({
     case "developer": return <AgentGatewayScreen />;
     case "portfolio-analytics": return <PortfolioAnalyticsScreen />;
     case "tools": return <ToolRegistryScreen />;
-    case "unified-lineage": return <UnifiedLineageScreen />;
     case "transformations": return <TransformationsScreen />;
     case "agents": return <AiGovernanceScreen />;
     case "administration": return <AdministrationScreen />;
     case "stewardship": return <StewardshipScreen />;
-    case "worklist": return <DocumentationWorklistScreen />;
+    case "worklist": return <DocumentationWorkspace />;
     case "task-agents": return <TaskAgentsScreen />;
     case "playbooks": return <PlaybooksScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
@@ -589,8 +595,14 @@ function AppShell() {
    * entirely. Dropping them is the fix, not a regression: estate context
    * (`ds`/`project`/`dom`) is still inherited by screens that declare it. */
   const navigate = (id: string, params?: Record<string, string>) => {
-    const target = SCREEN_IDS.find((screen) => screen === id);
-    if (!target) {
+    /* R11-S13: resolved through the retired-alias table, not matched against
+     * the live list. `onNavigate` takes a `string` -- `HomeScreen`,
+     * `AgentInboxScreen`, `FirstSourceSetup` and `OnboardingWizard` all pass
+     * literals the compiler never checks -- so a screen merged away under one
+     * of those literals would silently do nothing here. Same contract a pasted
+     * URL gets from `resolveHash`. */
+    const resolved = resolveScreenRef(id);
+    if (!resolved) {
       if (import.meta.env?.DEV) console.warn(`App.navigate: unknown screen "${id}"`);
       return;
     }
@@ -605,7 +617,12 @@ function AppShell() {
     if (!confirmNavigation()) return;
     setPaletteOpen(false);
     setNavOpen(false);
-    pushLocation({ screen: target, params });
+    // The caller's selection, with the retired route's implied filter overlaid
+    // -- the same order `normalizeLocation` folds them in.
+    pushLocation({
+      screen: resolved.screen,
+      params: { ...params, ...(resolved.params ?? {}) },
+    });
   };
 
   const matches = useMemo(() => {

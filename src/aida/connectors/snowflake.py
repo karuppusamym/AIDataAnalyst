@@ -18,12 +18,20 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from aida.connectors.base import (
+    ENTROPY_NOT_IMPLEMENTED,
+    FACET_REASON_NOT_IMPLEMENTED,
+    FACET_UNSUPPORTED,
+    OBSERVATION_SCOPE_FULL,
+    PROFILE_FACET_BLANKS,
+    PROFILE_FACET_LENGTH,
+    PROFILE_FACET_LENGTH_DISTRIBUTION,
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     DiscoveredRoutine,
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
+    ProfileFacetStatus,
     QueryEstimate,
     QueryLogEntry,
     QueryResult,
@@ -57,6 +65,21 @@ def _quote_identifier(identifier: str) -> str:
 def _qualified_table(database: str, schema: str, table: str) -> str:
     """Format a fully-qualified 3-part Snowflake table identifier."""
     return f"{_quote_identifier(database)}.{_quote_identifier(schema)}.{_quote_identifier(table)}"
+
+
+#: R11-FP04: the value-free facets this adapter's `profile_table` does not
+#: compute, stated per column rather than left as bare `None`s. Every one of
+#: them is expressible in Snowflake SQL, so the status is UNSUPPORTED with
+#: reason NOT_IMPLEMENTED -- "this adapter does not ask" -- and never
+#: ENGINE_LACKS_FACET, which would blame the warehouse for a gap that is ours.
+_UNIMPLEMENTED_FACETS: tuple[ProfileFacetStatus, ...] = (
+    ProfileFacetStatus(PROFILE_FACET_LENGTH, FACET_UNSUPPORTED, FACET_REASON_NOT_IMPLEMENTED),
+    ProfileFacetStatus(PROFILE_FACET_BLANKS, FACET_UNSUPPORTED, FACET_REASON_NOT_IMPLEMENTED),
+    ProfileFacetStatus(
+        PROFILE_FACET_LENGTH_DISTRIBUTION, FACET_UNSUPPORTED, FACET_REASON_NOT_IMPLEMENTED
+    ),
+    ENTROPY_NOT_IMPLEMENTED,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1035,13 +1058,39 @@ class SnowflakeConnector(SqlExecutor):
                                     approximate_distinct_count=approx_distinct,
                                     min_length=None,
                                     max_length=None,
+                                    # R11-FP04: these NULLs now carry a reason.
+                                    # This connector computes three aggregates
+                                    # per column and no text-shaped ones at
+                                    # all, so a reader seeing `min_length is
+                                    # None` could not tell "Snowflake was never
+                                    # asked" from "this column has no text
+                                    # form" -- two facts with opposite
+                                    # implications for whether asking again
+                                    # would help. Snowflake can express every
+                                    # one of these (`LENGTH(TO_VARCHAR(...))`,
+                                    # a grouped entropy aggregate); this
+                                    # adapter does not, which is
+                                    # NOT_IMPLEMENTED and not UNSUPPORTED.
+                                    facet_status=_UNIMPLEMENTED_FACETS,
                                 )
                             )
 
+                    # R11-FP04: every aggregate above runs over the *whole*
+                    # table -- there is no `LIMIT` anywhere in this method -- so
+                    # this is a full observation and must say so. It previously
+                    # reported `sampled_row_count = min(row_count,
+                    # sample_rows)`, which made a complete profile arrive
+                    # downstream as sampled and weakened join evidence that was
+                    # in fact exhaustive. `sample_rows` is deliberately unused
+                    # here: bounding Snowflake's profiling cost is a real open
+                    # question, and the answer to it is a bound in the SQL, not
+                    # a smaller number reported for a scan that already
+                    # happened.
                     return TableProfileSnapshot(
                         row_count_estimate=row_count,
-                        sampled_row_count=min(row_count, sample_rows),
+                        sampled_row_count=row_count,
                         columns=tuple(column_snapshots),
+                        observation_scope=OBSERVATION_SCOPE_FULL,
                     )
                 finally:
                     cur.close()

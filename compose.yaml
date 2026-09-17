@@ -28,6 +28,14 @@ name: aida-platform
 #   archive      minio                         audit_archive_storage_backend
 #                                              defaults to `none`.
 #   temporal-ui  temporal-ui                   Developer convenience.
+#   monitoring   prometheus                    R11-FP17. Scrapes `api:8000` and,
+#                                              when AIDA_WORKER_METRICS_PORT is
+#                                              set, the two worker processes that
+#                                              publish gauges nothing could reach
+#                                              before. Off by default because a
+#                                              scrape target set and an alert
+#                                              routing decision belong to the
+#                                              estate, not to a default stack.
 #   full         all of the above              One flag for the 18 services a
 #                                              plain `up` used to start
 #                                              (excludes `seed`).
@@ -48,7 +56,15 @@ name: aida-platform
 #   docker compose --profile events up -d               # + Kafka transport
 #   docker compose --profile archive up -d              # + MinIO
 #   docker compose --profile temporal-ui up -d          # + Temporal Web UI
+#   docker compose --profile monitoring up -d           # + Prometheus
 #   docker compose --profile full up -d --build         # everything
+#
+# A profile that is not named is not merely unstarted: Compose will not
+# recreate a RUNNING service whose profile is disabled. So a rebuild must
+# repeat the flags the stack was started with, or it leaves the profiled
+# services on the old image -- two images against one database. That is how
+# review F03 happened; the procedure is
+# `Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md` §2.
 #
 # The feature flags below follow the profiles: enabling `cache` or `graph` also
 # means setting the matching AIDA_* variable, which is why each one is now read
@@ -456,7 +472,17 @@ services:
       temporal:
         condition: service_healthy
     env_file: *app-env-file
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      # R11-FP17. `prometheus_client`'s registry is per process and only
+      # `aida.main` serves `/metrics`, so the footprint gauges this process
+      # publishes live where no scrape can reach until it listens. 0 (the
+      # `Settings` default) means "do not listen": opening a port is a change
+      # to the deployment's network surface, so it stays the operator's
+      # decision, made together with `--profile monitoring`. Set
+      # AIDA_WORKER_METRICS_PORT=9108 -- the value
+      # `infra/monitoring/prometheus/prometheus.yml` scrapes -- to turn it on.
+      AIDA_WORKER_METRICS_PORT: ${AIDA_WORKER_METRICS_PORT:-0}
     command: ["python", "-m", "aida.workflows.scheduler"]
     restart: unless-stopped
 
@@ -490,8 +516,45 @@ services:
       neo4j:
         condition: service_healthy
     env_file: *app-env-file
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      # Same as `fleet-scheduler` above: the `aida_graph_projection_*` gauges
+      # are published here, and are unreachable until this process listens.
+      AIDA_WORKER_METRICS_PORT: ${AIDA_WORKER_METRICS_PORT:-0}
     command: ["python", "-m", "aida.projectors.graph_projector"]
+    restart: unless-stopped
+
+  # Opt-in: `--profile monitoring`. R11-FP17's scrape configuration and alert
+  # rules live in `infra/monitoring/` and are owned there; this service only
+  # decides whether a Prometheus is running to read them. Off by default for
+  # the reason every other profile is: the default stack should not start a
+  # service that has nothing to do, and a scrape target set plus an alert
+  # routing decision belong to the estate.
+  #
+  # Nothing `depends_on` this, so it has no healthcheck -- the same reason
+  # `temporal-ui` and `redpanda-console` have none. Its own readiness is
+  # visible at http://localhost:9090/targets, which is also where a target
+  # showing DOWN tells you AIDA_WORKER_METRICS_PORT is still 0.
+  #
+  # Version pinned, not `:latest` (the k8s base deployment already calls the
+  # floating tag out as an audit finding). Bump it deliberately.
+  prometheus:
+    profiles: ["monitoring", "full"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Local development retention. An estate sets its own, and a real
+      # deployment sends these to long-term storage rather than keeping them
+      # in one container's volume.
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
     restart: unless-stopped
 
 volumes:
@@ -500,5 +563,6 @@ volumes:
   neo4j-data:
   redpanda-data:
   minio-data:
+  prometheus-data:
   sample-source-data:
   sample-mssql-source-data:

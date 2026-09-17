@@ -27,9 +27,13 @@ import "./DescriptionActionDialog.css";
 --------------------------------------------------------------------------- */
 
 export type DescriptionActionSubject = {
-  subjectType: "TABLE" | "COLUMN";
+  /* R11-FP08: ROUTINE joined the withdrawal subjects when routines gained an
+     Atlas-authored description of their own. The API already accepts it
+     (`description_withdrawal_api.py`'s `^(TABLE|COLUMN|ROUTINE)$`); this union
+     is the only thing that kept the dialog from offering it. */
+  subjectType: "TABLE" | "COLUMN" | "ROUTINE";
   subjectId: string;
-  /** What the steward sees named in the dialog — a column or table name. */
+  /** What the steward sees named in the dialog — a column, table or routine name. */
   label: string;
   /** The words being retired, or brought back. Always shown. */
   text: string;

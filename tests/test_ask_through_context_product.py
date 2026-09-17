@@ -8,6 +8,10 @@ question were unrelated events. `context_product_key` on the request ties them t
 Driven through `GovernedAgentOrchestrator.run()` -- the object the Ask route constructs -- on the
 retrieval-wiring scenario, whose governed tool needs a parameter the question never mentions, so a
 run that reaches the tool lands on CLARIFICATION without a warehouse or a model route.
+
+F08 adds a second group at the bottom that goes through the ROUTE instead, over ASGI: driving the
+orchestrator directly says nothing about whether `POST /v1/datasources/{id}/agent-analyses`
+carries the key to it, and nothing did.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -31,7 +36,12 @@ from aida.agent_orchestrator import (
     ContextProductScope,
     GovernedAgentOrchestrator,
 )
-from aida.config import Settings
+from aida.config import Settings, get_settings
+from aida.db import get_session
+
+# Imported at module scope, so every router -- and the model modules mounting them imports --
+# is registered before the `db` fixture's `create_all` builds the schema.
+from aida.main import app
 from aida.models import AgentRun, ContextProduct, ContextProductVersion
 from tests.support.doubles import security_context
 from tests.test_agent_orchestrator_retrieval_wiring import _Scenario, db  # noqa: F401
@@ -353,3 +363,142 @@ async def test_asking_without_a_product_is_unchanged(scenario: _Scenario) -> Non
 
     run = await _latest_run(scenario)
     assert any(hit["object_type"] == "GOVERNED_TOOL" for hit in run.retrieval_evidence)
+
+
+# ---------------------------------------------------------------------------
+# The route, over HTTP (F08)
+#
+# Everything above drives `GovernedAgentOrchestrator.run()` directly. That is the object the Ask
+# route constructs, which is why those tests are about scoping rather than about plumbing -- but
+# it also means nothing here exercised the ROUTE. `AgentAnalysisRequest` could have dropped
+# `context_product_key`, or `run_agent_analysis` could have stopped passing it, and every test
+# above would still pass while the Ask screen's selection quietly did nothing.
+#
+# These POST the real `/v1/datasources/{id}/agent-analyses` into the real FastAPI application
+# (ASGI transport, the scenario's own sqlite session) and assert on the status and detail the
+# browser actually receives -- the same three stable tokens `classifyAgentAskError`
+# (ui-next/src/lib/api/agents.ts) maps to its three refusal states.
+# ---------------------------------------------------------------------------
+
+
+def _ask_headers(scenario: _Scenario, roles: str) -> dict[str, str]:
+    return {
+        "X-Principal-Id": "ask-analyst",
+        "X-Principal-Type": "USER",
+        "X-Roles": roles,
+        "X-Business-Purpose": "Ask through a context product",
+        "X-Organization-Id": str(scenario.organization.id),
+    }
+
+
+@pytest_asyncio.fixture
+async def http(scenario: _Scenario) -> AsyncIterator[httpx.AsyncClient]:
+    """The application, talking to the scenario's session.
+
+    `app` is process-wide, so the overrides are restored exactly as they were found rather than
+    cleared -- clearing would silently remove whatever another test had installed.
+    """
+    previous_overrides = dict(app.dependency_overrides)
+
+    async def _session_override() -> AsyncIterator[AsyncSession]:
+        yield scenario.db
+
+    app.dependency_overrides[get_session] = _session_override
+    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ask.test") as client:
+        yield client
+    app.dependency_overrides.clear()
+    app.dependency_overrides.update(previous_overrides)
+
+
+async def _post_ask(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    *,
+    product_key: str | None,
+    roles: str = "Analyst",
+) -> httpx.Response:
+    body: dict[str, Any] = {
+        "question": QUESTION,
+        "preferred_tool_version_id": str(scenario.tool_version.id),
+    }
+    if product_key is not None:
+        body["context_product_key"] = product_key
+    return await http.post(
+        f"/v1/datasources/{scenario.datasource.id}/agent-analyses",
+        json=body,
+        headers=_ask_headers(scenario, roles),
+    )
+
+
+async def test_the_route_scopes_the_run_to_the_product_it_was_sent(
+    http: httpx.AsyncClient, scenario: _Scenario
+) -> None:
+    await _product(
+        scenario,
+        key="orders-context",
+        table_ids=[scenario.fact_orders.id],
+        tool_version_ids=[scenario.tool_version.id],
+    )
+
+    response = await _post_ask(http, scenario, product_key="orders-context")
+
+    # The tool is reachable, so the run lands on the structured clarification its missing
+    # parameter causes -- the same 409 the Ask screen renders as a form.
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "MISSING_TOOL_PARAMETERS"
+    # And the run says which published version it stood on, which is only recorded when a
+    # product actually resolved.
+    run = await _latest_run(scenario)
+    resolved = [step for step in run.step_trace if step.get("stage") == "RESOLVED"]
+    assert resolved and resolved[-1]["details"]["context_product_version"] == 1
+
+
+async def test_the_route_refuses_an_unknown_product_with_the_token_the_ui_maps(
+    http: httpx.AsyncClient, scenario: _Scenario
+) -> None:
+    """The assertion that fails if the route ever stops forwarding the key: without it the run
+    would reach the tool and answer with the 409 above instead."""
+    response = await _post_ask(http, scenario, product_key="no-such-product")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == CONTEXT_PRODUCT_UNAVAILABLE
+
+
+async def test_the_route_refuses_a_caller_who_is_not_a_consumer(
+    http: httpx.AsyncClient, scenario: _Scenario
+) -> None:
+    """The refusal the Ask picker used to offer: a published product whose consumer roles do not
+    include the caller's. `askable=true` on the listing keeps it out of the picker; this is what
+    the caller still gets if it is asked for anyway."""
+    await _product(
+        scenario,
+        key="orders-context",
+        table_ids=[scenario.fact_orders.id],
+        tool_version_ids=[scenario.tool_version.id],
+        consumer_roles=["DataSteward"],
+    )
+
+    response = await _post_ask(http, scenario, product_key="orders-context")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == CONTEXT_PRODUCT_FORBIDDEN
+
+
+async def test_the_route_without_a_product_records_none(
+    http: httpx.AsyncClient, scenario: _Scenario
+) -> None:
+    await _product(
+        scenario,
+        key="orders-context",
+        table_ids=[scenario.fact_orders.id],
+        tool_version_ids=[scenario.tool_version.id],
+    )
+
+    response = await _post_ask(http, scenario, product_key=None)
+
+    assert response.status_code == 409
+    run = await _latest_run(scenario)
+    resolved = [step for step in run.step_trace if step.get("stage") == "RESOLVED"]
+    assert resolved and "context_product_version" not in resolved[-1]["details"]

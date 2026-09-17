@@ -515,3 +515,79 @@ async def test_another_organization_cannot_read_or_set_the_selection(
         await put_discovery_selection(ids["datasource"], DiscoverySelection(), outsider, session)
     datasource = await session.get(DataSource, ids["datasource"])
     assert datasource is not None and datasource.discovery_selection == _SELECTION
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-16 §5: a kind this selection leaves out reads NOT_SELECTED.
+#
+# The design target asks the source configuration UI to distinguish
+# NOT_APPLICABLE, UNSUPPORTED and NOT_SELECTED
+# (`Docs/10-architecture/20-database-footprint-and-agent-context.md` §5.2). Only
+# the first two existed: a kind a selection excluded still reported the support
+# the adapter would have had, which is true about the adapter and wrong about
+# the source.
+# ---------------------------------------------------------------------------
+
+
+def test_a_kind_the_selection_excludes_reads_not_selected() -> None:
+    from aida.discovery_selection import DiscoverySelection, kind_capabilities
+
+    selection = DiscoverySelection(object_kinds=["TABLE", "VIEW"])
+    by_kind = {
+        read.kind: read
+        for read in kind_capabilities(
+            "postgres", {"views": True, "routines": True}, selection
+        )
+    }
+    assert by_kind["TABLE"].inventory == "SUPPORTED"
+    assert by_kind["VIEW"].definition == "SUPPORTED"
+    assert by_kind["PROCEDURE"].inventory == "NOT_SELECTED"
+    assert by_kind["PROCEDURE"].definition == "NOT_SELECTED"
+    assert by_kind["FUNCTION"].inventory == "NOT_SELECTED"
+    assert by_kind["MATERIALIZED_VIEW"].inventory == "NOT_SELECTED"
+
+
+def test_not_selected_never_overwrites_a_more_specific_answer() -> None:
+    """An engine without packages does not gain one by being excluded, and
+    excluding an axis the adapter cannot read is not what kept it out. Both keep
+    the more specific answer."""
+    from aida.discovery_selection import DiscoverySelection, kind_capabilities
+
+    selection = DiscoverySelection(object_kinds=["TABLE"])
+    postgres = {
+        read.kind: read
+        for read in kind_capabilities(
+            "postgres", {"views": True, "routines": True}, selection
+        )
+    }
+    assert postgres["PACKAGE"].inventory == "NOT_APPLICABLE"
+
+    databricks = {
+        read.kind: read
+        for read in kind_capabilities(
+            "databricks", {"views": False, "routines": False}, selection
+        )
+    }
+    assert databricks["PROCEDURE"].inventory == "UNSUPPORTED"
+    assert databricks["VIEW"].definition == "UNSUPPORTED"
+    # ... while a kind the adapter *can* read is honestly NOT_SELECTED.
+    assert databricks["VIEW"].inventory == "NOT_SELECTED"
+
+
+def test_an_unrestricted_selection_changes_nothing() -> None:
+    """A source that never set a selection, or set one that names no kinds, must
+    read exactly as it did before."""
+    from aida.discovery_selection import DiscoverySelection, kind_capabilities
+
+    capabilities = {"views": True, "routines": True}
+    baseline = kind_capabilities("postgres", capabilities)
+    assert kind_capabilities("postgres", capabilities, None) == baseline
+    assert (
+        kind_capabilities("postgres", capabilities, DiscoverySelection()) == baseline
+    )
+    assert (
+        kind_capabilities(
+            "postgres", capabilities, DiscoverySelection(include_schemas=["sales"])
+        )
+        == baseline
+    ), "a schema scope excludes no kind"

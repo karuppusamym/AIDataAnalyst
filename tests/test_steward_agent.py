@@ -1133,6 +1133,12 @@ async def test_the_state_endpoint_reports_an_unregistered_agent_honestly(
     assert {(c.capability, c.object_type, c.risk_tier) for c in state.capabilities} == {
         ("TABLE_DESCRIPTION", "ASSET_DESCRIPTION_DRAFT", "T0"),
         ("COLUMN_DESCRIPTION", "COLUMN_DESCRIPTION_DRAFT", "T0"),
+        # R11-FP08: routines gained an Atlas-authored description, so the steward
+        # can draft one. T0 like its two siblings, and deliberately asserted here
+        # rather than loosened to a subset: this set is the agent's whole declared
+        # authority, and a capability appearing in it without anyone deciding so is
+        # the thing an exact assertion is for.
+        ("ROUTINE_DESCRIPTION", "ROUTINE_DESCRIPTION_DRAFT", "T0"),
         ("GLOSSARY_LINK", "GLOSSARY_LINK_PROPOSAL", "T1"),
     }
     assert state.outcomes == []

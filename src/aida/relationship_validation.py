@@ -41,6 +41,7 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.connectors.base import OBSERVATION_SCOPES
 from aida.models import (
     ColumnProfile,
     CompositeKeyCandidate,
@@ -53,6 +54,12 @@ from aida.models import (
     TableProfile,
 )
 from aida.relationship_naming import canonical_column_name, physical_type_family
+from atlas.modules.profiling.facets import (
+    PROFILED_UNIQUE_MIN_RATIO as _PROFILED_UNIQUE_MIN_RATIO,
+)
+from atlas.modules.profiling.facets import (
+    effectively_unique as _effectively_unique,
+)
 
 RELATIONSHIP_VALIDATION_VERSION = "relationship-validation-v1"
 NAME_MATCH_ONLY_CODE = "RELATIONSHIP_NAME_MATCH_ONLY"
@@ -71,7 +78,13 @@ INCLUSION_CHECK_REASON = (
 )
 QUERY_LOG_JOIN_RULE = "QUERY_LOG_JOIN_V1"
 # Approximate distinct counts can undercount a unique column slightly.
-PROFILED_UNIQUE_MIN_RATIO = 0.98
+#
+# R11-FP04: the rule now lives in `atlas.modules.profiling.facets`, which
+# applies it once when a profile is written, because it was also being
+# re-derived -- against a different denominator -- in
+# `aida.composite_key_inference`. Re-exported under its original name so
+# nothing that reads it from here changed.
+PROFILED_UNIQUE_MIN_RATIO = _PROFILED_UNIQUE_MIN_RATIO
 # A match on one of these canonical names says nothing about which table is referenced.
 GENERIC_COLUMN_NAMES = frozenset({"id", "key", "pk", "uuid", "guid", "code", "name", "value"})
 
@@ -104,14 +117,35 @@ class ColumnFacts:
     null_count: int | None = None
     non_null_count: int | None = None
     approximate_distinct_count: int | None = None
+    # R11-FP04: `ColumnProfile.effectively_unique`, the stored answer, when the
+    # profile that produced these counts recorded one. None for a profile
+    # written before the facet existed -- see `profiled_unique`.
+    stored_effectively_unique: bool | None = None
 
     @property
     def profiled_unique(self) -> bool:
-        if self.non_null_count is None or self.approximate_distinct_count is None:
-            return False
-        return (
-            self.non_null_count > 0
-            and self.approximate_distinct_count >= PROFILED_UNIQUE_MIN_RATIO * self.non_null_count
+        """Whether the profile behind these counts showed the column unique.
+
+        R11-FP04: reads the stored facet when the profile has one, and falls
+        back to deriving it from the counts otherwise, so a profile written
+        before the facet existed still answers -- and answers identically,
+        since the fallback calls the same function the writer does.
+
+        Still `bool` rather than `bool | None` at this seam: `_side_uniqueness`
+        treats "not shown unique" and "cannot tell" the same way (neither is
+        evidence of a key), and widening the type here would put a three-valued
+        logic into every caller for no decision that depends on it. The
+        distinction that *does* matter -- whether the evidence was
+        sample-bounded -- is `ProfileBounds.scope`, which is separate and is
+        carried through to the reviewer.
+        """
+        if self.stored_effectively_unique is not None:
+            return self.stored_effectively_unique
+        return bool(
+            _effectively_unique(
+                non_null_count=self.non_null_count,
+                approximate_distinct_count=self.approximate_distinct_count,
+            )
         )
 
 
@@ -121,9 +155,32 @@ class ProfileBounds:
     profiled_at: datetime
     sampled_row_count: int
     row_count_estimate: int | None
+    # R11-FP04: `TableProfile.observation_scope` -- what the connector itself
+    # said about its own scan. None for a profile written before the column
+    # existed.
+    stored_observation_scope: str | None = None
 
     @property
     def scope(self) -> str:
+        """How much of the table the profile behind these statistics saw.
+
+        R11-FP04. Prefers the stored facet, because only the connector knows
+        whether it issued a bound, and the comparison below is a proxy that got
+        it wrong in both directions: BigQuery reported the sample size as the
+        row estimate (so a bounded profile of a huge table read as FULL), and
+        Snowflake reported a nominal sample size for an unbounded full scan (so
+        a complete profile read as SAMPLE). Since this scope is what decides
+        whether a join's uniqueness evidence is flagged sample-bounded to a
+        reviewer, both errors silently mis-stated the strength of approval
+        evidence.
+
+        The old derivation is kept, unchanged, for rows written before the
+        facet existed -- it is imperfect but it is what those rows support, and
+        dropping it would turn every historical profile into UNKNOWN and
+        withdraw evidence from candidates that were assessed with it.
+        """
+        if self.stored_observation_scope in OBSERVATION_SCOPES:
+            return self.stored_observation_scope or "UNKNOWN"
         if self.row_count_estimate is None:
             return "UNKNOWN"
         return "FULL" if self.sampled_row_count >= self.row_count_estimate else "SAMPLE"
@@ -591,6 +648,7 @@ async def _load_facts(
                     profiled_at=profile.created_at,
                     sampled_row_count=profile.sampled_row_count,
                     row_count_estimate=profile.row_count_estimate,
+                    stored_observation_scope=profile.observation_scope,
                 )
                 if profile is not None
                 else None
@@ -611,6 +669,7 @@ async def _load_facts(
             approximate_distinct_count=(
                 stats.approximate_distinct_count if stats is not None else None
             ),
+            stored_effectively_unique=(stats.effectively_unique if stats is not None else None),
         )
 
     observed = 0

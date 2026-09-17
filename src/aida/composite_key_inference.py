@@ -118,6 +118,9 @@ class ColumnKeyEvidence:
     null_count: int
     non_null_count: int
     approximate_distinct_count: int
+    # R11-FP04: `ColumnProfile.distinct_ratio`, the ratio computed once when the
+    # profile was written, when this profile has one. See `_distinct_ratio`.
+    stored_distinct_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,24 @@ class CompositeKeyCandidateProposal:
 
 
 def _distinct_ratio(evidence: ColumnKeyEvidence, sampled_row_count: int) -> float:
+    """How much of this column's population is distinct.
+
+    R11-FP04: prefers `ColumnProfile.distinct_ratio`, the one stored answer,
+    over re-deriving it. This function and
+    `relationship_validation.ColumnFacts.profiled_unique` were the same rule
+    computed two ways -- that one divided by the *non-null* count, this one by
+    the *sampled row* count -- so the same column could read as unique to join
+    validation and not to key inference, differing by exactly the null rate,
+    with nothing anywhere saying so. `MAX_MEMBER_NULL_RATE` keeps that gap
+    under 1% for any column that gets this far, which is why the divergence
+    survived unnoticed rather than showing up as a wrong answer.
+
+    The old derivation stays as the fallback for profiles written before the
+    facet existed. It is not identical -- that is the point -- so the stored
+    value is the one to trust when present.
+    """
+    if evidence.stored_distinct_ratio is not None:
+        return evidence.stored_distinct_ratio
     if sampled_row_count <= 0:
         return 0.0
     # approximate_distinct_count is an approximation (see ColumnProfile) and can

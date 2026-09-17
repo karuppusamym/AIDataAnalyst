@@ -42,6 +42,7 @@ from aida.description_withdrawal import (
     current_description_version,
     request_description_withdrawal,
 )
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.events import record_audit, record_outbox
 from aida.governance_notifications import notify_safely
 from aida.model_import import request_model_import_reversal
@@ -1378,8 +1379,9 @@ async def _raise_sample_reversal(
     * bulk stewardship -- a reversal operation, below;
     * an enrichment proposal -- a withdrawal of the annotation version the
       agent approved (`_raise_annotation_withdrawal`);
-    * the two description draft types -- a withdrawal of the version the
-      draft published (`_raise_description_draft_withdrawal`);
+    * the three description draft types -- table, column and, since R11-FP08,
+      routine -- a withdrawal of the version the draft published
+      (`_raise_description_draft_withdrawal`);
     * a workbook import -- a reversal batch that puts back what the import
       replaced (`_raise_model_import_reversal`).
 
@@ -1390,7 +1392,16 @@ async def _raise_sample_reversal(
     if sample.object_type == "METADATA_ENRICHMENT_PROPOSAL":
         await _raise_annotation_withdrawal(session, sample, context=context)
         return
-    if sample.object_type in ("ASSET_DESCRIPTION_DRAFT", "COLUMN_DESCRIPTION_DRAFT"):
+    if sample.object_type in (
+        "ASSET_DESCRIPTION_DRAFT",
+        "COLUMN_DESCRIPTION_DRAFT",
+        # R11-FP08: the third description draft type reaches the same
+        # compensating action. Listed here rather than left to the refusal
+        # below, because "no compensating action exists" would be false the
+        # moment a routine draft became agent-decidable, and a correction that
+        # silently does not exist is the state R11-C8 closed.
+        "ROUTINE_DESCRIPTION_DRAFT",
+    ):
         await _raise_description_draft_withdrawal(session, sample, context=context)
         return
     if sample.object_type == "MODEL_IMPORT_BATCH":
@@ -1541,10 +1552,12 @@ async def _raise_description_draft_withdrawal(
     undescribed until a better description is approved.
     """
     review = await session.get(GovernanceReview, sample.governance_review_id)
-    draft: AssetDescriptionDraft | ColumnDescriptionDraft | None = None
+    draft: AssetDescriptionDraft | ColumnDescriptionDraft | RoutineDescriptionDraft | None = None
     if review is not None:
         if sample.object_type == "COLUMN_DESCRIPTION_DRAFT":
             draft = await session.get(ColumnDescriptionDraft, UUID(review.object_id))
+        elif sample.object_type == "ROUTINE_DESCRIPTION_DRAFT":
+            draft = await session.get(RoutineDescriptionDraft, UUID(review.object_id))
         else:
             draft = await session.get(AssetDescriptionDraft, UUID(review.object_id))
     if (
@@ -1557,6 +1570,13 @@ async def _raise_description_draft_withdrawal(
         )
     if isinstance(draft, ColumnDescriptionDraft):
         subject_type, subject_id = "COLUMN", draft.column_id
+    elif isinstance(draft, RoutineDescriptionDraft):
+        # R11-FP08: `DescriptionWithdrawal.subject_type` admits ROUTINE, and the
+        # withdrawal path resolves the current version from the routine store --
+        # so the correction for a wrongly approved routine description is the
+        # same governed retraction a steward raises, at the same tier (T2), not
+        # a rollback to whatever the draft superseded.
+        subject_type, subject_id = "ROUTINE", draft.routine_id
     else:
         subject_type, subject_id = "TABLE", draft.table_id
     current = await current_description_version(session, subject_type, subject_id)

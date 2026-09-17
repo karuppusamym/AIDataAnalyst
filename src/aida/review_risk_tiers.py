@@ -90,6 +90,18 @@ _TIERS: Final[Mapping[str, str]] = {
     # --- T0: language attached to an asset -------------------------------
     "ASSET_DESCRIPTION_DRAFT": TIER_T0,
     "COLUMN_DESCRIPTION_DRAFT": TIER_T0,
+    # R11-FP08: the routine-level sibling of the two above, and the same kind of
+    # change -- language attached to one catalog object, published append-only,
+    # withdrawable. Registered here and not left to `risk_tier_for`'s unknown-type
+    # fallback: that fails closed to T3, which sounds safe and is wrong in a way
+    # that would be hard to see. T3 is *above every agent's hard ceiling*
+    # (`HARD_MAX_AGENT_TIER` is T1), so an unregistered routine draft would sit
+    # outside the tier ladder entirely -- not "held to a higher bar" but
+    # invisible to `agent_decidable_object_types`, absent from the oversight
+    # bounds that count by tier, and mis-reported to any auditor reading tiers as
+    # a description of what the platform lets automation touch. The honest tier
+    # for a drafted description is T0, whatever the agent then does with it.
+    "ROUTINE_DESCRIPTION_DRAFT": TIER_T0,
     "ASSET_DOCUMENTATION_VERSION": TIER_T0,
     "BUSINESS_ANNOTATION": TIER_T0,
     "METADATA_ENRICHMENT_PROPOSAL": TIER_T0,

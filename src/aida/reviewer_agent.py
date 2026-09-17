@@ -454,6 +454,29 @@ async def _metadata_enrichment_evidence(
 #: approve threshold, so the number cannot separate a right link from a wrong
 #: one: a staging table whose name stem is "revenue" links to the Revenue term
 #: at 1.0. `tests/test_ar03_false_approval_benchmark.py` measures both.
+#:
+#: **`ROUTINE_DESCRIPTION_DRAFT` (R11-FP08) is deliberately absent, so the agent
+#: abstains on every routine description.** This was a choice, not an omission,
+#: and it is the opposite of the choice made for `ASSET_DESCRIPTION_DRAFT`
+#: above, so it needs its reason stated. A table draft can rest on an *authored
+#: statement of meaning* -- a dbt description someone wrote, an approved business
+#: annotation a steward wrote -- and `score_routine_evidence` has no such signal
+#: to read. Its four dimensions are computed almost entirely from *presence*:
+#: a signature exists, parameters exist, the body's state is known, some
+#: person-approved lineage edges exist. Those separate a well-catalogued routine
+#: from a poorly-catalogued one; none of them is evidence that the prose about
+#: what the routine is *for* is true. The one authored signal a routine carries
+#: is `source_description`, which is the source system's own comment -- evidence,
+#: explicitly never authority (`MetadataObjectDescription`'s docstring), and the
+#: precise shape of misleading source text the AR-03 corpus already shows the
+#: control cannot see through for tables and columns. Adding a resolver here
+#: would therefore add a number that clears the 0.8 threshold on well-catalogued
+#: routines and says nothing about their descriptions: a third false-approval
+#: route, measurably no better than the two the benchmark already records.
+#: The abstention is also the cheaper thing to reverse: a resolver can be added
+#: the day there is a routine signal that measures truth, and
+#: `tests/test_ar03_false_approval_benchmark.py` carries a routine pair that
+#: demonstrates the abstention rather than asserting it in prose.
 _EVIDENCE_RESOLVERS: dict[str, Any] = {
     "ASSET_DESCRIPTION_DRAFT": _by_object_id(AssetDescriptionDraft, "overall_score"),
     "COLUMN_DESCRIPTION_DRAFT": _column_description_draft_evidence,

@@ -62,22 +62,31 @@ const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["semantics", "Semantic layer"],
   ["tools", "Tool registry"],
   ["tool-plans", "Tool plans"],
+  /* R11-S13 (M1): the narrated traversal and the merged graph are three views
+     of one destination. Two routes became three rows, so both absorbed
+     surfaces are still swept -- including the impact-led layout, which is the
+     one whose DOM order the merge changed. */
   ["lineage", "Lineage"],
-  ["unified-lineage", "Unified lineage"],
+  ["lineage", "Lineage", "?view=graph"],
+  ["lineage", "Lineage", "?view=impact"],
   ["marketplace", "Marketplace"],
   ["portfolio-analytics", "Portfolio analytics"],
   ["context", "Context products"],
   ["developer", "Agent gateway"],
   ["stewardship", "Stewardship"],
-  ["worklist", "Documentation worklist"],
+  /* R11-S13 (M3): the worklist, the description drafts and the dictionary
+     imports are three tabs of one workspace. They were three routes; they are
+     three rows here, and are swept exactly as before -- which is the property
+     that stops a merge from quietly shrinking this suite's subject list. */
+  ["worklist", "Documentation"],
+  ["worklist", "Documentation", "?view=drafts"],
+  ["worklist", "Documentation", "?view=imports"],
   ["task-agents", "Task agents"],
   ["task-agents", "Task agents", "?agent=lineage"],
   ["task-agents", "Task agents", "?agent=quality"],
   ["playbooks", "Playbooks"],
   ["negative-knowledge", "Negative knowledge"],
   ["meaning", "Business meaning"],
-  ["description-drafts", "Description drafts"],
-  ["data-dictionaries", "Data dictionaries"],
   ["relationships", "Relationships"],
   ["cross-source", "Cross-source"],
   ["transformations", "Transformations"],

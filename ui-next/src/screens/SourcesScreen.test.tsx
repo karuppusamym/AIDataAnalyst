@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   AnalysisRunRead,
   ConnectorHealthScoreRead,
+  DataSourceCreate,
   DataSourceRead,
+  MeRead,
   ProjectRead,
   ScanPolicyRead,
 } from "../lib/types";
+import type { Session } from "../lib/session";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError, type DatasourceContextSnapshot, type ProjectContextSnapshot } from "../lib/api";
 import type { ScopeSelection } from "../lib/scope";
@@ -38,6 +41,10 @@ const downloadProjectContextSnapshot = vi.fn<
    here so these tests stay about the fleet/health/snapshot behaviour they were
    written for; the administration panel has its own file. */
 const fetchScanPolicy = vi.fn<(id: string, signal?: AbortSignal) => Promise<ScanPolicyRead>>();
+/* R11-S13 (M5): the registration form Administration already owned is mounted
+   here too, so this file now reaches `POST /v1/projects/{id}/datasources`. */
+const registerDatasource =
+  vi.fn<(projectId: string, body: DataSourceCreate) => Promise<DataSourceRead>>();
 const fetchDatasourceAnalysisRuns =
   vi.fn<
     (id: string, query: { limit?: number }, signal?: AbortSignal) => Promise<PageOf<AnalysisRunRead>>
@@ -61,6 +68,30 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchScanPolicy: (id: string, signal?: AbortSignal) => fetchScanPolicy(id, signal),
     fetchDatasourceAnalysisRuns: (id: string, query: { limit?: number }, signal?: AbortSignal) =>
       fetchDatasourceAnalysisRuns(id, query, signal),
+    registerDatasource: (projectId: string, body: DataSourceCreate) =>
+      registerDatasource(projectId, body),
+  };
+});
+
+/* R11-S13 (M5): the registration form is role-gated, so these tests need to be
+   able to say who is asking. `null` -- the default every case below runs with
+   -- is "the session has not answered", which deliberately fails OPEN. */
+let sessionMe: MeRead | null = null;
+vi.mock("../lib/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/session")>();
+  return {
+    ...actual,
+    useSession: (): Session => ({
+      state: "demo",
+      me: sessionMe,
+      lapsed: false,
+      lastSuccessAt: null,
+      error: null,
+      dataMode: "fixtures",
+      authMode: "development",
+      authModeInferred: false,
+      reload: () => undefined,
+    }),
   };
 });
 
@@ -132,6 +163,8 @@ beforeEach(() => {
   downloadProjectContextSnapshot.mockReset();
   fetchScanPolicy.mockReset();
   fetchDatasourceAnalysisRuns.mockReset();
+  registerDatasource.mockReset();
+  sessionMe = null;
   // A source with no schedule and no scan history: the quietest honest answer
   // for tests that are not about the administration panel.
   fetchScanPolicy.mockRejectedValue(new ApiError(404, "scan policy not found"));
@@ -396,5 +429,122 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     expect(group).toHaveTextContent("0 datasource(s) in scope");
     expect(screen.getByRole("button", { name: "Generate project context (.md)" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Generate project context (.json)" })).toBeDisabled();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (M5) — registering a source and then testing it are one journey.
+
+   The review's complaint was that they were two screens: an operator created a
+   source in Administration, and the connection test, the scan policy and the
+   run history that follow it live here. The fix is the SAME component mounted
+   in both places, not a second form -- so the assertion that matters is that
+   the request this screen sends is `registerDatasource`'s, unchanged, and that
+   the created source is handed straight to the pane that owns the next step.
+--------------------------------------------------------------------------- */
+
+describe("registering a source is reachable from the fleet console", () => {
+  const NEW_SOURCE: DataSourceRead = {
+    ...SNOWFLAKE,
+    id: "ds_new",
+    name: "warehouse_dev",
+    connector_type: "POSTGRES",
+    dialect: "postgres",
+    environment: "DEV",
+    status: "REGISTERED",
+  };
+
+  it("posts through the shared RegisterDatasourceForm and selects the new source", async () => {
+    scopeSelection = scopeWithProject("proj1");
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    registerDatasource.mockResolvedValue(NEW_SOURCE);
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    // Collapsed by default: the form is not in the tab order until asked for.
+    const toggle = screen.getByRole("button", { name: /Register a data source/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    const form = screen.getByRole("form", { name: "Register data source" });
+    // The project list is the shell's shared scope, not a second fetch.
+    expect(form).toHaveTextContent("Core Finance");
+
+    fireEvent.change(within(form).getByLabelText("Project"), { target: { value: "proj1" } });
+    fireEvent.change(within(form).getByLabelText("Source name"), {
+      target: { value: "warehouse_dev" },
+    });
+    fireEvent.change(within(form).getByLabelText("Credential reference"), {
+      target: { value: "env://AIDA_SAMPLE_SOURCE_DSN" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Register source" }));
+
+    // The one endpoint, with the dialect derived from the connector -- the
+    // component's own contract, reused rather than re-implemented here.
+    await waitFor(() =>
+      expect(registerDatasource).toHaveBeenCalledWith("proj1", {
+        name: "warehouse_dev",
+        connector_type: "postgres",
+        dialect: "postgres",
+        environment: "DEV",
+        network_zone: "default",
+        credential_reference: "env://AIDA_SAMPLE_SOURCE_DSN",
+        max_concurrency: 4,
+      }),
+    );
+
+    // …and the journey continues here: `?source=` opens the detail pane whose
+    // administration panel owns `POST /v1/datasources/{id}/test`.
+    await waitFor(() =>
+      expect(new URLSearchParams(location.search).get("source")).toBe("ds_new"),
+    );
+    expect(screen.getByText(/Registering does not test the connection/)).toBeInTheDocument();
+  });
+
+  it("keeps the fleet's own filters across a registration", async () => {
+    scopeSelection = scopeWithProject("proj1");
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    registerDatasource.mockResolvedValue(NEW_SOURCE);
+    history.replaceState(null, "", "/?q=snow&status=ACTIVE#/operator/sources");
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Register a data source/ }));
+    const form = screen.getByRole("form", { name: "Register data source" });
+    fireEvent.change(within(form).getByLabelText("Project"), { target: { value: "proj1" } });
+    fireEvent.change(within(form).getByLabelText("Source name"), {
+      target: { value: "warehouse_dev" },
+    });
+    fireEvent.change(within(form).getByLabelText("Credential reference"), {
+      target: { value: "env://AIDA_SAMPLE_SOURCE_DSN" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Register source" }));
+
+    await waitFor(() =>
+      expect(new URLSearchParams(location.search).get("source")).toBe("ds_new"),
+    );
+    // Selecting the new source must not throw away the search the operator was
+    // running: `setParams` merges, it does not replace.
+    const params = new URLSearchParams(location.search);
+    expect(params.get("q")).toBe("snow");
+    expect(params.get("status")).toBe("ACTIVE");
+  });
+
+  it("hides the form from a session that may not register, without hiding the fleet", async () => {
+    scopeSelection = scopeWithProject("proj1");
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    sessionMe = {
+      principal_id: "p1", principal_type: "USER", organization_id: "org1",
+      roles: ["DataConsumer"], persona: null, identity_provider: "development",
+    };
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+
+    // The read model is still everyone's; only the write surface is gated.
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /Register a data source/ })).toBeNull();
   });
 });

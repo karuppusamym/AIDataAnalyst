@@ -132,6 +132,9 @@ async def discover_composite_key_candidates(
             null_count=profile.null_count,
             non_null_count=profile.non_null_count,
             approximate_distinct_count=profile.approximate_distinct_count,
+            # R11-FP04: the stored facet, so key inference and join validation
+            # read one answer instead of two derivations of the same rule.
+            stored_distinct_ratio=profile.distinct_ratio,
         )
         for profile in column_profiles
         if profile.column_id in columns_by_id

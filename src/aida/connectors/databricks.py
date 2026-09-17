@@ -36,13 +36,17 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from aida.connectors.base import (
+    ENTROPY_NOT_IMPLEMENTED,
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    bounded_scan_scope,
+    read_value_free_distribution,
     rows_to_dicts,
+    value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
     append_grouped_foreign_key_rows,
@@ -591,14 +595,26 @@ class DatabricksConnector(SqlExecutor):
                         expressions = ["COUNT(*) AS sampled_row_count"]
                         for position, col in enumerate(batch):
                             quoted_col = _quote_identifier(col)
+                            text_form = f"CAST({quoted_col} AS STRING)"
                             expressions.extend(
                                 [
                                     f"COUNT(*) - COUNT({quoted_col}) AS n_{position}",
                                     f"COUNT({quoted_col}) AS nn_{position}",
                                     f"APPROX_COUNT_DISTINCT({quoted_col}) AS d_{position}",
-                                    f"MIN(LENGTH(CAST({quoted_col} AS STRING))) AS minl_{position}",
-                                    f"MAX(LENGTH(CAST({quoted_col} AS STRING))) AS maxl_{position}",
+                                    f"MIN(LENGTH({text_form})) AS minl_{position}",
+                                    f"MAX(LENGTH({text_form})) AS maxl_{position}",
                                 ]
+                            )
+                            # R11-FP04: value-free distribution shape on the
+                            # same shared scan this method already batches
+                            # onto, so it costs no extra round trip.
+                            expressions.extend(
+                                value_free_distribution_expressions(
+                                    position=position,
+                                    text_form=text_form,
+                                    length_form=f"LENGTH({text_form})",
+                                    trimmed_form=f"TRIM({text_form})",
+                                )
                             )
                         cur.execute(
                             f"""
@@ -614,6 +630,9 @@ class DatabricksConnector(SqlExecutor):
                             sampled_row_count, int(stats.get("sampled_row_count") or 0)
                         )
                         for position, col in enumerate(batch):
+                            blank, whitespace, buckets = read_value_free_distribution(
+                                position, stats.get
+                            )
                             column_snapshots.append(
                                 ColumnProfileSnapshot(
                                     name=col,
@@ -622,13 +641,24 @@ class DatabricksConnector(SqlExecutor):
                                     approximate_distinct_count=int(stats.get(f"d_{position}") or 0),
                                     min_length=stats.get(f"minl_{position}"),
                                     max_length=stats.get(f"maxl_{position}"),
+                                    blank_count=blank,
+                                    whitespace_only_count=whitespace,
+                                    length_bucket_counts=buckets,
+                                    facet_status=(ENTROPY_NOT_IMPLEMENTED,),
                                 )
                             )
 
+                    # R11-FP04: `row_count` is a real `SELECT COUNT(*)` over the
+                    # whole table, so it stays -- but whether the *profile* saw
+                    # all of it is decided by the `LIMIT` above, not by
+                    # comparing the two numbers.
                     return TableProfileSnapshot(
                         row_count_estimate=row_count,
                         sampled_row_count=sampled_row_count,
                         columns=tuple(column_snapshots),
+                        observation_scope=bounded_scan_scope(
+                            sampled_row_count=sampled_row_count, sample_rows=sample_rows
+                        ),
                     )
                 finally:
                     cur.close()

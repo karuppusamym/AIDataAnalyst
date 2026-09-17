@@ -42,6 +42,70 @@ def _package_qualifiers(function: exp.Func) -> list[str]:
     return [name for name in _flatten_dot_chain(node) if name]
 
 
+def _attached_with(node: exp.Expr) -> exp.With | None:
+    """The ``WITH`` clause attached directly to ``node``, if it has one.
+
+    Found by scanning ``node``'s own argument values rather than by naming the
+    argument key, because sqlglot has spelled it both ``with`` and ``with_``
+    across versions and a key that silently stops matching would reopen F01's
+    G6 defect without failing a single parse.
+    """
+    for value in node.args.values():
+        if isinstance(value, exp.With):
+            return value
+    return None
+
+
+def _visible_cte_names(table: exp.Table) -> set[str]:
+    """The CTE names in scope *at this table's own position* in the statement.
+
+    F01 (G6): this used to be one flat, scope-blind set over the whole
+    statement -- ``{cte.alias_or_name for cte in statement.find_all(exp.CTE)}``
+    -- so a CTE declared inside a subquery's ``WITH`` shadowed an
+    identically-named physical table referenced unqualified *anywhere else* in
+    the same statement, and that table was silently dropped from
+    ``referenced_tables``. Every downstream control consumes only that list --
+    the catalog allowlist (`sql_validation.findings_from_catalog`), the ABAC
+    axes (`policy_resource_attributes`), the context-product boundary
+    (`context_product_execution_scope`) and the orchestrator's post-execution
+    re-check -- so a dropped name escaped all of them at once. A name the guard
+    does not report is a name nothing else can refuse.
+
+    So visibility is walked rather than assumed. Climbing from the table to the
+    root, a ``WITH`` attached to an ancestor query is in scope, and a ``WITH``
+    belonging to some sibling subquery is never an ancestor, which is exactly
+    the distinction the flat set lost.
+
+    Inside one of a ``WITH``'s own CTE bodies only the CTEs declared *before*
+    it are in scope, plus itself when the ``WITH`` is ``RECURSIVE`` -- SQL's own
+    rule, and the conservative direction here: treating a later sibling's name
+    as shadowing would drop a physical table again.
+    """
+    visible: set[str] = set()
+    child: exp.Expr = table
+    node: exp.Expr | None = table.parent
+    while node is not None:
+        if isinstance(node, exp.With):
+            ctes = list(node.expressions)
+            position = next(
+                (index for index, cte in enumerate(ctes) if cte is child), len(ctes)
+            )
+            visible.update(cte.alias_or_name.lower() for cte in ctes[:position])
+            if node.args.get("recursive") and position < len(ctes):
+                visible.add(ctes[position].alias_or_name.lower())
+        else:
+            with_node = _attached_with(node)
+            # `with_node is child` is the step already handled by the branch
+            # above: the walk passes *through* the `With` node on its way out of
+            # a CTE body, so counting it again here would put every sibling CTE
+            # name back in scope.
+            if with_node is not None and with_node is not child:
+                visible.update(cte.alias_or_name.lower() for cte in with_node.expressions)
+        child = node
+        node = node.parent
+    return visible
+
+
 class SqlGuard:
     #: Dangerous functions blocked regardless of dialect -- none currently, kept
     #: for symmetry with the per-dialect maps below.
@@ -499,12 +563,17 @@ class SqlGuard:
                 violations.append("SELECT_WILDCARD_FORBIDDEN")
                 break
 
-        cte_aliases = {cte.alias_or_name.lower() for cte in statement.find_all(exp.CTE)}
+        # A qualified name is a physical table even when a CTE shares its leaf
+        # name: `FROM public.active` reads the schema's table, not the `active`
+        # CTE, so only an unqualified reference can be shadowed -- and only by a
+        # CTE actually visible where it stands (`_visible_cte_names`, F01 G6).
         tables = sorted(
             {
                 ".".join(part for part in (table.catalog, table.db, table.name) if part)
                 for table in statement.find_all(exp.Table)
-                if not (not table.catalog and not table.db and table.name.lower() in cte_aliases)
+                if table.catalog
+                or table.db
+                or table.name.lower() not in _visible_cte_names(table)
             }
         )
         columns = sorted({column.sql(dialect=dialect) for column in statement.find_all(exp.Column)})

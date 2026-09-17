@@ -43,6 +43,7 @@ from aida.delegation_api import router as delegation_router
 from aida.description_withdrawal_api import router as description_withdrawal_router
 from aida.detokenization_api import router as detokenization_router
 from aida.document_ingestion_api import router as document_ingestion_router
+from aida.engine_capability_api import router as engine_capability_router
 from aida.footprint_gaps_api import router as footprint_gaps_router
 from aida.glossary_api import router as glossary_router
 from aida.ingestion_api import router as ingestion_router
@@ -89,6 +90,7 @@ from aida.readiness import (
 from aida.relationship_validation_api import router as relationship_validation_router
 from aida.retrieval_ops_api import router as retrieval_ops_router
 from aida.review_queue_api import router as review_queue_router
+from aida.routine_description_api import router as routine_description_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
 from aida.schemas import HealthResponse
 from aida.search_api import router as search_router
@@ -458,6 +460,9 @@ app.include_router(persona_router)
 app.include_router(playbooks_router)
 app.include_router(asset_description_router)
 app.include_router(column_description_router)
+# R11-FP08: the third member of the description family -- a routine's
+# Atlas-authored description, drafted and reviewed exactly as the two above.
+app.include_router(routine_description_router)
 app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
@@ -477,6 +482,9 @@ app.include_router(footprint_gaps_router)
 app.include_router(relationship_validation_router)
 # Group I addition (Atlas Wave-2, tracker N3/N12).
 app.include_router(procedure_lineage_router)
+# Review 2026-09-16 §5: the engine x native-object-kind x facet matrix, served
+# from the same source the published reference page is generated from.
+app.include_router(engine_capability_router)
 app.include_router(procedure_tool_router)
 app.include_router(
     mcp_router

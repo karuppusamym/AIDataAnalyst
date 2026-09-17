@@ -1,5 +1,5 @@
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -7,15 +7,23 @@ from urllib.parse import unquote, urlsplit
 import oracledb
 
 from aida.connectors.base import (
+    ENTROPY_NOT_IMPLEMENTED,
+    FACET_REASON_TYPE_HAS_NO_TEXT_FORM,
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     DiscoveredRoutine,
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
+    ProfileFacetStatus,
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    bounded_scan_scope,
+    null_distribution_expressions,
+    read_value_free_distribution,
+    text_facets_not_applicable,
+    value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
     TableMap,
@@ -85,18 +93,61 @@ def _profile_expressions(quoted_column: str, position: int, data_type: str) -> l
         distinct_expression = f"CAST(0 AS NUMBER) AS d_{position}"
         min_length_expression = f"CAST(NULL AS NUMBER) AS minl_{position}"
         max_length_expression = f"CAST(NULL AS NUMBER) AS maxl_{position}"
+        # R11-FP04: same honest-placeholder rule as the three above --
+        # `TO_CHAR` over a LOB is an error, not a value, so the aliases exist
+        # and answer NULL and `_profile_facet_status` says why.
+        distribution = null_distribution_expressions(
+            position=position, null_literal="CAST(NULL AS NUMBER)"
+        )
     else:
-        text_form = f"LENGTH(TO_CHAR({quoted_column}))"
+        char_form = f"TO_CHAR({quoted_column})"
+        text_form = f"LENGTH({char_form})"
         distinct_expression = f"COUNT(DISTINCT {quoted_column}) AS d_{position}"
         min_length_expression = f"MIN({text_form}) AS minl_{position}"
         max_length_expression = f"MAX({text_form}) AS maxl_{position}"
+        # Oracle stores '' as NULL, so `blank_count` is structurally always 0
+        # here rather than sometimes nonzero -- which is itself the right
+        # answer, and a different one from NULL.
+        distribution = value_free_distribution_expressions(
+            position=position,
+            text_form=char_form,
+            length_form=text_form,
+            trimmed_form=f"TRIM({char_form})",
+        )
     return [
         f"SUM(CASE WHEN {quoted_column} IS NULL THEN 1 ELSE 0 END) AS n_{position}",
         f"COUNT({quoted_column}) AS nn_{position}",
         distinct_expression,
         min_length_expression,
         max_length_expression,
+        *distribution,
     ]
+
+
+def _upper_cased_reader(row: dict[str, Any]) -> Callable[[str], Any]:
+    """Read a generated lower-case alias out of an Oracle row.
+
+    Oracle folds unquoted column aliases to upper case, so the shared
+    `read_value_free_distribution` accessor -- which asks for the alias exactly
+    as `value_free_distribution_expressions` generated it -- needs the fold
+    applied on the way in.
+    """
+    return lambda alias: row.get(alias.upper())
+
+
+def _profile_facet_status(data_type: str) -> tuple[ProfileFacetStatus, ...]:
+    """Which facets `_profile_expressions` declined for this column, and why.
+
+    R11-FP04. A LOB's NULL length has a different meaning from an unimplemented
+    one: no credential and no retry makes `TO_CHAR` work on a CLOB, whereas
+    entropy is simply not asked for here yet.
+    """
+    if data_type.upper() in _LOB_LIKE_TYPES:
+        return (
+            *text_facets_not_applicable(FACET_REASON_TYPE_HAS_NO_TEXT_FORM),
+            ENTROPY_NOT_IMPLEMENTED,
+        )
+    return (ENTROPY_NOT_IMPLEMENTED,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1114,6 +1165,12 @@ class OracleConnector(SqlExecutor):
                     row_dict = _rows_as_dicts(cursor.description, [row])[0]
                     sampled_row_count = max(sampled_row_count, int(row_dict["SAMPLED_ROW_COUNT"]))
                     for position, name in enumerate(batch):
+                        # Oracle folds unquoted aliases to upper case, which is
+                        # why the read goes through a case-folding accessor
+                        # rather than the alias as generated.
+                        blank, whitespace, buckets = read_value_free_distribution(
+                            position, _upper_cased_reader(row_dict)
+                        )
                         snapshots.append(
                             ColumnProfileSnapshot(
                                 name=name,
@@ -1122,6 +1179,10 @@ class OracleConnector(SqlExecutor):
                                 approximate_distinct_count=int(row_dict[f"D_{position}"]),
                                 min_length=row_dict[f"MINL_{position}"],
                                 max_length=row_dict[f"MAXL_{position}"],
+                                blank_count=blank,
+                                whitespace_only_count=whitespace,
+                                length_bucket_counts=buckets,
+                                facet_status=_profile_facet_status(data_types.get(name, "")),
                             )
                         )
         finally:
@@ -1131,6 +1192,13 @@ class OracleConnector(SqlExecutor):
             row_count_estimate=(max(estimate, sampled_row_count) if estimate is not None else None),
             sampled_row_count=sampled_row_count,
             columns=tuple(snapshots),
+            # R11-FP04: the `FETCH FIRST n ROWS ONLY` above is the bound.
+            # `ALL_TABLES.num_rows` is only as fresh as the last statistics
+            # gather, so it can sit either side of the sample and must not be
+            # what decides whether this profile saw the whole table.
+            observation_scope=bounded_scan_scope(
+                sampled_row_count=sampled_row_count, sample_rows=sample_rows
+            ),
         )
 
 

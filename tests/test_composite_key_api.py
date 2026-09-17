@@ -148,6 +148,15 @@ class FakeAsyncSession:
     def added_of(self, cls: type) -> list[Any]:
         return [obj for obj in self.added if isinstance(obj, cls)]
 
+    def seeded_of(self, cls: type) -> list[Any]:
+        """Rows a scenario seeded, so a test can adjust one before the call.
+
+        The counterpart to `added_of` above, which answers what the endpoint
+        wrote. R11-FP04 needs the other direction: a `ColumnProfile` facet has
+        to be set on an already-seeded row to prove the endpoint reads it.
+        """
+        return list(self._store.get(cls, {}).values())
+
     def _register(self, obj: Any) -> None:
         self._table_registry[_table_name_of(type(obj))] = type(obj)
 
@@ -528,3 +537,65 @@ async def test_decide_returns_404_for_unknown_candidate() -> None:
             session=scenario.session,
         )
     assert getattr(exc_info.value, "status_code", None) == 404
+
+
+# ---------------------------------------------------------------------------
+# R11-FP04: key inference reads the stored distinct ratio
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_reads_the_stored_distinct_ratio_rather_than_re_deriving_it() -> None:
+    """R11-FP04: one rule, one place, and this endpoint is one of its two readers.
+
+    `composite_key_inference._distinct_ratio` divided the distinct count by the
+    *sampled row* count while `relationship_validation` divided it by the
+    *non-null* count, so the same profile could make a column a viable key
+    member to one consumer and not to the other -- by exactly the null rate,
+    with nothing saying so. `ColumnProfile.distinct_ratio` is now the one
+    answer, and this proves the endpoint carries it through rather than
+    recomputing.
+
+    `status_flag` has two distinct values in a thousand rows, so it is nowhere
+    near a key by either derivation. Giving its profile row a stored ratio of
+    1.0 is not a plausible profile -- it is the only way to tell "read the
+    stored facet" apart from "recompute from the counts", because any
+    *consistent* fixture gives both paths the same answer and the test would
+    pass either way.
+    """
+    scenario = _Scenario()
+    stored = next(
+        row
+        for row in scenario.session.seeded_of(ColumnProfile)
+        if row.column_id == scenario.noise.id
+    )
+    stored.distinct_ratio = 1.0
+
+    page = await scenario.discover()
+
+    members = {
+        tuple(sorted(candidate.column_names))
+        for candidate in page.items
+    }
+    assert any("status_flag" in names for names in members), (
+        "the stored ratio was ignored and the counts were re-derived instead"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_profile_without_the_stored_ratio_still_yields_candidates() -> None:
+    """The fallback is not decoration.
+
+    Every `ColumnProfile` row in an existing deployment has `distinct_ratio IS
+    NULL`, so a reader that required the facet would return no candidates at all
+    on upgrade until every table had been re-profiled. The default `_Scenario`
+    seeds no ratios, which is exactly that state.
+    """
+    scenario = _Scenario()
+    assert all(
+        row.distinct_ratio is None for row in scenario.session.seeded_of(ColumnProfile)
+    ), "this fixture is meant to represent a pre-facet profile"
+
+    page = await scenario.discover()
+
+    assert page.items, "the pre-facet fallback stopped producing candidates"

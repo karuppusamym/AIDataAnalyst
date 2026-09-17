@@ -54,7 +54,21 @@ OBJECT_KINDS: tuple[ObjectKind, ...] = (
     # R11-FP03: an Oracle package is its own kind, never a function in disguise.
     "PACKAGE",
 )
-CapabilityStatus = Literal["SUPPORTED", "UNSUPPORTED", "NOT_APPLICABLE"]
+#: Review 2026-09-16 §5 widened this from SUPPORTED / UNSUPPORTED /
+#: NOT_APPLICABLE onto the shared vocabulary in `aida.capability_states`, so a
+#: kind this scan's own selection leaves out reads `NOT_SELECTED` instead of
+#: claiming the support the adapter would have had. Every previously-valid
+#: value still means exactly what it did: this is an enum *widening*, which the
+#: OpenAPI gate classifies as non-breaking for a response field, and no
+#: existing caller sees a value change for a selection it was already sending.
+#:
+#: Only the states a *capability read* can honestly answer are listed.
+#: `PERMISSION_DENIED`, `UNAVAILABLE` and `TRUNCATED` are outcomes of one read
+#: with one login, not properties of the adapter, and belong on the discovery
+#: receipt; `UNRESOLVED` is a property of a parsed fact.
+CapabilityStatus = Literal[
+    "SUPPORTED", "PARTIAL", "UNSUPPORTED", "NOT_APPLICABLE", "NOT_SELECTED"
+]
 
 MAX_PATTERNS = 100
 #: Upper bound on the catalog rows one preview reads; beyond it the counts are partial and
@@ -289,13 +303,26 @@ def _capabilities_of(datasource: DataSource) -> tuple[dict[str, Any], str]:
 
 
 def kind_capabilities(
-    connector_type: str, capabilities: dict[str, Any]
+    connector_type: str,
+    capabilities: dict[str, Any],
+    selection: DiscoverySelection | None = None,
 ) -> list[ObjectKindCapabilityRead]:
     """Per kind, whether the connector inventories it and captures its definition.
 
     Derived from the connector's own capability flags, which are honest by INV-9 (a flag is
     False until the axis is implemented); `NOT_APPLICABLE` is a native concept the engine
     does not have, which is a different answer from `UNSUPPORTED`.
+
+    Review 2026-09-16 §5: when `selection` restricts the object kinds, a kind it leaves out
+    reads `NOT_SELECTED` rather than the support the adapter would otherwise have had. That
+    is the third distinct answer the design target asks for -- "the scan intentionally
+    excluded it" is neither a missing feature nor a missing concept, and a panel that
+    showed SUPPORTED for a kind the next run will not read would be telling the truth
+    about the adapter and the wrong thing about this source.
+
+    The state is *masked*, never overwritten: a kind that is NOT_APPLICABLE or UNSUPPORTED
+    stays so, because an engine without packages does not gain one by being excluded, and
+    excluding an axis the adapter cannot read is not what kept it out.
     """
     views: CapabilityStatus = "SUPPORTED" if capabilities.get("views") else "UNSUPPORTED"
     routines: CapabilityStatus = "SUPPORTED" if capabilities.get("routines") else "UNSUPPORTED"
@@ -304,7 +331,7 @@ def kind_capabilities(
         else "NOT_APPLICABLE" if connector_type in _NO_MATERIALIZED_VIEW_KIND
         else "UNSUPPORTED"
     )
-    return [
+    reads = [
         ObjectKindCapabilityRead(kind="TABLE", inventory="SUPPORTED", definition="NOT_APPLICABLE"),
         ObjectKindCapabilityRead(kind="VIEW", inventory="SUPPORTED", definition=views),
         ObjectKindCapabilityRead(
@@ -320,6 +347,28 @@ def kind_capabilities(
             definition=routines if connector_type in _PACKAGE_CONNECTORS else "NOT_APPLICABLE",
         ),
     ]
+    if selection is None or not selection.object_kinds:
+        return reads
+    excluded = {kind for kind in OBJECT_KINDS if kind not in selection.object_kinds}
+    return [
+        _masked_for_selection(read) if read.kind in excluded else read for read in reads
+    ]
+
+
+def _masked_for_selection(read: ObjectKindCapabilityRead) -> ObjectKindCapabilityRead:
+    """`read` with each facet the selection kept out marked `NOT_SELECTED`.
+
+    A facet already answering NOT_APPLICABLE or UNSUPPORTED keeps its answer: the reason it
+    is not being read is the engine or the adapter, not the selection, and overwriting it
+    would lose the more specific fact.
+    """
+    state: CapabilityStatus = "NOT_SELECTED"
+    maskable: frozenset[str] = frozenset({"SUPPORTED", "PARTIAL"})
+    return ObjectKindCapabilityRead(
+        kind=read.kind,
+        inventory=state if read.inventory in maskable else read.inventory,
+        definition=state if read.definition in maskable else read.definition,
+    )
 
 
 def selection_read(datasource: DataSource) -> DiscoverySelectionRead:
@@ -330,7 +379,7 @@ def selection_read(datasource: DataSource) -> DiscoverySelectionRead:
         selection=selection,
         restricted=selection.restricted,
         fingerprint=selection.fingerprint(),
-        capabilities=kind_capabilities(datasource.connector_type, capabilities),
+        capabilities=kind_capabilities(datasource.connector_type, capabilities, selection),
         capability_source=source,
     )
 
@@ -420,6 +469,9 @@ async def preview_selection(
             if pattern not in matched_patterns
         ],
         truncated=truncated,
-        capabilities=kind_capabilities(datasource.connector_type, capabilities),
+        # The previewed selection, not the stored one: the panel is asking what
+        # *this* selection would do, so a kind it drops must read NOT_SELECTED
+        # here even while the source's current selection still reads it.
+        capabilities=kind_capabilities(datasource.connector_type, capabilities, selection),
         capability_source=source,
     )

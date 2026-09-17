@@ -7165,6 +7165,28 @@
             "title": "Approximate Distinct Count",
             "type": "integer"
           },
+          "blank_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blank Count"
+          },
+          "cardinality_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cardinality Class"
+          },
           "classification": {
             "title": "Classification",
             "type": "string"
@@ -7177,6 +7199,69 @@
           "column_name": {
             "title": "Column Name",
             "type": "string"
+          },
+          "distinct_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distinct Ratio"
+          },
+          "effectively_unique": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effectively Unique"
+          },
+          "facets_withheld": {
+            "default": false,
+            "title": "Facets Withheld",
+            "type": "boolean"
+          },
+          "frequency_entropy_bits": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frequency Entropy Bits"
+          },
+          "length_bucket_counts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Length Bucket Counts"
+          },
+          "length_bucket_scheme": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Length Bucket Scheme"
           },
           "max_length": {
             "anyOf": [
@@ -7207,6 +7292,46 @@
           "null_count": {
             "title": "Null Count",
             "type": "integer"
+          },
+          "unavailable_facets": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileFacetStatusRead"
+            },
+            "title": "Unavailable Facets",
+            "type": "array"
+          },
+          "whitespace_only_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Whitespace Only Count"
+          },
+          "withheld_marker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withheld Marker"
+          },
+          "withheld_reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withheld Reason Code"
           }
         },
         "required": [
@@ -12709,7 +12834,7 @@
             "type": "string"
           },
           "subject_type": {
-            "pattern": "^(TABLE|COLUMN)$",
+            "pattern": "^(TABLE|COLUMN|ROUTINE)$",
             "title": "Subject Type",
             "type": "string"
           }
@@ -13507,6 +13632,297 @@
           "ready"
         ],
         "title": "EnforcementReadinessRead",
+        "type": "object"
+      },
+      "EngineCapabilityEngineRead": {
+        "additionalProperties": false,
+        "description": "What the connector registry says about one engine, and how far it is proven.\n\n`live_validation` is deliberately separate from every facet state: a state\nsays a code path exists, and that is not the same fact as the adapter\nhaving been exercised against a live instance of the engine.",
+        "properties": {
+          "adapter_version": {
+            "title": "Adapter Version",
+            "type": "string"
+          },
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "engine": {
+            "title": "Engine",
+            "type": "string"
+          },
+          "flags": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "object"
+          },
+          "implementation_status": {
+            "title": "Implementation Status",
+            "type": "string"
+          },
+          "live_validation": {
+            "title": "Live Validation",
+            "type": "string"
+          },
+          "maturity": {
+            "title": "Maturity",
+            "type": "string"
+          },
+          "notes": {
+            "title": "Notes",
+            "type": "string"
+          },
+          "overridden_methods": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Overridden Methods",
+            "type": "array"
+          },
+          "parser_dialect_supported": {
+            "title": "Parser Dialect Supported",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "engine",
+          "display_name",
+          "dialect",
+          "adapter_version",
+          "implementation_status",
+          "maturity",
+          "parser_dialect_supported",
+          "live_validation",
+          "flags",
+          "overridden_methods",
+          "notes"
+        ],
+        "title": "EngineCapabilityEngineRead",
+        "type": "object"
+      },
+      "EngineCapabilityFacetRead": {
+        "additionalProperties": false,
+        "description": "One (engine, native object kind, facet) answer.\n\n`state` is one of `aida.capability_states.CapabilityState`; `reason` is a\ncode from that module's closed vocabulary, or empty where the state needs\nnone. Both are plain strings rather than enums so that adding a state or a\nreason code stays a backward-compatible widening for every existing\nconsumer.",
+        "properties": {
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "facet": {
+            "title": "Facet",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "facet",
+          "state",
+          "reason",
+          "evidence"
+        ],
+        "title": "EngineCapabilityFacetRead",
+        "type": "object"
+      },
+      "EngineCapabilityMatrixRead": {
+        "additionalProperties": false,
+        "properties": {
+          "dbt_coverage": {
+            "items": {
+              "$ref": "#/components/schemas/EngineDbtCoverageRead"
+            },
+            "title": "Dbt Coverage",
+            "type": "array"
+          },
+          "declared_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Declared Gaps",
+            "type": "array"
+          },
+          "engines": {
+            "items": {
+              "$ref": "#/components/schemas/EngineCapabilityEngineRead"
+            },
+            "title": "Engines",
+            "type": "array"
+          },
+          "facets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Facets",
+            "type": "array"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "matrix_key": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matrix Key",
+            "type": "array"
+          },
+          "parser_degradation_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Parser Degradation Reasons",
+            "type": "array"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/EngineCapabilityObjectKindRead"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "source_mapping": {
+            "$ref": "#/components/schemas/EngineSourceMappingRead"
+          },
+          "states": {
+            "items": {
+              "type": "string"
+            },
+            "title": "States",
+            "type": "array"
+          }
+        },
+        "required": [
+          "matrix_key",
+          "facets",
+          "states",
+          "generated_at",
+          "engines",
+          "rows",
+          "source_mapping",
+          "dbt_coverage",
+          "parser_degradation_reasons",
+          "declared_gaps"
+        ],
+        "title": "EngineCapabilityMatrixRead",
+        "type": "object"
+      },
+      "EngineCapabilityObjectKindRead": {
+        "additionalProperties": false,
+        "description": "One native object kind on one engine, with its six facet answers.\n\nKeyed by the **native** kind, never by the graph category it collapses\ninto: an Oracle PACKAGE, a PostgreSQL materialized view and a SQL Server\nindexed view each keep their own row even where `graph_category` is shared.",
+        "properties": {
+          "engine": {
+            "title": "Engine",
+            "type": "string"
+          },
+          "facets": {
+            "items": {
+              "$ref": "#/components/schemas/EngineCapabilityFacetRead"
+            },
+            "title": "Facets",
+            "type": "array"
+          },
+          "graph_category": {
+            "title": "Graph Category",
+            "type": "string"
+          },
+          "native_concept": {
+            "title": "Native Concept",
+            "type": "boolean"
+          },
+          "native_object_kind": {
+            "title": "Native Object Kind",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "engine",
+          "native_object_kind",
+          "graph_category",
+          "native_concept",
+          "note",
+          "facets"
+        ],
+        "title": "EngineCapabilityObjectKindRead",
+        "type": "object"
+      },
+      "EngineDbtCoverageRead": {
+        "additionalProperties": false,
+        "description": "Bounded coverage reporting for one dbt aspect (macros, hooks).",
+        "properties": {
+          "aspect": {
+            "title": "Aspect",
+            "type": "string"
+          },
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "aspect",
+          "state",
+          "reason",
+          "evidence"
+        ],
+        "title": "EngineDbtCoverageRead",
+        "type": "object"
+      },
+      "EngineSourceMappingRead": {
+        "additionalProperties": false,
+        "description": "How precisely a parsed fact can be located in its source text.",
+        "properties": {
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "granularity": {
+            "title": "Granularity",
+            "type": "string"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "granularity",
+          "state",
+          "reason",
+          "evidence",
+          "rationale"
+        ],
+        "title": "EngineSourceMappingRead",
         "type": "object"
       },
       "EntitlementOperation": {
@@ -20449,8 +20865,10 @@
           "definition": {
             "enum": [
               "SUPPORTED",
+              "PARTIAL",
               "UNSUPPORTED",
-              "NOT_APPLICABLE"
+              "NOT_APPLICABLE",
+              "NOT_SELECTED"
             ],
             "title": "Definition",
             "type": "string"
@@ -20458,8 +20876,10 @@
           "inventory": {
             "enum": [
               "SUPPORTED",
+              "PARTIAL",
               "UNSUPPORTED",
-              "NOT_APPLICABLE"
+              "NOT_APPLICABLE",
+              "NOT_SELECTED"
             ],
             "title": "Inventory",
             "type": "string"
@@ -23314,6 +23734,37 @@
         "title": "ProcedureToolBlueprintRequest",
         "type": "object"
       },
+      "ProfileFacetStatusRead": {
+        "additionalProperties": false,
+        "description": "R11-FP04: one facet that is absent from a profile, and why.\n\nThree closed vocabularies (`aida.connectors.base`' `PROFILE_FACETS`,\n`FACET_STATUSES`, `FACET_REASON_CODES`), which is what lets this be served\nat all: the natural implementation of a reason is the driver's own message,\nand a source driver's error text routinely quotes the offending row. A code\ncannot carry a value (INV-6).",
+        "properties": {
+          "facet": {
+            "title": "Facet",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "UNSUPPORTED",
+              "NOT_APPLICABLE",
+              "PERMISSION_DENIED",
+              "UNAVAILABLE"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "facet",
+          "status",
+          "reason_code"
+        ],
+        "title": "ProfileFacetStatusRead",
+        "type": "object"
+      },
       "ProfilingExceptionDecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -23959,6 +24410,19 @@
       "QueryExecutionRequest": {
         "additionalProperties": false,
         "properties": {
+          "context_product_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Product Key"
+          },
           "max_rows": {
             "anyOf": [
               {
@@ -26108,6 +26572,389 @@
           "sufficient_sample"
         ],
         "title": "RiskTierDisagreementRateRead",
+        "type": "object"
+      },
+      "RoutineDescriptionDraftEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "drafted_text": {
+            "maxLength": 20000,
+            "minLength": 10,
+            "title": "Drafted Text",
+            "type": "string"
+          },
+          "expected_text": {
+            "maxLength": 20000,
+            "title": "Expected Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "drafted_text",
+          "expected_text"
+        ],
+        "title": "RoutineDescriptionDraftEdit",
+        "type": "object"
+      },
+      "RoutineDescriptionDraftGenerate": {
+        "additionalProperties": false,
+        "description": "Draft descriptions for up to 100 routines at once.\n\nNamed `routine_ids`, not `schema_ids`: a routine is the unit a description\nis about, and a schema-wide request would silently include the packages this\npath refuses (`routine_description_service.ensure_routine_is_describable`).",
+        "properties": {
+          "include_described": {
+            "default": false,
+            "title": "Include Described",
+            "type": "boolean"
+          },
+          "routine_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Routine Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "routine_ids"
+        ],
+        "title": "RoutineDescriptionDraftGenerate",
+        "type": "object"
+      },
+      "RoutineDescriptionDraftGenerateResult": {
+        "additionalProperties": false,
+        "description": "What a generation call did, and each thing it deliberately did not do.",
+        "properties": {
+          "below_review_threshold": {
+            "title": "Below Review Threshold",
+            "type": "integer"
+          },
+          "created": {
+            "title": "Created",
+            "type": "integer"
+          },
+          "drafts": {
+            "items": {
+              "$ref": "#/components/schemas/RoutineDescriptionDraftRead"
+            },
+            "title": "Drafts",
+            "type": "array"
+          },
+          "routines_skipped": {
+            "title": "Routines Skipped",
+            "type": "integer"
+          },
+          "skipped_described": {
+            "title": "Skipped Described",
+            "type": "integer"
+          },
+          "skipped_duplicate_rejected": {
+            "title": "Skipped Duplicate Rejected",
+            "type": "integer"
+          },
+          "skipped_open": {
+            "title": "Skipped Open",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "drafts",
+          "created",
+          "skipped_open",
+          "skipped_described",
+          "skipped_duplicate_rejected",
+          "below_review_threshold",
+          "routines_skipped"
+        ],
+        "title": "RoutineDescriptionDraftGenerateResult",
+        "type": "object"
+      },
+      "RoutineDescriptionDraftRead": {
+        "additionalProperties": false,
+        "properties": {
+          "accuracy_score": {
+            "title": "Accuracy Score",
+            "type": "number"
+          },
+          "base_description_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Description Version"
+          },
+          "clarity_score": {
+            "title": "Clarity Score",
+            "type": "number"
+          },
+          "completeness_score": {
+            "title": "Completeness Score",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "drafted_text": {
+            "title": "Drafted Text",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "governance_review_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Review Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "overall_score": {
+            "title": "Overall Score",
+            "type": "number"
+          },
+          "published_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published Version Id"
+          },
+          "reviewable": {
+            "title": "Reviewable",
+            "type": "boolean"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          },
+          "routine_id": {
+            "format": "uuid",
+            "title": "Routine Id",
+            "type": "string"
+          },
+          "routine_qualified_name": {
+            "title": "Routine Qualified Name",
+            "type": "string"
+          },
+          "routine_type": {
+            "title": "Routine Type",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "style_score": {
+            "title": "Style Score",
+            "type": "number"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "datasource_id",
+          "routine_id",
+          "routine_qualified_name",
+          "routine_type",
+          "drafted_text",
+          "accuracy_score",
+          "clarity_score",
+          "style_score",
+          "completeness_score",
+          "overall_score",
+          "reviewable",
+          "evidence",
+          "status",
+          "base_description_version",
+          "governance_review_id",
+          "published_version_id",
+          "created_by",
+          "reviewed_by",
+          "reviewed_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RoutineDescriptionDraftRead",
+        "type": "object"
+      },
+      "RoutineDescriptionRead": {
+        "additionalProperties": false,
+        "description": "A routine detail read's one description field, and where it came from.\n\nThe precedence chain\n(`routine_description_service.resolve_routine_description`) collapses an\napproved version, a pending draft and the source system's own comment into\none field, exactly as the catalog row does for a table. The flags are what\nkeep that collapse honest: without them a reader cannot tell prose this\nplatform asserts from a proposal nobody has approved.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "description_is_proposed": {
+            "title": "Description Is Proposed",
+            "type": "boolean"
+          },
+          "description_is_source_comment": {
+            "title": "Description Is Source Comment",
+            "type": "boolean"
+          },
+          "documentation_withdrawn": {
+            "title": "Documentation Withdrawn",
+            "type": "boolean"
+          },
+          "routine_id": {
+            "format": "uuid",
+            "title": "Routine Id",
+            "type": "string"
+          },
+          "routine_qualified_name": {
+            "title": "Routine Qualified Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "routine_id",
+          "routine_qualified_name",
+          "description",
+          "description_is_proposed",
+          "documentation_withdrawn",
+          "description_is_source_comment"
+        ],
+        "title": "RoutineDescriptionRead",
+        "type": "object"
+      },
+      "RoutineParseCoverageRead": {
+        "additionalProperties": false,
+        "description": "R11-FP07 / finding F06.4: how completely one routine body was understood.\n\nPersisted per object rather than re-derived by hunting for `UNPARSED`\nedges, so \"was this routine fully understood?\" is a stored answer.\n`state` is the reporting-boundary rendering of `parse_completed` and\n`statement_count`; the booleans stay the stored truth.",
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "is_read_only": {
+            "title": "Is Read Only",
+            "type": "boolean"
+          },
+          "parse_completed": {
+            "title": "Parse Completed",
+            "type": "boolean"
+          },
+          "parsed_at": {
+            "format": "date-time",
+            "title": "Parsed At",
+            "type": "string"
+          },
+          "routine_id": {
+            "format": "uuid",
+            "title": "Routine Id",
+            "type": "string"
+          },
+          "source_mapping_granularity": {
+            "title": "Source Mapping Granularity",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "statement_count": {
+            "title": "Statement Count",
+            "type": "integer"
+          },
+          "unparsed_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unparsed Reason Codes",
+            "type": "array"
+          },
+          "unparsed_statement_count": {
+            "title": "Unparsed Statement Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "routine_id",
+          "state",
+          "parse_completed",
+          "is_read_only",
+          "statement_count",
+          "unparsed_statement_count",
+          "unparsed_reason_codes",
+          "dialect",
+          "confidence",
+          "source_mapping_granularity",
+          "parsed_at"
+        ],
+        "title": "RoutineParseCoverageRead",
         "type": "object"
       },
       "SampleDownstreamImpactRead": {
@@ -28867,6 +29714,22 @@
             "title": "Id",
             "type": "string"
           },
+          "observation_scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "FULL",
+                  "SAMPLE",
+                  "UNKNOWN"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Scope"
+          },
           "profile_version": {
             "title": "Profile Version",
             "type": "string"
@@ -28894,6 +29757,18 @@
             "format": "uuid",
             "title": "Table Id",
             "type": "string"
+          },
+          "uncomputed_facets": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileFacetStatusRead"
+            },
+            "title": "Uncomputed Facets",
+            "type": "array"
+          },
+          "withheld_column_count": {
+            "default": 0,
+            "title": "Withheld Column Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -49996,6 +50871,145 @@
         ]
       }
     },
+    "/v1/datasources/{datasource_id}/procedures/{routine_id}/parse-coverage": {
+      "get": {
+        "description": "How completely this routine's body was understood, as last measured.\n\nFinding F06.4: an object being inventoried is not the same as every path\nthrough it being understood, and this is the stored answer rather than one\nre-derived by scanning for `UNPARSED` edges. 404 when no parse has\nmeasured this routine yet -- \"not measured\" is a different answer from\n\"fully understood\", and returning a zeroed row would collapse them.\n\n`state` is the reporting-boundary rendering of the two stored booleans\n(`aida.capability_states.parse_coverage_state`); the row itself keeps them\nas booleans, so no sentinel string ever stands where a real value would.",
+        "operationId": "get_routine_parse_coverage_v1_datasources__datasource_id__procedures__routine_id__parse_coverage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineParseCoverageRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Routine Parse Coverage",
+        "tags": [
+          "procedure-lineage"
+        ]
+      }
+    },
     "/v1/datasources/{datasource_id}/profiling-exception-policies": {
       "get": {
         "operationId": "list_profiling_exception_policies_v1_datasources__datasource_id__profiling_exception_policies_get",
@@ -56504,6 +57518,125 @@
         "summary": "List Document Sections",
         "tags": [
           "document-ingestion"
+        ]
+      }
+    },
+    "/v1/engines/capability-matrix": {
+      "get": {
+        "description": "Per engine and native object kind, what each of the six review \u00a75 facets\ncan actually do -- derived from the connector registry, the adapters' own\ncapability flags and method overrides, the lineage parsers' dialect map and\nconstruct matrix, and the blueprint generators' eligibility rules.\n\n`generated_at` is stamped here rather than baked into the published files,\nwhich carry no timestamp so their staleness gate can compare them byte for\nbyte.",
+        "operationId": "get_engine_capability_matrix_v1_engines_capability_matrix_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineCapabilityMatrixRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Engine Capability Matrix",
+        "tags": [
+          "engine-capability"
         ]
       }
     },
@@ -79955,6 +81088,331 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/routine-description-drafts": {
+      "get": {
+        "description": "One datasource's drafts (gated), or -- for stewards and reviewers -- all of them.\n\nHighest-evidence first, which is how a reviewer triages; that ordering is\nthe score's *only* effect, exactly as for table and column drafts.",
+        "operationId": "list_routine_description_drafts_v1_organizations__organization_id__routine_description_drafts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "datasource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Datasource Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Routine Description Drafts",
+        "tags": [
+          "routine-description-drafting"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/routine-description-drafts/generate": {
+      "post": {
+        "description": "Draft descriptions for the requested routines.\n\n**A package in the request refuses the whole request, by name.** Refused\nrather than skipped, and refused rather than sliced: a steward who names a\npackage and gets back a result missing it has learned nothing about why,\nand `column_description_api`'s own \"refused, not sliced\" rule says a\nsilently reduced result looks complete. The refusal names the ids and the\nreason (`ensure_routine_is_describable`), so the client can drop them and\nask again. Everything else that produces no draft has its own counter for\nthe same reason -- a result that only says \"0 created\" is indistinguishable\nfrom a broken request.",
+        "operationId": "generate_routine_description_drafts_v1_organizations__organization_id__routine_description_drafts_generate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutineDescriptionDraftGenerate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineDescriptionDraftGenerateResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate Routine Description Drafts",
+        "tags": [
+          "routine-description-drafting"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/steward-agent": {
       "get": {
         "operationId": "get_steward_agent_state_v1_organizations__organization_id__steward_agent_get",
@@ -85001,6 +86459,16 @@
             }
           },
           {
+            "in": "query",
+            "name": "askable",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Askable",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Principal-Id",
             "required": false,
@@ -89400,6 +90868,403 @@
         "summary": "Decide Rename Candidate",
         "tags": [
           "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/routine-description-drafts/{draft_id}": {
+      "put": {
+        "description": "Fix a draft's text before it is submitted.\n\nThe editor is recorded as `edited_by` and appended to `editors`, and\n`semantic_api._decide_routine_description_draft` refuses anyone so recorded\nas the draft's approver: editing is authorship. The two halves are one\nmechanism -- the stamp here is what the guard there reads -- so neither is\noptional.\n\nThe score is left alone: it measures the catalog evidence the draft rests\non, and rewording the prose does not change that evidence.",
+        "operationId": "edit_routine_description_draft_v1_routine_description_drafts__draft_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutineDescriptionDraftEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineDescriptionDraftRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Routine Description Draft",
+        "tags": [
+          "routine-description-drafting"
+        ]
+      }
+    },
+    "/v1/routine-description-drafts/{draft_id}/submit": {
+      "post": {
+        "description": "Move one DRAFT into the shared review queue.\n\nThe minimum-evidence gate is the same one table and column drafts pass\n(`asset_description_service.ensure_reviewable`, one threshold for all\nthree), so a near-empty routine draft can never reach a state that could be\nmistaken for a published description.",
+        "operationId": "submit_routine_description_draft_v1_routine_description_drafts__draft_id__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceReviewRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Routine Description Draft",
+        "tags": [
+          "routine-description-drafting"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/description": {
+      "get": {
+        "description": "The one description a routine detail read should show, and its standing.\n\nR11-FP08: the catalog precedence chain, for a routine -- approved version,\nthen a pending draft flagged as proposed, then the source system's own\ncomment. Resolved in `routine_description_service` rather than here so the\nMCP and compilation surfaces answer from the same rungs in the same order\n(`atlas.modules.catalog.service._description` is the precedent, and the\nreason the rungs are in that order).",
+        "operationId": "get_routine_description_v1_routines__routine_id__description_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineDescriptionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Routine Description",
+        "tags": [
+          "routine-description-drafting"
         ]
       }
     },

@@ -334,6 +334,27 @@ class TableProfile(Base):
     schema_fingerprint: Mapped[str | None] = mapped_column(String(64))
     row_count_estimate: Mapped[int | None] = mapped_column(BigInteger)
     sampled_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    # R11-FP04: how much of the table this profile actually saw, as the
+    # connector itself reported it (`aida.connectors.base.OBSERVATION_SCOPES`).
+    #
+    # A first-class stored facet rather than a property re-derived by whichever
+    # consumer needs it. It used to be inferred downstream from
+    # `sampled_row_count >= row_count_estimate`, which is a proxy for the
+    # question and gets it wrong in both directions: an engine that reported
+    # the sample size as the estimate made a `LIMIT`-bounded profile of a
+    # ten-million-row table read as a full scan, and an engine that scanned
+    # fully while reporting a nominal sample size made a genuinely complete
+    # profile read as sampled. Both were real
+    # (`aida.connectors.bigquery`/`snowflake`), and the consumer that acts on
+    # the answer is relationship approval -- so the mistake was silently
+    # strengthening or weakening join evidence.
+    #
+    # Nullable with no backfill: rows written before this column existed have
+    # no scope to state, and `relationship_validation.ProfileBounds` falls back
+    # to the old derivation for exactly those. NULL means "not recorded", which
+    # is not the same claim as UNKNOWN ("recorded, and the connector could not
+    # say").
+    observation_scope: Mapped[str | None] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30), default="COMPLETED", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -361,6 +382,52 @@ class ColumnProfile(Base):
     approximate_distinct_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
     min_length: Mapped[int | None] = mapped_column(Integer)
     max_length: Mapped[int | None] = mapped_column(Integer)
+    # -- R11-FP04 value-free aggregate facets ------------------------------
+    #
+    # Every column below is a statistic *about* values and never a value:
+    # a ratio, a class of a ratio, or a count. What is deliberately absent,
+    # and must stay absent, is anything that would identify a value --
+    # a bucket boundary, a mode, an exemplar, a pattern literal, a
+    # data-inferred unit string. Those belong to the value-bearing half of
+    # FP-04, which `ColumnValueProfileArtifact` gates behind an approved
+    # `ProfilingExceptionPolicy` and which this table must never absorb
+    # (ADR-0014; asserted positively, not just by naming convention, in
+    # `tests/test_inv6_value_freedom.py`).
+    #
+    # All nullable, all without backfill: a profile written before these
+    # existed made no claim about them, and NULL is how that reads. A reader
+    # that needs to know *why* one is NULL reads `unavailable_facets`.
+    #
+    # `distinct_ratio` and `effectively_unique` are the one rule two
+    # consumers used to re-derive differently -- see
+    # `atlas.modules.profiling.facets` for which two and how they diverged.
+    distinct_ratio: Mapped[float | None] = mapped_column(Float)
+    effectively_unique: Mapped[bool | None] = mapped_column(Boolean)
+    cardinality_class: Mapped[str | None] = mapped_column(String(30))
+    # Non-null values that are the empty string, and non-null values that are
+    # non-empty but only whitespace. Separate counts because they are separate
+    # data-quality findings: one is a field the source stores empty, the other
+    # is a field something wrote a space into.
+    blank_count: Mapped[int | None] = mapped_column(BigInteger)
+    whitespace_only_count: Mapped[int | None] = mapped_column(BigInteger)
+    # Counts per length bucket, positionally aligned to the *code-defined*
+    # `aida.connectors.base.LENGTH_BUCKET_BOUNDS` named by
+    # `length_bucket_scheme`. The boundaries are not stored here on purpose:
+    # a persisted edge is the thin end of persisting a histogram of values,
+    # and a reader that wants the edges reads the named scheme.
+    length_bucket_scheme: Mapped[str | None] = mapped_column(String(40))
+    length_bucket_counts: Mapped[list[int] | None] = mapped_column(JSON)
+    # Shannon entropy of the frequency distribution over distinct values, in
+    # bits. Says how evenly the rows spread without naming any of them: 0.0 for
+    # a constant column, log2(n) for n equally-frequent values.
+    frequency_entropy_bits: Mapped[float | None] = mapped_column(Float)
+    # Facets this engine could not produce for this column, each as
+    # `{"facet", "status", "reason_code"}` drawn from the closed vocabularies in
+    # `aida.connectors.base`. Never free text: see
+    # `facets.persistable_facet_status` for why a driver's own message must not
+    # land here. NULL distinguishes "written before this column existed" from
+    # `[]` ("every facet was available").
+    unavailable_facets: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

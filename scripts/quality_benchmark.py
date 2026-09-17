@@ -383,6 +383,29 @@ def _rate(flags: Iterable[bool]) -> float:
     return sum(1 for v in values if v) / len(values)
 
 
+def expected_object_id(catalog: SeededCatalog, object_type: str, object_key: str) -> str:
+    """The id `seed_catalog`/`enrich_footprint` gave the object a corpus names by slug.
+
+    Module-level rather than nested inside `run_retrieval_benchmark`, because the answer
+    evaluation (`scripts/answer_evaluation_benchmark.py`, R11-FP13) resolves the *same*
+    corpus slugs against the *same* enriched catalog and must not derive them a second,
+    independently-drifting way.
+
+    The routine and ontology ids are derived the way `enrich_footprint` assigns them rather
+    than looked up, so a case still resolves -- and honestly misses -- against a catalog that
+    was never enriched.
+    """
+    if object_type == "TABLE":
+        return str(catalog.table_ids[object_key])
+    if object_type == "GOVERNED_TOOL":
+        return str(catalog.tool_version_ids[object_key])
+    if object_type == "ROUTINE":
+        return str(_fixed_id("routine", object_key))
+    if object_type == "ONTOLOGY_CONCEPT":
+        return str(uuid5(_fixed_id("ontology-version", "1"), object_key))
+    raise ValueError(f"unsupported expected_object_type: {object_type!r}")
+
+
 def load_retrieval_corpus(path: Path) -> list[RetrievalCase]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return [
@@ -409,24 +432,13 @@ async def run_retrieval_benchmark(
     if datasource is None:
         raise RuntimeError("seeded datasource missing -- seed_catalog did not commit")
 
-    def _expected_object_id(case: RetrievalCase) -> str:
-        if case.expected_object_type == "TABLE":
-            return str(catalog.table_ids[case.expected_object_key])
-        if case.expected_object_type == "GOVERNED_TOOL":
-            return str(catalog.tool_version_ids[case.expected_object_key])
-        # R11-FP13: derived the way `enrich_footprint` assigns them, so a case resolves (and
-        # honestly misses) against a catalog that was never enriched.
-        if case.expected_object_type == "ROUTINE":
-            return str(_fixed_id("routine", case.expected_object_key))
-        if case.expected_object_type == "ONTOLOGY_CONCEPT":
-            return str(uuid5(_fixed_id("ontology-version", "1"), case.expected_object_key))
-        raise ValueError(f"unsupported expected_object_type: {case.expected_object_type!r}")
-
     retriever = GovernedRetriever(get_settings())
     results: list[RetrievalCaseResult] = []
     for case in cases:
         hits = await retriever.retrieve(session, datasource=datasource, question=case.question)
-        expected_id = _expected_object_id(case)
+        expected_id = expected_object_id(
+            catalog, case.expected_object_type, case.expected_object_key
+        )
         rank = next(
             (
                 idx + 1

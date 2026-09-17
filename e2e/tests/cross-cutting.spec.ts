@@ -141,8 +141,11 @@ test.describe("denied access", () => {
     test.use({ identity: "reviewer" });
 
     test("refuses the action visibly and does not fake success", async ({ page, api }) => {
+      // R11-S13 (M3): the drafts surface is a tab of the documentation
+      // workspace now; the route this test has always used still lands on it.
       await page.goto("/#/description-drafts");
-      await expectScreen(page, "description-drafts");
+      await expectScreen(page, "worklist");
+      await expect(page).toHaveURL(/view=drafts/);
 
       const list = page.getByRole("list", { name: "Description drafts" });
       await expect(list.getByText("public.orders")).toBeVisible();

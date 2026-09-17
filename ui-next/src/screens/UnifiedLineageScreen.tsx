@@ -217,8 +217,22 @@ function ImpactRow({ item }: { item: UnifiedLineageImpactNodeRead }) {
   );
 }
 
-export function UnifiedLineageScreen() {
+/**
+ * Which of this screen's two panes leads.
+ *
+ * R11-S13 (M1): `lineage` is one destination with three views, and two of them
+ * are this screen. The graph and the bounded impact of the selected node were
+ * always both here -- the graph wide, the impact in a 360px rail -- and
+ * "who breaks if I change this" is the question that rail made hardest to
+ * read. `lead` is which one gets the width; it is NOT a second set of data, a
+ * second endpoint or a second permission contract. One component, one set of
+ * requests, two emphases.
+ */
+export type UnifiedLineageLead = "graph" | "impact";
+
+export function UnifiedLineageScreen({ lead = "graph" }: { lead?: UnifiedLineageLead } = {}) {
   const ORG = useOrgId();
+  const impactLed = lead === "impact";
   const [ontologyOpen, setOntologyOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [detailsVisible, setDetailsVisible] = useState(true);
@@ -462,14 +476,83 @@ export function UnifiedLineageScreen() {
     ].filter(row => impactDirection === "both" || row.direction.toLowerCase() === impactDirection);
   }, [impact, impactDirection]);
 
+  /* R11-S13 (M1): held in a variable so the Impact view can put it BEFORE the
+     graph in the DOM, not merely above it in CSS. A screen reader and the Tab
+     key follow document order, so a view whose whole point is the impact table
+     must not make a keyboard user walk the graph's zoom, layer chips, asset
+     filters and graph-question form to reach it. Visual order and reading
+     order agree in both views because the same value moves. */
+  const impactPane = (
+    <aside hidden={!detailsVisible} className="ult__impact" aria-label="Impact">
+      {!selectedNodeId ? (
+        <Empty title="Select a graph node" hint="Bounded upstream and downstream impact will appear here." />
+      ) : impactError ? (
+        <ErrorState title="Impact could not be loaded" detail={impactError} onRetry={() => void loadImpact()} />
+      ) : impactLoading || !impact ? (
+        <div className="ult__skeleton" role="status" aria-live="polite">
+          Tracing impact…
+        </div>
+      ) : (
+        <>
+          <div className="ult__panelhead">
+            <div>
+              <p className="ult__eyebrow">TRANSITIVE IMPACT</p>
+              <h2 className="ult__h2">{impact.focus_label}</h2>
+            </div>
+            <Pill tone={kindTone(impact.focus_node_kind)}>{impact.focus_node_kind.toLowerCase().replace(/_/g, " ")}</Pill>
+          </div>
+          {impactRows.length === 0 ? (
+            <Empty title="No connected impact" />
+          ) : (
+            <div className="ult__impactscroll">
+              <table className="ult__impacttable">
+                <thead>
+                  <tr>
+                    <th scope="col">Asset</th>
+                    <th scope="col" className="ult__impactdepth">Depth</th>
+                    <th scope="col" className="ult__impactquality">Quality</th>
+                  </tr>
+                </thead>
+                {(["Upstream", "Downstream"] as const).map((direction) => {
+                  const rows = impactRows.filter((row) => row.direction === direction);
+                  return rows.length > 0 ? (
+                    <tbody key={direction}>
+                      <tr>
+                        <th scope="colgroup" colSpan={3} className="ult__impactgroup">
+                          <span>{direction}</span>
+                          <span className="ult__impactgroupcount">{rows.length}</span>
+                        </th>
+                      </tr>
+                      {rows.map(({ item }) => (
+                        <ImpactRow key={`${direction}-${item.node_id}`} item={item} />
+                      ))}
+                    </tbody>
+                  ) : null;
+                })}
+              </table>
+            </div>
+          )}
+          {impact.upstream_truncated || impact.downstream_truncated ? (
+            <p className="ult__trunc">Truncated at this depth/node limit — narrower search shows more of the true chain.</p>
+          ) : null}
+        </>
+      )}
+    </aside>
+  );
+
   return (
     <div className={`ult${maximized ? " ult--maximized" : ""}`}>
       <header className="ult__head">
         <div>
-          <h1 className="ult__h1">Unified lineage</h1>
+          {/* R11-S13 (M1): the heading names the VIEW, because this screen is
+              now two of the merged destination's three views and a heading
+              that said "Unified lineage" over an impact-led layout would be
+              describing the other one. */}
+          <h1 className="ult__h1">{impactLed ? "Lineage impact" : "Unified lineage"}</h1>
           <p className="ult__lede">
-            Declared constraints, approved relationships, dbt dependencies, and OpenLineage runs, merged into one
-            bounded, value-free graph — pick a node to see its bounded upstream/downstream impact.
+            {impactLed
+              ? "Who breaks if this changes: bounded upstream and downstream impact for the selected node, over the same merged graph — declared constraints, approved relationships, dbt dependencies, OpenLineage runs and view/procedure definitions."
+              : "Declared constraints, approved relationships, dbt dependencies, and OpenLineage runs, merged into one bounded, value-free graph — pick a node to see its bounded upstream/downstream impact."}
           </p>
         </div>
         <Button onClick={() => setOntologyOpen(true)}>Manage ontology</Button>
@@ -610,7 +693,12 @@ export function UnifiedLineageScreen() {
         </p>
       ) : null}
 
-      <div className={`ult__layout${detailsVisible ? "" : " ult__layout--wide"}`}>
+      <div
+        className={`ult__layout${detailsVisible ? "" : " ult__layout--wide"}${
+          impactLed ? " ult__layout--impactled" : ""
+        }`}
+      >
+        {impactLed ? impactPane : null}
         <article className="ult__main">
           <div className="ult__panelhead">
             <div>
@@ -808,61 +896,7 @@ export function UnifiedLineageScreen() {
           )}
         </article>
 
-        <aside hidden={!detailsVisible} className="ult__impact" aria-label="Impact">
-          {!selectedNodeId ? (
-            <Empty title="Select a graph node" hint="Bounded upstream and downstream impact will appear here." />
-          ) : impactError ? (
-            <ErrorState title="Impact could not be loaded" detail={impactError} onRetry={() => void loadImpact()} />
-          ) : impactLoading || !impact ? (
-            <div className="ult__skeleton" role="status" aria-live="polite">
-              Tracing impact…
-            </div>
-          ) : (
-            <>
-              <div className="ult__panelhead">
-                <div>
-                  <p className="ult__eyebrow">TRANSITIVE IMPACT</p>
-                  <h2 className="ult__h2">{impact.focus_label}</h2>
-                </div>
-                <Pill tone={kindTone(impact.focus_node_kind)}>{impact.focus_node_kind.toLowerCase().replace(/_/g, " ")}</Pill>
-              </div>
-              {impactRows.length === 0 ? (
-                <Empty title="No connected impact" />
-              ) : (
-                <div className="ult__impactscroll">
-                  <table className="ult__impacttable">
-                    <thead>
-                      <tr>
-                        <th scope="col">Asset</th>
-                        <th scope="col" className="ult__impactdepth">Depth</th>
-                        <th scope="col" className="ult__impactquality">Quality</th>
-                      </tr>
-                    </thead>
-                    {(["Upstream", "Downstream"] as const).map((direction) => {
-                      const rows = impactRows.filter((row) => row.direction === direction);
-                      return rows.length > 0 ? (
-                        <tbody key={direction}>
-                          <tr>
-                            <th scope="colgroup" colSpan={3} className="ult__impactgroup">
-                              <span>{direction}</span>
-                              <span className="ult__impactgroupcount">{rows.length}</span>
-                            </th>
-                          </tr>
-                          {rows.map(({ item }) => (
-                            <ImpactRow key={`${direction}-${item.node_id}`} item={item} />
-                          ))}
-                        </tbody>
-                      ) : null;
-                    })}
-                  </table>
-                </div>
-              )}
-              {impact.upstream_truncated || impact.downstream_truncated ? (
-                <p className="ult__trunc">Truncated at this depth/node limit — narrower search shows more of the true chain.</p>
-              ) : null}
-            </>
-          )}
-        </aside>
+        {impactLed ? null : impactPane}
       </div>
     </div>
   );

@@ -92,6 +92,10 @@ const OBJECT_TYPES = [
   "SEMANTIC_METRIC_PROPOSAL",
   "ASSET_DESCRIPTION_DRAFT",
   "COLUMN_DESCRIPTION_DRAFT",
+  /* R11-FP08: a routine's description is reviewed through this same queue --
+     one decision path, not a second governance engine. Absent from this list
+     the drafts still arrived, but no reviewer could filter to them. */
+  "ROUTINE_DESCRIPTION_DRAFT",
   "TERM_SEMANTIC_BINDING",
   "COLUMN_CLASSIFICATION_PROMOTION",
   "CONTEXT_PRODUCT_VERSION",
@@ -173,14 +177,25 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
   }
   if (
     proposal.object_type === "COLUMN_DESCRIPTION_DRAFT" ||
-    proposal.object_type === "ASSET_DESCRIPTION_DRAFT"
+    proposal.object_type === "ASSET_DESCRIPTION_DRAFT" ||
+    proposal.object_type === "ROUTINE_DESCRIPTION_DRAFT"
   ) {
     // The proposed text arrives as the first evidence item: description
     // drafts have no field diff, so without it the row would ask a reviewer
     // to approve text it never showed them.
     const proposed = extractEvidenceValue(proposal, "proposed_description");
     const column = extractEvidenceValue(proposal, "column");
+    const signature = extractEvidenceValue(proposal, "signature");
+    const bodyState = extractEvidenceValue(proposal, "body_state");
     const parts: string[] = [];
+    /* R11-FP08: a routine drafted without its body is a weaker claim than one
+       drafted from it, and the score alone does not say which happened. The
+       read model carries `body_state` for exactly this; say it here rather
+       than making a reviewer open the evidence to find out. CAPTURED is the
+       unremarkable case and stays silent. */
+    if (bodyState && bodyState !== "CAPTURED") {
+      parts.push(`body ${bodyState.toLowerCase().replace(/_/g, " ")}`);
+    }
     // Said first, where a reviewer skimming the queue cannot miss it: a
     // model's text can be wrong in a way that reads as right.
     if (extractEvidenceValue(proposal, "origin")?.startsWith("MODEL_INFERRED")) {
@@ -194,7 +209,9 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
       subject:
         proposal.object_type === "COLUMN_DESCRIPTION_DRAFT"
           ? `Describe column ${column ?? proposal.object_id}`
-          : "Table description draft",
+          : proposal.object_type === "ROUTINE_DESCRIPTION_DRAFT"
+            ? `Describe routine ${signature ?? proposal.object_id}`
+            : "Table description draft",
       subtitle: parts.join(" — ") || undefined,
     };
   }

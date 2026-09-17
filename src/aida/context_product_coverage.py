@@ -43,7 +43,14 @@ from aida.context_compiler import (
     ResolvedViewCoverage,
 )
 from aida.discovery_selection import table_kind
-from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataViewDefinition,
+    RoutineDescriptionDraft,
+    RoutineDocumentation,
+    RoutineDocumentationVersion,
+)
 from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.models import (
     AnalysisRun,
@@ -55,6 +62,7 @@ from aida.models import (
 )
 from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.routine_description_service import current_routine_descriptions
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
 #: Some ACTIVE edge was parsed from the definition (UNPARSED markers do not count).
@@ -102,6 +110,63 @@ def _lineage(object_id: UUID, active: set[UUID], proposed: set[UUID]) -> str:
     return LINEAGE_NONE
 
 
+#: R11-FP08: the standing of a routine's Atlas-authored description, as a context product
+#: reports it. `PROPOSED` and `WITHDRAWN` carry no text here on purpose (see
+#: `load_routine_references`); they exist so a consumer can tell an undescribed routine from
+#: one whose description a reviewer retired, which a bare null cannot.
+_DESCRIPTION_APPROVED: Final = "APPROVED"
+_DESCRIPTION_PROPOSED: Final = "PROPOSED"
+_DESCRIPTION_WITHDRAWN: Final = "WITHDRAWN"
+_DESCRIPTION_NONE: Final = "NONE"
+
+
+async def _routine_description_states(
+    session: AsyncSession,
+    organization_id: UUID,
+    routine_ids: Sequence[UUID],
+    *,
+    approved: set[UUID],
+) -> dict[UUID, str]:
+    """The description standing per routine, in two batched reads for the whole page.
+
+    Precedence matches `routine_description_service.resolve_routine_description`: approved
+    wins, then a draft awaiting review, then a retirement. A routine with none of those is
+    absent from the result and reads as `NONE`.
+    """
+    states: dict[UUID, str] = {routine_id: _DESCRIPTION_APPROVED for routine_id in approved}
+    remaining = [routine_id for routine_id in routine_ids if routine_id not in approved]
+    if not remaining:
+        return states
+    pending = set(
+        await session.scalars(
+            select(RoutineDescriptionDraft.routine_id).where(
+                RoutineDescriptionDraft.organization_id == organization_id,
+                RoutineDescriptionDraft.routine_id.in_(remaining),
+                RoutineDescriptionDraft.status == "PENDING_APPROVAL",
+            )
+        )
+    )
+    retired = set(
+        await session.scalars(
+            select(RoutineDocumentation.routine_id)
+            .join(
+                RoutineDocumentationVersion,
+                RoutineDocumentationVersion.documentation_id == RoutineDocumentation.id,
+            )
+            .where(
+                RoutineDocumentation.routine_id.in_(remaining),
+                RoutineDocumentationVersion.status == "WITHDRAWN",
+            )
+        )
+    )
+    for routine_id in remaining:
+        if routine_id in pending:
+            states[routine_id] = _DESCRIPTION_PROPOSED
+        elif routine_id in retired:
+            states[routine_id] = _DESCRIPTION_WITHDRAWN
+    return states
+
+
 async def load_routine_references(
     session: AsyncSession,
     organization_id: UUID,
@@ -144,6 +209,21 @@ async def load_routine_references(
             )
         )
     ).all()
+    # R11-FP08: the approved description of each routine, plus whether one was drafted or
+    # retired. Two batched reads for the whole page, not one per routine, and deliberately
+    # *only* the approved text: a draft is a proposal nobody has accepted and a source comment
+    # is the source speaking, so neither is what a context product asserts. Both are still
+    # *reported*, through `description_state`, because a consumer acts differently on
+    # "undescribed" and "described, then retired".
+    approved_descriptions = await current_routine_descriptions(
+        session, [routine.id for routine, _, _ in rows]
+    )
+    described_states = await _routine_description_states(
+        session,
+        organization_id,
+        [routine.id for routine, _, _ in rows],
+        approved=set(approved_descriptions),
+    )
     active: set[UUID] = set()
     proposed: set[UUID] = set()
     unparsed: set[UUID] = set()
@@ -186,6 +266,12 @@ async def load_routine_references(
             reads_table_ids=tuple(sorted(reads.get(routine.id, set()))),
             writes_table_ids=tuple(sorted(writes.get(routine.id, set()))),
             definition_digest=_digest(routine.body_sql_redacted, routine.redaction_status),
+            description=(
+                approved_descriptions[routine.id].description
+                if routine.id in approved_descriptions
+                else None
+            ),
+            description_state=described_states.get(routine.id, _DESCRIPTION_NONE),
         )
         for routine, schema_name, catalog_name in rows
     ]

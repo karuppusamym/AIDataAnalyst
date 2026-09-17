@@ -7,12 +7,16 @@ import defusedxml.ElementTree as ET
 import pytds
 
 from aida.connectors.base import (
+    ENTROPY_NOT_IMPLEMENTED,
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    bounded_scan_scope,
+    read_value_free_distribution,
+    value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
     append_grouped_foreign_key_rows,
@@ -615,6 +619,22 @@ class SqlServerConnector(SqlExecutor):
                                 f"MAX({text_form}) AS maxl_{position}",
                             )
                         )
+                        # R11-FP04. `LTRIM(RTRIM(...))` rather than `TRIM(...)`:
+                        # TRIM is SQL Server 2017+, and this adapter supports
+                        # older instances. Note that the blank and
+                        # whitespace-only predicates compare the *text* form,
+                        # not its LEN -- `LEN` ignores trailing spaces in T-SQL,
+                        # so a LEN-based blank test would count '   ' as empty
+                        # and the two findings would collapse into one.
+                        cast_form = f"CAST({quoted} AS NVARCHAR(MAX))"
+                        expressions.extend(
+                            value_free_distribution_expressions(
+                                position=position,
+                                text_form=cast_form,
+                                length_form=text_form,
+                                trimmed_form=f"LTRIM(RTRIM({cast_form}))",
+                            )
+                        )
                     profile_sql = (
                         f"WITH bounded_sample AS (SELECT TOP ({int(sample_rows)}) {selected} "  # noqa: S608 -- identifiers are bracket-quoted and limits are validated integers
                         f"FROM {qualified_table}) SELECT {', '.join(expressions)} "
@@ -626,6 +646,9 @@ class SqlServerConnector(SqlExecutor):
                         continue
                     sampled_row_count = max(sampled_row_count, int(row["sampled_row_count"]))
                     for position, name in enumerate(batch):
+                        blank, whitespace, buckets = read_value_free_distribution(
+                            position, row.get
+                        )
                         snapshots.append(
                             ColumnProfileSnapshot(
                                 name=name,
@@ -634,6 +657,10 @@ class SqlServerConnector(SqlExecutor):
                                 approximate_distinct_count=int(row[f"d_{position}"]),
                                 min_length=row[f"minl_{position}"],
                                 max_length=row[f"maxl_{position}"],
+                                blank_count=blank,
+                                whitespace_only_count=whitespace,
+                                length_bucket_counts=buckets,
+                                facet_status=(ENTROPY_NOT_IMPLEMENTED,),
                             )
                         )
             finally:
@@ -645,6 +672,13 @@ class SqlServerConnector(SqlExecutor):
             row_count_estimate=(max(estimate, sampled_row_count) if estimate is not None else None),
             sampled_row_count=sampled_row_count,
             columns=tuple(snapshots),
+            # R11-FP04: the `TOP (n)` above is the bound. `sys.partitions` is a
+            # maintained estimate that can sit either side of the truth, so
+            # comparing the two numbers -- which is what downstream used to do
+            # -- is not the same question as "did the bound bite".
+            observation_scope=bounded_scan_scope(
+                sampled_row_count=sampled_row_count, sample_rows=sample_rows
+            ),
         )
 
 

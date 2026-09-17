@@ -29,6 +29,32 @@ SUPPORTED_RESOURCE_TYPES = frozenset(
     }
 )
 
+#: The manifest keys `parse_dbt_manifest` reads resources out of. Named as a
+#: constant rather than inlined because the engine capability matrix publishes
+#: it as the evidence for "macros are not ingested": `macros` is deliberately
+#: absent, and a reader of the published matrix should be looking at the same
+#: tuple the parser loops over, not a sentence about it.
+MANIFEST_COLLECTION_KEYS = (
+    "nodes",
+    "sources",
+    "exposures",
+    "metrics",
+    "semantic_models",
+    "saved_queries",
+)
+
+#: dbt compiles `on-run-start` / `on-run-end` into nodes of this resource type.
+#: It is not in `SUPPORTED_RESOURCE_TYPES`, so such a node is skipped and its
+#: SQL is never parsed. F06.4: counted rather than ignored, so a project that
+#: runs hooks is visibly bounded instead of silently reading as fully covered.
+HOOK_RESOURCE_TYPE = "operation"
+
+#: Where a model's own hooks live in its manifest node. dbt accepts both
+#: spellings; a manifest carries the hyphenated form and some older ones the
+#: underscored.
+_PRE_HOOK_KEYS = ("pre-hook", "pre_hook")
+_POST_HOOK_KEYS = ("post-hook", "post_hook")
+
 
 class DbtArtifactError(ValueError):
     pass
@@ -64,6 +90,22 @@ class ParsedDbtResource:
     column_descriptions: dict[str, str] = field(default_factory=dict)
     column_types: dict[str, str] = field(default_factory=dict)
     extra_metadata: dict[str, Any] = field(default_factory=dict)
+    # F06.4 (review 2026-09-16): bounded coverage evidence, not lineage.
+    #
+    # How many macros this resource's SQL depends on, from the manifest's own
+    # `depends_on.macros`. The *compiled* SQL a macro produced is parsed like
+    # any other, so the relations an expansion resolved to are real lineage --
+    # but the macro itself is not ingested (see `MANIFEST_COLLECTION_KEYS`), so
+    # nothing can say which macro produced what, and a macro whose expansion
+    # depends on warehouse state at compile time is not modelled at all. A
+    # non-zero count here is the explicit limitation; it is never a reason to
+    # treat the model as less understood than its compiled SQL shows.
+    macro_dependency_count: int = 0
+    # Hooks are the harder gap: their SQL is in the node's config, not in its
+    # compiled code, so it is never parsed and a post-hook that writes another
+    # table produces no edge at all. Counted so the gap is visible per model.
+    pre_hook_count: int = 0
+    post_hook_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -75,6 +117,25 @@ class ParsedDbtArtifact:
     generated_at: datetime | None
     resources: list[ParsedDbtResource]
     edges: list[tuple[str, str]]
+    # F06.4: project-level bounded coverage evidence. `macro_count` is how many
+    # macros the manifest declares, all of which are skipped;
+    # `project_hook_count` is how many `on-run-start`/`on-run-end` operations it
+    # compiled, whose SQL is never parsed. Both default to zero so an older
+    # caller constructing this by keyword is unaffected.
+    macro_count: int = 0
+    project_hook_count: int = 0
+
+    @property
+    def macro_dependent_resource_count(self) -> int:
+        """Resources whose SQL a macro contributed to."""
+        return sum(1 for resource in self.resources if resource.macro_dependency_count)
+
+    @property
+    def model_hook_count(self) -> int:
+        """`pre_hook` + `post_hook` entries across every parsed resource."""
+        return sum(
+            resource.pre_hook_count + resource.post_hook_count for resource in self.resources
+        )
 
 
 def _required_text(value: Any, field: str, limit: int) -> str:
@@ -125,6 +186,10 @@ def _resource_from_manifest(
     raw_dependency_nodes = depends_on.get("nodes")
     dependency_nodes: list[Any] = (
         raw_dependency_nodes if isinstance(raw_dependency_nodes, list) else []
+    )
+    raw_dependency_macros = depends_on.get("macros")
+    macro_dependency_count = (
+        len(raw_dependency_macros) if isinstance(raw_dependency_macros, list) else 0
     )
     raw_columns = payload.get("columns")
     columns: dict[str, Any] = raw_columns if isinstance(raw_columns, dict) else {}
@@ -195,7 +260,27 @@ def _resource_from_manifest(
         column_descriptions=column_descriptions,
         column_types=column_types,
         extra_metadata=extra_metadata,
+        macro_dependency_count=macro_dependency_count,
+        pre_hook_count=_hook_count(config, _PRE_HOOK_KEYS),
+        post_hook_count=_hook_count(config, _POST_HOOK_KEYS),
     )
+
+
+def _hook_count(config: dict[str, Any], keys: tuple[str, ...]) -> int:
+    """How many hooks `config` declares under either accepted spelling.
+
+    A hook is a string or a `{"sql": ..., "transaction": ...}` mapping, and dbt
+    accepts a bare string where a list is expected. Only the *count* is taken:
+    a hook body is arbitrary SQL that routinely carries literal values, and
+    nothing here may store one (INV-6).
+    """
+    total = 0
+    for key in keys:
+        value = config.get(key)
+        if value is None:
+            continue
+        total += len(value) if isinstance(value, list) else 1
+    return total
 
 
 def parse_dbt_manifest(manifest: dict[str, Any], dialect: str) -> ParsedDbtArtifact:
@@ -211,11 +296,24 @@ def parse_dbt_manifest(manifest: dict[str, Any], dialect: str) -> ParsedDbtArtif
         raise DbtArtifactError("dbt manifest metadata is required")
     schema_version = _required_text(metadata.get("dbt_schema_version"), "schema version", 255)
     collections: list[dict[str, Any]] = []
-    for key in ("nodes", "sources", "exposures", "metrics", "semantic_models", "saved_queries"):
+    for key in MANIFEST_COLLECTION_KEYS:
         value = manifest.get(key, {})
         if not isinstance(value, dict):
             raise DbtArtifactError(f"dbt manifest {key} must be an object")
         collections.append(value)
+    # F06.4: macros and project hooks are counted before the resource loop
+    # skips them, so "this project runs 4 hooks and 37 macros, none of which
+    # Atlas reads" is a fact the ingestion records rather than an absence a
+    # reader has to notice. Nothing about either is stored beyond the count.
+    raw_macros = manifest.get("macros", {})
+    macro_count = len(raw_macros) if isinstance(raw_macros, dict) else 0
+    project_hook_count = sum(
+        1
+        for collection in collections
+        for raw_resource in collection.values()
+        if isinstance(raw_resource, dict)
+        and str(raw_resource.get("resource_type", "")).lower() == HOOK_RESOURCE_TYPE
+    )
     total = sum(len(collection) for collection in collections)
     if total > MAX_RESOURCES:
         raise DbtArtifactError(f"dbt manifest exceeds the {MAX_RESOURCES} resource limit")
@@ -246,6 +344,8 @@ def parse_dbt_manifest(manifest: dict[str, Any], dialect: str) -> ParsedDbtArtif
         generated_at=parse_generated_at(metadata.get("generated_at")),
         resources=resources,
         edges=edges,
+        macro_count=macro_count,
+        project_hook_count=project_hook_count,
     )
 
 

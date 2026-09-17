@@ -234,6 +234,43 @@ class Settings(BaseSettings):
     # sweep deletes per scheduler iteration, mirroring `scheduler_batch_size`.
     profiling_exception_purge_batch_size: int = Field(default=500, ge=1, le=5_000)
     max_active_runs_per_organization: int = Field(default=100, ge=1, le=10_000)
+    # R11-FP17: the per-source half of run admission, which was a hard-coded `1`
+    # in `fleet.reserve_analysis_run` until this setting existed. Still 1 by
+    # default, so the shipped behaviour is unchanged: one discovery run per
+    # source at a time is backpressure against the source, not a licensing
+    # bound, and raising it means accepting concurrent scans of one system.
+    max_active_runs_per_datasource: int = Field(default=1, ge=1, le=1_000)
+    # --- R11-FP17: per-tenant and per-source daily quotas -------------------
+    # These are *quotas*, not the per-pass and per-run bounds the rest of this
+    # class is full of. A bound ("at most 500 signals per pass") limits one unit
+    # of work; a quota limits how much of a resource a tenant or a source may
+    # consume in a day, across every unit of work, and needs accumulated state
+    # to do it -- `aida.usage_quotas`, over `tenant_usage_window` /
+    # `source_usage_window`, with the cap in the UPDATE's own predicate the way
+    # `aida.agent_budget` already does it for an agent contract's token cap.
+    #
+    # Every one of them is `None` by default, and that is not a quota of zero:
+    # `None` means "this estate has declared no quota for this dimension", and
+    # `aida.usage_quotas` then does not touch the database at all. A number here
+    # would be an operator's number invented by this repository -- the same
+    # mistake the alert thresholds in `infra/monitoring/` refuse to make -- and
+    # a quota nobody chose that starts refusing work on upgrade is worse than no
+    # quota. What *is* enforced by default is unchanged: the two concurrency
+    # limits above.
+    analysis_run_daily_quota_per_organization: int | None = Field(default=None, ge=1, le=1_000_000)
+    analysis_run_daily_quota_per_datasource: int | None = Field(default=None, ge=1, le=1_000_000)
+    model_token_daily_quota_per_organization: int | None = Field(
+        default=None, ge=1, le=100_000_000_000
+    )
+    model_token_daily_quota_per_datasource: int | None = Field(
+        default=None, ge=1, le=100_000_000_000
+    )
+    parser_statement_daily_quota_per_organization: int | None = Field(
+        default=None, ge=1, le=1_000_000_000
+    )
+    parser_statement_daily_quota_per_datasource: int | None = Field(
+        default=None, ge=1, le=1_000_000_000
+    )
     scheduler_poll_seconds: int = Field(default=10, ge=1, le=300)
     scheduler_batch_size: int = Field(default=100, ge=1, le=1000)
     outbox_max_attempts: int = Field(default=10, ge=1, le=100)
@@ -772,6 +809,15 @@ class Settings(BaseSettings):
     # Five minutes: fast enough to alert on, far too slow to cost anything.
     footprint_metrics_enabled: bool = True
     footprint_metrics_interval_seconds: int = Field(default=300, ge=60, le=86_400)
+    # R11-FP17: the port the fleet scheduler and graph projector expose their own
+    # Prometheus registry on (`aida.worker_metrics.serve_worker_metrics`).
+    # `prometheus_client`'s registry is per process and only `aida.main` serves
+    # `/metrics`, so every gauge the two passes above publish previously landed in a
+    # process nothing could reach -- the real reason no deployment scraped them.
+    # 0 means "do not listen", and is the default because opening a port is a change
+    # to a deployment's network surface that belongs with whoever configures the
+    # scrape. 9108 is the suggested value; `infra/monitoring/` uses it throughout.
+    worker_metrics_port: int = Field(default=0, ge=0, le=65_535)
     # R11-B18: an approved route can be silently retired by its provider, and
     # the approval cannot expire when they do. The sweep lists models (free)
     # and never generates (not free), so it is on by default; it is a no-op

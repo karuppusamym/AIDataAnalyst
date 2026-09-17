@@ -39,7 +39,6 @@ export const SCREEN_IDS = [
   "tools",
   "tool-plans",
   "lineage",
-  "unified-lineage",
   "marketplace",
   "context",
   "developer",
@@ -50,8 +49,6 @@ export const SCREEN_IDS = [
   "playbooks",
   "negative-knowledge",
   "meaning",
-  "description-drafts",
-  "data-dictionaries",
   "relationships",
   "cross-source",
   "transformations",
@@ -130,7 +127,6 @@ export const SCREEN_JOURNEY: Record<ScreenId, Journey> = {
   tools: "analyst",
   "tool-plans": "analyst",
   lineage: "analyst",
-  "unified-lineage": "analyst",
   marketplace: "consumer",
   "portfolio-analytics": "consumer",
   context: "developer",
@@ -141,8 +137,6 @@ export const SCREEN_JOURNEY: Record<ScreenId, Journey> = {
   playbooks: "steward",
   "negative-knowledge": "steward",
   meaning: "steward",
-  "description-drafts": "steward",
-  "data-dictionaries": "steward",
   relationships: "steward",
   "cross-source": "steward",
   transformations: "steward",
@@ -203,6 +197,23 @@ export const RETIRED_SCREEN_ALIASES: Readonly<Record<string, ScreenAlias>> = {
   "quality-agent": { screen: "task-agents", params: { agent: "quality" } },
   // R11-S10: the parsed-lineage queue is now a queue OF the review surface.
   "parsed-lineage-review": { screen: "governance", params: { queue: "parsed-lineage" } },
+  /* R11-S13 (M3): one documentation workspace. Three sidebar items covered
+     three steps of one job -- which tables matter, writing their descriptions,
+     and importing a dictionary that answers the same question in bulk. They
+     are three tabs of `worklist` now, and each old route opens the tab it
+     named rather than the workspace's default. */
+  "description-drafts": { screen: "worklist", params: { view: "drafts" } },
+  "data-dictionaries": { screen: "worklist", params: { view: "imports" } },
+  /* R11-S13 (M1): one lineage destination. "Lineage" and "Unified lineage"
+     were two sidebar items over one question -- both scoped by `?ds=`, both
+     selecting with `?node=` -- so which one you opened decided which answer
+     you got. `#/unified-lineage` opens the merged destination's Graph view,
+     which is the surface that route always showed.
+
+     `#/lineage`'s own `?view=` values are NOT aliased here: a query value is
+     not a path, and `#/lineage` is not retired. `lineageViewFrom` in
+     `screens/LineageWorkspace.tsx` maps them, and is the only reader. */
+  "unified-lineage": { screen: "lineage", params: { view: "graph" } },
 };
 
 /**
@@ -238,27 +249,72 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
      setup steps are describing. */
   home: ["ds"],
   inbox: ["persona"],
-  analyst: ["ds", "run"],
+  /* R11-FP12 (F08): `product` is the context product Ask is asking *through*.
+     Undeclared, it was stripped by `buildSearch` on every screen change, by
+     `normalizeLocation` on a pasted flat link, and left out of the answer's own
+     permalink -- so a shared link silently re-widened the question from one
+     curated product back to the whole datasource, which is the opposite of what
+     the person sharing it meant.
+
+     Screen-local, deliberately NOT a `CONTEXT_FIELD`. Two reasons, and either
+     alone is enough: a product key means nothing without the project that owns
+     it (Ask resolves the list from the selected datasource's project, so the
+     key inherited into a different project matches no option), and `product`
+     already names a different object on Marketplace -- a listing there, a
+     context product here. Inheriting it would carry one screen's key into
+     another screen that reads it as something else, the exact defect
+     `CONTEXT_FIELDS`' own comment exists to prevent. */
+  analyst: ["ds", "product", "run"],
   catalog: ["asset", "cert", "ds", "q", "type"],
   semantics: ["metric", "model", "project"],
   tools: ["project", "status", "tool"],
   "tool-plans": ["plan"],
-  lineage: ["depth", "ds", "node", "view"],
-  "unified-lineage": ["dom", "ds", "node", "scope", "tab"],
+  /* R11-S13 (M1): one lineage destination, three views, and the UNION of every
+     field the two screens it merges declared.
+
+     `view` is the discriminator (`explain | graph | impact`, plus the two
+     legacy values `lineage` already answered to -- see `lineageViewFrom`).
+     `depth`/`ds`/`node` were already here; `dom`/`scope`/`tab` come from
+     `unified-lineage`. Every one of them has to be declared HERE or
+     `normalizeLocation` drops it from the pasted link that carried it -- the
+     bookmark resolves to the right screen and loses the thing it was a
+     bookmark OF.
+
+     `direction` is the fix, not an addition. `UnifiedLineageScreen` has always
+     READ it (its impact rows filter on upstream/downstream) and WRITTEN it
+     (the graph-question form's "Run impact query" sets `node`, `depth` and
+     `direction` together), and `unified-lineage` declared neither `depth` nor
+     `direction`. So a non-canonical link carrying either -- exactly the link
+     that button produces, pasted into a fresh tab -- was normalized with both
+     silently removed, and the impact query reverted to depth 5, both
+     directions. Declared here, it survives. */
+  lineage: ["depth", "direction", "dom", "ds", "node", "scope", "tab", "view"],
   marketplace: ["class", "domain", "product", "q", "sort"],
   context: ["project"],
   developer: ["project", "tab"],
   "portfolio-analytics": ["window"],
   stewardship: ["action", "ds", "field", "pattern"],
-  worklist: ["ranking", "zero"],
+  /* R11-S13 (M3): the documentation workspace's three tabs, and the union of
+     every field the three screens declared. `view` is the tab discriminator;
+     `ranking`/`zero` are Priorities', `focus`/`type` are Drafts', `document`
+     is Imports'. They are listed together because they do not collide -- had
+     any two meant different things under one name, that would have been a
+     reason not to merge, not a reason to rename one of them quietly.
+
+     Every field the absorbed screens declared is declared HERE. A field left
+     behind is not a cosmetic loss: `normalizeLocation` filters a pasted link
+     through this list, so an undeclared field is silently dropped from the
+     bookmark that carried it. */
+  worklist: ["document", "focus", "ranking", "type", "view", "zero"],
   /* R11-S10: `agent` is which task agent's console is open. It replaces the
      three routes that differed only by that value. */
   "task-agents": ["agent"],
   playbooks: [],
   "negative-knowledge": ["assertion_type", "subject", "suppression"],
   meaning: ["asset", "ds", "node", "q", "view"],
-  "description-drafts": ["focus", "type"],
-  "data-dictionaries": ["document"],
+  /* R11-S13 (M3): `description-drafts` and `data-dictionaries` used to declare
+     their fields here. They are tabs of `worklist` now, which declares all of
+     them -- see its entry above. */
   relationships: ["candidate", "ds"],
   "cross-source": ["dom", "status"],
   transformations: ["dbtProject", "import", "match", "project", "resource", "type"],
@@ -284,6 +340,29 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   audit: ["action", "correlation_id", "event", "resource_type", "since", "until"],
   compliance: [],
 };
+
+/**
+ * Resolve a screen id that arrived as a plain string, accepting every id that
+ * has ever been one.
+ *
+ * R11-S13. `isScreenId` answers "is this a LIVE screen", which is the wrong
+ * question for a caller holding an id: `components/CrossLinks.tsx` types its
+ * targets as `string` (deliberately -- it is not a router), so a link naming a
+ * screen that has since been merged away type-checks and then fell back to
+ * Overview at runtime. `EvidencePane`'s "Impact" cross-link named
+ * `unified-lineage`, which M1 merged into `lineage`; without this, a click on
+ * it landed on the dashboard.
+ *
+ * Returns the live screen plus any filters the retired id implies, or `null`
+ * for an id that has never existed -- which really is a caller bug.
+ */
+export function resolveScreenRef(
+  value: string,
+): { screen: ScreenId; params?: Readonly<Record<string, string>> } | null {
+  if (isScreenId(value)) return { screen: value };
+  const retired = RETIRED_SCREEN_ALIASES[value];
+  return retired ? { screen: retired.screen, params: retired.params } : null;
+}
 
 /** The fields a screen may carry, or `null` when the screen declares none. */
 export function allowedFieldsFor(screen: ScreenId): readonly string[] | null {

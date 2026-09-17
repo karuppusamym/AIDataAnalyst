@@ -2031,6 +2031,20 @@ async def _handle_tools_call(
             agent_asset_version_id=(
                 caller_contract.ai_asset_version_id if caller_contract is not None else None
             ),
+            # F01 (G1): forward the product this call was made through. The scope
+            # resolved above was used only to filter tool *eligibility*, and was
+            # then dropped -- so `request.context_product_key` was None,
+            # `retrieved.context_product_scope` was None, and neither the
+            # orchestrator's pre-execution check nor its post-execution re-check
+            # ran on this surface at all. A curated product bounded which tool
+            # could be called here and nothing about which tables its SQL read.
+            #
+            # The resolved version is handed over rather than its key: this URI
+            # pins an exact version number and admits a SUPPORTED one inside its
+            # support window, so re-resolving "the published version" from the key
+            # could scope the tables to a different version than the one tool
+            # eligibility was just filtered against.
+            context_product_version=None if scoped_product is None else scoped_product[0],
         )
     except AgentPolicyRejected as exc:
         return {

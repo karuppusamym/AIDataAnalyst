@@ -157,4 +157,50 @@ DECISIONS: dict[str, tuple[str, str]] = {
         "R11-B9: needs an S3 bucket with Object Lock to verify against",
     ),
     "audit_archive_filesystem_root": (SUPPLIED, "only for a filesystem archive destination"),
+    "worker_metrics_port": (
+        OPT_IN,
+        "R11-FP17: the fleet scheduler and graph projector publish their gauges into their "
+        "own process registry, which only this port exposes; 0 opens no port, because "
+        "opening one changes a deployment's network surface and belongs with whoever "
+        "configures the scrape (`infra/monitoring/README.md`)",
+    ),
+    # R11-FP17. Every quota below is Supplied rather than Opt-in, and the
+    # distinction is the whole point: there is no capability here for an estate
+    # to enable, only a number only they can know. Unset means no quota is
+    # declared -- never a quota of zero -- and `aida.usage_quotas` then issues
+    # no statement at all, so admission behaves exactly as it did before these
+    # settings existed. Shipping a default would be this repository inventing an
+    # operator's number, the same mistake the alert thresholds in
+    # `infra/monitoring/` refuse to make, and a quota nobody chose that starts
+    # refusing work on upgrade is worse than no quota.
+    "analysis_run_daily_quota_per_organization": (
+        SUPPLIED,
+        "R11-FP17: analysis runs one tenant may consume per UTC day; the two "
+        "`max_active_runs_per_*` concurrency limits still apply when unset",
+    ),
+    "analysis_run_daily_quota_per_datasource": (
+        SUPPLIED,
+        "R11-FP17: analysis runs one source may consume per UTC day, which bounds a "
+        "repeatedly-rescanned source that the one-at-a-time concurrency limit does not",
+    ),
+    "model_token_daily_quota_per_organization": (
+        SUPPLIED,
+        "R11-FP17: model tokens one tenant may consume per UTC day, across every agent and "
+        "every source -- wider than `AgentContract.daily_token_cap`, which is per contract",
+    ),
+    "model_token_daily_quota_per_datasource": (
+        SUPPLIED,
+        "R11-FP17: model tokens attributable to one source per UTC day; counts "
+        "provider-reported and estimated tokens alike, since a cap that only counted "
+        "billed tokens could be walked past by a provider that reports nothing",
+    ),
+    "parser_statement_daily_quota_per_organization": (
+        SUPPLIED,
+        "R11-FP17: SQL statements one tenant may put through the lineage parsers per UTC day",
+    ),
+    "parser_statement_daily_quota_per_datasource": (
+        SUPPLIED,
+        "R11-FP17: SQL statements one source may put through the lineage parsers per UTC "
+        "day -- the compute a change burst over that source actually spends",
+    ),
 }

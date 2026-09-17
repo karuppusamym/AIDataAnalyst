@@ -1,0 +1,59 @@
+# Prometheus Operator ServiceMonitor for the aida-api Service (R11-FP17).
+#
+# This selects the Service that `infra/k8s/base/service.yaml` already defines,
+# by the labels it already carries. Nothing in `infra/k8s/base/` was edited to
+# add this -- that directory is owned elsewhere, and a ServiceMonitor is an
+# additive resource that needs no change there.
+#
+# **This requires the Prometheus Operator CRDs.** `monitoring.coreos.com/v1` is
+# not core Kubernetes; on a cluster without kube-prometheus-stack (or another
+# operator that installs these CRDs) `kubectl apply` fails with "no matches for
+# kind". Use `../prometheus/prometheus.yml` instead on such a cluster, mounted
+# into a plain Prometheus.
+#
+# **Inherits the honesty caveats of what it points at.** `infra/k8s/base/
+# README.md` says those manifests are a reviewable sketch of one process that
+# has never been applied to a cluster. This resource is the same: it has never
+# been reconciled by a real operator, because there is no cluster here to run
+# one. Said plainly rather than implied.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aida-api
+  namespace: aida
+  labels:
+    app.kubernetes.io/name: aida-api
+    app.kubernetes.io/part-of: aida-platform
+    # Most kube-prometheus-stack installations restrict which ServiceMonitors
+    # their Prometheus picks up via `serviceMonitorSelector`. The conventional
+    # selector is `release: <helm release name>`; substitute the estate's own
+    # value, or drop this label if the Prometheus resource selects everything.
+    release: REPLACE_ME_PROMETHEUS_RELEASE_LABEL
+spec:
+  namespaceSelector:
+    matchNames:
+      - aida
+  selector:
+    matchLabels:
+      # Exactly the label `infra/k8s/base/service.yaml` puts on the Service.
+      app.kubernetes.io/name: aida-api
+  endpoints:
+    # `http` is the port name on the existing Service (port 80 -> targetPort
+    # http -> containerPort 8000). Referenced by name, not number, so a port
+    # renumbering in the owning directory does not silently break this.
+    - port: http
+      path: /metrics
+      # 15s matches ../prometheus/prometheus.yml's global interval; see that
+      # file for why the number is derived from the slowest producer rather
+      # than chosen.
+      interval: 15s
+      scrapeTimeout: 10s
+      # `/metrics` is `include_in_schema=False` and unauthenticated, like
+      # `/health/live` and `/health/ready`. It is a tenant-free surface by
+      # construction -- `tests/test_inv5_tenant_isolation.py` lists
+      # `GET /metrics` among the routes that serve no tenant-scoped data at
+      # all, and both `footprint_metrics.py` and `projection_metrics.py`
+      # deliberately keep organization identifiers out of every label. It is
+      # still an internal endpoint: expose it to the monitoring namespace, not
+      # through the ingress.
+      honorLabels: false

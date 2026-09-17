@@ -49,6 +49,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.envelope_models import RoutineDescriptionDraft
 from aida.models import (
     AgentRun,
     AssetDescriptionDraft,
@@ -303,7 +304,11 @@ async def decision_subjects(
         subjects = await _enrichment_subjects(session, sample, review)
     elif sample.object_type == "MODEL_IMPORT_BATCH":
         subjects = await _import_subjects(session, sample, review)
-    elif sample.object_type in ("ASSET_DESCRIPTION_DRAFT", "COLUMN_DESCRIPTION_DRAFT"):
+    elif sample.object_type in (
+        "ASSET_DESCRIPTION_DRAFT",
+        "COLUMN_DESCRIPTION_DRAFT",
+        "ROUTINE_DESCRIPTION_DRAFT",
+    ):
         draft_id = _uuid(review.object_id)
         subjects = []
         if draft_id is not None and sample.object_type == "COLUMN_DESCRIPTION_DRAFT":
@@ -316,6 +321,20 @@ async def decision_subjects(
                         table_id=str(column_draft.table_id),
                     )
                 ]
+        elif draft_id is not None and sample.object_type == "ROUTINE_DESCRIPTION_DRAFT":
+            # R11-FP08. The subject is the routine itself, and no `table_id` is
+            # carried: a routine hangs off a schema, not a table, and the tables
+            # it touches are *lineage*, not what the description changed.
+            # Naming one of them here would report every answer that consulted
+            # a table the procedure happens to write as having relied on the
+            # procedure's description, which is over-inclusive past the point of
+            # being useful -- `ASSET_IN_CONTEXT` is deliberately broad, not
+            # unbounded. A routine's own identity does appear in retrieval
+            # evidence, so `ASSET_IN_CONTEXT` still matches the runs that read
+            # it.
+            routine_draft = await session.get(RoutineDescriptionDraft, draft_id)
+            if routine_draft is not None and routine_draft.published_version_id is not None:
+                subjects = [ImpactSubject("ROUTINE", str(routine_draft.routine_id))]
         elif draft_id is not None:
             asset_draft = await session.get(AssetDescriptionDraft, draft_id)
             if asset_draft is not None and asset_draft.published_version_id is not None:

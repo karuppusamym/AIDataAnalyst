@@ -10,8 +10,9 @@ import { render, screen } from "@testing-library/react";
 
    * `OrgSelection.error` was populated and read by nobody, so a refused
      organization list rendered as an empty dropdown -- which reads as "this
-     tenant has no organizations", the one thing it does not mean. `OrgPicker`
-     has always shown it, but that component is not wired into the shell.
+     tenant has no organizations", the one thing it does not mean. A second,
+     never-mounted org picker did show it; this is the component the shell
+     renders (R11-S13 M6 deleted the other).
    * the scope provider carried the server's own message and the status line
      replaced it with a flat "Scope could not be loaded", so a caller refused
      for a nameable reason read the same as a dead network.
