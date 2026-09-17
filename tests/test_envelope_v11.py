@@ -713,12 +713,18 @@ def test_envelope_scope_reports_cross_chunk_11_inventory() -> None:
         grant_ids={uuid4()},
     )
 
+    # R11-FP01 added the two native-object axes to the same accumulator, so they are
+    # part of what a batch reports. Kept as an exact dict rather than relaxed to a
+    # subset: this assertion's value is that a *new* axis cannot join `EnvelopeScope`
+    # without someone deciding what a delivery's counts should say about it.
     assert scope.object_counts() == {
         "views": 1,
         "routines": 2,
         "routine_parameters": 3,
         "object_descriptions": 0,
         "grants": 1,
+        "triggers": 0,
+        "sequences": 0,
     }
 
 

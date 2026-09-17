@@ -189,6 +189,14 @@ async def test_no_source_values_in_control_plane(monkeypatch: pytest.MonkeyPatch
     # sentinel exactly there.
     await _scan_the_profiling_path_for_sentinels(monkeypatch)
 
+    # R11-FP02 widened the discovery path in the same shape. A facet whose read the source
+    # refuses is now recorded on the run's receipt instead of failing the run, and the
+    # obvious implementation of "why" is the driver's own message -- which for a refusal
+    # names the relation and can quote the row that provoked it, and which no two drivers
+    # spell the same way. So the discovery half of this scan plants a sentinel in exactly
+    # that message and requires the receipt to carry a classification instead.
+    await _scan_the_refused_facet_path_for_sentinels(monkeypatch)
+
 
 async def test_the_control_plane_scan_would_notice_a_leak(
     monkeypatch: pytest.MonkeyPatch,
@@ -983,6 +991,168 @@ async def _scan_the_profiling_path_for_sentinels(monkeypatch: pytest.MonkeyPatch
     finally:
         activity._Context.reset(token)
         await engine.dispose()
+
+
+# --- R11-FP02: a refused facet read, the newest place a driver's words could enter ---
+
+SENTINEL_REFUSAL = "ZZQ-SENTINEL-REFUSAL-9c14"
+
+
+class _RefusingDiscoveryConnector:
+    """A connector that inventories a source and is refused one facet of it.
+
+    Duck-typed exactly like `_SentinelFacetConnector` above, and shaped like the same
+    plausible mistake: the driver refuses the grants query and says why in a message that
+    quotes the row it choked on, and an adapter author who passes that message through as
+    the facet's reason has written something that looks careful and leaks.
+    """
+
+    capabilities = ConnectorCapabilities(grants=True, views=True)
+
+    async def test_connection(self) -> None:
+        return None
+
+    def scope_discovery(self, **kwargs: Any) -> bool:
+        return False
+
+    async def count_invisible_objects(self) -> dict[str, int] | None:
+        return None
+
+    async def discover_streaming(self, *, batch_size: int = 500) -> Any:
+        from aida.connectors.discovery import (
+            FACET_GRANTS,
+            assemble_catalog,
+            build_grants,
+            build_table_map_from_column_rows,
+            read_facet,
+        )
+
+        class _Refusal(Exception):
+            sqlstate = "42501"
+
+        async def _refused() -> Any:
+            raise _Refusal(
+                "permission denied for relation grants "
+                f"while reading (account_no)=({SENTINEL_REFUSAL})"
+            )
+
+        tables = build_table_map_from_column_rows(
+            [
+                {
+                    "table_schema": "public",
+                    "table_name": "accounts",
+                    "table_type": "BASE TABLE",
+                    "column_name": "account_no",
+                    "ordinal_position": 1,
+                    "data_type": "text",
+                    "is_nullable": "YES",
+                }
+            ]
+        )
+        grant_rows = await read_facet(FACET_GRANTS, _refused())
+        yield assemble_catalog("bank", tables, grants=build_grants(grant_rows))
+
+
+async def _scan_the_refused_facet_path_for_sentinels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the real `discover_datasource` through a refused facet and scan what it wrote.
+
+    Called from `test_no_source_values_in_control_plane` for the same reason the profiling
+    scan is: the receipt is control-plane state, a refusal is the one discovery outcome
+    whose natural explanation is a driver's message, and a run that now *completes* through
+    a refusal persists that outcome rather than throwing it away with the failure.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import AnalysisRun, MetadataTable
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, _ = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_FP02_SENTINEL"
+            )
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_FP02_SENTINEL", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry,
+                "create",
+                lambda *a, **k: _RefusingDiscoveryConnector(),
+            )
+
+            result = await activities.discover_datasource(str(run.id))
+            assert result["status"] == "COMPLETED", (
+                "the run did not complete through the refusal, so the receipt this scan "
+                "reads was never written"
+            )
+
+            rows: list[Any] = [
+                *(await session.scalars(select(AnalysisRun))).all(),
+                *(await session.scalars(select(MetadataTable))).all(),
+                *(await session.scalars(select(AuditEvent))).all(),
+                *(await session.scalars(select(OutboxEvent))).all(),
+            ]
+            leaks = [
+                f"{type(row).__name__}: {rendered[:200]}"
+                for row in rows
+                for rendered in _persisted_values(row)
+                if SENTINEL_REFUSAL in rendered
+            ]
+            assert leaks == [], f"a driver's refusal message reached a run row: {leaks}"
+
+            # Not merely absent: the refusal is still recorded, as a state and a reason
+            # code. A path that dropped the outcome would pass the scan above while losing
+            # the honesty the receipt exists for -- the facet would read as an empty one.
+            completed = await session.get(AnalysisRun, run.id)
+            assert completed is not None and completed.discovery_receipt is not None
+            assert completed.discovery_receipt["facets"]["grants"] == {
+                "support": "SUPPORTED",
+                "state": "PERMISSION_DENIED",
+                "reason": "SOURCE_DENIED_READ",
+            }
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+
+async def test_the_refused_facet_sentinel_scan_would_notice_a_leak() -> None:
+    """Negative control for `_scan_the_refused_facet_path_for_sentinels`.
+
+    Proves the fixture connector really hands the discovery path a value-bearing message,
+    and that a row of the shape the scan reads would surrender it. Without this, a fixture
+    that quietly stopped carrying a sentinel would leave the scan passing forever while
+    checking nothing.
+    """
+    from aida.models import AnalysisRun
+
+    refused: list[BaseException] = []
+    connector = _RefusingDiscoveryConnector()
+    try:
+        async for _ in connector.discover_streaming():
+            pass
+    except Exception as exc:  # noqa: BLE001 -- outside a scope the refusal is never absorbed
+        refused.append(exc)
+
+    assert refused, "the fixture connector did not refuse its grants read"
+    assert SENTINEL_REFUSAL in str(refused[0])
+    leaky = AnalysisRun(id=uuid4(), organization_id=uuid4(), error_message=str(refused[0]))
+    assert any(SENTINEL_REFUSAL in rendered for rendered in _persisted_values(leaky)), (
+        "the scan's own renderer cannot see this row shape, so the assertion it makes "
+        "in the positive test is vacuous"
+    )
 
 
 async def test_the_profiling_sentinel_scan_would_notice_a_leak() -> None:

@@ -35,10 +35,10 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.connectors.base import OBSERVATION_SCOPES
@@ -105,6 +105,13 @@ _BASIS_WORDS = {
 
 class RelationshipColumnsMissingError(LookupError):
     """A candidate names a column the catalog no longer holds."""
+
+
+class _TableScoped(Protocol):
+    """A catalog row that belongs to one table -- enough for `_by_table`."""
+
+    @property
+    def table_id(self) -> UUID: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,17 +541,82 @@ def assess_relationship(facts: RelationshipFacts) -> RelationshipValidation:
 # --------------------------------------------------------------------------
 
 
-async def _load_facts(
-    session: AsyncSession,
-    *,
-    source_table_id: UUID,
-    target_table_id: UUID,
-    column_pairs: Sequence[tuple[UUID, UUID]],
-    detection_rule: str,
-    evidence: Mapping[str, Any] | None,
-) -> RelationshipFacts:
-    table_ids = {source_table_id, target_table_id}
-    column_ids = {column_id for pair in column_pairs for column_id in pair}
+@dataclass(frozen=True, slots=True)
+class CatalogFacts:
+    """Everything `assess_relationship` needs, for any number of candidates, read once.
+
+    R11-FP06's remainder named "batching the bulk path's per-item reads". The
+    bulk decision already loads its candidates in one read, but then called a
+    validation that issued six reads plus one per table for every candidate --
+    so a reviewer approving 200 joins paid ~1,400 round trips to answer 200
+    questions about at most 400 tables.
+
+    The shape is `resolve_mapping_targets`' (R11-FP09, `aida.ontology_api`), and
+    deliberately so rather than a cache: gather every id the whole batch wants,
+    read each table once with an `IN`, and then answer each item *purely* from
+    the result. The property that matters is not "fewer reads" -- any cache
+    gives that -- but that the read count no longer depends on how many
+    candidates were asked about, which only a batched read can give.
+
+    Nothing here is a judgement. `columns` holds only ACTIVE columns, so a
+    retired column is absent exactly as it was before, and which candidate that
+    makes unvalidatable stays a per-candidate answer (`_relationship_facts`) --
+    one candidate's missing column has never affected another's verdict and
+    still does not.
+    """
+
+    #: ACTIVE columns only, by id. An absent id is a retired or deleted column.
+    columns: dict[UUID, MetadataColumn]
+    #: ACTIVE constraints, by `table_id`.
+    constraints: dict[UUID, tuple[MetadataConstraint, ...]]
+    #: ACTIVE unique-or-primary indexes, by `table_id`.
+    unique_indexes: dict[UUID, tuple[MetadataIndex, ...]]
+    #: APPROVED composite-key candidates, by `table_id`.
+    approved_keys: dict[UUID, tuple[CompositeKeyCandidate, ...]]
+    #: The latest COMPLETED profile per `table_id`, or no entry.
+    profiles: dict[UUID, TableProfile]
+    #: Column statistics from those profiles, by `column_id`.
+    column_stats: dict[UUID, ColumnProfile]
+
+
+def relationship_candidate_scope(
+    candidates: Sequence[RelationshipCandidate],
+) -> tuple[set[UUID], set[UUID]]:
+    """The table and column ids a batch of single-column candidates reads."""
+    table_ids: set[UUID] = set()
+    column_ids: set[UUID] = set()
+    for candidate in candidates:
+        table_ids.update((candidate.source_table_id, candidate.target_table_id))
+        column_ids.update((candidate.source_column_id, candidate.target_column_id))
+    return table_ids, column_ids
+
+
+async def load_catalog_facts(
+    session: AsyncSession, *, table_ids: set[UUID], column_ids: set[UUID]
+) -> CatalogFacts:
+    """Read the catalog facts for every table and column in one batch.
+
+    At most six reads -- one per table it reads -- whatever the batch size, and
+    five when no table in the batch has a completed profile. The filters are the
+    per-candidate ones widened from one candidate's ids to the batch's, which
+    leaves every per-candidate lookup below returning the same row it did: a
+    `ColumnProfile` is reachable only through its own table's profile, so
+    widening `table_profile_id` cannot attach one table's statistics to
+    another's column.
+    """
+    if not table_ids and not column_ids:
+        # A batch that asks about nothing reads nothing. This is the shape a
+        # bulk *rejection* has -- it decides no evidence, so it needs no facts
+        # -- and it keeps that path at zero reads without the caller holding an
+        # optional and asserting it away at the point of use.
+        return CatalogFacts(
+            columns={},
+            constraints={},
+            unique_indexes={},
+            approved_keys={},
+            profiles={},
+            column_stats={},
+        )
     columns = {
         column.id: column
         for column in (
@@ -556,49 +628,68 @@ async def _load_facts(
             )
         ).all()
     }
-    missing = column_ids - set(columns)
-    if missing:
-        raise RelationshipColumnsMissingError(
-            f"{len(missing)} column(s) of this relationship are no longer in the catalog"
-        )
-
-    constraints = (
-        await session.scalars(
-            select(MetadataConstraint).where(
-                MetadataConstraint.table_id.in_(table_ids),
-                MetadataConstraint.status == "ACTIVE",
+    constraints = _by_table(
+        (
+            await session.scalars(
+                select(MetadataConstraint).where(
+                    MetadataConstraint.table_id.in_(table_ids),
+                    MetadataConstraint.status == "ACTIVE",
+                )
             )
-        )
-    ).all()
-    indexes = (
-        await session.scalars(
-            select(MetadataIndex).where(
-                MetadataIndex.table_id.in_(table_ids),
-                MetadataIndex.status == "ACTIVE",
-                or_(MetadataIndex.is_unique.is_(True), MetadataIndex.is_primary.is_(True)),
+        ).all()
+    )
+    unique_indexes = _by_table(
+        (
+            await session.scalars(
+                select(MetadataIndex).where(
+                    MetadataIndex.table_id.in_(table_ids),
+                    MetadataIndex.status == "ACTIVE",
+                    or_(MetadataIndex.is_unique.is_(True), MetadataIndex.is_primary.is_(True)),
+                )
             )
-        )
-    ).all()
-    approved_keys = (
-        await session.scalars(
-            select(CompositeKeyCandidate).where(
-                CompositeKeyCandidate.table_id.in_(table_ids),
-                CompositeKeyCandidate.status == "APPROVED",
+        ).all()
+    )
+    approved_keys = _by_table(
+        (
+            await session.scalars(
+                select(CompositeKeyCandidate).where(
+                    CompositeKeyCandidate.table_id.in_(table_ids),
+                    CompositeKeyCandidate.status == "APPROVED",
+                )
             )
+        ).all()
+    )
+    # The latest COMPLETED profile for every table in one read. This was the
+    # per-item loop inside the per-item function: one `ORDER BY created_at DESC
+    # LIMIT 1` per table, so two more round trips per candidate on top of the
+    # six above.
+    ranked = (
+        select(
+            TableProfile.id.label("profile_id"),
+            func.row_number()
+            .over(
+                partition_by=TableProfile.table_id,
+                # `created_at` alone is what the per-table read ordered by, which
+                # left a tie to the database to break. `id` breaks it the same
+                # way on every dialect and every run -- a batched read that has
+                # to be reproducible cannot inherit an arbitrary choice.
+                order_by=(TableProfile.created_at.desc(), TableProfile.id.desc()),
+            )
+            .label("rank"),
         )
-    ).all()
-    profiles: dict[UUID, TableProfile] = {}
-    for table_id in table_ids:
-        profile = (
+        .where(TableProfile.table_id.in_(table_ids), TableProfile.status == "COMPLETED")
+        .subquery()
+    )
+    profiles = {
+        profile.table_id: profile
+        for profile in (
             await session.scalars(
                 select(TableProfile)
-                .where(TableProfile.table_id == table_id, TableProfile.status == "COMPLETED")
-                .order_by(TableProfile.created_at.desc())
-                .limit(1)
+                .join(ranked, ranked.c.profile_id == TableProfile.id)
+                .where(ranked.c.rank == 1)
             )
-        ).first()
-        if profile is not None:
-            profiles[table_id] = profile
+        ).all()
+    }
     column_stats: dict[UUID, ColumnProfile] = {}
     if profiles:
         column_stats = {
@@ -612,9 +703,54 @@ async def _load_facts(
                 )
             ).all()
         }
+    return CatalogFacts(
+        columns=columns,
+        constraints=constraints,
+        unique_indexes=unique_indexes,
+        approved_keys=approved_keys,
+        profiles=profiles,
+        column_stats=column_stats,
+    )
+
+
+def _by_table[RowT: _TableScoped](rows: Sequence[RowT]) -> dict[UUID, tuple[RowT, ...]]:
+    """Group rows carrying a `table_id` by it.
+
+    A per-candidate lookup is then a dict hit rather than a scan of the whole
+    batch's rows, which is what keeps a batched read from trading N queries for
+    an O(batch) filter per candidate.
+    """
+    grouped: dict[UUID, list[RowT]] = {}
+    for row in rows:
+        grouped.setdefault(row.table_id, []).append(row)
+    return {table_id: tuple(group) for table_id, group in grouped.items()}
+
+
+def _relationship_facts(
+    facts: CatalogFacts,
+    *,
+    source_table_id: UUID,
+    target_table_id: UUID,
+    column_pairs: Sequence[tuple[UUID, UUID]],
+    detection_rule: str,
+    evidence: Mapping[str, Any] | None,
+) -> RelationshipFacts:
+    """One candidate's facts, assembled from the batch's read. Pure."""
+    columns = facts.columns
+    constraints = facts.constraints
+    indexes = facts.unique_indexes
+    approved_keys = facts.approved_keys
+    profiles = facts.profiles
+    column_stats = facts.column_stats
+    column_ids = {column_id for pair in column_pairs for column_id in pair}
+    missing = column_ids - set(columns)
+    if missing:
+        raise RelationshipColumnsMissingError(
+            f"{len(missing)} column(s) of this relationship are no longer in the catalog"
+        )
 
     def table_facts(table_id: UUID) -> TableFacts:
-        own_constraints = [c for c in constraints if c.table_id == table_id]
+        own_constraints = constraints.get(table_id, ())
         profile = profiles.get(table_id)
         return TableFacts(
             table_id=table_id,
@@ -625,13 +761,13 @@ async def _load_facts(
             ),
             unique_indexes=tuple(
                 frozenset(name.lower() for name in index.columns)
-                for index in indexes
-                if index.table_id == table_id and index.columns
+                for index in indexes.get(table_id, ())
+                if index.columns
             ),
             approved_keys=tuple(
                 frozenset(key.column_ids)
-                for key in approved_keys
-                if key.table_id == table_id and key.column_ids
+                for key in approved_keys.get(table_id, ())
+                if key.column_ids
             ),
             foreign_keys=tuple(
                 DeclaredForeignKey(
@@ -685,18 +821,47 @@ async def _load_facts(
     )
 
 
+async def load_relationship_catalog_facts(
+    session: AsyncSession, candidates: Sequence[RelationshipCandidate]
+) -> CatalogFacts:
+    """The one read a bulk decision makes before validating its whole batch.
+
+    Pair with `validate_relationship_candidate_from`, which is pure. A batch
+    that shares tables -- which a datasource-filtered bulk decision usually
+    does -- reads each table's constraints, indexes, approved keys and profile
+    once for the batch rather than once per candidate.
+    """
+    table_ids, column_ids = relationship_candidate_scope(candidates)
+    return await load_catalog_facts(session, table_ids=table_ids, column_ids=column_ids)
+
+
+def validate_relationship_candidate_from(
+    facts: CatalogFacts, candidate: RelationshipCandidate
+) -> RelationshipValidation:
+    """One candidate's verdict, from a batch's read. No I/O.
+
+    Raises `RelationshipColumnsMissingError` for a candidate naming a column the
+    catalog no longer holds ACTIVE, exactly as the single-item path does, and
+    only for that candidate: the batch's other verdicts are unaffected.
+    """
+    return assess_relationship(
+        _relationship_facts(
+            facts,
+            source_table_id=candidate.source_table_id,
+            target_table_id=candidate.target_table_id,
+            column_pairs=[(candidate.source_column_id, candidate.target_column_id)],
+            detection_rule=candidate.detection_rule,
+            evidence=candidate.evidence,
+        )
+    )
+
+
 async def validate_relationship_candidate(
     session: AsyncSession, candidate: RelationshipCandidate
 ) -> RelationshipValidation:
-    facts = await _load_facts(
-        session,
-        source_table_id=candidate.source_table_id,
-        target_table_id=candidate.target_table_id,
-        column_pairs=[(candidate.source_column_id, candidate.target_column_id)],
-        detection_rule=candidate.detection_rule,
-        evidence=candidate.evidence,
-    )
-    return assess_relationship(facts)
+    """One candidate, read and assessed. The batch of one."""
+    facts = await load_relationship_catalog_facts(session, [candidate])
+    return validate_relationship_candidate_from(facts, candidate)
 
 
 async def validate_composite_relationship_candidate(
@@ -711,15 +876,22 @@ async def validate_composite_relationship_candidate(
     ).all()
     if not members:
         raise RelationshipColumnsMissingError("this composite relationship has no column pairs")
-    facts = await _load_facts(
+    column_pairs = [(member.source_column_id, member.target_column_id) for member in members]
+    facts = await load_catalog_facts(
         session,
-        source_table_id=group.source_table_id,
-        target_table_id=group.target_table_id,
-        column_pairs=[(member.source_column_id, member.target_column_id) for member in members],
-        detection_rule=group.detection_rule,
-        evidence=group.evidence,
+        table_ids={group.source_table_id, group.target_table_id},
+        column_ids={column_id for pair in column_pairs for column_id in pair},
     )
-    return assess_relationship(facts)
+    return assess_relationship(
+        _relationship_facts(
+            facts,
+            source_table_id=group.source_table_id,
+            target_table_id=group.target_table_id,
+            column_pairs=column_pairs,
+            detection_rule=group.detection_rule,
+            evidence=group.evidence,
+        )
+    )
 
 
 # --------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from sqlalchemy import Select, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import AuthorizationDenied, gate
+from aida.capability_states import CapabilityState
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE
 from aida.config import Settings
@@ -103,6 +104,16 @@ GAP_DEFINITIONS: Final[dict[str, tuple[str, str, str]]] = {
         "last completed run asked the source's own catalog how many it kept back. Granting read "
         "access and rescanning closes it; a source that cannot be asked reports none rather "
         "than a false zero.",
+    ),
+    "SOURCE_READS_REFUSED": (
+        "SOURCE_ACCESS",
+        "source administrator",
+        "Facets the source refused to read for the scanning principal on its last completed "
+        "run -- grants, view definitions, routine bodies, constraints, indexes, comments, or "
+        "the question of what the login cannot see at all. Counted per facet, not per object: "
+        "a refused read returns nothing, so there is no object to count. Nothing about these "
+        "facets is current, and nothing Atlas already holds for them is retired on account of "
+        "the refusal. Granting the read and rescanning closes it.",
     ),
     "CHANGE_SIGNALS_PENDING": (
         "OPERATIONS",
@@ -366,9 +377,27 @@ async def footprint_gaps(
             )
         ).all()
         counts["SOURCE_OBJECTS_INVISIBLE"] = {}
+        # R11-FP02 / review 2026-09-16 §5: a facet the source *refused* is its own gap, and
+        # has to be, because every other reading of a refusal is wrong. The counts above see
+        # nothing (a refused read returns no rows, so there is no withheld definition and no
+        # truncated body to count), and `invisible` goes null on a refused visibility
+        # question -- which the kinds loop below deliberately treats as "could not ask".
+        # Without this kind, one missing grant would present as a clean source: the very
+        # false-clean reading the receipt exists to prevent, moved one surface along.
+        counts["SOURCE_READS_REFUSED"] = {}
         for datasource_id, receipt in receipt_rows:
             if datasource_id is None or not isinstance(receipt, dict):
                 continue
+            facets = receipt.get("facets")
+            if isinstance(facets, dict):
+                refused = sum(
+                    1
+                    for facet in facets.values()
+                    if isinstance(facet, dict)
+                    and facet.get("state") == CapabilityState.PERMISSION_DENIED.value
+                )
+                if refused:
+                    counts["SOURCE_READS_REFUSED"][datasource_id] = refused
             kinds = receipt.get("kinds")
             if not isinstance(kinds, dict):
                 continue

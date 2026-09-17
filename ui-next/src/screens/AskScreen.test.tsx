@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   AgentAnalysisResponse,
   AgentRunGroundingReceiptsRead,
@@ -193,6 +193,54 @@ afterEach(() => {
 });
 
 describe("AskScreen against the real agent-analyses endpoint", () => {
+  it("does not paginate history while it is hidden", async () => {
+    let complete!: (page: PageOf<AgentRunRead>) => void;
+    const pending = new Promise<PageOf<AgentRunRead>>((resolve) => { complete = resolve; });
+    fetchAgentRuns.mockImplementationOnce(() => pending);
+    // A stale server count must not cause an endless empty-page fetch loop.
+    fetchAgentRuns.mockResolvedValue({ items: [], limit: 50, offset: 1, total: 2 });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    await waitFor(() => expect(fetchAgentRuns).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Hide history" }));
+    await act(async () => {
+      complete({ items: [PAST_RUN], limit: 50, offset: 0, total: 2 });
+      await pending;
+    });
+    expect(fetchAgentRuns).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Show history" }));
+    await waitFor(() => expect(fetchAgentRuns).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(fetchAgentRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])("discards a late history page after switching source (pagination=%s)", async (pagination) => {
+    const secondSource = { ...DATASOURCE, id: "ds_2", name: "Second source" };
+    listOrgDatasources.mockResolvedValue({ items: [DATASOURCE, secondSource], limit: 500, offset: 0, total: 2 });
+    let complete!: (page: PageOf<AgentRunRead>) => void;
+    const pending = new Promise<PageOf<AgentRunRead>>((resolve) => { complete = resolve; });
+    if (pagination) {
+      fetchAgentRuns.mockResolvedValueOnce({ items: [PAST_RUN], limit: 50, offset: 0, total: 2 });
+    }
+    fetchAgentRuns.mockImplementationOnce(() => pending);
+    fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    await waitFor(() => expect(fetchAgentRuns).toHaveBeenCalledTimes(pagination ? 2 : 1));
+    const pendingCall = fetchAgentRuns.mock.calls[pagination ? 1 : 0]!;
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_2" } });
+    await screen.findByText("No questions asked yet");
+    expect(pendingCall[2]?.aborted).toBe(true);
+    await act(async () => {
+      complete({ items: [{ ...PAST_RUN, id: "late-old-source-run" }], limit: 50, offset: 0, total: 2 });
+      await pending;
+    });
+    expect(screen.queryByRole("article", { name: "Run late-old-source-run" })).not.toBeInTheDocument();
+    expect(screen.getByText("No questions asked yet")).toBeInTheDocument();
+  });
+
   it("picking a datasource then asking a question calls POST .../agent-analyses with the right body and renders the real explanation", async () => {
     runAgentAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
     fetchAgentRunGroundingReceipts.mockResolvedValue({
@@ -831,5 +879,74 @@ describe("AskScreen's result panel", () => {
       expect(within(panel).getByText(/result values are not retained/)).toBeInTheDocument(),
     );
     expect(within(panel).queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-FP12 remainder -- a reopened answer names its product.
+
+     The RESOLVED stage now records `context_product_key` beside the version
+     (`agent_orchestrator.py`), which is the only thing that can name the
+     product on a run nobody is currently asking through: "version 2" alone
+     identifies nothing, because two products' v2 are unrelated.
+  ------------------------------------------------------------------------- */
+
+  it("names the context product a reopened run recorded, not only its version", async () => {
+    const RUN_THROUGH_PRODUCT: AgentRunRead = {
+      ...PAST_RUN,
+      step_trace: [
+        {
+          stage: "RESOLVED",
+          details: {
+            context_product_version_id: "cpv_9",
+            context_product_version: 3,
+            context_product_key: "quarterly-orders",
+          },
+        },
+        { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+      ],
+    };
+    fetchAgentRuns.mockResolvedValue({ items: [RUN_THROUGH_PRODUCT], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(RUN_THROUGH_PRODUCT);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    // The picker is set to a DIFFERENT product, which is exactly the state the
+    // answer must not be attributed from.
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1,
+    });
+    history.replaceState(null, "", "/?ds=ds_1&run=run_past_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const panel = await screen.findByLabelText("Answer for run run_past_1");
+    expect(await within(panel).findByText("quarterly-orders · version 3")).toBeInTheDocument();
+    // Neither the picker's product nor a bare version number stands in for it.
+    expect(within(panel).queryByText(/Customer revenue · version 3/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/product not recorded on the run/)).not.toBeInTheDocument();
+  });
+
+  it("still says the product is unrecorded for a run from before the key was written", async () => {
+    const OLD_RUN: AgentRunRead = {
+      ...PAST_RUN,
+      step_trace: [
+        { stage: "RESOLVED", details: { context_product_version_id: "cpv_9", context_product_version: 3 } },
+        { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+      ],
+    };
+    fetchAgentRuns.mockResolvedValue({ items: [OLD_RUN], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(OLD_RUN);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    fetchContextProducts.mockResolvedValue({
+      items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1,
+    });
+    history.replaceState(null, "", "/?ds=ds_1&run=run_past_1&product=customer-revenue");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const panel = await screen.findByLabelText("Answer for run run_past_1");
+    // An absent key is its own fact, and the answer is still not attributed to
+    // the product the picker happens to be showing.
+    expect(
+      await within(panel).findByText("version 3 · product not recorded on the run"),
+    ).toBeInTheDocument();
   });
 });

@@ -12,11 +12,24 @@ from aida.connectors.base import (
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    attach_native_objects,
     bounded_scan_scope,
+    build_sequences,
+    build_triggers,
     read_value_free_distribution,
     value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
+    FACET_CONSTRAINTS,
+    FACET_GRANTS,
+    FACET_INDEXES,
+    FACET_INVENTORY,
+    FACET_OBJECT_COMMENTS,
+    FACET_PARTITIONS,
+    FACET_ROUTINE_BODIES,
+    FACET_SEQUENCES,
+    FACET_TRIGGERS,
+    FACET_VIEW_DEFINITIONS,
     append_aggregated_constraint_rows,
     append_grouped_index_rows,
     append_partition_rows,
@@ -27,6 +40,7 @@ from aida.connectors.discovery import (
     build_grants,
     build_routines,
     build_table_map_from_column_rows,
+    read_facet,
 )
 from aida.connectors.schema_scope import SchemaScope, schema_scope, scoped_postgres_query
 from aida.connectors.sql_execution import SqlExecutor
@@ -95,7 +109,9 @@ _VIEW_DEFINITION_SQL = """
 # `p.oid` is the overload discriminator: PostgreSQL allows two routines to share
 # a schema and a name, so the name alone is not an identity and the parameter
 # join has to be on the oid. Restricted to prokind 'f'/'p' because
-# `pg_get_functiondef` raises on aggregate and window functions.
+# `pg_get_functiondef` raises on aggregate and window functions -- those two
+# kinds are read by `_AGGREGATE_ROUTINE_SQL` below, which asks for no
+# definition at all.
 # CN-3. `information_schema.tables`/`.columns` never list materialized views
 # (relkind 'm') -- that is a documented Postgres limitation of the SQL-standard
 # information_schema, not a version difference -- so a materialized view was
@@ -154,6 +170,56 @@ _ROUTINE_SQL = """
     ORDER BY n.nspname, p.proname, p.oid
 """
 
+# R11-FP01: aggregate (`prokind = 'a'`) and window (`'w'`) functions.
+#
+# They were absent for a true reason that is not the same as "the object does
+# not exist": `pg_get_functiondef` raises `ERROR: "x" is an aggregate function`
+# on either kind, and `_ROUTINE_SQL` above calls it unconditionally, so widening
+# that query's own `IN` list would have made every discovery run against a
+# database with one aggregate fail outright. A `CASE` guard is not the fix
+# either -- PostgreSQL does not guarantee that a `CASE` branch's function call
+# is never evaluated for a non-matching row, so it would be a latent version-
+# dependent failure. A second query that never asks for a definition cannot
+# raise, which is why this is a query of its own rather than a widened `IN`.
+#
+# Identity, signature and parameters are all real and all discovered: the
+# parameter query below covers all four prokinds. Only the *definition* is
+# absent, and it arrives as `availability = UNAVAILABLE` with the reason, which
+# is exactly what that column pair exists for -- an aggregate is now an object
+# Atlas knows the name, signature and return type of and honestly says it
+# cannot show the source of.
+#
+# `native_subtype` keeps the native identity beside the portable
+# `routine_type`, the way SQL Server's SCALAR / INLINE_TABLE and BigQuery's
+# SCALAR_FUNCTION already do (R11-FP03): an aggregate is a FUNCTION for every
+# portable purpose and is still an aggregate.
+_AGGREGATE_ROUTINE_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.proname AS routine_name,
+        p.oid::text AS specific_name,
+        'FUNCTION' AS routine_type,
+        CASE p.prokind WHEN 'a' THEN 'AGGREGATE' ELSE 'WINDOW' END AS native_subtype,
+        l.lanname AS language,
+        NULL AS body,
+        pg_get_function_result(p.oid) AS return_type,
+        (p.provolatile <> 'v') AS is_deterministic,
+        CASE WHEN p.prosecdef THEN 'DEFINER' ELSE 'INVOKER' END AS security_mode,
+        obj_description(p.oid, 'pg_proc') AS description,
+        -- `prokind` is PostgreSQL's `"char"`, and `'literal' || "char"` has no
+        -- unique operator resolution (`operator is not unique: unknown || "char"`),
+        -- so the cast is load-bearing rather than cosmetic.
+        'pg_get_functiondef refuses prokind ' || p.prokind::text ||
+            ': PostgreSQL exposes no CREATE statement for an aggregate or window function'
+            AS unavailable_reason
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE p.prokind IN ('a', 'w')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.proname, p.oid
+"""
+
 _ROUTINE_PARAMETER_SQL = """
     SELECT
         n.nspname AS routine_schema,
@@ -173,9 +239,114 @@ _ROUTINE_PARAMETER_SQL = """
     JOIN pg_namespace n ON n.oid = p.pronamespace
     JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
         WITH ORDINALITY AS arg(type_oid, ordinality) ON TRUE
-    WHERE p.prokind IN ('f', 'p')
+    WHERE p.prokind IN ('f', 'p', 'a', 'w')
       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
     ORDER BY n.nspname, p.oid, arg.ordinality
+"""
+
+# R11-FP01: triggers.
+#
+# `pg_trigger.tgtype` is a bitmask and is the only place the timing, the
+# orientation and the event set live; `information_schema.triggers` spells them
+# out but emits one row per event, is permission-filtered to tables the role
+# owns, and omits the action function entirely -- so the catalog is both more
+# complete and cheaper here.
+#
+# The bits, from PostgreSQL's own `catalog/pg_trigger.h`: 1 ROW, 2 BEFORE,
+# 4 INSERT, 8 DELETE, 16 UPDATE, 32 TRUNCATE, 64 INSTEAD. INSTEAD is tested
+# first because an INSTEAD OF trigger has neither the BEFORE bit nor an AFTER
+# bit -- reading the absence of bit 2 as AFTER without that test would report
+# every INSTEAD OF trigger on a view as AFTER.
+#
+# `NOT tgisinternal` excludes the triggers PostgreSQL creates to enforce foreign
+# keys and deferred constraints. Those are already discovered as constraints
+# (`pg_constraint`, above), and reporting them again as triggers would double
+# every referential integrity rule in the estate and present an implementation
+# detail as user code.
+#
+# A PostgreSQL trigger has no body: `tgfoid` names a function, and that
+# function's own body is already captured by `_ROUTINE_SQL`. So `body` is NULL
+# here and `unavailable_reason` says exactly that, with `action_routine`
+# carrying the qualified name that joins the two. `pg_get_triggerdef` is
+# deliberately not called: it returns the whole `CREATE TRIGGER` statement,
+# which re-states facts this row already has as columns, and its `WHEN` clause
+# would put an unredacted SQL expression -- literals and all -- into the
+# envelope (INV-6).
+_TRIGGER_SQL = """
+    SELECT
+        n.nspname AS trigger_schema,
+        t.tgname AS trigger_name,
+        c.relname AS table_name,
+        n.nspname AS table_schema,
+        CASE
+            WHEN (t.tgtype::int & 64) <> 0 THEN 'INSTEAD OF'
+            WHEN (t.tgtype::int & 2) <> 0 THEN 'BEFORE'
+            ELSE 'AFTER'
+        END AS timing,
+        CASE WHEN (t.tgtype::int & 1) <> 0 THEN 'ROW' ELSE 'STATEMENT' END AS orientation,
+        (t.tgtype::int & 4) <> 0 AS on_insert,
+        (t.tgtype::int & 16) <> 0 AS on_update,
+        (t.tgtype::int & 8) <> 0 AS on_delete,
+        (t.tgtype::int & 32) <> 0 AS on_truncate,
+        (t.tgenabled <> 'D') AS is_enabled,
+        fn.nspname || '.' || p.proname AS action_routine,
+        NULL AS body,
+        'a PostgreSQL trigger has no body of its own: it executes the function '
+            || 'named in action_routine, whose own body is captured on the routine axis'
+            AS unavailable_reason
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_proc p ON p.oid = t.tgfoid
+    JOIN pg_namespace fn ON fn.oid = p.pronamespace
+    WHERE NOT t.tgisinternal
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname, t.tgname
+"""
+
+# R11-FP01: sequences.
+#
+# Read from `pg_sequence`, not from `pg_sequences`: the latter is a view that
+# carries `last_value`, and `last_value` is the value the next insert writes
+# into a customer's row -- source data, not metadata (INV-6). `pg_sequence` has
+# the declaration and nothing else, so the value cannot be read here even by
+# accident. That is why this query exists in this shape rather than as a
+# `SELECT * FROM pg_sequences`.
+#
+# The `pg_depend` join is the reason a sequence is part of the footprint rather
+# than a loose object: it names the table and column whose default expression
+# reads this sequence. `deptype` 'a' is the `serial` case (the sequence is owned
+# by the column and dropped with it) and 'i' is an `IDENTITY` column's internal
+# dependency. A standalone `CREATE SEQUENCE` matches neither and honestly
+# reports no owner.
+_SEQUENCE_SQL = """
+    SELECT
+        n.nspname AS sequence_schema,
+        c.relname AS sequence_name,
+        format_type(s.seqtypid, NULL) AS data_type,
+        s.seqstart::text AS start_with,
+        s.seqincrement::text AS increment_by,
+        s.seqmin::text AS minimum_bound,
+        s.seqmax::text AS maximum_bound,
+        s.seqcache::text AS cache_size,
+        s.seqcycle AS cycles,
+        owner.relname AS owned_by_table,
+        att.attname AS owned_by_column,
+        obj_description(c.oid, 'pg_class') AS description
+    FROM pg_sequence s
+    JOIN pg_class c ON c.oid = s.seqrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_depend d
+      ON d.classid = 'pg_class'::regclass
+     AND d.objid = c.oid
+     AND d.refclassid = 'pg_class'::regclass
+     AND d.deptype IN ('a', 'i')
+    LEFT JOIN pg_class owner ON owner.oid = d.refobjid
+    LEFT JOIN pg_attribute att
+      ON att.attrelid = d.refobjid
+     AND att.attnum = d.refobjsubid
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname
 """
 
 _TABLE_COMMENT_SQL = """
@@ -621,6 +792,51 @@ _PARTITION_BATCH_SQL = (
 # `discover_streaming`, never interpolated into this SQL text.
 
 
+# R11-FP01. A trigger is keyed by the table it fires on, so it pages with the
+# table roster exactly as columns and constraints do -- unlike routines and
+# sequences, which belong to a schema and are fetched once up front. A 100K-
+# table estate can hold more triggers than tables (audit estates routinely have
+# three per table), which is precisely the shape `discover_streaming` exists for.
+_TRIGGER_BATCH_SQL = (
+    """
+    SELECT
+        n.nspname AS trigger_schema,
+        t.tgname AS trigger_name,
+        c.relname AS table_name,
+        n.nspname AS table_schema,
+        CASE
+            WHEN (t.tgtype::int & 64) <> 0 THEN 'INSTEAD OF'
+            WHEN (t.tgtype::int & 2) <> 0 THEN 'BEFORE'
+            ELSE 'AFTER'
+        END AS timing,
+        CASE WHEN (t.tgtype::int & 1) <> 0 THEN 'ROW' ELSE 'STATEMENT' END AS orientation,
+        (t.tgtype::int & 4) <> 0 AS on_insert,
+        (t.tgtype::int & 16) <> 0 AS on_update,
+        (t.tgtype::int & 8) <> 0 AS on_delete,
+        (t.tgtype::int & 32) <> 0 AS on_truncate,
+        (t.tgenabled <> 'D') AS is_enabled,
+        fn.nspname || '.' || p.proname AS action_routine,
+        NULL AS body,
+        'a PostgreSQL trigger has no body of its own: it executes the function '
+            || 'named in action_routine, whose own body is captured on the routine axis'
+            AS unavailable_reason
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_proc p ON p.oid = t.tgfoid
+    JOIN pg_namespace fn ON fn.oid = p.pronamespace
+    WHERE NOT t.tgisinternal
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY n.nspname, c.relname, t.tgname
+"""
+).format(
+    predicate=_batch_predicate("n.nspname", "c.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
 _GRANT_BATCH_SQL = (
     """
     SELECT
@@ -653,7 +869,9 @@ _GRANT_BATCH_SQL = (
 # rule. Materialized views and routines are read from `pg_class`/`pg_proc` directly
 # (`_MATERIALIZED_VIEW_ROSTER_SQL`, `_ROUTINE_SQL`), which every role may read, so none of them
 # is ever hidden from discovery and counting the ones this role cannot SELECT or EXECUTE would
-# report a gap that does not exist.
+# report a gap that does not exist. R11-FP01's two new axes are the same case: `pg_trigger` and
+# `pg_sequence` are readable by every role, so no trigger and no sequence is hidden from this
+# connector, and neither kind is counted here.
 _INVISIBLE_TABLE_SQL = """
     -- `relkind` is PostgreSQL's `"char"`, which asyncpg hands back as bytes; ::text keeps
     -- the lookup below reading the letter the catalog means.
@@ -678,6 +896,53 @@ _INVISIBLE_TABLE_SQL = """
 _RELKIND_TO_KIND = {"r": "TABLE", "p": "TABLE", "f": "TABLE", "v": "VIEW"}
 
 
+# ---------------------------------------------------------------------------
+# R11-FP02: which facet each discovery query belongs to.
+#
+# Every read below goes through `connectors.discovery.read_facet` under the
+# facet it answers, so a login that may not read one catalog relation loses
+# that relation rather than the run. asyncpg is the driver this is provable
+# with: `asyncpg.PostgresError.sqlstate` is the SQLSTATE the server sent, so
+# `capability_states.is_permission_refusal` sees `42501` for an
+# insufficient-privilege refusal and `classify_read_failure` returns
+# PERMISSION_DENIED rather than the under-claiming UNAVAILABLE the drivers
+# without a SQLSTATE field have to settle for
+# (`tests/test_facet_refusal_live.py` pins it against a real revoke).
+#
+# Two reads here are deliberately *not* wrapped:
+#
+# * **The roster and the column queries are the inventory**, and they are
+#   wrapped as `FACET_INVENTORY`, which is not the same thing as being made
+#   optional: `RETIREMENT_BEARING_FACETS` holds that facet, so `read_facet`
+#   records the refusal and then lets it fail the run exactly as it did before.
+#   A FULL run that completed over zero objects would retire the estate. What
+#   the wrap buys is the receipt entry -- the INTERRUPTED receipt now names the
+#   read that ended the run instead of saying only that something did.
+#
+# * **The trigger and sequence queries have no facet to be attributed to.**
+#   `DISCOVERY_FACETS` (and `discovery_receipt.RECEIPT_FACETS` with it) names
+#   eight facets, and neither triggers nor sequences is one of them, so there
+#   is no name `FacetReadScope.record` would accept and none that a receipt
+#   could publish. Inventing one here would raise `unknown discovery facet` at
+#   the moment of the refusal -- turning a recoverable refusal into a crash --
+#   so `_TRIGGER_SQL`, `_TRIGGER_BATCH_SQL` and `_SEQUENCE_SQL` keep failing the
+#   run until the facet vocabulary gains them (see the R11-FP02 remainder).
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_scalar_rows(connection: Any, sql: str) -> list[Any]:
+    """One scalar metadata read, shaped as rows so `read_facet` can carry it.
+
+    R11-FP02: `read_facet` takes a read that returns a row sequence, because
+    every other discovery query returns one. The catalog comment
+    (`_CATALOG_COMMENT_SQL`) is the single discovery read that is one value, and
+    it belongs to `object_comments` like the three comment queries beside it --
+    so it is shaped as a one-row list here rather than left as the one comment
+    read whose refusal still costs the whole run.
+    """
+    return [await connection.fetchval(sql)]
+
+
 class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
@@ -700,6 +965,12 @@ class PostgresConnector(SqlExecutor):
         routines=True,
         object_comments=True,
         grants=True,
+        # R11-FP01. Each backed by a query in `discover()`, which is what INV-9
+        # requires of a `True`:
+        #   triggers  -> pg_trigger (+ pg_proc for the action function)
+        #   sequences -> pg_sequence (+ pg_depend for the owning column)
+        triggers=True,
+        sequences=True,
         # PR-2: the only connector today with a real `profile_column_values`
         # implementation below -- every other connector stays honestly
         # unsupported (default False) rather than simulating this capability.
@@ -765,87 +1036,123 @@ class PostgresConnector(SqlExecutor):
         connection = await asyncpg.connect(self._dsn, command_timeout=self._command_timeout)
         try:
             catalog_name = await connection.fetchval("SELECT current_database()")
-            rows = await self._fetch(
-                connection,
-                """
-                SELECT
-                    c.table_schema,
-                    c.table_name,
-                    t.table_type,
-                    c.column_name,
-                    c.ordinal_position,
-                    c.data_type,
-                    c.is_nullable,
-                    c.column_default
-                FROM information_schema.columns c
-                JOIN information_schema.tables t
-                  ON t.table_catalog = c.table_catalog
-                 AND t.table_schema = c.table_schema
-                 AND t.table_name = c.table_name
-                WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
-                ORDER BY c.table_schema, c.table_name, c.ordinal_position
-                """
+            rows = await read_facet(
+                FACET_INVENTORY,
+                self._fetch(
+                    connection,
+                    """
+                    SELECT
+                        c.table_schema,
+                        c.table_name,
+                        t.table_type,
+                        c.column_name,
+                        c.ordinal_position,
+                        c.data_type,
+                        c.is_nullable,
+                        c.column_default
+                    FROM information_schema.columns c
+                    JOIN information_schema.tables t
+                      ON t.table_catalog = c.table_catalog
+                     AND t.table_schema = c.table_schema
+                     AND t.table_name = c.table_name
+                    WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
+                    ORDER BY c.table_schema, c.table_name, c.ordinal_position
+                    """,
+                ),
             )
-            constraint_rows = await self._fetch(
-                connection,
-                """
-                SELECT
-                    ns.nspname AS table_schema,
-                    rel.relname AS table_name,
-                    con.conname AS constraint_name,
-                    CASE con.contype
-                        WHEN 'p' THEN 'PRIMARY_KEY'
-                        WHEN 'u' THEN 'UNIQUE'
-                        WHEN 'f' THEN 'FOREIGN_KEY'
-                    END AS constraint_type,
-                    array_agg(att.attname ORDER BY local_key.ordinality) AS columns,
-                    ref_ns.nspname AS referenced_schema,
-                    ref_rel.relname AS referenced_table,
-                    array_agg(ref_att.attname ORDER BY local_key.ordinality)
-                        FILTER (WHERE ref_att.attname IS NOT NULL) AS referenced_columns
-                FROM pg_constraint con
-                JOIN pg_class rel ON rel.oid = con.conrelid
-                JOIN pg_namespace ns ON ns.oid = rel.relnamespace
-                JOIN LATERAL unnest(con.conkey) WITH ORDINALITY
-                    AS local_key(attnum, ordinality) ON TRUE
-                JOIN pg_attribute att
-                  ON att.attrelid = rel.oid
-                 AND att.attnum = local_key.attnum
-                LEFT JOIN pg_class ref_rel ON ref_rel.oid = con.confrelid
-                LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_rel.relnamespace
-                LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY
-                    AS foreign_key(attnum, ordinality)
-                  ON foreign_key.ordinality = local_key.ordinality
-                LEFT JOIN pg_attribute ref_att
-                  ON ref_att.attrelid = ref_rel.oid
-                 AND ref_att.attnum = foreign_key.attnum
-                WHERE con.contype IN ('p', 'u', 'f')
-                  AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
-                GROUP BY
-                    ns.nspname,
-                    rel.relname,
-                    con.conname,
-                    con.contype,
-                    ref_ns.nspname,
-                    ref_rel.relname
-                ORDER BY ns.nspname, rel.relname, con.conname
-                """
+            constraint_rows = await read_facet(
+                FACET_CONSTRAINTS,
+                self._fetch(
+                    connection,
+                    """
+                    SELECT
+                        ns.nspname AS table_schema,
+                        rel.relname AS table_name,
+                        con.conname AS constraint_name,
+                        CASE con.contype
+                            WHEN 'p' THEN 'PRIMARY_KEY'
+                            WHEN 'u' THEN 'UNIQUE'
+                            WHEN 'f' THEN 'FOREIGN_KEY'
+                        END AS constraint_type,
+                        array_agg(att.attname ORDER BY local_key.ordinality) AS columns,
+                        ref_ns.nspname AS referenced_schema,
+                        ref_rel.relname AS referenced_table,
+                        array_agg(ref_att.attname ORDER BY local_key.ordinality)
+                            FILTER (WHERE ref_att.attname IS NOT NULL) AS referenced_columns
+                    FROM pg_constraint con
+                    JOIN pg_class rel ON rel.oid = con.conrelid
+                    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+                    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY
+                        AS local_key(attnum, ordinality) ON TRUE
+                    JOIN pg_attribute att
+                      ON att.attrelid = rel.oid
+                     AND att.attnum = local_key.attnum
+                    LEFT JOIN pg_class ref_rel ON ref_rel.oid = con.confrelid
+                    LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_rel.relnamespace
+                    LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY
+                        AS foreign_key(attnum, ordinality)
+                      ON foreign_key.ordinality = local_key.ordinality
+                    LEFT JOIN pg_attribute ref_att
+                      ON ref_att.attrelid = ref_rel.oid
+                     AND ref_att.attnum = foreign_key.attnum
+                    WHERE con.contype IN ('p', 'u', 'f')
+                      AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+                    GROUP BY
+                        ns.nspname,
+                        rel.relname,
+                        con.conname,
+                        con.contype,
+                        ref_ns.nspname,
+                        ref_rel.relname
+                    ORDER BY ns.nspname, rel.relname, con.conname
+                    """,
+                ),
             )
-            materialized_view_column_rows = await self._fetch(
-                connection,
-                _MATERIALIZED_VIEW_COLUMN_SQL
+            materialized_view_column_rows = await read_facet(
+                FACET_INVENTORY,
+                self._fetch(connection, _MATERIALIZED_VIEW_COLUMN_SQL),
             )
-            view_rows = await self._fetch(connection, _VIEW_DEFINITION_SQL)
-            routine_rows = await self._fetch(connection, _ROUTINE_SQL)
-            routine_parameter_rows = await self._fetch(connection, _ROUTINE_PARAMETER_SQL)
-            table_description_rows = await self._fetch(connection, _TABLE_COMMENT_SQL)
-            column_description_rows = await self._fetch(connection, _COLUMN_COMMENT_SQL)
-            schema_description_rows = await self._fetch(connection, _SCHEMA_COMMENT_SQL)
-            catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
-            grant_rows = await self._fetch(connection, _GRANT_SQL)
-            index_rows = await self._fetch(connection, _INDEX_SQL)
-            partition_key_rows = await self._fetch(connection, _PARTITION_KEY_SQL)
-            partition_rows = await self._fetch(connection, _PARTITION_SQL)
+            view_rows = await read_facet(
+                FACET_VIEW_DEFINITIONS, self._fetch(connection, _VIEW_DEFINITION_SQL)
+            )
+            routine_rows = await read_facet(
+                FACET_ROUTINE_BODIES, self._fetch(connection, _ROUTINE_SQL)
+            )
+            # R11-FP01: aggregates and window functions, whose definition
+            # `pg_get_functiondef` refuses -- see `_AGGREGATE_ROUTINE_SQL`.
+            aggregate_routine_rows = await read_facet(
+                FACET_ROUTINE_BODIES, self._fetch(connection, _AGGREGATE_ROUTINE_SQL)
+            )
+            routine_parameter_rows = await read_facet(
+                FACET_ROUTINE_BODIES, self._fetch(connection, _ROUTINE_PARAMETER_SQL)
+            )
+            trigger_rows = await read_facet(
+                FACET_TRIGGERS, self._fetch(connection, _TRIGGER_SQL)
+            )
+            sequence_rows = await read_facet(
+                FACET_SEQUENCES, self._fetch(connection, _SEQUENCE_SQL)
+            )
+            table_description_rows = await read_facet(
+                FACET_OBJECT_COMMENTS, self._fetch(connection, _TABLE_COMMENT_SQL)
+            )
+            column_description_rows = await read_facet(
+                FACET_OBJECT_COMMENTS, self._fetch(connection, _COLUMN_COMMENT_SQL)
+            )
+            schema_description_rows = await read_facet(
+                FACET_OBJECT_COMMENTS, self._fetch(connection, _SCHEMA_COMMENT_SQL)
+            )
+            catalog_comment_rows = await read_facet(
+                FACET_OBJECT_COMMENTS, _fetch_scalar_rows(connection, _CATALOG_COMMENT_SQL)
+            )
+            catalog_description = catalog_comment_rows[0] if catalog_comment_rows else None
+            grant_rows = await read_facet(FACET_GRANTS, self._fetch(connection, _GRANT_SQL))
+            index_rows = await read_facet(FACET_INDEXES, self._fetch(connection, _INDEX_SQL))
+            partition_key_rows = await read_facet(
+                FACET_PARTITIONS, self._fetch(connection, _PARTITION_KEY_SQL)
+            )
+            partition_rows = await read_facet(
+                FACET_PARTITIONS, self._fetch(connection, _PARTITION_SQL)
+            )
         finally:
             await connection.close()
 
@@ -883,18 +1190,28 @@ class PostgresConnector(SqlExecutor):
         ]
         append_partition_rows(tables, merged_partition_rows)
 
-        return assemble_catalog(
-            str(catalog_name),
-            tables,
-            routines=build_routines(routine_rows, routine_parameter_rows),
-            grants=build_grants(grant_rows),
-            schema_descriptions={
-                str(row["schema_name"]): str(row["description"])
-                for row in schema_description_rows
-            },
-            catalog_description=(
-                None if catalog_description is None else str(catalog_description)
+        # R11-FP01: the two new axes are attached to the assembled tree rather
+        # than passed into `assemble_catalog`, which takes no parameter for
+        # them -- see `attach_native_objects` for why the helper lives in
+        # `connectors.base` this cycle.
+        return attach_native_objects(
+            assemble_catalog(
+                str(catalog_name),
+                tables,
+                routines=build_routines(
+                    [*routine_rows, *aggregate_routine_rows], routine_parameter_rows
+                ),
+                grants=build_grants(grant_rows),
+                schema_descriptions={
+                    str(row["schema_name"]): str(row["description"])
+                    for row in schema_description_rows
+                },
+                catalog_description=(
+                    None if catalog_description is None else str(catalog_description)
+                ),
             ),
+            triggers=build_triggers(trigger_rows),
+            sequences=build_sequences(sequence_rows),
         )
 
     async def discover_streaming(
@@ -932,8 +1249,16 @@ class PostgresConnector(SqlExecutor):
             # One row per table (not per column), so this roster scan is cheap
             # even at 100K tables -- it exists only to compute page boundaries
             # before any of the heavier per-axis queries below ever runs.
-            roster_rows = await self._fetch(connection, _TABLE_ROSTER_SQL)
-            materialized_roster_rows = await self._fetch(connection, _MATERIALIZED_VIEW_ROSTER_SQL)
+            # R11-FP02: the roster *is* the inventory, so it is read under
+            # `FACET_INVENTORY` -- recorded on refusal and then still allowed to fail
+            # the run, because `RETIREMENT_BEARING_FACETS` holds that facet. See the
+            # facet-attribution comment above `_fetch_scalar_rows`.
+            roster_rows = await read_facet(
+                FACET_INVENTORY, self._fetch(connection, _TABLE_ROSTER_SQL)
+            )
+            materialized_roster_rows = await read_facet(
+                FACET_INVENTORY, self._fetch(connection, _MATERIALIZED_VIEW_ROSTER_SQL)
+            )
             roster = sorted(
                 {
                     (str(row["table_schema"]), str(row["table_name"]))
@@ -944,11 +1269,32 @@ class PostgresConnector(SqlExecutor):
                 yield (DiscoveredCatalog(name=catalog_name, schemas=()),)
                 return
 
-            routine_rows = await self._fetch(connection, _ROUTINE_SQL)
-            routine_parameter_rows = await self._fetch(connection, _ROUTINE_PARAMETER_SQL)
-            schema_description_rows = await self._fetch(connection, _SCHEMA_COMMENT_SQL)
-            catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
-            routines = build_routines(routine_rows, routine_parameter_rows)
+            routine_rows = await read_facet(
+                FACET_ROUTINE_BODIES, self._fetch(connection, _ROUTINE_SQL)
+            )
+            aggregate_routine_rows = await read_facet(
+                FACET_ROUTINE_BODIES, self._fetch(connection, _AGGREGATE_ROUTINE_SQL)
+            )
+            routine_parameter_rows = await read_facet(
+                FACET_ROUTINE_BODIES, self._fetch(connection, _ROUTINE_PARAMETER_SQL)
+            )
+            # R11-FP01: a sequence belongs to a schema, not to a table, so it
+            # joins routines and schema comments in the up-front, attach-to-the-
+            # first-batch group. Triggers do not: see `_TRIGGER_BATCH_SQL`.
+            sequence_rows = await read_facet(
+                FACET_SEQUENCES, self._fetch(connection, _SEQUENCE_SQL)
+            )
+            schema_description_rows = await read_facet(
+                FACET_OBJECT_COMMENTS, self._fetch(connection, _SCHEMA_COMMENT_SQL)
+            )
+            catalog_comment_rows = await read_facet(
+                FACET_OBJECT_COMMENTS, _fetch_scalar_rows(connection, _CATALOG_COMMENT_SQL)
+            )
+            catalog_description = catalog_comment_rows[0] if catalog_comment_rows else None
+            routines = build_routines(
+                [*routine_rows, *aggregate_routine_rows], routine_parameter_rows
+            )
+            sequences = build_sequences(sequence_rows)
             schema_descriptions = {
                 str(row["schema_name"]): str(row["description"])
                 for row in schema_description_rows
@@ -962,38 +1308,70 @@ class PostgresConnector(SqlExecutor):
                 schemas_arr = [schema for schema, _name in page]
                 names_arr = [name for _schema, name in page]
 
-                column_rows = await self._fetch(
-                    connection, _COLUMN_BATCH_SQL, schemas_arr, names_arr
+                column_rows = await read_facet(
+                    FACET_INVENTORY,
+                    self._fetch(connection, _COLUMN_BATCH_SQL, schemas_arr, names_arr),
                 )
-                materialized_view_column_rows = await self._fetch(
-                    connection,
-                    _MATERIALIZED_VIEW_COLUMN_BATCH_SQL, schemas_arr, names_arr
+                materialized_view_column_rows = await read_facet(
+                    FACET_INVENTORY,
+                    self._fetch(
+                        connection,
+                        _MATERIALIZED_VIEW_COLUMN_BATCH_SQL, schemas_arr, names_arr
+                    ),
                 )
-                constraint_rows = await self._fetch(
-                    connection,
-                    _CONSTRAINT_BATCH_SQL, schemas_arr, names_arr
+                constraint_rows = await read_facet(
+                    FACET_CONSTRAINTS,
+                    self._fetch(
+                        connection,
+                        _CONSTRAINT_BATCH_SQL, schemas_arr, names_arr
+                    ),
                 )
-                view_rows = await self._fetch(
-                    connection,
-                    _VIEW_DEFINITION_BATCH_SQL, schemas_arr, names_arr
+                view_rows = await read_facet(
+                    FACET_VIEW_DEFINITIONS,
+                    self._fetch(
+                        connection,
+                        _VIEW_DEFINITION_BATCH_SQL, schemas_arr, names_arr
+                    ),
                 )
-                table_description_rows = await self._fetch(
-                    connection,
-                    _TABLE_COMMENT_BATCH_SQL, schemas_arr, names_arr
+                table_description_rows = await read_facet(
+                    FACET_OBJECT_COMMENTS,
+                    self._fetch(
+                        connection,
+                        _TABLE_COMMENT_BATCH_SQL, schemas_arr, names_arr
+                    ),
                 )
-                column_description_rows = await self._fetch(
-                    connection,
-                    _COLUMN_COMMENT_BATCH_SQL, schemas_arr, names_arr
+                column_description_rows = await read_facet(
+                    FACET_OBJECT_COMMENTS,
+                    self._fetch(
+                        connection,
+                        _COLUMN_COMMENT_BATCH_SQL, schemas_arr, names_arr
+                    ),
                 )
-                grant_rows = await self._fetch(connection, _GRANT_BATCH_SQL, schemas_arr, names_arr)
-                index_rows = await self._fetch(connection, _INDEX_BATCH_SQL, schemas_arr, names_arr)
-                partition_key_rows = await self._fetch(
-                    connection,
-                    _PARTITION_KEY_BATCH_SQL, schemas_arr, names_arr
+                trigger_rows = await read_facet(
+                    FACET_TRIGGERS,
+                    self._fetch(connection, _TRIGGER_BATCH_SQL, schemas_arr, names_arr),
                 )
-                partition_rows = await self._fetch(
-                    connection,
-                    _PARTITION_BATCH_SQL, schemas_arr, names_arr
+                grant_rows = await read_facet(
+                    FACET_GRANTS,
+                    self._fetch(connection, _GRANT_BATCH_SQL, schemas_arr, names_arr),
+                )
+                index_rows = await read_facet(
+                    FACET_INDEXES,
+                    self._fetch(connection, _INDEX_BATCH_SQL, schemas_arr, names_arr),
+                )
+                partition_key_rows = await read_facet(
+                    FACET_PARTITIONS,
+                    self._fetch(
+                        connection,
+                        _PARTITION_KEY_BATCH_SQL, schemas_arr, names_arr
+                    ),
+                )
+                partition_rows = await read_facet(
+                    FACET_PARTITIONS,
+                    self._fetch(
+                        connection,
+                        _PARTITION_BATCH_SQL, schemas_arr, names_arr
+                    ),
                 )
 
                 # CN-3: materialized-view rows are appended, not merged separately,
@@ -1029,15 +1407,19 @@ class PostgresConnector(SqlExecutor):
                 append_partition_rows(tables, merged_partition_rows)
 
                 is_first_batch = start == 0
-                yield assemble_catalog(
-                    catalog_name,
-                    tables,
-                    routines=routines if is_first_batch else None,
-                    grants=build_grants(grant_rows),
-                    schema_descriptions=schema_descriptions if is_first_batch else None,
-                    catalog_description=(
-                        catalog_description_str if is_first_batch else None
+                yield attach_native_objects(
+                    assemble_catalog(
+                        catalog_name,
+                        tables,
+                        routines=routines if is_first_batch else None,
+                        grants=build_grants(grant_rows),
+                        schema_descriptions=schema_descriptions if is_first_batch else None,
+                        catalog_description=(
+                            catalog_description_str if is_first_batch else None
+                        ),
                     ),
+                    triggers=build_triggers(trigger_rows),
+                    sequences=sequences if is_first_batch else None,
                 )
         finally:
             await connection.close()

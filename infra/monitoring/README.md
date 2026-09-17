@@ -2,9 +2,18 @@
 
 **Tracker: R11-FP17.** The row's remaining work said "no deployment scrapes these
 gauges yet, so the alert thresholds are unset". This directory is the scrape
-configuration and the alert rules. It is not a deployment, and the thresholds that
-need an operator's number are still unset — deliberately, and labelled as such in
-every rule that carries one.
+configuration and the alert rules.
+
+**Updated 2026-09-17.** A Prometheus now runs in the compose stack and reads
+these files: it loads all 24 rules without error, scrapes the API, and fires
+three alerts that correctly report the rest is unreachable — see "Verified
+against a running Prometheus" below. Two things that were true before are still
+true and are not fixed by that: the thresholds needing an operator's number are
+still unset (deliberately, and labelled as such in every rule that carries one),
+and the footprint and projection gauges are still unreachable because
+`AIDA_WORKER_METRICS_PORT` is 0 — an operator's decision this repository does
+not get to take. So "nothing has ever fired" is no longer accurate; "no alert
+has fired on a threshold anyone chose" is.
 
 ## The finding that came out of writing this
 
@@ -60,34 +69,45 @@ written for.
 
 ### Compose (local and dev stacks)
 
-`compose.yaml` is owned by another change and **was not edited here**. Two things
-have to be added to it, and both are small:
+**Both halves of this are now in `compose.yaml`** — this section used to say the
+file "was not edited here" and give the YAML to add. That is done, so what
+follows is what an operator still has to *decide*, not what they have to write.
 
-1. **A Prometheus service, profile-gated** so it stays out of the default `up`:
+1. **The Prometheus service exists**, profile-gated so it stays out of the
+   default `up`: `profiles: ["monitoring", "full"]`, `prom/prometheus:v3.5.0`,
+   this directory's `prometheus.yml` and `rules/` mounted read-only, port 9090
+   published, and a `prometheus-data` volume with 15-day local retention. Start
+   it with:
 
-   ```yaml
-     prometheus:
-       profiles: ["monitoring"]
-       image: prom/prometheus:v3.1.0            # pin a digest in any shared environment
-       command:
-         - --config.file=/etc/prometheus/prometheus.yml
-       volumes:
-         - ./infra/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-         - ./infra/monitoring/prometheus/rules:/etc/prometheus/rules:ro
-       ports:
-         - "9090:9090"
+   ```
+   docker compose --profile monitoring up -d prometheus
    ```
 
-   `prometheus.yml`'s `rule_files` already points at `/etc/prometheus/rules/*.rules.yml`,
-   which is where the second mount lands.
+2. **`AIDA_WORKER_METRICS_PORT` is plumbed per-service but defaults to 0.**
+   `compose.yaml` passes `${AIDA_WORKER_METRICS_PORT:-0}` to `fleet-scheduler`
+   and `graph-projector` individually (not through the shared
+   `*app-environment` anchor, which would also set it on the API, where it is
+   unused and misleading). 0 means "listen on nothing", and it is the default
+   because opening a port changes the deployment's network surface and is the
+   operator's decision, not this file's.
 
-2. **`AIDA_WORKER_METRICS_PORT=9108` on the `fleet-scheduler` and `graph-projector`
-   services.** Without it those two serve nothing and their jobs stay down. The
-   shared `*app-environment` anchor would set it for every service including the
-   API, which is harmless (the API's own port is untouched and the extra listener
-   is unused) but misleading; per-service is clearer.
+   **The one action still outstanding**, and the reason 13 of the 19 series are
+   unreachable: set `AIDA_WORKER_METRICS_PORT=9108` in the environment those two
+   services read, then recreate just those two containers:
 
-Then `docker compose --profile monitoring up -d prometheus`.
+   ```
+   AIDA_WORKER_METRICS_PORT=9108 docker compose up -d fleet-scheduler graph-projector
+   ```
+
+   Until then `atlas-fleet-scheduler` and `atlas-graph-projector` report DOWN,
+   `AtlasTargetDown` fires for both, `AtlasFootprintMetricsAbsent` fires, and
+   every other footprint and projection rule evaluates against an empty vector.
+   That is the honest reading and not a defect: the scheduler logs
+   `worker_metrics_disabled` with "this process publishes no scrapeable
+   endpoint" on every start, and `aida_footprint_gaps` is unreachable **by
+   design** rather than missing. `prometheus_client` keeps one registry per
+   process and only `aida.main` serves `/metrics`; no scrape configuration can
+   reach a gauge in a process that is not listening.
 
 ### Kubernetes
 
@@ -134,7 +154,7 @@ twenty alerts are placeholders:
 | `AtlasChangeSignalQueueStale` | `3600s` | A fraction (a third is a common start) of the estate's freshness commitment for catalog metadata: how stale may a table's shape be before an answer built on it is wrong? This is the threshold `src/aida/readiness.py` explicitly declines to own — see below. |
 | `AtlasProjectionLagHigh` | `900s` | How out of date the graph explorer and unified lineage may be before an answer drawn from them misleads. Set below that. |
 | `AtlasProjectionBacklogAgeHigh` | `1800s` | A multiple of the observed steady-state oldest-backlog age. `projection_metrics.py` calls this gauge "the signal a tenant-budget policy should be chosen from", which is an admission the number is not yet chosen. |
-| `AtlasRetrievalLatencyHigh` | `5s` p95 | The steady-state p95 that `scripts/scale_harness/fp17_change_burst_latency.py` reports against a real deployment. That script's baseline percentile is exactly this input. |
+| `AtlasRetrievalLatencyHigh` | `5s` p95 | The steady-state `aida_retrieval_duration_seconds` p95 an estate observes under its own load. **Not** what `scripts/scale_harness/fp17_change_burst_latency.py` reports, which this row used to claim: that harness times `footprint_gaps` and `list_tables` against a change burst and never touches the retrieval path, so its baseline is not this input. It was run for the first time on 2026-09-17 (see that script's docstring), and it still leaves this number unset. |
 | `AtlasHttpServerErrorRateHigh` | `0.05` | The complement of the estate's availability objective. There is no agreed one for this platform. |
 | `AtlasHttpLatencyHigh` | `3s` p95 | Same as the retrieval ceiling, over the whole API surface — or split per route template once the estate knows which routes are interactive and which are reports. |
 
@@ -189,20 +209,68 @@ pytest tests/test_monitoring_rules.py
 
 `tests/test_monitoring_rules.py` is the substantive one: it checks that every
 metric name referenced by a rule is actually published somewhere under `src/`
-(an alert on a metric nobody emits is silence that looks like health), that every
-alert declares a `threshold_status` from the closed set, that every placeholder
-rule explains itself in its annotation, and that the generated PrometheusRule
-matches the source file.
+(an alert on a metric nobody emits is silence that looks like health), that
+every label matcher names a label that metric declares (`{kimd="..."}` parses,
+loads and never fires), that every alert declares a `threshold_status` from the
+closed set plus a severity, summary and runbook, that every placeholder rule
+explains itself in its annotation, and that the generated PrometheusRule matches
+the source file.
 
-**Not verified, and not claimed:**
+**That file was named here before it existed.** It was written 2026-09-17, to
+this description. Until then the four properties above were claimed and not
+checked, and the drift the generator exists to prevent had nothing watching it.
+`--check` happened to be passing when the test was added, so nothing had drifted
+— but that was luck, not a guard.
 
-- **`promtool check rules` was not run.** `promtool` is not installed on this
-  machine and installing tooling was out of scope, so the PromQL in these rules
-  has been parsed as YAML and reviewed by eye, never by Prometheus itself. This
-  is the weakest link in the validation above: a rule whose YAML is valid and
-  whose PromQL is malformed loads as a broken rule group. Run
-  `promtool check rules infra/monitoring/prometheus/rules/atlas.rules.yml`
-  before relying on any of it.
+### Verified against a running Prometheus, 2026-09-17
+
+`promtool` **is** available: it ships inside the `prom/prometheus` image, so it
+needs no local install. Run against the mounted copies, in the container the
+compose stack starts:
+
+```
+docker exec aida-platform-prometheus-1 promtool check config /etc/prometheus/prometheus.yml
+  Checking /etc/prometheus/prometheus.yml
+    SUCCESS: 1 rule files found
+   SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file syntax
+  Checking /etc/prometheus/rules/atlas.rules.yml
+    SUCCESS: 24 rules found
+```
+
+What that Prometheus (v3.5.0) reports about itself:
+
+- `/api/v1/status/runtimeinfo` — `reloadConfigSuccess: true`, `corruptionCount: 0`.
+- `/api/v1/rules` — all 7 groups and all 24 rules loaded, every one
+  `health: "ok"` with an empty `lastError`. So the PromQL is not merely
+  YAML-valid: Prometheus has parsed and is evaluating every expression.
+- `/api/v1/targets` — `atlas-api` (`http://api:8000/metrics`) **up**;
+  `atlas-fleet-scheduler` and `atlas-graph-projector` (`:9108`) **down**,
+  `connection refused`, because `AIDA_WORKER_METRICS_PORT` is 0. See "Wiring it
+  up" above.
+- `/api/v1/alerts` — **three alerts firing**, and all three are correct:
+  `AtlasTargetDown` twice (one per unreachable worker) and
+  `AtlasFootprintMetricsAbsent`. The rules' first real-world job was to report
+  that two thirds of the series are unreachable, and they did.
+- Series actually present: `aida_http_*` and `aida_retrieval_*`, plus
+  `aida_usage_quota_decisions_total`, and the two HTTP/retrieval p95 recording
+  rules. `aida_footprint_*` and `aida_graph_projection_*` are absent, as the
+  table at the top of this file predicts.
+
+**Still not verified, and not claimed:**
+
+- **No alert has fired on a real threshold.** The three firing alerts are all
+  `threshold_status: structural` and all say "this is not being scraped". No
+  placeholder threshold has been exercised, because nothing has driven this
+  deployment past one.
+- **`aida_parser_*` and `aida_model_*` are only partly reachable.** They are
+  declared in the API's registry, so `atlas-api` exposes their `# HELP` lines,
+  but they are incremented wherever the work happens: `sql_lineage_parser` and
+  `lineage_agent` run in the fleet scheduler, and `model_gateway` runs in
+  several processes. `AtlasParserFailures` and `AtlasModelSpendEntirelyEstimated`
+  therefore see only the share of that activity that happens inside
+  `aida.main`. This is the same per-process-registry cause as the footprint
+  gauges, and it is not fixed by the same setting: the metadata worker has no
+  metrics listener and no scrape job at all.
 - **No cluster.** `kubectl kustomize` renders manifests without an API server;
   it does not validate them against real resource schemas. `kubeconform` is not
   installed here either. `kubectl apply --dry-run=server` against a cluster with

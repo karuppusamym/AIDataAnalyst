@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -45,6 +45,22 @@ class ConnectorCapabilities:
     routines: bool = False
     object_comments: bool = False
     grants: bool = False
+    # R11-FP01: two more native object kinds, on exactly the same
+    # every-axis-defaults-to-False convention as the four envelope 1.1 flags
+    # above (INV-9) -- an adapter that has not implemented the axis keeps
+    # reporting honestly with no edit, and `discovery_selection` turns the flag
+    # into SUPPORTED / UNSUPPORTED / NOT_APPLICABLE per engine.
+    #
+    # Two flags rather than one "other native objects" flag, because the six
+    # engines disagree *per kind* and a single flag could only be honest on the
+    # engines that happen to have both: Snowflake has sequences and no trigger
+    # object at all, BigQuery has neither (its `GENERATE_UUID`/`GENERATE_ARRAY`
+    # are functions, not sequences), Databricks has neither. Collapsing them
+    # would make a Snowflake source read UNSUPPORTED for triggers, which is the
+    # NOT_APPLICABLE-shown-as-UNSUPPORTED confusion the capability vocabulary
+    # exists to end.
+    triggers: bool = False
+    sequences: bool = False
     # PR-2 (ADR-0014 exception path). Value-free statistics (row estimates,
     # null rates, distinct estimates, lengths) are always computed by
     # `profile_table` regardless of this flag. Actual ranges/top-values are a
@@ -199,6 +215,123 @@ class DiscoveredRoutine:
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+# --------------------------------------------------------------------------
+# R11-FP01: triggers and sequences, modelled as themselves.
+#
+# The review's rule is that a native kind keeps its native identity even where
+# it shares a graph category with another ("an Oracle package, PostgreSQL
+# materialized view and SQL Server indexed view must retain their native
+# identity"). Neither of the two types below is therefore a `DiscoveredRoutine`
+# or a `DiscoveredTable` with a flag on it:
+#
+# * A trigger is not a routine. It is not called; it *fires*, on a named table,
+#   for a named event, at a named time, and the thing it runs may be its own
+#   body (Oracle, SQL Server) or a separately-declared function (PostgreSQL).
+#   None of those four facts has anywhere to live on `DiscoveredRoutine`, and a
+#   trigger squeezed into one would report a firing table as a parameter or
+#   lose it entirely.
+# * A sequence is not a table. It holds no rows and has no columns; it has an
+#   increment, bounds, a cache and a cycle flag, and it is *read* by a default
+#   expression on somebody else's column. `DiscoveredTable` can express none of
+#   that, and a sequence reported as a table would be offered for profiling.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredTrigger:
+    """A trigger, the table it fires on, and the code it runs.
+
+    **Why this is worth discovering at all.** A trigger that writes another
+    table is a data path the footprint cannot otherwise see: the write has no
+    view definition, no routine call site and no dbt model behind it, so to
+    every lineage surface the destination table simply changes by itself.
+    `table_name` is the half of that path this pass captures -- the object whose
+    modification runs the code -- and `action_routine` names the code where the
+    engine keeps it somewhere else.
+
+    **`body_sql` is redacted and value-free exactly as a routine body is.** A
+    trigger body is SQL, SQL carries source values in its literals (INV-6), and
+    a trigger body reaches model context by the same paths a procedure body
+    does, so it is the same injection surface and is never quoted anywhere.
+    `body_sql is None` with a populated `unavailable_reason` is a first-class
+    state, as on `DiscoveredRoutine`: PostgreSQL genuinely has no trigger body
+    to give -- the action is `EXECUTE FUNCTION f()` and `f`'s body arrives on
+    the routine axis -- and that is a different fact from a body the source
+    refused.
+
+    A `WHEN` condition is deliberately not a field of its own. It is a SQL
+    expression, so it would need the whole redaction/fingerprint/screening
+    apparatus the body already carries to be stored safely, for one predicate;
+    where the engine returns the condition as part of the trigger's own text it
+    is already inside `body_sql` and redacted with it.
+    """
+
+    name: str
+    #: The table whose modification fires this trigger.
+    table_name: str
+    #: The firing table's schema, when the engine allows it to differ from the
+    #: trigger's own (Oracle). `None` means "the schema this trigger is in",
+    #: which is the only possibility on PostgreSQL and SQL Server.
+    table_schema: str | None = None
+    #: BEFORE / AFTER / INSTEAD_OF / COMPOUND. Never inferred: an engine that
+    #: does not say leaves it empty.
+    timing: str = ""
+    #: INSERT / UPDATE / DELETE / TRUNCATE, in engine order. A tuple because
+    #: one trigger can fire on several events and every engine allows it.
+    events: tuple[str, ...] = ()
+    #: ROW or STATEMENT, where the engine distinguishes them.
+    orientation: str | None = None
+    is_enabled: bool | None = None
+    #: The qualified name of the function this trigger runs, where the engine
+    #: keeps the code outside the trigger (PostgreSQL's `tgfoid`). `None` on an
+    #: engine whose trigger carries its own body.
+    action_routine: str | None = None
+    body_sql: str | None = None
+    truncated: bool = False
+    unavailable_reason: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredSequence:
+    """A sequence generator, as its own declaration.
+
+    **What is deliberately absent: the sequence's current position.** Every
+    engine exposes it (`pg_sequences.last_value`, `ALL_SEQUENCES.LAST_NUMBER`,
+    `sys.sequences.current_value`) and it is *source data*, not metadata -- it
+    is the value the next insert will write into a customer's row, and it
+    changes on every insert. Reading it would also advance nothing but would
+    put a live business value into the control plane, which INV-6 forbids. It
+    is not read, not carried here and not persisted.
+
+    Every numeric declaration parameter is a string. Oracle permits a 28-digit
+    `MAXVALUE` and PostgreSQL a `bigint` one; a single Python/SQL integer column
+    wide enough for both does not exist, and a declaration is compared and
+    displayed rather than arithmetic, so text is the honest carrier. The field
+    names say `_bound` rather than `min_value`/`max_value` on purpose: these are
+    limits written in a `CREATE SEQUENCE` statement, and a field spelled like a
+    column value invites exactly the confusion INV-6's naming ratchet exists to
+    catch.
+    """
+
+    name: str
+    data_type: str | None = None
+    start_with: str | None = None
+    increment_by: str | None = None
+    minimum_bound: str | None = None
+    maximum_bound: str | None = None
+    cache_size: str | None = None
+    cycles: bool | None = None
+    #: The table and column whose default expression reads this sequence, where
+    #: the engine records the dependency (PostgreSQL `serial`/`IDENTITY`). This
+    #: is the edge that makes a sequence part of the footprint rather than a
+    #: loose object: it says which column's values this generator produces.
+    owned_by_table: str | None = None
+    owned_by_column: str | None = None
+    source_description: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass(frozen=True, slots=True)
 class DiscoveredGrant:
     """One privilege held by one grantee on one object.
@@ -238,6 +371,12 @@ class DiscoveredSchema:
     tables: tuple[DiscoveredTable, ...]
     routines: tuple[DiscoveredRoutine, ...] = ()
     grants: tuple[DiscoveredGrant, ...] = ()
+    #: R11-FP01. Defaulted to empty so an adapter that reads neither axis is
+    #: unchanged, and so "this engine has no triggers" and "this scan read none"
+    #: stay distinguishable through `capabilities.triggers` rather than through
+    #: an empty tuple.
+    triggers: tuple[DiscoveredTrigger, ...] = ()
+    sequences: tuple[DiscoveredSequence, ...] = ()
     source_description: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
 
@@ -248,6 +387,208 @@ class DiscoveredCatalog:
     schemas: tuple[DiscoveredSchema, ...]
     source_description: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------
+# R11-FP01: row-shape assembly for the two new axes.
+#
+# These belong beside `aida.connectors.discovery`'s `build_routines` /
+# `build_grants`, which is where every other row-shape-agnostic builder lives,
+# and they are here instead for one reason worth recording rather than leaving
+# as a puzzle: `discovery.py` is owned by the push-ingestion workstream this
+# cycle and is not mine to edit. They are byte-for-byte the shape that module's
+# helpers take -- schema-keyed maps built from plain row mappings -- so moving
+# them there later is a cut and a paste, and `attach_native_objects` below
+# exists precisely so `assemble_catalog` needs no new parameter to be given
+# them.
+# --------------------------------------------------------------------------
+
+#: Schema-keyed trigger and sequence inventories, as `attach_native_objects` takes them.
+TriggerMap = Mapping[str, Sequence[DiscoveredTrigger]]
+SequenceMap = Mapping[str, Sequence[DiscoveredSequence]]
+
+
+def _optional_row_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_row_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().upper() in {"YES", "Y", "TRUE", "T", "1", "ENABLED"}
+
+
+def build_triggers(
+    trigger_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, list[DiscoveredTrigger]]:
+    """Group triggers by the schema that holds them.
+
+    Rows: `trigger_schema`, `trigger_name`, `table_name`, and optionally
+    `table_schema`, `timing`, `orientation`, `is_enabled`, `action_routine`,
+    `body`, `truncated`, `unavailable_reason`, plus the four event flags
+    `on_insert` / `on_update` / `on_delete` / `on_truncate`, or an `events`
+    sequence where the engine returns them as one string.
+
+    The event flags are read rather than an `events` list built per adapter,
+    because three of the four engines with triggers expose the events as
+    separate booleans or bits (PostgreSQL `tgtype`, SQL Server
+    `sys.trigger_events`) and only Oracle hands over a phrase. Normalising here
+    keeps the order stable across engines, which a set would not.
+
+    A row whose `body` is NULL is recorded as *unavailable with a reason*, never
+    as a trigger with an empty body -- the same rule `build_routines` applies,
+    and for the same downstream reason: a parser has to tell "there is no text"
+    from "we were not given the text".
+    """
+    triggers: dict[str, list[DiscoveredTrigger]] = {}
+    for row in trigger_rows:
+        schema_name = str(row["trigger_schema"])
+        events = _trigger_events(row)
+        body = _optional_row_text(row.get("body"))
+        reason = _optional_row_text(row.get("unavailable_reason"))
+        if body is None:
+            reason = reason or "source returned no trigger body"
+        else:
+            reason = None
+        triggers.setdefault(schema_name, []).append(
+            DiscoveredTrigger(
+                name=str(row["trigger_name"]),
+                table_name=str(row["table_name"]),
+                table_schema=_optional_row_text(row.get("table_schema")),
+                timing=(_optional_row_text(row.get("timing")) or "").replace(" ", "_").upper(),
+                events=events,
+                orientation=_optional_row_text(row.get("orientation")),
+                is_enabled=_optional_row_bool(row.get("is_enabled")),
+                action_routine=_optional_row_text(row.get("action_routine")),
+                body_sql=body,
+                truncated=bool(row.get("truncated", False)),
+                unavailable_reason=reason,
+            )
+        )
+    return triggers
+
+
+#: The DML events a trigger may fire on, in the order every engine lists them.
+TRIGGER_EVENTS: tuple[str, ...] = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
+
+
+def _trigger_events(row: Mapping[str, Any]) -> tuple[str, ...]:
+    """The events one trigger row fires on, from flags or from a phrase.
+
+    Oracle's `ALL_TRIGGERS.TRIGGERING_EVENT` is a phrase (`INSERT OR UPDATE`),
+    so it is matched against the closed `TRIGGER_EVENTS` vocabulary rather than
+    split on `OR` and stored as whatever words came back: a phrase this function
+    does not recognise contributes no event, which reads as "the events are not
+    known" instead of putting engine prose into platform state.
+    """
+    declared = row.get("events")
+    if declared is not None:
+        phrase = (
+            " ".join(str(item) for item in declared)
+            if isinstance(declared, list | tuple)
+            else str(declared)
+        ).upper()
+        return tuple(event for event in TRIGGER_EVENTS if event in phrase)
+    flags = {
+        "INSERT": row.get("on_insert"),
+        "UPDATE": row.get("on_update"),
+        "DELETE": row.get("on_delete"),
+        "TRUNCATE": row.get("on_truncate"),
+    }
+    return tuple(event for event in TRIGGER_EVENTS if _optional_row_bool(flags[event]))
+
+
+def build_sequences(
+    sequence_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, list[DiscoveredSequence]]:
+    """Group sequences by schema.
+
+    Rows: `sequence_schema`, `sequence_name`, and optionally `data_type`,
+    `start_with`, `increment_by`, `minimum_bound`, `maximum_bound`,
+    `cache_size`, `cycles`, `owned_by_table`, `owned_by_column`, `description`.
+
+    Every numeric parameter is coerced to text -- see `DiscoveredSequence` for
+    why -- and a row carrying the sequence's *current position* under any name
+    is not read here at all: this function only ever looks at the keys above.
+    """
+    sequences: dict[str, list[DiscoveredSequence]] = {}
+    for row in sequence_rows:
+        schema_name = str(row["sequence_schema"])
+        sequences.setdefault(schema_name, []).append(
+            DiscoveredSequence(
+                name=str(row["sequence_name"]),
+                data_type=_optional_row_text(row.get("data_type")),
+                start_with=_optional_row_text(row.get("start_with")),
+                increment_by=_optional_row_text(row.get("increment_by")),
+                minimum_bound=_optional_row_text(row.get("minimum_bound")),
+                maximum_bound=_optional_row_text(row.get("maximum_bound")),
+                cache_size=_optional_row_text(row.get("cache_size")),
+                cycles=_optional_row_bool(row.get("cycles")),
+                owned_by_table=_optional_row_text(row.get("owned_by_table")),
+                owned_by_column=_optional_row_text(row.get("owned_by_column")),
+                source_description=_optional_row_text(row.get("description")),
+            )
+        )
+    return sequences
+
+
+def attach_native_objects(
+    catalogs: tuple[DiscoveredCatalog, ...],
+    *,
+    triggers: TriggerMap | None = None,
+    sequences: SequenceMap | None = None,
+) -> tuple[DiscoveredCatalog, ...]:
+    """`catalogs` with each schema's triggers and sequences attached.
+
+    A `replace` pass over an already-assembled tree, the same shape the Oracle,
+    Snowflake, BigQuery and Databricks adapters already use to fold their own
+    per-dialect facts onto one (`envelope_v11_unavailable`, Databricks'
+    comments). It is a pass rather than two more `assemble_catalog` parameters
+    for the ownership reason recorded above this section.
+
+    A schema that holds *only* triggers or sequences is added, exactly as
+    `assemble_catalog` unions a routine-only schema in: a schema whose entire
+    content is an audit trigger is a real schema, and dropping it would make the
+    inventory silently incomplete for the estates where the axis matters most.
+    """
+    if not triggers and not sequences:
+        return catalogs
+    triggers = triggers or {}
+    sequences = sequences or {}
+    attached: list[DiscoveredCatalog] = []
+    for index, catalog in enumerate(catalogs):
+        seen = {schema.name for schema in catalog.schemas}
+        schemas = [
+            replace(
+                schema,
+                triggers=tuple(triggers.get(schema.name, ())),
+                sequences=tuple(sequences.get(schema.name, ())),
+            )
+            for schema in catalog.schemas
+        ]
+        # Only the first catalog gains the schemas nothing else mentioned:
+        # every adapter that reads these axes returns exactly one catalog, and
+        # adding an unseen schema to each of several would duplicate it.
+        if index == 0:
+            for name in (*triggers, *sequences):
+                if name in seen:
+                    continue
+                seen.add(name)
+                schemas.append(
+                    DiscoveredSchema(
+                        name=name,
+                        tables=(),
+                        triggers=tuple(triggers.get(name, ())),
+                        sequences=tuple(sequences.get(name, ())),
+                    )
+                )
+        attached.append(replace(catalog, schemas=tuple(schemas)))
+    return tuple(attached)
 
 
 @dataclass(frozen=True, slots=True)

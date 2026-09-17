@@ -41,10 +41,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.connectors.base import DiscoveredCatalog, DiscoveredGrant
 from aida.connectors.registry import connector_registry
-from aida.envelope_models import MetadataRoutine
+from aida.envelope_models import MetadataRoutine, MetadataSequence, MetadataTrigger
 from aida.models import DataSource, MetadataCatalog, MetadataSchema, MetadataTable
 
-ObjectKind = Literal["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE"]
+ObjectKind = Literal[
+    "TABLE",
+    "VIEW",
+    "MATERIALIZED_VIEW",
+    "PROCEDURE",
+    "FUNCTION",
+    "PACKAGE",
+    "TRIGGER",
+    "SEQUENCE",
+]
 OBJECT_KINDS: tuple[ObjectKind, ...] = (
     "TABLE",
     "VIEW",
@@ -53,6 +62,14 @@ OBJECT_KINDS: tuple[ObjectKind, ...] = (
     "FUNCTION",
     # R11-FP03: an Oracle package is its own kind, never a function in disguise.
     "PACKAGE",
+    # R11-FP01: a trigger is its own kind for the same reason -- it is not
+    # called but fires, on a table, for an event, at a time -- and a sequence is
+    # its own kind because it holds no rows and is read by somebody else's
+    # default expression. Both are selectable so that a deployment that does not
+    # want them reads NOT_SELECTED (below) rather than UNSUPPORTED: "the scan
+    # excluded it" is neither a missing feature nor a missing concept.
+    "TRIGGER",
+    "SEQUENCE",
 )
 #: Review 2026-09-16 §5 widened this from SUPPORTED / UNSUPPORTED /
 #: NOT_APPLICABLE onto the shared vocabulary in `aida.capability_states`, so a
@@ -86,6 +103,31 @@ _CONTAINER_GRANT_TYPES = frozenset({"SCHEMA", "DATABASE", "CATALOG"})
 _ROUTINE_GRANT_TYPES = frozenset({"PROCEDURE", "FUNCTION", "PACKAGE"})
 #: Engines with a package object. Everywhere else a PACKAGE kind is NOT_APPLICABLE.
 _PACKAGE_CONNECTORS = frozenset({"oracle"})
+
+# R11-FP01: which engines have a trigger or a sequence *at all*, which is the
+# fact that separates NOT_APPLICABLE from UNSUPPORTED. Engine knowledge, not a
+# fact in this repository, and deliberately listed as the negative set: a
+# connector absent from both sets has the concept and the flag answers whether
+# the adapter reads it, so a seventh adapter arrives as UNSUPPORTED (honest)
+# rather than as NOT_APPLICABLE (a claim about its SQL nobody made).
+#
+# Each engine gets its own answer rather than one blanket verdict:
+#   Snowflake -- has sequences (CREATE SEQUENCE, INFORMATION_SCHEMA.SEQUENCES);
+#                has no trigger object of any kind. Streams plus tasks are how
+#                the same intent is expressed, and they are neither triggers nor
+#                in scope here.
+#   BigQuery   -- has neither. There is no CREATE TRIGGER, and nothing named a
+#                sequence: GENERATE_UUID / GENERATE_ARRAY are functions.
+#   Databricks -- has neither. Unity Catalog has no trigger and no sequence;
+#                Delta's generated columns and `IDENTITY` are column properties
+#                of the table, not a separate object with its own increment.
+_NO_TRIGGER_KIND = frozenset({"snowflake", "bigquery", "databricks"})
+_NO_SEQUENCE_KIND = frozenset({"bigquery", "databricks"})
+#: Engines whose trigger carries its own text (Oracle `ALL_TRIGGERS.TRIGGER_BODY`,
+#: SQL Server `sys.sql_modules.definition`). PostgreSQL's does not: the action is
+#: `EXECUTE FUNCTION f()` and `f`'s body arrives on the routine axis, so its
+#: definition facet is PARTIAL rather than SUPPORTED -- see `kind_capabilities`.
+_TRIGGER_BODY_CONNECTORS = frozenset({"oracle", "sqlserver"})
 
 
 class DiscoverySelection(BaseModel):
@@ -232,6 +274,14 @@ def apply_selection(
                 excluded["SCHEMA"] += 1
                 excluded.update(table_kind(table.object_type) for table in schema.tables)
                 excluded.update(routine_kind(routine.routine_type) for routine in schema.routines)
+                # R11-FP01: counted by kind like everything else, so an
+                # excluded schema's triggers and sequences appear in the
+                # receipt's excluded tally rather than vanishing. Counted
+                # through `update` rather than `+= len(...)`: on a `Counter`
+                # the latter creates a zero entry, and a kind reported as
+                # "0 excluded" reads as a kind that was looked at.
+                excluded.update({"TRIGGER": len(schema.triggers)} if schema.triggers else {})
+                excluded.update({"SEQUENCE": len(schema.sequences)} if schema.sequences else {})
                 continue
             tables = []
             for table in schema.tables:
@@ -247,11 +297,35 @@ def apply_selection(
                     routines.append(routine)
                 else:
                     excluded[kind] += 1
+            # R11-FP01: a trigger is scoped by its own qualified name, not by
+            # its firing table's. A selection that excludes `staging.*` must
+            # stop maintaining the triggers *in* `staging`; whether one of them
+            # fires on an in-scope table is a lineage fact, and using it as the
+            # scope would silently re-admit an object the operator excluded.
+            triggers = []
+            for trigger in schema.triggers:
+                if selection.object_in_scope(schema.name, trigger.name, "TRIGGER"):
+                    triggers.append(trigger)
+                else:
+                    excluded["TRIGGER"] += 1
+            sequences = []
+            for sequence in schema.sequences:
+                if selection.object_in_scope(schema.name, sequence.name, "SEQUENCE"):
+                    sequences.append(sequence)
+                else:
+                    excluded["SEQUENCE"] += 1
             grants = tuple(
                 grant for grant in schema.grants if _grant_in_scope(selection, schema.name, grant)
             )
             kept_schemas.append(
-                replace(schema, tables=tuple(tables), routines=tuple(routines), grants=grants)
+                replace(
+                    schema,
+                    tables=tuple(tables),
+                    routines=tuple(routines),
+                    triggers=tuple(triggers),
+                    sequences=tuple(sequences),
+                    grants=grants,
+                )
             )
         kept_catalogs.append(replace(catalog, schemas=tuple(kept_schemas)))
     return SelectionOutcome(tuple(kept_catalogs), dict(excluded))
@@ -346,6 +420,27 @@ def kind_capabilities(
             inventory=routines if connector_type in _PACKAGE_CONNECTORS else "NOT_APPLICABLE",
             definition=routines if connector_type in _PACKAGE_CONNECTORS else "NOT_APPLICABLE",
         ),
+        # R11-FP01. `triggers` and `sequences` are the adapter's own flags, so
+        # INV-9 holds -- neither is True until the adapter reads the kind -- and
+        # the engine's own lack of the concept outranks the flag, because an
+        # engine without triggers does not gain one by an adapter implementing
+        # the axis.
+        ObjectKindCapabilityRead(
+            kind="TRIGGER",
+            inventory=_trigger_inventory(connector_type, capabilities),
+            definition=_trigger_definition(connector_type, capabilities),
+        ),
+        ObjectKindCapabilityRead(
+            kind="SEQUENCE",
+            inventory=_sequence_inventory(connector_type, capabilities),
+            # A sequence has no defining text to retrieve. Its declaration --
+            # increment, bounds, cache, cycle -- *is* the inventory, exactly as
+            # a base relation's columns are the fact rather than a stored
+            # `CREATE TABLE` statement, so this facet is NOT_APPLICABLE on every
+            # engine (including the two that have no sequence at all, where it
+            # is NOT_APPLICABLE for the stronger reason).
+            definition="NOT_APPLICABLE",
+        ),
     ]
     if selection is None or not selection.object_kinds:
         return reads
@@ -353,6 +448,37 @@ def kind_capabilities(
     return [
         _masked_for_selection(read) if read.kind in excluded else read for read in reads
     ]
+
+
+def _trigger_inventory(connector_type: str, capabilities: dict[str, Any]) -> CapabilityStatus:
+    if connector_type in _NO_TRIGGER_KIND:
+        return "NOT_APPLICABLE"
+    return "SUPPORTED" if capabilities.get("triggers") else "UNSUPPORTED"
+
+
+def _trigger_definition(connector_type: str, capabilities: dict[str, Any]) -> CapabilityStatus:
+    """Whether the trigger's own code text is retrievable, per engine.
+
+    PostgreSQL is `PARTIAL` and it is not a shortfall in the adapter: a
+    PostgreSQL trigger has no body. `CREATE TRIGGER ... EXECUTE FUNCTION f()`
+    names a function whose body is captured on the routine axis, and the adapter
+    records that name (`DiscoveredTrigger.action_routine`) so the code is
+    reachable -- but there is no trigger-local text to return, and the `WHEN`
+    condition is not captured either. `PARTIAL` is what the vocabulary has for
+    "implemented, and known to return only part of the fact"; `SUPPORTED` would
+    claim a body that does not exist and `UNSUPPORTED` would blame the adapter
+    for the engine's design.
+    """
+    inventory = _trigger_inventory(connector_type, capabilities)
+    if inventory != "SUPPORTED":
+        return inventory
+    return "SUPPORTED" if connector_type in _TRIGGER_BODY_CONNECTORS else "PARTIAL"
+
+
+def _sequence_inventory(connector_type: str, capabilities: dict[str, Any]) -> CapabilityStatus:
+    if connector_type in _NO_SEQUENCE_KIND:
+        return "NOT_APPLICABLE"
+    return "SUPPORTED" if capabilities.get("sequences") else "UNSUPPORTED"
 
 
 def _masked_for_selection(read: ObjectKindCapabilityRead) -> ObjectKindCapabilityRead:
@@ -416,8 +542,38 @@ async def preview_selection(
             .limit(PREVIEW_OBJECT_LIMIT + 1)
         )
     ).all()
+    # R11-FP01: the two new kinds are counted from their own tables, with
+    # `organization_id` restated beside `datasource_id` in each predicate
+    # (INV-5) exactly as the envelope queries above do. A source scanned before
+    # these axes existed returns nothing here, which reads as 0 in scope and 0
+    # excluded -- the honest answer for a kind the last scan never looked for.
+    triggers = (
+        await session.execute(
+            select(MetadataSchema.name, MetadataTrigger.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTrigger.schema_id)
+            .where(
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.status == "ACTIVE",
+            )
+            .limit(PREVIEW_OBJECT_LIMIT + 1)
+        )
+    ).all()
+    sequences = (
+        await session.execute(
+            select(MetadataSchema.name, MetadataSequence.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataSequence.schema_id)
+            .where(
+                MetadataSequence.organization_id == datasource.organization_id,
+                MetadataSequence.datasource_id == datasource.id,
+                MetadataSequence.status == "ACTIVE",
+            )
+            .limit(PREVIEW_OBJECT_LIMIT + 1)
+        )
+    ).all()
     truncated = any(
-        len(rows) > PREVIEW_OBJECT_LIMIT for rows in (schema_names, tables, routines)
+        len(rows) > PREVIEW_OBJECT_LIMIT
+        for rows in (schema_names, tables, routines, triggers, sequences)
     )
 
     matched_patterns: set[str] = set()
@@ -442,6 +598,10 @@ async def preview_selection(
     ] + [
         (schema, name, routine_kind(routine_type))
         for schema, name, routine_type in routines[:PREVIEW_OBJECT_LIMIT]
+    ] + [
+        (schema, name, "TRIGGER") for schema, name in triggers[:PREVIEW_OBJECT_LIMIT]
+    ] + [
+        (schema, name, "SEQUENCE") for schema, name in sequences[:PREVIEW_OBJECT_LIMIT]
     ]
     for schema, name, kind in objects:
         qualified = f"{schema}.{name}".lower()

@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -13,10 +14,15 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.documentation_worklist import (
     DocumentationWorklistEntry,
+    RoutineDocumentationWorklistEntry,
     WorklistRanking,
     rank_documentation_worklist,
+    rank_routine_documentation_worklist,
 )
-from aida.documentation_worklist_signals import gather_documentation_worklist_signals
+from aida.documentation_worklist_signals import (
+    gather_documentation_worklist_signals,
+    gather_routine_documentation_worklist_signals,
+)
 from aida.events import record_audit, record_outbox
 from aida.glossary_link_candidates import (
     build_glossary_link_proposal,
@@ -2020,12 +2026,56 @@ class DocumentationWorklistEntryRead(ApiModel):
     missing: list[str]
 
 
+class RoutineDocumentationWorklistEntryRead(ApiModel):
+    """R11-FP08: the routine-shaped row of the same worklist.
+
+    A separate model rather than optional fields bolted onto the table row: a
+    routine has no `table_id`, no FK in-degree and no five-field checklist, so
+    half of that row would be null and the other half would mean something else.
+    Every term of the score is on the row for the reason the table row carries
+    its own -- "why is this first" has to be answerable from the response.
+    """
+
+    subject_type: Literal["ROUTINE"] = "ROUTINE"
+    routine_id: UUID
+    routine_name: str
+    schema_name: str
+    datasource_name: str
+    routine_type: str
+    rank: int
+    #: Borrowed usage: the query/consumption volume of the tables this routine
+    #: writes. A routine's own traffic is always zero -- see
+    #: `documentation_worklist.py`'s note on why the terms are not the table's.
+    written_table_query_volume: int
+    writes_table_count: int
+    reads_table_count: int
+    description_is_proposed: bool
+    score: float
+    usage: float
+    impact: float
+    deficit: float
+
+
 @router.get(
     "/organizations/{organization_id}/stewardship/documentation-worklist",
     response_model=Page,
 )
 async def list_documentation_worklist(
     organization_id: UUID,
+    subject_type: Literal["TABLE", "ROUTINE"] = Query(
+        default="TABLE",
+        description=(
+            "Which kind of undescribed object to rank. `TABLE` (default) is AT-5's "
+            "original list, unchanged. `ROUTINE` (R11-FP08) ranks undescribed stored "
+            "procedures and functions by the value of what they write: a routine has "
+            "no traffic of its own, so its usage is the combined query/consumption "
+            "volume of the tables ACTIVE procedure lineage says it writes, and its "
+            "impact is that write reach rather than a foreign-key in-degree. The two "
+            "are ranked separately, and their score ceilings taken separately, "
+            "because one usage figure is measured and the other borrowed -- see "
+            "`documentation_worklist.py`. `PACKAGE` is out of scope (R11-FP03)."
+        ),
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     include_zero_volume: bool = Query(
@@ -2053,6 +2103,16 @@ async def list_documentation_worklist(
 ) -> Page:
     """AT-5: undocumented/under-described tables ranked by real query volume.
 
+    R11-FP08: `subject_type=ROUTINE` ranks undescribed stored procedures and
+    functions on the same surface. Not a second endpoint, because it is the same
+    concern -- a documentation deficit computed fresh from real signals, with no
+    routing state -- and not a second *row shape on one list*, because the two
+    kinds' usage figures are not on one scale: a table's is measured, a routine's
+    is borrowed from the tables its ACTIVE lineage says it writes. One discriminated
+    parameter is how this platform already extends a description surface to routines
+    (`description_withdrawal_api`'s `subject_type`), and `TABLE` remains the default
+    so every existing caller sees exactly what it saw before.
+
     Distinct from RT-6's `usage_popularity` retrieval signal
     (`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate
     tables for an agent's next SQL statement*; this ranks *tables a human
@@ -2069,6 +2129,32 @@ async def list_documentation_worklist(
     reports the full ranked-candidate count, independent of `limit`.
     """
     enforce_organization(context, organization_id)
+    if subject_type == "ROUTINE":
+        # R11-FP08. `ranking` is deliberately not forwarded: `query_volume` exists to
+        # restore AT-5's pre-SW-1 table order, and a routine list has no pre-adoption
+        # order to restore -- see `rank_routine_documentation_worklist`.
+        routine_signals = await gather_routine_documentation_worklist_signals(
+            session,
+            organization_id=organization_id,
+            scan_limit=settings.agent_retrieval_scan_limit,
+            include_zero_volume=include_zero_volume,
+        )
+        routine_entries: list[RoutineDocumentationWorklistEntry]
+        routine_entries, routine_total = rank_routine_documentation_worklist(
+            routine_signals,
+            limit=limit,
+            offset=offset,
+            include_zero_volume=include_zero_volume,
+        )
+        return Page(
+            items=[
+                RoutineDocumentationWorklistEntryRead.model_validate(entry)
+                for entry in routine_entries
+            ],
+            limit=limit,
+            offset=offset,
+            total=routine_total,
+        )
     signals = await gather_documentation_worklist_signals(
         session,
         organization_id=organization_id,

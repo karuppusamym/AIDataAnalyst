@@ -6,7 +6,12 @@ bodies were withheld from our principal" read the same in those counters. The re
 apart:
 
 * per object kind, how many the source returned into scope, how many the selection left
-  out (R11-FP01), and how many exist that this run's login may not see at all;
+  out (R11-FP01), and how many exist that this run's login may not see at all. On a pull run
+  `excluded` counts objects the selection kept Atlas from reading; on a pushed snapshot it
+  counts objects a sender delivered that the selection kept Atlas from persisting
+  (`batch_ingestion`). Both are "the source offered it and this scan did not take it in",
+  which is why they share the counter, and `mode` plus the `canonical_push` capability say
+  which path a reader is looking at;
 * per facet, whether the connector collects it at all (`SUPPORTED` / `UNSUPPORTED`, from its own
   capability flags, which INV-9 keeps honest) and, for code -- view definitions and routine
   bodies -- how much arrived, how much was withheld, and how much was truncated;
@@ -34,6 +39,24 @@ from aida.capability_states import (
     reason_code,
 )
 from aida.connectors.base import DiscoveredCatalog
+from aida.connectors.discovery import (
+    DISCOVERY_FACETS,
+    FACET_CONSTRAINTS,
+    FACET_GRANTS,
+    FACET_INDEXES,
+    FACET_OBJECT_COMMENTS,
+    FACET_PARTITIONS,
+)
+from aida.connectors.discovery import (
+    # Re-exported deliberately (the `as` form is what strict mypy reads as an
+    # explicit re-export). `batch_ingestion` imports nothing else from
+    # `connectors` -- a pushed snapshot has no connector -- so the receipt is the
+    # right place for the push path to read the facet vocabulary from.
+    FACET_SEQUENCES as FACET_SEQUENCES,
+)
+from aida.connectors.discovery import (
+    FACET_TRIGGERS as FACET_TRIGGERS,
+)
 from aida.discovery_selection import routine_kind, table_kind
 
 #: 2 (R11-FP02) adds `invisible` to every kind. A reader of a version-1 receipt finds the
@@ -50,13 +73,81 @@ STREAM_IN_PROGRESS: Final = "IN_PROGRESS"
 STREAM_COMPLETE: Final = "COMPLETE"
 STREAM_INTERRUPTED: Final = "INTERRUPTED"
 
+# ---------------------------------------------------------------------------
+# R11-FP01: triggers and sequences are facets in their own right.
+#
+# The question the peer who added the two axes left open -- "`DISCOVERY_FACETS`
+# will want `triggers`/`sequences` entries once the receipt grows those facets"
+# -- is answered yes, on this module's own definition of a facet: a facet is one
+# read of the source, against its own catalog relation, that can succeed, be
+# refused or be unimplemented independently of every other read. A trigger read
+# is `pg_trigger` / `sys.triggers` / `ALL_TRIGGERS`; a sequence read is
+# `pg_sequence` / `sys.sequences` / `ALL_SEQUENCES`. Neither is a by-product of
+# the roster, and each already has its own flag on `ConnectorCapabilities`.
+#
+# Two facets and not one, for the reason `ConnectorCapabilities.triggers` /
+# `.sequences` are two flags: Snowflake has sequences and no trigger object at
+# all, so a single `native_objects` facet could only be honest on the engines
+# that happen to have both, and Snowflake would read UNSUPPORTED for a kind it
+# does support.
+#
+# **They are flagged facets, not code facets.** `view_definitions` and
+# `routine_bodies` publish `captured` / `withheld` / `truncated`, and a trigger
+# body looks superficially like it wants the same three counters. It must not
+# have them: on PostgreSQL a trigger has *no body to give* -- the action is
+# `EXECUTE FUNCTION f()` and `f`'s body arrives on the routine axis -- so every
+# PostgreSQL trigger would count as `withheld`, the facet would read UNAVAILABLE
+# on every scan, and an administrator would go hunting for a grant that does not
+# exist. That per-engine truth is already published where it can be told
+# properly, as `PARTIAL` with its reason on the engine capability matrix
+# (`discovery_selection._trigger_definition_state`), and per trigger as
+# `MetadataTrigger.availability` + `unavailable_reason`. A sequence has no text
+# at all and so could never have had them.
+#
+# **What is deliberately not done here.** `DISCOVERY_FACETS` itself lives in
+# `connectors.discovery`, which is another session's this cycle, so no connector
+# can yet attribute a *refused* trigger read to this facet -- `FacetReadScope.record`
+# validates against that frozenset. The receipt accepts the outcome
+# (`RECEIPT_FACETS` below) and the reconciliation honours it
+# (`workflows.activities._FACET_AXES`), so the protection is in place the moment
+# that one entry lands. Until it does, a refused trigger read raises out of
+# `discover_streaming` and fails the run -- which reconciles nothing and so
+# retires nothing, the same safe direction `RETIREMENT_BEARING_FACETS` relies on.
+# (Both now come from `connectors.discovery` with the other eight -- see the
+# import at the top of this module. They were declared here while that module
+# belonged to another session; the entry it was waiting for has landed.)
+
 #: Facets a connector reports by capability flag alone -- Atlas counts no withheld share for them.
-_FLAGGED_FACETS: Final = ("constraints", "indexes", "partitions", "grants", "object_comments")
+#: Taken from `connectors.discovery`'s own names so the facet a connector attributes a refused
+#: read to and the facet this receipt publishes can never drift apart; for these five the facet
+#: name is also the capability flag's name, which is what `support()` below relies on. The two
+#: R11-FP01 names above obey that same rule -- they *are* the `ConnectorCapabilities` field
+#: names -- which is what lets them join this tuple rather than needing a branch of their own.
+_FLAGGED_FACETS: Final = (
+    FACET_CONSTRAINTS,
+    FACET_INDEXES,
+    FACET_PARTITIONS,
+    FACET_GRANTS,
+    FACET_OBJECT_COMMENTS,
+    FACET_TRIGGERS,
+    FACET_SEQUENCES,
+)
 
 #: R11-FP02 / review 2026-09-16 §5: the facet name under which a run records how much of the
 #: source its own login could not see at all. Not a capability flag -- there is no
 #: `visibility` on `ConnectorCapabilities` -- so it is named here, beside the facet it reports.
+#: Not in `DISCOVERY_FACETS` either: it is a question *about* the catalog rather than one of the
+#: reads that builds it, and no connector attributes a facet read to it.
 FACET_OBJECT_VISIBILITY: Final = "object_visibility"
+
+#: Every facet name this receipt will record an outcome for. A refusal recorded against a name
+#: outside this set would be accepted and then quietly dropped by `as_json`, which is the one
+#: failure mode a receipt must not have, so `record_facet_outcome` refuses it instead.
+RECEIPT_FACETS: Final[frozenset[str]] = DISCOVERY_FACETS | {
+    FACET_OBJECT_VISIBILITY,
+    FACET_TRIGGERS,
+    FACET_SEQUENCES,
+}
 
 
 def _count_code(counter: Counter[str], text: str | None, truncated: bool) -> None:
@@ -113,6 +204,32 @@ class DiscoveryReceipt:
                 for routine in schema.routines:
                     self.discovered[routine_kind(routine.routine_type)] += 1
                     _count_code(self.routine_bodies, routine.body_sql, routine.truncated)
+                # R11-FP01: counted here for the same reason every other kind is, and
+                # the reason is sharper for these two. `apply_selection` already counts
+                # an excluded TRIGGER and SEQUENCE, so without this a scoped run
+                # published `{"discovered": 0, "excluded": 7}` for a kind it had read
+                # seven of -- and a reader has no way to tell that from a source with
+                # none. A count is the only thing that tells "we looked and there were
+                # none" apart from "nobody counted"; `excluded` has no such ambiguity
+                # because it is only ever written by the pass that does the excluding.
+                #
+                # No code counters go with them: see FACET_TRIGGERS above for why a
+                # trigger body's captured/withheld share would misreport PostgreSQL.
+                #
+                # Counted through `update` rather than `+= len(...)`, exactly as
+                # `discovery_selection.apply_selection` counts the excluded side: on a
+                # `Counter` the latter materialises a zero entry, so every Snowflake and
+                # BigQuery run -- engines with no trigger object at all -- would publish
+                # a `TRIGGER` row reading `discovered: 0`. An absent kind row is how this
+                # receipt already says "nothing to report" (a source with no
+                # materialized views has no MATERIALIZED_VIEW row), and
+                # `facets.triggers.support` is what tells "this adapter does not collect
+                # them" apart from "it collected none" -- INV-9's absent-rather-than-empty
+                # rule, in the one place a zero would have quietly broken it.
+                self.discovered.update({"TRIGGER": len(schema.triggers)} if schema.triggers else {})
+                self.discovered.update(
+                    {"SEQUENCE": len(schema.sequences)} if schema.sequences else {}
+                )
 
     def record_reconciliation(self, *, deprecated: int, retained_out_of_scope: int) -> None:
         self.reconciliation = {
@@ -139,7 +256,13 @@ class DiscoveryReceipt:
         `reason` passes through the closed vocabulary in `aida.capability_states`, so a
         driver's own message can never land in a receipt (INV-6): a code cannot carry a
         value, and a source's explanation of what it withheld routinely quotes one.
+
+        `facet` is checked against `RECEIPT_FACETS` because the alternative is the one
+        thing worse than an unrecorded refusal: a recorded one that `as_json` never
+        publishes, so the run looks clean and the facet looks empty.
         """
+        if facet not in RECEIPT_FACETS:
+            raise ValueError(f"unknown receipt facet: {facet}")
         self.facet_outcomes[facet] = (state.value, reason_code(reason))
 
     def as_json(self, state: str) -> dict[str, Any]:

@@ -58,6 +58,7 @@ overlapping spellings are the same English words, not the same vocabulary.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Final
 
@@ -305,6 +306,17 @@ def is_permission_refusal(exc: BaseException | None) -> bool:
             value = getattr(current, attribute, None)
             if isinstance(value, str) and value in PRIVILEGE_SQLSTATES:
                 return True
+        # databricks-sql reports a real SQLSTATE, but in a mapping rather than
+        # an attribute (`exc.context["sqlState"]`), so reading attributes alone
+        # classified a Databricks refusal as UNAVAILABLE while the driver had
+        # said 42501 plainly. Still SQLSTATE and nothing else -- only the place
+        # this driver puts it.
+        context = getattr(current, "context", None)
+        if isinstance(context, Mapping):
+            for key in ("sqlState", "sqlstate"):
+                value = context.get(key)
+                if isinstance(value, str) and value in PRIVILEGE_SQLSTATES:
+                    return True
         nxt = getattr(current, "orig", None)
         if not isinstance(nxt, BaseException):
             nxt = current.__cause__ or current.__context__

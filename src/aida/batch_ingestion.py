@@ -11,10 +11,13 @@ from aida.change_signal_models import MetadataChangeSignal
 from aida.config import get_settings
 from aida.db import session_factory
 from aida.discovery_receipt import (
+    FACET_SEQUENCES,
+    FACET_TRIGGERS,
     STREAM_COMPLETE,
     STREAM_INTERRUPTED,
     DiscoveryReceipt,
 )
+from aida.discovery_selection import DiscoverySelection, apply_selection, selection_for
 from aida.events import record_audit, record_outbox
 from aida.ingestion import (
     EnvelopeScope,
@@ -34,7 +37,10 @@ from aida.workflows.activities import (
     SnapshotScope,
     deprecate_missing_snapshot,
     detect_rename_candidates,
+    out_of_scope_existing,
     persist_discovery_snapshot,
+    union_envelope_scopes,
+    union_snapshot_scopes,
 )
 
 
@@ -175,6 +181,54 @@ async def _preflight_batch(batch_id: UUID) -> list[UUID]:
     return chunk_ids
 
 
+# ---------------------------------------------------------------------------
+# R11-FP01/R11-FP02: the discovery selection, on the push path.
+#
+# A pull scan filters what it *asks for*; a push has already been sent. Until
+# this change the push path applied no selection at all, so a pushed snapshot
+# was in scope by definition: an operator who had carefully scoped a pull scan
+# got none of that scoping when the same estate arrived through the ingestion
+# API, and the receipt's `selection_fingerprint: null` was honest about it and
+# no help whatsoever.
+#
+# Three contracts were available for an out-of-scope object that has already
+# been delivered. **Ignore** is the one implemented here: it is not persisted,
+# it is counted, and it is reported back to the sender.
+#
+# * *Reject the batch.* Refused. A selection is Atlas-side configuration a
+#   sender cannot see, so failing a delivery over it turns an operator's
+#   scoping edit into a broken nightly feed, and takes the in-scope objects
+#   delivered in the same batch down with it. The pull path does not fail a
+#   scan for narrowing a selection either.
+# * *Record it as out-of-scope and keep it.* Refused. Persisting means Atlas
+#   holds, serves, profiles and describes an object the operator excluded. The
+#   selection would govern one path and not the other -- exactly the split
+#   R11-FP01 exists to close -- and every downstream reader would need a
+#   second rule for objects that are present but excluded. A scope that has
+#   to be re-applied at read time is a second authority, which is what the
+#   receipt and the fingerprint exist to avoid.
+# * *Ignore it.* Chosen. One selection means one thing on both paths: the same
+#   patterns, the same fingerprint on the receipt, the same per-kind counts.
+#   Its cost is real -- the sender delivered bytes Atlas did not keep -- and is
+#   paid by saying so rather than by keeping the data. The receipt carries the
+#   fingerprint and `excluded` per kind; the batch manifest carries
+#   `excluded_objects` in its own change counts, which the batch read model
+#   already serves, so the sender sees it by polling the batch it submitted;
+#   and the completion audit record carries it with the fingerprint that
+#   governed it. Nothing is dropped silently.
+#
+# **Nothing is retired for being out of scope.** This is where the push path
+# has to match the pull path rather than contradict it. A FULL pull run counts
+# existing out-of-scope objects as *seen* before it reconciles
+# (`workflows.activities.out_of_scope_existing`, and the hazard note in
+# `discovery_selection`: "narrowing a selection stops maintaining an object; it
+# never retires one"). A FULL push batch now does the same, through the same
+# function. Without it, narrowing a selection and then pushing a snapshot would
+# tombstone every object the new scope leaves out -- worse than the bug being
+# fixed here, because it would delete rather than ignore.
+# ---------------------------------------------------------------------------
+
+
 async def _process_chunk(
     batch_id: UUID,
     chunk_id: UUID,
@@ -183,6 +237,8 @@ async def _process_chunk(
     *,
     record_changes: bool,
     receipt: DiscoveryReceipt | None = None,
+    selection: DiscoverySelection | None = None,
+    excluded_by_kind: dict[str, int] | None = None,
 ) -> None:
     async with session_factory() as session:
         batch = await session.get(MetadataIngestionBatch, batch_id)
@@ -198,6 +254,15 @@ async def _process_chunk(
         body = MetadataIngestionChunkCreate.model_validate(chunk.payload)
         prior_status = chunk.status
         discovery = catalogs_to_discovery(body.catalogs)
+        # R11-FP01: applied before anything is persisted, exactly where the pull path
+        # applies it to each streamed batch. Both passes over a chunk apply it: the reapply
+        # pass below re-persists the same objects to resolve cross-chunk keys, and a pass
+        # that skipped the selection would put back precisely what this one left out.
+        excluded: dict[str, int] = {}
+        if selection is not None and selection.restricted:
+            outcome = apply_selection(discovery, selection)
+            discovery = outcome.catalogs
+            excluded = outcome.excluded
         counts = await persist_discovery_snapshot(
             session,
             run,
@@ -227,9 +292,13 @@ async def _process_chunk(
         if record_changes and prior_status != "PROCESSED":
             # R11-FP02: counted once, on the pass that records changes. The reapply
             # pass below re-persists the same objects to resolve cross-chunk keys, and
-            # counting them again would report a source twice its size.
+            # counting them again would report a source twice its size. What the
+            # selection left out is counted on the same pass, for the same reason.
             if receipt is not None:
-                receipt.observe_batch(discovery, {})
+                receipt.observe_batch(discovery, excluded)
+            if excluded_by_kind is not None:
+                for kind, count in excluded.items():
+                    excluded_by_kind[kind] = excluded_by_kind.get(kind, 0) + count
             chunk.change_counts = {
                 key: counts[key] + extension_counts[key]
                 for key in ("created_objects", "changed_objects")
@@ -245,6 +314,8 @@ async def _complete_batch(
     scope: SnapshotScope,
     envelope_scope: EnvelopeScope,
     receipt: DiscoveryReceipt | None = None,
+    selection: DiscoverySelection | None = None,
+    excluded_by_kind: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     async with session_factory() as session:
         batch = await session.scalar(
@@ -268,9 +339,30 @@ async def _complete_batch(
         created = sum(int(chunk.change_counts.get("created_objects", 0)) for chunk in chunks)
         changed = sum(int(chunk.change_counts.get("changed_objects", 0)) for chunk in chunks)
         deprecated = 0
+        retained_out_of_scope = 0
         if batch.snapshot_type == "FULL":
+            # R11-FP01: an existing object the selection does not cover is reconciled as
+            # seen, never retired as missing -- the same rule, through the same function,
+            # as a FULL pull run (`workflows.activities.discover_datasource`). A pushed
+            # snapshot is authoritative about what exists *within the scope Atlas
+            # maintains*, and says nothing at all about what lies outside it.
+            reconcile_snapshot, reconcile_envelope = scope, envelope_scope
+            if selection is not None and selection.restricted:
+                kept_snapshot, kept_envelope = await out_of_scope_existing(
+                    session, datasource, selection
+                )
+                # R11-FP01: tables and routines only, unlike the pull path, which counts
+                # the two native kinds here as well. Nothing on this path can retire a
+                # trigger or a sequence (see the reconciliation call below), so counting
+                # them as "retained" would claim a protection that was never in play and
+                # inflate the number an operator reads as "what narrowing the scope cost".
+                retained_out_of_scope = len(kept_snapshot.table_ids) + len(
+                    kept_envelope.routine_ids
+                )
+                reconcile_snapshot = union_snapshot_scopes(scope, kept_snapshot)
+                reconcile_envelope = union_envelope_scopes(envelope_scope, kept_envelope)
             deprecation_result = await deprecate_missing_snapshot(
-                session, datasource, scope, analysis_run_id=run.id
+                session, datasource, reconcile_snapshot, analysis_run_id=run.id
             )
             deprecated = deprecation_result.total
             # Gated on the declared version as well as on FULL: a 1.0 batch is
@@ -278,7 +370,23 @@ async def _complete_batch(
             # 1.1 axes, so reconciling its silence would retire them.
             if batch.envelope_version != "1.0":
                 deprecated += await deprecate_missing_envelope_extensions(
-                    session, datasource, envelope_scope, analysis_run_id=run.id
+                    session,
+                    datasource,
+                    reconcile_envelope,
+                    analysis_run_id=run.id,
+                    # R11-FP01: neither native axis is reconciled from a pushed
+                    # snapshot, and this is the empty set on purpose rather than by
+                    # omission. **No envelope version has a field for a trigger or a
+                    # sequence** -- `MetadataIngestionChunkCreate` cannot carry one, so
+                    # `catalogs_to_discovery` builds every schema with empty tuples for
+                    # both. A FULL 1.1 batch is therefore exactly as silent about
+                    # triggers as a 1.0 batch is about views, and the gate one line up
+                    # is the precedent: reconciling that silence would tombstone every
+                    # trigger and sequence a pull scan discovered, on the first nightly
+                    # push after this feature shipped. The receipt says UNSUPPORTED for
+                    # both facets on this path (see `process_metadata_ingestion_batch`),
+                    # so the omission is published rather than inferred.
+                    native_axes_read=frozenset(),
                 )
             # CT-4: same-run tombstone-plus-create pairing, exactly as in the
             # unchunked pull path (`persist_discovery_snapshot`) -- `scope` here
@@ -297,7 +405,9 @@ async def _complete_batch(
             # R11-FP02: only a FULL batch reconciles what it did not see, exactly as
             # only a FULL pull run does; an INCREMENTAL one says so and retires nothing.
             if batch.snapshot_type == "FULL":
-                receipt.record_reconciliation(deprecated=deprecated, retained_out_of_scope=0)
+                receipt.record_reconciliation(
+                    deprecated=deprecated, retained_out_of_scope=retained_out_of_scope
+                )
             change_rows = await session.execute(
                 select(MetadataChangeSignal.signal_type, func.count())
                 .where(MetadataChangeSignal.analysis_run_id == run.id)
@@ -323,9 +433,20 @@ async def _complete_batch(
         run.created_objects = created
         run.changed_objects = changed
         run.deprecated_objects = deprecated
+        # R11-FP01: the run records which selection governed this delivery and how much of
+        # what arrived it kept out, in the same two columns a pull run writes, so a reader
+        # of `AnalysisRunRead` cannot tell a scoped push from a scoped pull by accident.
+        selection_fingerprint = selection.fingerprint() if selection is not None else None
+        excluded_total = sum((excluded_by_kind or {}).values())
+        run.discovery_selection_fingerprint = selection_fingerprint
+        run.excluded_objects = excluded_total
         run.status = "COMPLETED"
         batch.object_counts = object_counts
-        batch.change_counts = change_counts
+        # The sender's copy. `change_counts` is a free-form object the batch read model
+        # already serves, so the producer that polls the batch it submitted can see that
+        # some of what it delivered was not kept -- which is the whole difference between
+        # ignoring an object and dropping it silently.
+        batch.change_counts = {**change_counts, "excluded_objects": excluded_total}
         batch.processed_chunks = len(chunks)
         batch.status = "COMPLETED"
         batch.completed_at = datetime.now(UTC)
@@ -348,6 +469,13 @@ async def _complete_batch(
             "snapshot_type": batch.snapshot_type,
             **object_counts,
             **change_counts,
+            # R11-FP01: attributable. The audit record names the scope that governed the
+            # delivery, how much of it was left out, and how much existing out-of-scope
+            # metadata was reconciled as seen rather than retired -- the same three facts
+            # the pull path's `metadata.discovery.complete` record carries.
+            "selection_fingerprint": selection_fingerprint,
+            "excluded_objects": excluded_total,
+            "retained_out_of_scope": retained_out_of_scope,
         }
         record_audit(
             session,
@@ -407,18 +535,37 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
             batch.status = "PROCESSING"
             batch.error_class = None
             batch.error_message = None
-            # R11-FP02: the same receipt a pulled run keeps, for a snapshot that was
-            # pushed. `selection_fingerprint` is None because this path applies no
-            # discovery selection -- it persists what the sender sent -- and `invisible`
-            # stays None because a sender cannot be asked what it left out: the receipt
-            # reports UNKNOWN rather than claiming nothing was held back.
+            # R11-FP01: the selection as it stood when this batch started processing, so an
+            # edit made while chunks are landing governs the next delivery rather than half
+            # of this one -- the same rule the pull path states for a run.
+            selection = selection_for(datasource)
+            # R11-FP02: the same receipt a pulled run keeps, for a snapshot that was pushed,
+            # and since R11-FP01 with the same selection fingerprint: a pushed snapshot now
+            # records which scope governed it instead of being in scope by definition.
+            # `invisible` stays None because a sender cannot be asked what it left out --
+            # the receipt reports UNKNOWN rather than claiming nothing was held back.
             receipt = DiscoveryReceipt(
                 mode=batch.snapshot_type,
-                selection_fingerprint=None,
+                selection_fingerprint=selection.fingerprint(),
                 capabilities={
                     **(datasource.capabilities or {}),
                     "canonical_push": True,
                     "chunked_ingestion": True,
+                    # R11-FP01: overridden to False, after the source's own flags, and
+                    # this override is the honest half of not persisting them here.
+                    # `datasource.capabilities` is a copy of the *connector's*
+                    # capability dict (`ingestion.default_capabilities`), so a
+                    # PostgreSQL source pushing a snapshot arrives carrying
+                    # `triggers: true` -- and the receipt would then publish
+                    # `triggers: SUPPORTED` with no TRIGGER kind row at all, which
+                    # reads as "this source has no triggers" when the truth is "this
+                    # transport cannot carry one". UNSUPPORTED is the word for a path
+                    # that does not collect the axis, which is exactly INV-9's
+                    # absent-rather-than-empty rule and exactly what the canonical push
+                    # envelope is. It becomes a real capability the day the envelope
+                    # grows the two axes, and not before.
+                    FACET_TRIGGERS: False,
+                    FACET_SEQUENCES: False,
                 },
             )
             if batch.analysis_run_id:
@@ -430,6 +577,7 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
         chunk_ids = await _preflight_batch(batch_uuid)
         scope = SnapshotScope()
         envelope_scope = EnvelopeScope()
+        excluded_by_kind: dict[str, int] = {}
         for index, chunk_id in enumerate(chunk_ids, start=1):
             # IN-2: cooperative checkpoint. An operator pause/cancel issued via
             # the console flips the manifest status; the worker observes it here,
@@ -446,6 +594,8 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
                 envelope_scope,
                 record_changes=True,
                 receipt=receipt,
+                selection=selection,
+                excluded_by_kind=excluded_by_kind,
             )
             if activity.in_activity():
                 activity.heartbeat(
@@ -462,9 +612,16 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
             if control is not None:
                 raise BatchControlSignal(control)
             await _process_chunk(
-                batch_uuid, chunk_id, scope, envelope_scope, record_changes=False
+                batch_uuid,
+                chunk_id,
+                scope,
+                envelope_scope,
+                record_changes=False,
+                selection=selection,
             )
-        return await _complete_batch(batch_uuid, scope, envelope_scope, receipt)
+        return await _complete_batch(
+            batch_uuid, scope, envelope_scope, receipt, selection, excluded_by_kind
+        )
     except BatchControlSignal as signal:
         # The operator already owns the batch's status (PAUSED/CANCELLED); return
         # cleanly so the workflow completes without retrying and without marking

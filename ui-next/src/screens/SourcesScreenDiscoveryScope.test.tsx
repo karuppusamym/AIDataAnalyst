@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type {
   DataSourceRead,
@@ -19,7 +19,10 @@ import { ApiError } from "../lib/api";
         re-reads the scope from the server afterwards.
      3. Unticking every kind is refused before the request -- the server reads
         an empty kind list as "everything", the opposite of what was meant.
-     4. "Not supported" and "n/a" stay two different answers.
+     4. The four ways of not being read stay four different answers, and each
+        says which it is (review 2026-09-16 §5).
+     5. Every kind the server accepts is tickable, and a stored one survives
+        being edited -- the PUT replaces the whole document (R11-FP01).
 --------------------------------------------------------------------------- */
 
 type ReadArgs = [string, (AbortSignal | undefined)?];
@@ -61,6 +64,11 @@ const UNRESTRICTED: DiscoverySelectionRead = {
     { kind: "PROCEDURE", inventory: "SUPPORTED", definition: "UNSUPPORTED" },
     { kind: "FUNCTION", inventory: "SUPPORTED", definition: "SUPPORTED" },
     { kind: "PACKAGE", inventory: "NOT_APPLICABLE", definition: "NOT_APPLICABLE" },
+    // R11-FP01. SQL Server has both kinds; a trigger there carries its own text
+    // (`sys.sql_modules`), and a sequence's declaration IS its inventory, so its
+    // definition facet is NOT_APPLICABLE on every engine.
+    { kind: "TRIGGER", inventory: "SUPPORTED", definition: "SUPPORTED" },
+    { kind: "SEQUENCE", inventory: "SUPPORTED", definition: "NOT_APPLICABLE" },
   ],
   capability_source: "CONNECTOR_DEFAULT",
 };
@@ -97,7 +105,12 @@ async function openAndNarrow() {
 }
 
 const NARROWED_BODY: DiscoverySelection = {
-  object_kinds: ["TABLE", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE"],
+  // Every kind but the one unticked -- including TRIGGER and SEQUENCE, which the form must
+  // send rather than drop (R11-FP01): a kind the editor does not name would be silently
+  // removed from the stored scope by the act of editing something else.
+  object_kinds: [
+    "TABLE", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "SEQUENCE",
+  ],
   include_schemas: [],
   exclude_schemas: ["scratch"],
   include_objects: ["retail.*", "retial.*"],
@@ -113,17 +126,81 @@ beforeEach(() => {
 });
 
 describe("DiscoveryScope — what the server reports", () => {
-  it("reads the scope and keeps 'not supported' apart from 'n/a' per kind", async () => {
+  it("reads the scope and keeps 'not supported' apart from 'no such object' per kind", async () => {
     await mount();
 
     expect(fetchDiscoverySelection).toHaveBeenCalledWith("ds_mssql", expect.anything());
     const table = screen.getByRole("table", { name: "What this connector discovers" });
     const materialized = screen.getByRole("row", { name: /Materialized views/ });
-    expect(materialized).toHaveTextContent("n/a");
+    expect(materialized).toHaveTextContent("no such object");
     expect(screen.getByRole("row", { name: /Procedures/ })).toHaveTextContent("not supported");
     expect(table).toBeInTheDocument();
     expect(screen.getByText(/declared defaults/)).toBeInTheDocument();
     expect(screen.getByText("none (unrestricted)")).toBeInTheDocument();
+  });
+
+  /* -------------------------------------------------------------------------
+     R11-FP01 / review 2026-09-16 §5 -- the four ways of not being read.
+
+     The server tells NOT_APPLICABLE, UNSUPPORTED, NOT_SELECTED and PARTIAL
+     apart on purpose, because each has a different answer to "should I ask
+     again": nobody can grant an engine a trigger it does not have, nobody can
+     tick a box to make an adapter read one, and a kind this scope excluded is
+     one tick away. Rendering all four as the same dash is how a reader stops
+     asking, so each has to read differently AND say what it means.
+  ------------------------------------------------------------------------- */
+
+  it("tells inapplicable, unsupported, unselected and partial apart, and says what each means", async () => {
+    fetchDiscoverySelection.mockResolvedValue({
+      ...UNRESTRICTED,
+      // A PostgreSQL source whose scope has been narrowed to tables and views.
+      selection: { object_kinds: ["TABLE", "VIEW"] },
+      restricted: true,
+      fingerprint: "ff00ee11dd22cc",
+      capabilities: [
+        { kind: "TABLE", inventory: "SUPPORTED", definition: "NOT_APPLICABLE" },
+        { kind: "VIEW", inventory: "SUPPORTED", definition: "SUPPORTED" },
+        // Excluded by the selection: the adapter would read it.
+        { kind: "PROCEDURE", inventory: "NOT_SELECTED", definition: "NOT_SELECTED" },
+        // The engine has no such object, and no selection changes that.
+        { kind: "PACKAGE", inventory: "NOT_APPLICABLE", definition: "NOT_APPLICABLE" },
+        // Has a body only by way of the function it fires.
+        { kind: "TRIGGER", inventory: "NOT_SELECTED", definition: "PARTIAL" },
+        { kind: "SEQUENCE", inventory: "UNSUPPORTED", definition: "NOT_APPLICABLE" },
+      ],
+    });
+    const { DiscoveryScope } = await import("./SourcesScreenDiscoveryScope");
+    render(<DiscoveryScope source={SOURCE} mayEdit />);
+    await screen.findByRole("table", { name: "What this connector discovers" });
+
+    // Four distinct answers, four distinct words.
+    expect(screen.getByRole("row", { name: /Procedures/ })).toHaveTextContent("left out by this scope");
+    expect(screen.getByRole("row", { name: /Packages/ })).toHaveTextContent("no such object");
+    expect(screen.getByRole("row", { name: /Triggers/ })).toHaveTextContent("in part");
+    expect(screen.getByRole("row", { name: /Sequences/ })).toHaveTextContent("not supported");
+
+    // …and each says which of the four it is, so a reader knows whether to ask again.
+    expect(screen.getByText(/nothing of that kind, so there is nothing to grant/)).toBeInTheDocument();
+    expect(screen.getByText(/this connector does not read it yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Ticking the kind in the editor below/)).toBeInTheDocument();
+    expect(screen.getByText(/only some of the fact/)).toBeInTheDocument();
+  });
+
+  it("explains only the answers the table actually carries", async () => {
+    fetchDiscoverySelection.mockResolvedValue({
+      ...UNRESTRICTED,
+      capabilities: [
+        { kind: "TABLE", inventory: "SUPPORTED", definition: "NOT_APPLICABLE" },
+        { kind: "VIEW", inventory: "SUPPORTED", definition: "SUPPORTED" },
+      ],
+    });
+    await mount();
+
+    expect(screen.getByText(/nothing of that kind, so there is nothing to grant/)).toBeInTheDocument();
+    // Nothing here is unsupported, unselected or partial, so nothing says so.
+    expect(screen.queryByText(/does not read it yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Ticking the kind in the editor/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/only some of the fact/)).not.toBeInTheDocument();
   });
 
   it("renders a read failure as an error with a retry", async () => {
@@ -202,8 +279,12 @@ describe("DiscoveryScope — saving", () => {
   it("refuses a scope with no kind ticked before any request", async () => {
     await mount();
     fireEvent.click(screen.getByRole("button", { name: "Edit discovery scope" }));
-    for (const label of ["Tables", "Views", "Materialized views", "Procedures", "Functions", "Packages"]) {
-      fireEvent.click(screen.getByLabelText(label));
+    // Every box in the fieldset, not a hand-kept list of labels: the kinds the server
+    // accepts have grown twice now (PACKAGE, then TRIGGER and SEQUENCE), and a list that
+    // misses one leaves the form valid and stops testing the refusal at all.
+    const kinds = screen.getByRole("group", { name: "Object kinds" });
+    for (const box of within(kinds).getAllByRole("checkbox")) {
+      fireEvent.click(box);
     }
 
     fireEvent.click(screen.getByRole("button", { name: "Save discovery scope" }));
@@ -233,6 +314,27 @@ describe("scope form helpers", () => {
     expect(everything.kinds).toEqual([...SCOPE_KINDS]);
     expect(scopeFormToBody(everything).object_kinds).toEqual([]);
     expect(validateScopeForm({ ...everything, kinds: [] })).toMatch(/at least one object kind/);
+  });
+
+  it("keeps a stored trigger or sequence in the scope rather than dropping it on edit (R11-FP01)", async () => {
+    const { scopeFormToBody, scopeToForm } = await import("./SourcesScreenDiscoveryScope");
+    const stored = scopeToForm({ object_kinds: ["TABLE", "TRIGGER", "SEQUENCE"] });
+    expect(stored.kinds).toEqual(["TABLE", "TRIGGER", "SEQUENCE"]);
+    // Seeding the form from the stored scope and sending it straight back has to be a
+    // no-op. A kind the editor does not name is dropped by the PUT, which replaces the
+    // whole document -- so narrowing schemas would silently stop discovering triggers.
+    expect(scopeFormToBody(stored).object_kinds).toEqual(["TABLE", "TRIGGER", "SEQUENCE"]);
+  });
+
+  it("offers a tick box for every kind the server accepts", async () => {
+    const { SCOPE_KINDS } = await import("./SourcesScreenDiscoveryScope");
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Edit discovery scope" }));
+
+    expect(SCOPE_KINDS).toContain("TRIGGER");
+    expect(SCOPE_KINDS).toContain("SEQUENCE");
+    expect(screen.getByLabelText("Triggers")).toBeChecked();
+    expect(screen.getByLabelText("Sequences")).toBeChecked();
   });
 
   it("splits patterns on lines and commas and removes case-insensitive duplicates", async () => {

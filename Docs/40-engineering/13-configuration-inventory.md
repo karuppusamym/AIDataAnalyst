@@ -320,7 +320,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `dq_itsm_webhook_token` | `SecretStr | None` | `None` | 2 |
 | `dq_itsm_webhook_timeout_seconds` | `int` | `10` | 1 |
 | `agent_retrieval_limit` | `int` | `25` | 6 |
-| `agent_retrieval_scan_limit` | `int` | `5000` | 7 |
+| `agent_retrieval_scan_limit` | `int` | `5000` | 8 |
 | `agent_tool_match_threshold` | `float` | `0.55` | 1 |
 | `agent_query_memory_enabled` | `bool` | `False` | 1 |
 | `agent_query_memory_min_similarity` | `float` | `0.6` | 2 |

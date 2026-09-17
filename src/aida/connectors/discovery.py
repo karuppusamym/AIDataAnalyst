@@ -11,12 +11,24 @@ helpers rather than through `build_table_map_from_column_rows`, because every
 source exposes them in a different relation and several sources expose only some
 of them. A connector that does not implement an axis simply does not call its
 helper, and the axis is then absent rather than empty (INV-9).
+
+Because every facet arrives through its own relation, every facet can be refused
+on its own. `read_facet` below is where a connector says which facet one query
+belongs to, so a refusal costs that facet instead of the run (R11-FP02).
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Final
 
+from aida.capability_states import (
+    REASON_FACET_QUERY_FAILED,
+    REASON_SOURCE_DENIED_READ,
+    CapabilityState,
+    is_permission_refusal,
+)
 from aida.connectors.base import (
     DiscoveredCatalog,
     DiscoveredColumn,
@@ -48,6 +60,211 @@ TableMap = dict[str, dict[str, _MutableTable]]
 #: Schema-keyed routine and grant inventories, as `assemble_catalog` takes them.
 RoutineMap = Mapping[str, Sequence[DiscoveredRoutine]]
 GrantMap = Mapping[str, Sequence[DiscoveredGrant]]
+
+
+# ---------------------------------------------------------------------------
+# One facet's read, and what a refusal of it costs.
+#
+# R11-FP02 (with R11-FP01's selection reasoning). Discovery does not read a
+# source once: it reads a roster, then constraints, then indexes, then
+# comments, grants, view definitions and routine bodies -- each a separate
+# statement against a separate catalog relation, each refusable on its own.
+# Until this region existed a single refusal propagated out of
+# `Connector.discover_streaming` and failed the entire run, so a login missing
+# SELECT on one catalog relation cost a whole scan and left a receipt that said
+# INTERRUPTED without saying why. One missing grant is one facet's worth of
+# ignorance, not a lost estate.
+#
+# `read_facet` is the adoption point: a connector wraps one facet's own query
+# in it and names the facet. A refusal is then recorded against that facet in
+# the ambient `FacetReadScope`, the read yields no rows, and the run carries on
+# with the facets this login does hold. The discovery activity drains the scope
+# onto the receipt (`discovery_receipt.record_facet_outcome`), where
+# PERMISSION_DENIED is a different answer from UNSUPPORTED ("this adapter does
+# not collect it") and from a zero count ("the source has none").
+#
+# **Why the scope is ambient instead of an argument.** The connector contract
+# (`connectors.base.Connector.discover_streaming`) takes no receipt and returns
+# only catalogs, so reporting a per-facet outcome through it would change the
+# signature every connector implements and every fake in the suite. A scope
+# bound to the run for the duration of one discovery lets a connector adopt
+# this one query at a time, with no interface change anywhere.
+# ---------------------------------------------------------------------------
+
+#: The facets a *connector read* can be attributed to. `discovery_receipt`
+#: publishes these same names (plus `object_visibility`, which is not a read of
+#: the catalog but a question about it), and validates against this set, so a
+#: misspelled facet is a loud error here rather than a refusal that silently
+#: never reaches a receipt.
+FACET_INVENTORY: Final = "inventory"
+FACET_VIEW_DEFINITIONS: Final = "view_definitions"
+FACET_ROUTINE_BODIES: Final = "routine_bodies"
+FACET_CONSTRAINTS: Final = "constraints"
+FACET_INDEXES: Final = "indexes"
+FACET_PARTITIONS: Final = "partitions"
+FACET_GRANTS: Final = "grants"
+FACET_OBJECT_COMMENTS: Final = "object_comments"
+#: R11-FP01: the two native-object axes. Defined here rather than in
+#: `discovery_receipt` -- where they started -- so the facet a connector
+#: attributes a refused read to and the facet the receipt publishes are the
+#: same string by construction, which is what the other eight already get.
+FACET_TRIGGERS: Final = "triggers"
+FACET_SEQUENCES: Final = "sequences"
+
+DISCOVERY_FACETS: Final[frozenset[str]] = frozenset(
+    {
+        FACET_INVENTORY,
+        FACET_VIEW_DEFINITIONS,
+        FACET_ROUTINE_BODIES,
+        FACET_CONSTRAINTS,
+        FACET_INDEXES,
+        FACET_PARTITIONS,
+        FACET_GRANTS,
+        FACET_OBJECT_COMMENTS,
+        FACET_TRIGGERS,
+        FACET_SEQUENCES,
+    }
+)
+
+#: Facets a refusal may not be absorbed for, because absorbing it would make
+#: the run claim an estate it never saw.
+#:
+#: The inventory *is* the run: a refused roster yields no objects at all, and a
+#: FULL run that completed with no objects reconciles every table it already
+#: held as missing. `discovery_selection`'s own hazard note draws the line --
+#: an object that was not *looked for* is not missing -- and a refused read is
+#: on the not-looked-for side of it, which is why the outcome is still recorded
+#: here before the exception goes on to fail the run. An INTERRUPTED receipt
+#: naming the refusal is the honest outcome; a COMPLETE one over nothing is
+#: not.
+RETIREMENT_BEARING_FACETS: Final[frozenset[str]] = frozenset({FACET_INVENTORY})
+
+
+def classify_read_failure(exc: BaseException) -> tuple[CapabilityState, str]:
+    """One failed facet read as a state and a reason code -- never as a message.
+
+    INV-6 is the whole reason this is a function and not an f-string. A
+    driver's permission error is spelled differently by every engine and
+    routinely quotes the statement or the row that provoked it, so nothing
+    derived from `str(exc)` may be persisted (the same rule
+    `workflows.activities` applies to `analysis_run.error_message`, and the
+    same one `connectors.base.FACET_REASON_CODES` gives for its own set). The
+    judgement is made from the driver's own SQLSTATE field
+    (`capability_states.is_permission_refusal`) and what is written down is
+    this pair of closed-vocabulary codes.
+
+    A driver that reports no SQLSTATE -- Oracle's `ORA-01031`, SQL Server's
+    error 229 -- classifies as UNAVAILABLE. That under-claims, which is the
+    direction INV-9 requires: "we did not get it" is honest, while "the source
+    refused you" would be a guess at the source's intent that sends an
+    administrator off to grant access that may change nothing.
+    """
+    if is_permission_refusal(exc):
+        return CapabilityState.PERMISSION_DENIED, REASON_SOURCE_DENIED_READ
+    return CapabilityState.UNAVAILABLE, REASON_FACET_QUERY_FAILED
+
+
+@dataclass(slots=True)
+class FacetReadScope:
+    """Per-facet read outcomes collected while one discovery run is in flight.
+
+    A hand-off buffer, not the record: the receipt is the accumulator, and the
+    activity drains this after every batch it commits so a facet refused during
+    batch three is named by the receipt that batch three writes.
+    """
+
+    outcomes: dict[str, tuple[CapabilityState, str]] = field(default_factory=dict)
+
+    def record(self, facet: str, *, state: CapabilityState, reason: str) -> None:
+        """Record one facet's outcome; the first outcome for a facet wins.
+
+        A refused facet is typically refused once per batch, and the first
+        refusal is the one that describes the whole run's access to it. Keeping
+        the first also means a later, vaguer failure of the same facet cannot
+        downgrade a recorded PERMISSION_DENIED to UNAVAILABLE.
+        """
+        if facet not in DISCOVERY_FACETS:
+            raise ValueError(f"unknown discovery facet: {facet}")
+        self.outcomes.setdefault(facet, (state, reason))
+
+    def drain(self) -> dict[str, tuple[CapabilityState, str]]:
+        """Take what is recorded and clear it, so each outcome is written once."""
+        drained = dict(self.outcomes)
+        self.outcomes.clear()
+        return drained
+
+
+_ACTIVE_SCOPE: Final[ContextVar[FacetReadScope | None]] = ContextVar(
+    "aida_discovery_facet_read_scope", default=None
+)
+
+
+@contextmanager
+def facet_read_scope(scope: FacetReadScope | None = None) -> Iterator[FacetReadScope]:
+    """Bind a `FacetReadScope` for the duration of one discovery run.
+
+    Set by the caller that owns the receipt (`workflows.activities`). Outside
+    such a scope `read_facet` absorbs nothing at all: a refusal nobody is
+    recording must keep failing loudly rather than turn into an empty facet
+    that no receipt explains.
+
+    `scope` may be passed in so a caller can keep a reference that outlives the
+    block. The discovery activity does exactly that: the refusal that *ends* a
+    run is recorded while the exception is still on its way out, and the
+    activity's own failure path -- which runs after this block has exited --
+    needs it to write an INTERRUPTED receipt that says what it was refused.
+    """
+    scope = scope if scope is not None else FacetReadScope()
+    token = _ACTIVE_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _ACTIVE_SCOPE.reset(token)
+
+
+def active_facet_read_scope() -> FacetReadScope | None:
+    """The scope the current run is recording into, if any."""
+    return _ACTIVE_SCOPE.get()
+
+
+async def read_facet[T](facet: str, read: Awaitable[Sequence[T]]) -> Sequence[T]:
+    """Await one facet's own query; a refusal of it costs that facet, not the run.
+
+    Returns the rows the source gave. If the source *refuses* the read, the
+    outcome is recorded against `facet` and no rows are returned, so the
+    connector's own `apply_*` / `build_*` call for that facet simply has
+    nothing to attach -- and the receipt, not the absence, is what says why.
+    Downstream the two are never confused: the facet reads PERMISSION_DENIED
+    rather than SUPPORTED-with-nothing (`discovery_receipt.as_json`), and the
+    discovery activity keeps the objects of a refused facet out of the
+    reconciliation pass (`workflows.activities.refused_facet_existing`), so a
+    refused grants read never tombstones the grants an earlier run captured.
+
+    Three deliberate non-absorptions:
+
+    * **Anything that is not a refusal re-raises.** A timeout or a dropped
+      connection is not one facet's problem: the next read will fail too, and
+      absorbing it would let a FULL run reconcile against a source that had
+      stopped answering. Only a refusal is per-facet and deterministic --
+      asking again with the same login gets the same no.
+    * **A refusal of a retirement-bearing facet re-raises** after being
+      recorded (`RETIREMENT_BEARING_FACETS`).
+    * **Outside a `facet_read_scope` nothing is absorbed**, because nothing
+      would record it.
+    """
+    if facet not in DISCOVERY_FACETS:
+        raise ValueError(f"unknown discovery facet: {facet}")
+    try:
+        return await read
+    except Exception as exc:
+        state, reason = classify_read_failure(exc)
+        scope = _ACTIVE_SCOPE.get()
+        if scope is None:
+            raise
+        scope.record(facet, state=state, reason=reason)
+        if state is not CapabilityState.PERMISSION_DENIED or facet in RETIREMENT_BEARING_FACETS:
+            raise
+        return ()
 
 
 def build_table_map_from_column_rows(column_rows: Sequence[Mapping[str, Any]]) -> TableMap:

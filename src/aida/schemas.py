@@ -2032,6 +2032,127 @@ class RoutineDescriptionRead(ApiModel):
     description_is_source_comment: bool
 
 
+class RoutineDefinitionVersionRead(ApiModel):
+    """R11-FP03: one captured definition of a routine, described without its text.
+
+    `metadata_routine_definition_version` appends a row per first capture and
+    per moved definition. This is that row as a reader may see it -- and the
+    body is **not** in it, under any state, for any role. A routine body is the
+    largest indirect-injection surface in the estate, so the stored text is
+    released only through the screening gate, and this read does not release it
+    even when the gate would allow it: what the gate decides here is whether the
+    digest and the derived footprint below may be reported at all.
+
+    The fields exist because a steward's real question is "what changed", and
+    each one is a piece of that answer that costs no source text.
+    """
+
+    version_id: UUID
+    #: 1 for the first capture, ascending. Carried explicitly so the order is
+    #: never inferred from position in a page.
+    version_number: int
+    captured_at: datetime
+    #: The discovery run that captured it, when one is still recorded.
+    analysis_run_id: UUID | None
+    availability: str
+    #: What the source said when it would not give the body. Free text from the
+    #: connector, as `mcp_server`'s transformation detail already reports it.
+    unavailable_reason: str | None
+    truncated: bool
+    #: `LITERAL_ONLY` (only literals moved, so the stored value-free text did
+    #: not), `STRUCTURAL` (anything else), or null for the first capture, which
+    #: changed nothing because there was nothing to change.
+    change_class: str | None
+    redaction_status: str
+    screening_status: str
+    #: SHA-256 of the *stored, value-free* text -- never of the literal-bearing
+    #: original. Null only when no value-free text was stored: a *quarantined*
+    #: version still reports one, exactly as R11-FP12's coverage reports a
+    #: digest beside a false `definition_available`. Screening keeps prompt-risky
+    #: text out of a model's context, and a digest is not text; withholding it
+    #: would also withhold the one fact a steward can act on, that the
+    #: definition moved.
+    definition_digest: str | None
+    #: The preceding version's digest, when this page has one. Reported as the
+    #: pair rather than as a "changed" flag so the reader can check the change
+    #: class against it: LITERAL_ONLY with two different digests is a
+    #: contradiction, and a flag would have hidden it.
+    previous_definition_digest: str | None
+    #: Always false. Present so that "the body was not served" is a stated fact
+    #: in the payload rather than something a client infers from an absent key.
+    body_released: bool
+    #: `column_description_model.WITHHELD`, when the stored text may not be
+    #: read. The row is never dropped: omitting it would let a reader infer
+    #: something about the data from a fact about their own entitlement.
+    withheld_marker: str | None
+    #: Which refusal, in `routine_lineage_edges.RoutineNotEligibleError`'s
+    #: vocabulary -- the same gate's own codes. "The source refused the body"
+    #: and "screening quarantined it" are different things to do next.
+    withheld_reason_code: str | None
+    #: How the two table sets below were arrived at for *this* version:
+    #: COMPUTED, COMPUTED_NO_BASELINE, UNCHANGED_LITERALS_ONLY, WITHHELD,
+    #: UNAVAILABLE or NOT_COMPUTED. Said rather than left to be inferred from
+    #: empty lists, because "reads nothing" and "was not derived" are different
+    #: answers to "should I ask again".
+    footprint_state: str
+    #: Whether the parse of this version's text accounted for every statement.
+    #: Null when no footprint was derived -- never false, which would read as
+    #: "we looked and it did not parse".
+    parse_completed: bool | None
+    #: The distinct `procedure_lineage.UnparsedReason` prefixes only. The
+    #: per-statement suffixes are withheld: they can carry a callee name or a
+    #: parse-error message quoting a value (INV-6).
+    unparsed_reason_codes: list[str]
+    #: What this version's own statements read and write: resolved table names,
+    #: no routine-local or result-set placeholders, and no descent into called
+    #: routines.
+    reads_table_names: list[str]
+    writes_table_names: list[str]
+    #: The diff against the preceding version -- the answer the surface exists
+    #: for. "This procedure started writing a second table on 12 September" is
+    #: `writes_added` on the version captured that day.
+    reads_added: list[str]
+    reads_removed: list[str]
+    writes_added: list[str]
+    writes_removed: list[str]
+
+
+class RoutineDefinitionHistoryRead(ApiModel):
+    """R11-FP03: one routine's captured definitions, newest first.
+
+    An empty `versions` with a nonzero `total` means the page is past the end;
+    an empty `versions` with `total` zero means this routine has no captured
+    definition at all -- an Oracle package member, whose body belongs to its
+    package, is the ordinary case. Neither is ever answered with an invented
+    version 1.
+    """
+
+    routine_id: UUID
+    routine_qualified_name: str
+    routine_type: str
+    signature: str
+    status: str
+    #: The dialect each version's stored text was parsed as, which is the
+    #: source's, not the version's: a footprint derived for one dialect is not
+    #: evidence about another.
+    dialect: str
+    #: How the per-version footprints were arrived at, as a code the client
+    #: renders into a sentence (the `observation_scope` rule: the server states
+    #: the fact, the reader's surface writes the words).
+    #: `REPARSED_STORED_DEFINITION` -- derived on read from each version's own
+    #: stored value-free text, written nowhere, and **not** the reviewed
+    #: `deep_procedure_lineage_edge` set, which is a measurement of the body as
+    #: last read rather than a history.
+    footprint_basis: str
+    #: Distinct stored texts one request will parse. A version past it reads
+    #: `NOT_COMPUTED`; narrowing the window brings it back.
+    footprint_parse_budget: int
+    versions: list[RoutineDefinitionVersionRead]
+    limit: int
+    offset: int
+    total: int
+
+
 class CoverageDimensionRead(ApiModel):
     covered: int
     total: int

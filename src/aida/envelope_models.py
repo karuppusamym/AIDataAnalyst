@@ -315,6 +315,174 @@ class MetadataRoutineParameter(Base, TimestampMixin):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class MetadataTrigger(Base, TimestampMixin):
+    """R11-FP01: one trigger, the table it fires on, and the code it runs.
+
+    Keyed on `(schema_id, table_name, name)` rather than `(schema_id, name)`,
+    because the three engines with triggers disagree about where a trigger name
+    is unique: PostgreSQL scopes it to the *table* (two tables in one schema may
+    both own `audit_trg`), while Oracle and SQL Server scope it to the schema.
+    The tighter engine decides the key -- a key of `(schema_id, name)` would
+    make two PostgreSQL triggers collide and soft-delete one of them on every
+    rescan, which is exactly the overload defect `MetadataRoutine.signature`
+    exists to prevent.
+
+    **The body is redacted, fingerprinted and screened exactly as a routine
+    body is.** A trigger body is SQL and SQL carries source values in its
+    literals (INV-6), and it reaches model context by the same paths a
+    procedure body does, so it is the same indirect-injection surface and gets
+    the same four columns. `availability` + the CHECK tying it to
+    `body_sql_redacted` carry the same three-state distinction
+    `MetadataViewDefinition`'s docstring tabulates, and there is a fourth state
+    here the routine axis does not have: PostgreSQL has *no trigger body at
+    all*. The action is `EXECUTE FUNCTION f()`, `f`'s own body arrives on the
+    routine axis, and `action_routine` below names it. That is UNAVAILABLE with
+    a reason, not a trigger that does nothing.
+
+    **`table_name` is the lineage fact this table exists for.** A trigger that
+    writes another table is a data path with no view definition, no call site
+    and no dbt model behind it, so to every other lineage surface the
+    destination changes by itself. The firing table is the half of that path
+    this pass captures; deriving the body's own reads and writes is recorded as
+    a declared gap on the engine capability matrix rather than half-built here.
+
+    `table_schema_name` is a name and not a foreign key to `metadata_table`, on
+    purpose: Oracle lets a trigger's owner differ from its table's, discovery
+    can be schema-scoped so the firing table may be out of scope entirely, and
+    a nullable FK that is usually NULL for a reason nobody records is worse than
+    a name a reader can resolve.
+    """
+
+    __tablename__ = "metadata_trigger"
+    __table_args__ = (
+        UniqueConstraint("schema_id", "table_name", "name"),
+        CheckConstraint(
+            "availability IN ('AVAILABLE', 'UNAVAILABLE')",
+            name="availability_state",
+        ),
+        CheckConstraint(
+            "(availability = 'AVAILABLE') = (body_sql_redacted IS NOT NULL)",
+            name="availability_matches_body",
+        ),
+        Index("ix_metadata_trigger_org_status", "organization_id", "status"),
+        Index("ix_metadata_trigger_firing_table", "datasource_id", "table_name"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The table whose modification fires this trigger.
+    table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The firing table's schema where the engine allows it to differ from the
+    #: trigger's own; NULL means the trigger's own schema.
+    table_schema_name: Mapped[str | None] = mapped_column(String(255))
+    #: BEFORE / AFTER / INSTEAD_OF / COMPOUND. Empty where the engine does not say.
+    timing: Mapped[str] = mapped_column(String(20), default="", nullable=False)
+    #: The DML events this trigger fires on, from the closed vocabulary
+    #: `connectors.base.TRIGGER_EVENTS`. A list rather than four booleans
+    #: because a compound Oracle trigger fires on an ordered set and the order
+    #: is part of what a reader is reading.
+    events: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    #: ROW or STATEMENT, where the engine distinguishes them.
+    orientation: Mapped[str | None] = mapped_column(String(20))
+    is_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    #: The qualified function this trigger runs where the engine keeps the code
+    #: outside the trigger (PostgreSQL `pg_trigger.tgfoid`); NULL on an engine
+    #: whose trigger carries its own body.
+    action_routine: Mapped[str | None] = mapped_column(String(511))
+    # See the note on MetadataRoutine.body_sql_redacted: the same redaction, the
+    # same fingerprint over the original, the same write-time screening.
+    body_sql_redacted: Mapped[str | None] = mapped_column(Text)
+    body_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    redaction_status: Mapped[str] = mapped_column(String(20), default="PARSED", nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
+    screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # See the note on `MetadataViewDefinition.screening_version`.
+    screening_version: Mapped[str | None] = mapped_column(String(100))
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    availability: Mapped[str] = mapped_column(String(20), default=AVAILABLE, nullable=False)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(500))
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MetadataSequence(Base, TimestampMixin):
+    """R11-FP01: one sequence generator, as its own declaration.
+
+    **What this table deliberately has no column for: the sequence's current
+    position.** Every engine exposes it (`pg_sequences.last_value`,
+    `ALL_SEQUENCES.LAST_NUMBER`, `sys.sequences.current_value`) and it is
+    *source data* -- the value the next insert will write into a customer's
+    row, changing on every insert. Persisting it would put a live business value
+    in the control plane, which INV-6 forbids, and would make this row stale the
+    moment it was written. It is not queried, not carried on
+    `connectors.base.DiscoveredSequence` and has no column here.
+
+    **No `availability` / `body` pair, unlike every other 1.1 axis.** A sequence
+    has no defining text to be refused: its declaration *is* its metadata, the
+    way a base relation's columns are the fact rather than a `CREATE TABLE`
+    statement. A sequence whose declaration the source withheld does not appear
+    at all, which is the same thing that happens to a table the source withheld,
+    and the run's invisible-object count is where that is reported.
+
+    Every numeric parameter is `String`. Oracle permits a 28-digit `MAXVALUE`
+    and PostgreSQL a `bigint` one; no single integer column is wide enough for
+    both, and a declaration is compared and displayed rather than used in
+    arithmetic. The `_bound` names are chosen over `min_value`/`max_value`
+    because these are limits in a `CREATE SEQUENCE` statement and a column
+    spelled like a row value invites precisely the confusion INV-6's naming
+    ratchet exists to catch.
+    """
+
+    __tablename__ = "metadata_sequence"
+    __table_args__ = (
+        UniqueConstraint("schema_id", "name"),
+        Index("ix_metadata_sequence_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    data_type: Mapped[str | None] = mapped_column(String(255))
+    start_with: Mapped[str | None] = mapped_column(String(64))
+    increment_by: Mapped[str | None] = mapped_column(String(64))
+    minimum_bound: Mapped[str | None] = mapped_column(String(64))
+    maximum_bound: Mapped[str | None] = mapped_column(String(64))
+    cache_size: Mapped[str | None] = mapped_column(String(64))
+    cycles: Mapped[bool | None] = mapped_column(Boolean)
+    #: The table and column whose default expression reads this sequence, where
+    #: the engine records the dependency (PostgreSQL `serial` / `IDENTITY`).
+    #: This is what makes a sequence part of the footprint rather than a loose
+    #: object: it says which column's values this generator produces. Names
+    #: rather than foreign keys, for the reason on
+    #: `MetadataTrigger.table_schema_name`.
+    owned_by_table: Mapped[str | None] = mapped_column(String(255))
+    owned_by_column: Mapped[str | None] = mapped_column(String(255))
+    source_description: Mapped[str | None] = mapped_column(Text)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class MetadataObjectDescription(Base, TimestampMixin):
     """A description the *source* carries, for an object with nowhere else to put it.
 

@@ -9,6 +9,13 @@ this module owns every query that feeds it. The endpoint
 (`stewardship_api.list_documentation_worklist`) and the agent both call
 `gather_documentation_worklist_signals`, so there is one answer to "what should
 be documented next", not one per consumer.
+
+R11-FP08 adds `gather_routine_documentation_worklist_signals` beside it, on the
+same division of labour: this module owns every query, the pure
+`documentation_worklist.rank_routine_documentation_worklist` owns the order. It
+spends no new scan budget -- it reuses the two table-volume aggregates above and
+turns them into a routine's ranking through the procedure lineage the platform
+already holds.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.catalog_read_model import (
@@ -28,10 +35,26 @@ from aida.catalog_read_model import (
     _withdrawn_documentation_table_ids,
 )
 from aida.consumption_lineage import get_consumption_by_resource_counts
-from aida.documentation_worklist import TableQuerySignal
+from aida.documentation_worklist import RoutineDocumentationSignal, TableQuerySignal
+from aida.envelope_models import (
+    MetadataRoutine,
+    RoutineDescriptionDraft,
+    RoutineDocumentation,
+    RoutineDocumentationVersion,
+)
 from aida.models import DataSource, MetadataSchema, MetadataTable, QueryExecution
+from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.quality_coupling import resolve_table_ids
 from aida.stewardship_worklist import enrich_tables
+
+#: The open-draft states `uq_routine_description_draft_open` allows exactly one
+#: of per routine. Named here rather than inlined so the worklist's notion of
+#: "a draft is already in flight" is the index's, not a second list.
+_OPEN_ROUTINE_DRAFT_STATUSES = ("DRAFT", "PENDING_APPROVAL")
+
+#: Refused by name wherever routines are consumed in this codebase; see
+#: `documentation_worklist.PACKAGE_NOT_RANKABLE`.
+_PACKAGE = "PACKAGE"
 
 # Mirrors GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT` bound: caps both (a) how
 # many tables the CX-4 consumption side contributes as ranking candidates,
@@ -277,6 +300,238 @@ async def gather_documentation_worklist_signals(
                 description_is_proposed=description_is_proposed,
                 downstream_count=deficit.downstream_count if deficit else 0,
                 missing=deficit.missing if deficit else (),
+            )
+        )
+    return signals
+
+
+# ---------------------------------------------------------------------------
+# R11-FP08: the same gather, for routines
+# ---------------------------------------------------------------------------
+
+
+async def _routine_lineage_reach(
+    session: AsyncSession, *, organization_id: UUID, routine_ids: list[UUID]
+) -> tuple[dict[UUID, set[UUID]], dict[UUID, set[UUID]]]:
+    """`(writes, reads)` table-id sets per routine, from ACTIVE lineage only.
+
+    The rule `retrieval.hybrid_retrieve` applies to the same edges, for the same
+    reason: an agent's PROPOSED edge is a proposal nobody has decided, so it must
+    not steer what a steward is told to document next any more than it steers an
+    answer. `is_intermediate` edges name a temp table, which is not a thing to
+    describe.
+    """
+    writes: dict[UUID, set[UUID]] = {}
+    reads: dict[UUID, set[UUID]] = {}
+    if not routine_ids:
+        return writes, reads
+    rows = await session.execute(
+        select(
+            DeepProcedureLineageEdge.routine_id,
+            DeepProcedureLineageEdge.source_table_id,
+            DeepProcedureLineageEdge.target_table_id,
+            DeepProcedureLineageEdge.is_write,
+        ).where(
+            DeepProcedureLineageEdge.organization_id == organization_id,
+            DeepProcedureLineageEdge.routine_id.in_(routine_ids),
+            DeepProcedureLineageEdge.review_status == "ACTIVE",
+            DeepProcedureLineageEdge.is_intermediate.is_(False),
+        )
+    )
+    for routine_id, source_table_id, target_table_id, is_write in rows.all():
+        if source_table_id is not None:
+            reads.setdefault(routine_id, set()).add(source_table_id)
+        if target_table_id is not None and is_write:
+            writes.setdefault(routine_id, set()).add(target_table_id)
+    return writes, reads
+
+
+async def _routine_documentation_state(
+    session: AsyncSession, *, organization_id: UUID, routine_ids: list[UUID]
+) -> dict[UUID, tuple[bool, bool]]:
+    """routine id -> (is_documented, description_is_proposed).
+
+    "Documented" is one APPROVED `RoutineDocumentationVersion` and nothing else --
+    `routine_description_service.current_routine_descriptions`' own rule, restated
+    here with the `organization_id`/`datasource_id` every worklist read carries
+    (INV-5) rather than re-derived into a second definition. Two consequences worth
+    stating: a `WITHDRAWN` version is not `APPROVED`, so retiring a description puts
+    the routine back on the worklist, which is the point of retiring it; and a
+    `SUPERSEDED` one is not `APPROVED` either, but its replacement is, so a
+    re-described routine stays off.
+
+    `description_is_proposed` is an open `RoutineDescriptionDraft` --
+    `_OPEN_ROUTINE_DRAFT_STATUSES`, the two states
+    `uq_routine_description_draft_open` allows exactly one of.
+    """
+    if not routine_ids:
+        return {}
+    described = set(
+        (
+            await session.scalars(
+                select(RoutineDocumentation.routine_id)
+                .join(
+                    RoutineDocumentationVersion,
+                    RoutineDocumentationVersion.documentation_id == RoutineDocumentation.id,
+                )
+                .where(
+                    RoutineDocumentation.routine_id.in_(routine_ids),
+                    RoutineDocumentation.organization_id == organization_id,
+                    RoutineDocumentationVersion.organization_id == organization_id,
+                    RoutineDocumentationVersion.status == "APPROVED",
+                )
+            )
+        ).all()
+    )
+    proposed = set(
+        (
+            await session.scalars(
+                select(RoutineDescriptionDraft.routine_id).where(
+                    RoutineDescriptionDraft.routine_id.in_(routine_ids),
+                    RoutineDescriptionDraft.organization_id == organization_id,
+                    RoutineDescriptionDraft.status.in_(_OPEN_ROUTINE_DRAFT_STATUSES),
+                )
+            )
+        ).all()
+    )
+    return {
+        routine_id: (routine_id in described, routine_id in proposed)
+        for routine_id in routine_ids
+    }
+
+
+async def gather_routine_documentation_worklist_signals(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    scan_limit: int,
+    include_zero_volume: bool,
+) -> list[RoutineDocumentationSignal]:
+    """Gather every DB-touching input `rank_routine_documentation_worklist` needs.
+
+    The candidate set is driven by real activity for the reason the table gather's
+    is, but the activity is a different one: a routine has no traffic of its own, so
+    the driver is "an ACTIVE, non-intermediate edge says this routine writes a table
+    that real queries or real MCP reads have touched". The table-volume maps are the
+    *same two* the table worklist spends its scan budget on
+    (`_query_execution_volume`, `_consumption_volume`), so nothing new is measured
+    here -- the lineage the platform already holds is what turns a table's traffic
+    into a routine's ranking.
+
+    `PACKAGE` is excluded in SQL: this is a discovery surface, so there are no
+    caller-supplied ids to refuse, and every other routine-consuming discovery path
+    in this codebase (`footprint_gaps`, `footprint_gap_detail`) excludes it the same
+    way. A package that reaches the pure ranker anyway is refused by name there
+    (`documentation_worklist.RoutineNotRankable`), so the exclusion is provable
+    rather than a silent skip.
+    """
+    datasources = (
+        await session.scalars(
+            select(DataSource).where(DataSource.organization_id == organization_id)
+        )
+    ).all()
+    execution_volume = await _query_execution_volume(
+        session, datasources=list(datasources), scan_limit=scan_limit
+    )
+    consumption_volume = await _consumption_volume(
+        session,
+        organization_id=organization_id,
+        limit=DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT,
+    )
+    volume_by_table: dict[UUID, int] = {}
+    for table_id in set(execution_volume) | set(consumption_volume):
+        volume_by_table[table_id] = (
+            execution_volume.get(table_id, (0, None))[0]
+            + consumption_volume.get(table_id, (0, None))[0]
+        )
+
+    candidate_ids: set[UUID] = set()
+    if volume_by_table:
+        candidate_ids = set(
+            (
+                await session.scalars(
+                    select(DeepProcedureLineageEdge.routine_id)
+                    .where(
+                        DeepProcedureLineageEdge.organization_id == organization_id,
+                        DeepProcedureLineageEdge.review_status == "ACTIVE",
+                        DeepProcedureLineageEdge.is_intermediate.is_(False),
+                        DeepProcedureLineageEdge.is_write.is_(True),
+                        DeepProcedureLineageEdge.target_table_id.in_(
+                            sorted(volume_by_table)
+                        ),
+                    )
+                    .distinct()
+                    .limit(DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT)
+                )
+            ).all()
+        )
+
+    if include_zero_volume:
+        zero_volume_filters: list[Any] = [
+            MetadataRoutine.organization_id == organization_id,
+            MetadataRoutine.status == "ACTIVE",
+            func.upper(MetadataRoutine.routine_type) != _PACKAGE,
+        ]
+        if candidate_ids:
+            zero_volume_filters.append(MetadataRoutine.id.notin_(candidate_ids))
+        candidate_ids |= set(
+            (
+                await session.scalars(
+                    select(MetadataRoutine.id)
+                    .where(*zero_volume_filters)
+                    .order_by(MetadataRoutine.id)
+                    .limit(DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT)
+                )
+            ).all()
+        )
+
+    if not candidate_ids:
+        return []
+
+    rows = (
+        await session.execute(
+            select(MetadataRoutine, MetadataSchema.name, DataSource.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+            .join(DataSource, DataSource.id == MetadataRoutine.datasource_id)
+            .where(
+                MetadataRoutine.organization_id == organization_id,
+                MetadataRoutine.id.in_(sorted(candidate_ids)),
+                MetadataRoutine.status == "ACTIVE",
+                func.upper(MetadataRoutine.routine_type) != _PACKAGE,
+            )
+        )
+    ).all()
+    routine_ids = [routine.id for routine, _schema_name, _datasource_name in rows]
+    writes, reads = await _routine_lineage_reach(
+        session, organization_id=organization_id, routine_ids=routine_ids
+    )
+    documentation_state = await _routine_documentation_state(
+        session, organization_id=organization_id, routine_ids=routine_ids
+    )
+
+    signals: list[RoutineDocumentationSignal] = []
+    for routine, schema_name, datasource_name in rows:
+        written = writes.get(routine.id, set())
+        is_documented, description_is_proposed = documentation_state.get(
+            routine.id, (False, False)
+        )
+        signals.append(
+            RoutineDocumentationSignal(
+                routine_id=routine.id,
+                routine_name=routine.name,
+                schema_name=schema_name,
+                datasource_name=datasource_name,
+                routine_type=routine.routine_type,
+                # Borrowed from the whole volume map, not the table worklist's
+                # candidate set: a *documented* hot table still makes whatever
+                # writes it worth describing.
+                written_table_query_volume=sum(
+                    volume_by_table.get(table_id, 0) for table_id in written
+                ),
+                writes_table_count=len(written),
+                reads_table_count=len(reads.get(routine.id, set())),
+                is_documented=is_documented,
+                description_is_proposed=description_is_proposed,
             )
         )
     return signals

@@ -44,6 +44,39 @@
     }
   },
   "mode": "OFFLINE_NO_PROVIDER",
+  "proposed_thresholds": {
+    "how_to_adopt": "Copy a `proposed_minimum` into the matching `thresholds.<name>.minimum`, then fill `sign_off.signed_off_by` and `sign_off.signed_off_at`. No code change is needed. Adopt them one at a time if you prefer -- a null minimum and a set one coexist fine.",
+    "not_proposed_and_why": "answer_table_pass_rate, answer_text_pass_rate and result_set_match_rate measured null -- meaning not measured, not zero. They need the live paid run. overall_case_pass_rate folds them in, so it is left alone too: proposing a number for a metric nothing has measured is exactly the failure this file warns about.",
+    "proposed": {
+      "answer_verdict_pass_rate": {
+        "case_count": 3,
+        "measured": 1.0,
+        "proposed_minimum": 1.0,
+        "rationale": "This metric folds both directions, and they are not symmetric: refusing something answerable is an annoyance, while answering something that should have been refused is a governance breach. Since one direction has no acceptable failure rate, the combined metric takes the stricter bar, and the corpus grows rather than the bar dropping."
+      },
+      "evidence_support_rate": {
+        "case_count": 5,
+        "measured": 1.0,
+        "proposed_minimum": 0.9,
+        "rationale": "The one genuinely probabilistic metric here: it measures retrieval, which the repository already treats as tolerance-bearing -- scripts/quality_benchmark.py gates its retrieval metrics at 5 points of drift rather than demanding an exact figure, for the reason R11-FP09 records, that an exact bar turns into a test of whether a provider was configured. 0.90 leaves room for one miss in ten while still failing a systematic regression."
+      },
+      "refusal_reason_code_pass_rate": {
+        "case_count": 3,
+        "measured": 1.0,
+        "proposed_minimum": 1.0,
+        "rationale": "No tolerance, because this is a safety control rather than a quality metric. The file's own note says a refusal for the wrong reason is not a correct refusal; a partial credit here would mean accepting that the platform sometimes declines for a reason it made up."
+      },
+      "unapproved_evidence_avoidance_rate": {
+        "case_count": 1,
+        "measured": 1.0,
+        "proposed_minimum": 1.0,
+        "rationale": "Standing on unapproved evidence is a governance failure, not a quality shortfall -- the whole point of the governed context product is that an answer stands only on what was approved. One case is thin cover for a 1.0 bar, so treat this as the metric most in need of more cases."
+      }
+    },
+    "proposed_by": "review-2026-09-16 follow-up cycle, at the user's request",
+    "status": "PROPOSED -- not signed off, and not enforced. Every `minimum` in `thresholds` is still null.",
+    "the_honest_caveat": "These are reasoned from what the offline mode measured, NOT copied from it -- the file's own warning against copying a measurement into a threshold is right. But the case counts are 1 to 5. A 1.0 over three cases is weak evidence for demanding 1.0 of a larger corpus, so the real limiter here is corpus size, not the numbers below. Growing the corpus should come before tightening any of them."
+  },
   "sign_off": {
     "note": "Who set the thresholds below, and when. Left null until the domain owner (tracker row R11-FP13: AI quality lead) signs them off.",
     "signed_off_at": null,

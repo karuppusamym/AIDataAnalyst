@@ -1,5 +1,5 @@
 {
-  "description": "R11-FP13 footprint-enrichment corpus: the same cases are run twice through the real retrieval path (GovernedRetriever.retrieve -> hybrid_retrieve_enhanced) -- once over scripts/quality_benchmark.py::seed_catalog as seeded, once after enrich_footprint adds a routine with reviewed lineage, a routine whose lineage is only an undecided proposal, and a published ontology concept mapped to a table. No question shares a word with its target table's name or source description, so the target is reachable only through the enrichment: before enrichment every reachability case should miss, after it every one should land within bound. `expect_absent` cases are gaps: their only path is lineage nobody approved, and retrieving the target would mean an unreviewed proposal steered an answer, so they pass only when the target stays unreached. Object keys are the builder's fixed slugs, never production data (ADR-0014).",
+  "description": "R11-FP13 footprint-enrichment corpus: the same cases are run twice through the real retrieval path (GovernedRetriever.retrieve -> hybrid_retrieve_enhanced) -- once over scripts/quality_benchmark.py::seed_catalog as seeded, once after enrich_footprint adds a routine with reviewed lineage, a routine whose lineage is only an undecided proposal, a published ontology concept mapped to a table, and (R11-FP08) one routine's APPROVED Atlas-authored description. `routine-found-by-approved-description` is the R11-FP08 case: its question shares no word with the routine's name or the source's comment, so the only path to the routine is the reviewed description a steward published -- the signal that makes a governed routine description something an agent can actually retrieve. Its rank is bounded (min_rank), never an exact seat: the F09/R11-FP09 calibration lesson was that an exact rank makes a case depend on whether an embedding provider happens to be configured. No question shares a word with its target table's name or source description, so the target is reachable only through the enrichment: before enrichment every reachability case should miss, after it every one should land within bound. `expect_absent` cases are gaps: their only path is lineage nobody approved, and retrieving the target would mean an unreviewed proposal steered an answer, so they pass only when the target stays unreached. Object keys are the builder's fixed slugs, never production data (ADR-0014).",
   "catalog": "core-warehouse",
   "cases": [
     {
@@ -29,6 +29,13 @@
       "expected_object_type": "TABLE",
       "expected_object_key": "fact_account_balances",
       "min_rank": 5
+    },
+    {
+      "id": "routine-found-by-approved-description",
+      "question": "cleared interbank drafts each night",
+      "expected_object_type": "ROUTINE",
+      "expected_object_key": "nightly_settlement_rollup",
+      "min_rank": 3
     },
     {
       "id": "gap-proposed-lineage-steers-nothing",

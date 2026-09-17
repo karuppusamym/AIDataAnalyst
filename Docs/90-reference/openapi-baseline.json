@@ -13182,11 +13182,13 @@
                 "MATERIALIZED_VIEW",
                 "PROCEDURE",
                 "FUNCTION",
-                "PACKAGE"
+                "PACKAGE",
+                "TRIGGER",
+                "SEQUENCE"
               ],
               "type": "string"
             },
-            "maxItems": 6,
+            "maxItems": 8,
             "title": "Object Kinds",
             "type": "array"
           }
@@ -20891,7 +20893,9 @@
               "MATERIALIZED_VIEW",
               "PROCEDURE",
               "FUNCTION",
-              "PACKAGE"
+              "PACKAGE",
+              "TRIGGER",
+              "SEQUENCE"
             ],
             "title": "Kind",
             "type": "string"
@@ -26572,6 +26576,290 @@
           "sufficient_sample"
         ],
         "title": "RiskTierDisagreementRateRead",
+        "type": "object"
+      },
+      "RoutineDefinitionHistoryRead": {
+        "additionalProperties": false,
+        "description": "R11-FP03: one routine's captured definitions, newest first.\n\nAn empty `versions` with a nonzero `total` means the page is past the end;\nan empty `versions` with `total` zero means this routine has no captured\ndefinition at all -- an Oracle package member, whose body belongs to its\npackage, is the ordinary case. Neither is ever answered with an invented\nversion 1.",
+        "properties": {
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "footprint_basis": {
+            "title": "Footprint Basis",
+            "type": "string"
+          },
+          "footprint_parse_budget": {
+            "title": "Footprint Parse Budget",
+            "type": "integer"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "routine_id": {
+            "format": "uuid",
+            "title": "Routine Id",
+            "type": "string"
+          },
+          "routine_qualified_name": {
+            "title": "Routine Qualified Name",
+            "type": "string"
+          },
+          "routine_type": {
+            "title": "Routine Type",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/RoutineDefinitionVersionRead"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "routine_id",
+          "routine_qualified_name",
+          "routine_type",
+          "signature",
+          "status",
+          "dialect",
+          "footprint_basis",
+          "footprint_parse_budget",
+          "versions",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "title": "RoutineDefinitionHistoryRead",
+        "type": "object"
+      },
+      "RoutineDefinitionVersionRead": {
+        "additionalProperties": false,
+        "description": "R11-FP03: one captured definition of a routine, described without its text.\n\n`metadata_routine_definition_version` appends a row per first capture and\nper moved definition. This is that row as a reader may see it -- and the\nbody is **not** in it, under any state, for any role. A routine body is the\nlargest indirect-injection surface in the estate, so the stored text is\nreleased only through the screening gate, and this read does not release it\neven when the gate would allow it: what the gate decides here is whether the\ndigest and the derived footprint below may be reported at all.\n\nThe fields exist because a steward's real question is \"what changed\", and\neach one is a piece of that answer that costs no source text.",
+        "properties": {
+          "analysis_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Run Id"
+          },
+          "availability": {
+            "title": "Availability",
+            "type": "string"
+          },
+          "body_released": {
+            "title": "Body Released",
+            "type": "boolean"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "change_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Class"
+          },
+          "definition_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Definition Digest"
+          },
+          "footprint_state": {
+            "title": "Footprint State",
+            "type": "string"
+          },
+          "parse_completed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parse Completed"
+          },
+          "previous_definition_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Definition Digest"
+          },
+          "reads_added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reads Added",
+            "type": "array"
+          },
+          "reads_removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reads Removed",
+            "type": "array"
+          },
+          "reads_table_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reads Table Names",
+            "type": "array"
+          },
+          "redaction_status": {
+            "title": "Redaction Status",
+            "type": "string"
+          },
+          "screening_status": {
+            "title": "Screening Status",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          },
+          "unparsed_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unparsed Reason Codes",
+            "type": "array"
+          },
+          "version_id": {
+            "format": "uuid",
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          },
+          "withheld_marker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withheld Marker"
+          },
+          "withheld_reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withheld Reason Code"
+          },
+          "writes_added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Writes Added",
+            "type": "array"
+          },
+          "writes_removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Writes Removed",
+            "type": "array"
+          },
+          "writes_table_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Writes Table Names",
+            "type": "array"
+          }
+        },
+        "required": [
+          "version_id",
+          "version_number",
+          "captured_at",
+          "analysis_run_id",
+          "availability",
+          "unavailable_reason",
+          "truncated",
+          "change_class",
+          "redaction_status",
+          "screening_status",
+          "definition_digest",
+          "previous_definition_digest",
+          "body_released",
+          "withheld_marker",
+          "withheld_reason_code",
+          "footprint_state",
+          "parse_completed",
+          "unparsed_reason_codes",
+          "reads_table_names",
+          "writes_table_names",
+          "reads_added",
+          "reads_removed",
+          "writes_added",
+          "writes_removed"
+        ],
+        "title": "RoutineDefinitionVersionRead",
         "type": "object"
       },
       "RoutineDescriptionDraftEdit": {
@@ -82544,7 +82832,7 @@
     },
     "/v1/organizations/{organization_id}/stewardship/documentation-worklist": {
       "get": {
-        "description": "AT-5: undocumented/under-described tables ranked by real query volume.\n\nDistinct from RT-6's `usage_popularity` retrieval signal\n(`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate\ntables for an agent's next SQL statement*; this ranks *tables a human\nsteward should document next*, and excludes any table that already has a\nreal (non-proposed) description rather than merely weighting it down.\n\nPaginated with the same bounded offset/limit `Page` contract GL-6's own\nbacklog endpoint above uses, not CT-2's keyset convention: keyset\npagination continues a page via a `WHERE` predicate over an indexed,\nstored ordering column, and there is no such column here -- `query_volume`\nis a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`\nscan (`gather_documentation_worklist_signals`), recomputed and re-sorted by the\npure `rank_documentation_worklist` on every request. `Page.total` still\nreports the full ranked-candidate count, independent of `limit`.",
+        "description": "AT-5: undocumented/under-described tables ranked by real query volume.\n\nR11-FP08: `subject_type=ROUTINE` ranks undescribed stored procedures and\nfunctions on the same surface. Not a second endpoint, because it is the same\nconcern -- a documentation deficit computed fresh from real signals, with no\nrouting state -- and not a second *row shape on one list*, because the two\nkinds' usage figures are not on one scale: a table's is measured, a routine's\nis borrowed from the tables its ACTIVE lineage says it writes. One discriminated\nparameter is how this platform already extends a description surface to routines\n(`description_withdrawal_api`'s `subject_type`), and `TABLE` remains the default\nso every existing caller sees exactly what it saw before.\n\nDistinct from RT-6's `usage_popularity` retrieval signal\n(`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate\ntables for an agent's next SQL statement*; this ranks *tables a human\nsteward should document next*, and excludes any table that already has a\nreal (non-proposed) description rather than merely weighting it down.\n\nPaginated with the same bounded offset/limit `Page` contract GL-6's own\nbacklog endpoint above uses, not CT-2's keyset convention: keyset\npagination continues a page via a `WHERE` predicate over an indexed,\nstored ordering column, and there is no such column here -- `query_volume`\nis a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`\nscan (`gather_documentation_worklist_signals`), recomputed and re-sorted by the\npure `rank_documentation_worklist` on every request. `Page.total` still\nreports the full ranked-candidate count, independent of `limit`.",
         "operationId": "list_documentation_worklist_v1_organizations__organization_id__stewardship_documentation_worklist_get",
         "parameters": [
           {
@@ -82554,6 +82842,22 @@
             "schema": {
               "format": "uuid",
               "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Which kind of undescribed object to rank. `TABLE` (default) is AT-5's original list, unchanged. `ROUTINE` (R11-FP08) ranks undescribed stored procedures and functions by the value of what they write: a routine has no traffic of its own, so its usage is the combined query/consumption volume of the tables ACTIVE procedure lineage says it writes, and its impact is that write reach rather than a foreign-key in-degree. The two are ranked separately, and their score ceilings taken separately, because one usage figure is measured and the other borrowed -- see `documentation_worklist.py`. `PACKAGE` is out of scope (R11-FP03).",
+            "in": "query",
+            "name": "subject_type",
+            "required": false,
+            "schema": {
+              "default": "TABLE",
+              "description": "Which kind of undescribed object to rank. `TABLE` (default) is AT-5's original list, unchanged. `ROUTINE` (R11-FP08) ranks undescribed stored procedures and functions by the value of what they write: a routine has no traffic of its own, so its usage is the combined query/consumption volume of the tables ACTIVE procedure lineage says it writes, and its impact is that write reach rather than a foreign-key in-degree. The two are ranked separately, and their score ceilings taken separately, because one usage figure is measured and the other borrowed -- see `documentation_worklist.py`. `PACKAGE` is out of scope (R11-FP03).",
+              "enum": [
+                "TABLE",
+                "ROUTINE"
+              ],
+              "title": "Subject Type",
               "type": "string"
             }
           },
@@ -91136,6 +91440,158 @@
         "summary": "Submit Routine Description Draft",
         "tags": [
           "routine-description-drafting"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/definition-history": {
+      "get": {
+        "description": "Every captured definition of one routine, newest first, without its text.\n\nR11-FP03. Newest first because the question is \"what changed lately\"; the\n`version_number` on each row keeps the true order explicit, so a reader is\nnever left inferring it from position.\n\nAn empty list means this routine has no captured definition at all -- a\npackage member, whose source is its package's, is the ordinary case -- and\nis a different answer from a 404, which means no such routine. Neither is\never answered with a made-up version 1.",
+        "operationId": "get_routine_definition_history_v1_routines__routine_id__definition_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineDefinitionHistoryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Routine Definition History",
+        "tags": [
+          "routine-definition-history"
         ]
       }
     },

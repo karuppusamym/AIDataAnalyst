@@ -344,24 +344,40 @@ function AnswerPanel({
     : (detail?.retrieval_evidence ?? []);
   const planEvidence = isFresh ? askResult.plan_evidence : (detail?.plan_evidence ?? {});
   const failureReason = isFresh ? null : (detail?.failure_reason ?? null);
-  // R11-FP12: which published context product version the answer was scoped to, recorded by the
-  // run itself. Shown as provenance rather than inferred from the request, so a reopened run
-  // says what it actually stood on.
-  const contextProductVersion = (() => {
+  // R11-FP12: which published context product version the answer was scoped to, and -- since
+  // the RESOLVED stage records `context_product_key` beside it -- which product that version
+  // belongs to. Both read off the run's own trace rather than inferred from the request, so a
+  // reopened run says what it actually stood on.
+  const contextProductProvenance = (() => {
     for (const step of stepTrace) {
       const details = (step as { details?: Record<string, unknown> }).details;
       const version = details?.["context_product_version"];
-      if (typeof version === "number") return version;
+      if (typeof version !== "number") continue;
+      const key = details?.["context_product_key"];
+      return { version, key: typeof key === "string" && key !== "" ? key : null };
     }
     return null;
   })();
-  // F08: *which* product, not only which version of it. "version 2" alone does not say what
-  // answered, and two products' v2 have nothing to do with each other. The name comes from this
-  // session's own selection because the run records the version id and number
-  // (`agent_orchestrator.py:1182-1183`) and not the product key -- so a run reopened from
-  // history says the version and stops, rather than attributing the answer to whatever the
-  // picker happens to be showing now.
-  const askedThroughProduct = isFresh ? contextProduct : null;
+  const contextProductVersion = contextProductProvenance?.version ?? null;
+  // R11-FP12 remainder / F08: *which* product, not only which version of it. "version 2" alone
+  // does not say what answered, and two products' v2 have nothing to do with each other.
+  //
+  // The key the run recorded is the authority, and the picker only ever supplies a display
+  // name for it -- and only while it is showing that very product. A reopened run must never
+  // be attributed to whatever the picker happens to be set to now, which is why the earlier
+  // version of this line showed nothing at all for a stored run. A run whose trace carries no
+  // key predates the field; for a *fresh* answer this session sent the key on that same
+  // request, so its own selection is the request's own record rather than a guess.
+  const recordedProductKey = contextProductProvenance?.key ?? null;
+  const askedThroughProduct =
+    recordedProductKey !== null
+      ? {
+          key: recordedProductKey,
+          name: contextProduct?.key === recordedProductKey ? contextProduct.name : recordedProductKey,
+        }
+      : isFresh
+        ? contextProduct
+        : null;
   // Provenance the run pinned its answer to — which published semantic model
   // and policy version grounded it, and (for a stored run) which approved model
   // route generated the SQL. The fresh POST response omits the route, so it is
@@ -828,18 +844,27 @@ export function AskScreen() {
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const historyInflight = useRef<AbortController | null>(null);
+  const historyPageInflight = useRef<AbortController | null>(null);
+  const historyExhausted = useRef(false);
   const historySeq = useRef(0);
 
   const loadHistory = useCallback(async () => {
+    historyInflight.current?.abort();
+    historyPageInflight.current?.abort();
+    historyPageInflight.current = null;
+    historyExhausted.current = false;
+    const seq = ++historySeq.current;
+    setHistoryItems([]);
+    setHistoryTotal(null);
+    setHistoryError(null);
+    setHistoryLoadMoreError(null);
+    setHistoryLoadingMore(false);
     if (!dsId) {
-      setHistoryItems([]);
-      setHistoryTotal(null);
+      setHistoryLoading(false);
       return;
     }
-    historyInflight.current?.abort();
     const ac = new AbortController();
     historyInflight.current = ac;
-    const seq = ++historySeq.current;
 
     setHistoryLoading(true);
     setHistoryError(null);
@@ -859,23 +884,36 @@ export function AskScreen() {
 
   useEffect(() => {
     void loadHistory();
-    return () => historyInflight.current?.abort();
+    return () => {
+      ++historySeq.current;
+      historyInflight.current?.abort();
+      historyPageInflight.current?.abort();
+    };
   }, [loadHistory]);
 
   const loadMoreHistory = useCallback(async () => {
-    if (!dsId || historyLoadingMore || historyLoading) return;
+    if (!dsId || historyLoadingMore || historyLoading || historyPageInflight.current || historyExhausted.current) return;
     if (historyItems.length >= (historyTotal ?? 0)) return;
+    const seq = historySeq.current;
+    const ac = new AbortController();
+    historyPageInflight.current = ac;
     setHistoryLoadingMore(true);
     try {
-      const page = await fetchAgentRuns(dsId, { limit: 50, offset: historyItems.length });
+      const page = await fetchAgentRuns(dsId, { limit: 50, offset: historyItems.length }, ac.signal);
+      if (seq !== historySeq.current || ac.signal.aborted) return;
+      historyExhausted.current = page.items.length === 0;
       setHistoryItems((prev) => [...prev, ...page.items]);
+      setHistoryTotal(page.total);
       setHistoryLoadMoreError(null);
     } catch (e) {
+      if (seq !== historySeq.current || ac.signal.aborted) return;
+      historyExhausted.current = true;
       // See AuditLedgerScreen: a silent stop is indistinguishable from the end
       // of the list, so a refusal reads as "there is nothing more".
       setHistoryLoadMoreError(describeLoadMoreFailure(e));
     } finally {
-      setHistoryLoadingMore(false);
+      if (historyPageInflight.current === ac) historyPageInflight.current = null;
+      if (seq === historySeq.current) setHistoryLoadingMore(false);
     }
   }, [dsId, historyLoadingMore, historyLoading, historyItems.length, historyTotal]);
 
@@ -1086,7 +1124,7 @@ export function AskScreen() {
               ariaLabel="Past questions"
               estimateSize={86}
               totalCount={historyTotal}
-              onReachEnd={() => void loadMoreHistory()}
+              onReachEnd={showHistory ? () => void loadMoreHistory() : undefined}
               loadingMore={historyLoadingMore}
               loadMoreError={historyLoadMoreError}
               emptyState={historyEmptyState}

@@ -205,6 +205,36 @@ describe("OperationsScreen against the real operational_api.py", () => {
     expect(await within(panel).findByText(/not in the catalog/)).toBeInTheDocument();
   });
 
+  it("names the refused-read gap in words rather than printing its kind code (R11-FP02)", async () => {
+    fetchFootprintGaps.mockResolvedValue({
+      organization_id: ORG,
+      generated_at: "2026-09-17T12:00:00Z",
+      datasources: [
+        {
+          datasource_id: "ds_snowflake_prod",
+          datasource_name: "snowflake_prod",
+          oldest_pending_signal_minutes: null,
+          gaps: [
+            {
+              kind: "SOURCE_READS_REFUSED", count: 2, resolution: "SOURCE_ACCESS",
+              owner: "source administrator",
+              explanation: "Facets the source refused to read for the scanning principal.",
+            },
+          ],
+        },
+      ],
+      totals: { SOURCE_READS_REFUSED: 2 },
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    expect(panel).toHaveTextContent("Reads refused by the source");
+    // The kind code itself never reaches the operator: a row headed
+    // SOURCE_READS_REFUSED is a missing label, and reads as an internal leak.
+    expect(panel).not.toHaveTextContent("SOURCE_READS_REFUSED");
+  });
+
   it("loads and renders fleet-summary tiles plus the analysis-runs list", async () => {
     const OperationsScreen = await loadScreen();
 

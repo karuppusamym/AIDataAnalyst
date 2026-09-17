@@ -128,10 +128,21 @@ def test_databricks_registry_definition() -> None:
     assert defn.capabilities["constraints"] is True
     assert defn.capabilities["explain"] is True
     assert defn.capabilities["object_comments"] is True
-    # Honest gaps: not claimed until a certified, live-verified adapter closes them.
-    assert defn.capabilities["views"] is False
-    assert defn.capabilities["routines"] is False
+    # R11-FP01: the view and routine axes are now read from Unity Catalog's own
+    # information_schema, through the same best-effort path the foreign-key and
+    # comment queries use -- a refusal shrinks the envelope and records its
+    # reason rather than failing the run, which is what makes the flag
+    # claimable without a live workspace.
+    # `tests/test_connectors_triggers_and_sequences.py` drives both axes,
+    # including the refusal and the narrow-column retry.
+    assert defn.capabilities["views"] is True
+    assert defn.capabilities["routines"] is True
+    # Honest gaps, of two different kinds. `grants` is unimplemented on an
+    # engine that has the concept in a different shape; `triggers` and
+    # `sequences` are NOT_APPLICABLE, because Unity Catalog has neither object.
     assert defn.capabilities["grants"] is False
+    assert defn.capabilities["triggers"] is False
+    assert defn.capabilities["sequences"] is False
     assert defn.capabilities["delegated_identity"] is False
 
 
@@ -238,6 +249,16 @@ async def test_databricks_discover_assembles_catalog_with_constraints() -> None:
         ],
         [{"schema_name": "analytics", "comment": "Analytics schema"}],
         [{"catalog_name": "main", "comment": "Primary catalog"}],
+        # R11-FP01 added three queries after the comment reads: views, routines
+        # and parameters. Listed explicitly rather than left to run off the end
+        # of this `side_effect` -- a `StopIteration` would be swallowed by the
+        # best-effort guard and this test would pass by accident. Empty here
+        # because this test is about constraints and comments;
+        # `tests/test_connectors_triggers_and_sequences.py` drives both new
+        # axes with real rows, including a refusal and the narrow-column retry.
+        [],
+        [],
+        [],
     ]
 
     with patch.object(connector, "_get_connection", return_value=mock_conn):

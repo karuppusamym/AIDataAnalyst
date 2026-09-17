@@ -39,6 +39,7 @@ from aida.context_compiler_api import router as context_compiler_router
 from aida.context_product_api import router as context_product_router
 from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
+from aida.definition_history_api import router as definition_history_router
 from aida.delegation_api import router as delegation_router
 from aida.description_withdrawal_api import router as description_withdrawal_router
 from aida.detokenization_api import router as detokenization_router
@@ -463,6 +464,9 @@ app.include_router(column_description_router)
 # R11-FP08: the third member of the description family -- a routine's
 # Atlas-authored description, drafted and reviewed exactly as the two above.
 app.include_router(routine_description_router)
+# R11-FP03: the read half of the definition history those descriptions cite.
+# The rows have been written since 2026-09-15 and nothing could read them.
+app.include_router(definition_history_router)
 app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)

@@ -222,12 +222,25 @@ def test_databricks_is_unsupported_for_parsing_rather_than_missing(matrix) -> No
     ), matrix.declared_gaps
 
 
-def test_databricks_declares_neither_views_nor_routines(matrix) -> None:
+def test_databricks_now_declares_views_and_routines_and_still_not_grants(matrix) -> None:
+    """R11-FP01 closed two of the three axes this engine used to skip, and the
+    matrix follows the flags. `grants` stays UNSUPPORTED on purpose: Unity
+    Catalog's privilege model is not the SQL grant model that axis records, so
+    reading `TABLE_PRIVILEGES` would answer a different question while looking
+    like a complete grant inventory.
+    """
     engine = _engine(matrix, "databricks")
-    assert engine.flags["views"] == CapabilityState.UNSUPPORTED.value
-    assert engine.flags["routines"] == CapabilityState.UNSUPPORTED.value
+    assert engine.flags["views"] == CapabilityState.SUPPORTED.value
+    assert engine.flags["routines"] == CapabilityState.SUPPORTED.value
+    assert engine.flags["grants"] == CapabilityState.UNSUPPORTED.value
     assert (
         _row(matrix, "databricks", "PROCEDURE").state(FACET_INVENTORY)
+        == CapabilityState.SUPPORTED.value
+    )
+    # And still never parsed, because the dialect is refused -- which is why the
+    # row above and the parsing test below are two different facts.
+    assert (
+        _row(matrix, "databricks", "PROCEDURE").state(FACET_PARSING)
         == CapabilityState.UNSUPPORTED.value
     )
 
@@ -262,26 +275,60 @@ def test_a_planned_engine_gets_no_opinion_about_its_exotic_kinds(matrix) -> None
 
 
 @pytest.mark.parametrize(
-    ("engine", "kind"),
+    ("engine", "kind", "definition"),
     [
-        ("postgres", "TRIGGER"),
-        ("oracle", "TRIGGER"),
-        ("sqlserver", "TRIGGER"),
-        ("postgres", "SEQUENCE"),
-        ("oracle", "SEQUENCE"),
-        ("sqlserver", "SEQUENCE"),
-        ("snowflake", "SEQUENCE"),
+        # R11-FP01: these seven rows were the matrix's own declared gap, and the
+        # matrix moved with the code rather than being re-authored. PostgreSQL's
+        # trigger definition is PARTIAL and that is the engine, not the adapter:
+        # a PostgreSQL trigger has no body, so the adapter records the action
+        # function and that function's body arrives on the routine axis.
+        ("postgres", "TRIGGER", CapabilityState.PARTIAL.value),
+        ("oracle", "TRIGGER", CapabilityState.SUPPORTED.value),
+        ("sqlserver", "TRIGGER", CapabilityState.SUPPORTED.value),
+        # A sequence's declaration is its metadata, the way a base relation's
+        # columns are the fact, so there is no definition text anywhere.
+        ("postgres", "SEQUENCE", CapabilityState.NOT_APPLICABLE.value),
+        ("oracle", "SEQUENCE", CapabilityState.NOT_APPLICABLE.value),
+        ("sqlserver", "SEQUENCE", CapabilityState.NOT_APPLICABLE.value),
+        ("snowflake", "SEQUENCE", CapabilityState.NOT_APPLICABLE.value),
     ],
 )
-def test_an_undiscovered_native_kind_says_unsupported_with_a_reason(
-    matrix, engine: str, kind: str
+def test_a_discovered_native_kind_claims_it_and_cites_the_query(
+    matrix, engine: str, kind: str, definition: str
 ) -> None:
     row = _row(matrix, engine, kind)
     assert row.native_concept is True
     cell = next(c for c in row.cells if c.facet == FACET_INVENTORY)
-    assert cell.state == CapabilityState.UNSUPPORTED.value
-    assert cell.reason == "ADAPTER_NOT_IMPLEMENTED"
-    assert "no discovery query" in cell.evidence
+    assert cell.state == CapabilityState.SUPPORTED.value
+    assert cell.reason == ""
+    # The published evidence names the catalog objects the adapter actually
+    # reads, so a flag flipped without a query behind it reads differently here
+    # (and fails the test below).
+    assert "backed by" in cell.evidence and f"{engine}.py" in cell.evidence
+    assert row.state(FACET_DEFINITION) == definition
+
+
+def test_every_claimed_inventory_is_backed_by_a_query_in_the_adapter(matrix) -> None:
+    """INV-9 at the level the flags cannot enforce on their own. A capability
+    flag is hand-declared, so "the adapter says it reads triggers" and "some
+    query in the adapter reads a trigger catalog" are two different facts. The
+    matrix cites the second beside the first; this is the gate that makes a
+    divergence fail rather than merely read oddly.
+    """
+    from aida.engine_capability_matrix import _KIND_SPECS
+
+    probed = {spec.name for spec in _KIND_SPECS if spec.catalog_probes}
+    assert probed, "the probe mechanism has no kinds left; this test is a no-op"
+    unbacked = [
+        (row.engine, row.native_object_kind)
+        for row in matrix.rows
+        if row.native_object_kind in probed
+        for cell in row.cells
+        if cell.facet == FACET_INVENTORY
+        and cell.state in CLAIMS
+        and "which no query" in cell.evidence
+    ]
+    assert unbacked == []
 
 
 @pytest.mark.parametrize("engine", ["snowflake", "bigquery", "databricks"])
@@ -291,48 +338,113 @@ def test_an_engine_without_triggers_says_not_applicable(matrix, engine: str) -> 
     assert row.state(FACET_INVENTORY) == CapabilityState.NOT_APPLICABLE.value
 
 
+@pytest.mark.parametrize("engine", ["bigquery", "databricks"])
+def test_an_engine_without_sequences_says_not_applicable(matrix, engine: str) -> None:
+    """The per-engine half of R11-FP01's honesty requirement: Snowflake has
+    sequences and no triggers, and these two have neither, so a blanket verdict
+    would be wrong about at least one of the three.
+    """
+    row = _row(matrix, engine, "SEQUENCE")
+    assert row.native_concept is False
+    assert row.state(FACET_INVENTORY) == CapabilityState.NOT_APPLICABLE.value
+
+
 @pytest.mark.parametrize("kind", ["AGGREGATE FUNCTION", "WINDOW FUNCTION"])
-def test_postgres_aggregates_and_window_functions_are_unsupported(matrix, kind: str) -> None:
-    cell = next(
-        c for c in _row(matrix, "postgres", kind).cells if c.facet == FACET_INVENTORY
-    )
-    assert cell.state == CapabilityState.UNSUPPORTED.value
-    assert "prokind" in cell.evidence
-    assert "pg_get_functiondef" in cell.evidence
+def test_postgres_aggregates_are_discovered_with_their_definition_refused(
+    matrix, kind: str
+) -> None:
+    """"The definition cannot be fetched" is not "the object does not exist".
+    The identity, signature and parameters are discovered; the definition is
+    UNAVAILABLE because `pg_get_functiondef` refuses the prokind, which is the
+    source declining rather than the adapter not trying -- so the reason is
+    SOURCE_RETURNED_NO_TEXT and not ADAPTER_NOT_IMPLEMENTED.
+    """
+    row = _row(matrix, "postgres", kind)
+    inventory = next(c for c in row.cells if c.facet == FACET_INVENTORY)
+    assert inventory.state == CapabilityState.SUPPORTED.value
+    assert "prokind" in inventory.evidence
+
+    definition = next(c for c in row.cells if c.facet == FACET_DEFINITION)
+    assert definition.state == CapabilityState.UNAVAILABLE.value
+    assert definition.reason == "SOURCE_RETURNED_NO_TEXT"
+    assert "pg_get_functiondef" in definition.evidence
 
 
 def test_the_prokind_claim_is_read_from_the_query_not_asserted(monkeypatch) -> None:
-    """Proves the derivation: widen the routine query's own prokind list and the
-    two rows stop claiming the kinds are missing."""
+    """Proves the derivation, now in the other direction: narrow the routine
+    queries' own prokind list back to 'f'/'p' and the two rows return to saying
+    the kinds are missing. A hand-authored SUPPORTED would not move."""
     from aida import engine_capability_matrix as module
 
-    monkeypatch.setattr(
-        module, "_pg_prokinds", lambda: frozenset({"f", "p", "a", "w"})
-    )
-    widened = build_engine_capability_matrix(tests_root=TESTS_ROOT)
+    monkeypatch.setattr(module, "_pg_prokinds", lambda: frozenset({"f", "p"}))
+    narrowed = build_engine_capability_matrix(tests_root=TESTS_ROOT)
     for kind in ("AGGREGATE FUNCTION", "WINDOW FUNCTION"):
         cell = next(
             c
-            for c in _row(widened, "postgres", kind).cells
+            for c in _row(narrowed, "postgres", kind).cells
             if c.facet == FACET_INVENTORY
         )
-        assert cell.state == CapabilityState.PARTIAL.value
-        assert "stale" in cell.evidence
+        assert cell.state == CapabilityState.UNSUPPORTED.value
+        assert cell.reason == "ADAPTER_NOT_IMPLEMENTED"
 
 
 def test_a_trigger_claim_is_read_from_the_adapter_source(monkeypatch) -> None:
-    """Same derivation proof for the catalog probe: if `postgres.py` starts
-    mentioning `pg_trigger`, the matrix stops saying triggers are missing."""
+    """The catalog probe still derives, and now cross-checks the flag: if
+    `postgres.py` stopped mentioning `pg_trigger`, the flag would go on saying
+    SUPPORTED and the published evidence would say no query backs it."""
     from aida import engine_capability_matrix as module
 
-    monkeypatch.setattr(module, "_reads_any_catalog_object", lambda engine, probes: True)
-    widened = build_engine_capability_matrix(tests_root=TESTS_ROOT)
+    monkeypatch.setattr(module, "_reads_any_catalog_object", lambda engine, probes: False)
+    stripped = build_engine_capability_matrix(tests_root=TESTS_ROOT)
     cell = next(
         c
-        for c in _row(widened, "postgres", "TRIGGER").cells
+        for c in _row(stripped, "postgres", "TRIGGER").cells
         if c.facet == FACET_INVENTORY
     )
-    assert cell.state == CapabilityState.PARTIAL.value
+    assert cell.state == CapabilityState.SUPPORTED.value, "the flag is what it is"
+    assert "which no query in postgres.py backs" in cell.evidence
+
+
+def test_a_trigger_is_never_offered_as_a_governed_tool(matrix) -> None:
+    """Inventoried is not draftable, and here that is the right answer rather
+    than a gap: a trigger is fired by a statement rather than called, and
+    reading a sequence means advancing it, which writes to the source.
+    """
+    for engine, kind in (("postgres", "TRIGGER"), ("postgres", "SEQUENCE")):
+        cell = next(
+            c for c in _row(matrix, engine, kind).cells if c.facet == FACET_CANDIDATE
+        )
+        assert cell.state == CapabilityState.UNSUPPORTED.value
+        assert cell.reason == "CANDIDATE_SHAPE_REFUSED"
+
+
+def test_a_triggers_own_body_produces_no_lineage_and_says_so(matrix) -> None:
+    """The gap R11-FP01 declined and published rather than half-building. The
+    firing table is discovered, so the table -> trigger edge is a known fact;
+    nothing hands the body to `procedure_lineage`, so the relations it reads and
+    writes produce no edge. UNSUPPORTED rather than PARTIAL, because PARTIAL is
+    a claim and nothing yet produces a trigger lineage edge at all.
+    """
+    for engine in ("postgres", "oracle", "sqlserver"):
+        cell = next(
+            c for c in _row(matrix, engine, "TRIGGER").cells if c.facet == FACET_PARSING
+        )
+        assert cell.state == CapabilityState.UNSUPPORTED.value
+        assert cell.reason == "ADAPTER_NOT_IMPLEMENTED"
+        assert "firing table" in cell.evidence
+    assert any("firing table" in gap for gap in matrix.declared_gaps), matrix.declared_gaps
+
+
+def test_a_sequence_has_nothing_to_parse_at_all(matrix) -> None:
+    """NOT_APPLICABLE, not UNSUPPORTED: a sequence is a declaration rather than
+    code, so there is no statement anyone could parse and no relation for it to
+    read or write. UNSUPPORTED would send somebody to build a parser for it.
+    """
+    for engine in ("postgres", "oracle", "sqlserver", "snowflake"):
+        cell = next(
+            c for c in _row(matrix, engine, "SEQUENCE").cells if c.facet == FACET_PARSING
+        )
+        assert cell.state == CapabilityState.NOT_APPLICABLE.value
 
 
 def test_the_declared_gaps_name_every_deferral(matrix) -> None:
@@ -509,6 +621,10 @@ def test_inventory_and_definition_agree_with_the_discovery_selection_routes(matr
         "PROCEDURE": "PROCEDURE",
         "FUNCTION": "FUNCTION",
         "PACKAGE": "PACKAGE",
+        # R11-FP01: two more kinds the discovery-selection routes now answer
+        # for, which is exactly why they are held to the same agreement.
+        "TRIGGER": "TRIGGER",
+        "SEQUENCE": "SEQUENCE",
     }
     for definition in connector_registry.definitions:
         if definition.implementation_status != "IMPLEMENTED":
@@ -680,6 +796,16 @@ def _claim_is_unbacked(
             "routines"
         ):
             return "the adapter declares routines=False"
+        # R11-FP01. The two new categories get their own rule rather than
+        # sharing the catch-all, which is half the reason they stopped being
+        # `OTHER`: a claimed trigger definition must be backed by the flag that
+        # reads triggers, and a sequence may not claim a definition at all --
+        # its declaration is its metadata, so any SUPPORTED or PARTIAL here
+        # would be a definition nobody can produce.
+        if graph_category == "TRIGGER" and not capabilities.get("triggers"):
+            return "the adapter declares triggers=False"
+        if graph_category == "SEQUENCE":
+            return "a sequence has no defining text, so no definition can be claimed"
         return None
 
     if facet == FACET_PARSING:
@@ -726,8 +852,12 @@ def _claim_is_unbacked(
     if facet == FACET_INVENTORY:
         # Facet 1 comes from `kind_capabilities`, and
         # `test_inventory_and_definition_agree_with_the_discovery_selection_routes`
-        # holds the two to each other. Nothing further to check here, and saying
-        # so explicitly keeps an unchecked facet from looking checked.
+        # holds the two to each other. R11-FP01 added a second handle for the
+        # kinds with a catalog probe --
+        # `test_every_claimed_inventory_is_backed_by_a_query_in_the_adapter`
+        # checks the flag against the adapter's own source. Nothing further to
+        # check here, and saying so explicitly keeps an unchecked facet from
+        # looking checked.
         return None
 
     return f"facet {facet!r} has no certification rule in this gate"

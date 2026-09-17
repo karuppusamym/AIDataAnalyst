@@ -68,10 +68,12 @@ from aida.relationship_intelligence import (
 from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.relationship_validation import (
     RelationshipColumnsMissingError,
+    load_relationship_catalog_facts,
     public_relationship_evidence,
     refusal_detail,
     validate_composite_relationship_candidate,
     validate_relationship_candidate,
+    validate_relationship_candidate_from,
     with_recorded_validation,
 )
 from aida.relationship_validation_api import authorize_relationship_sides
@@ -1926,6 +1928,16 @@ async def bulk_decide_relationship_candidates(
         ).all()
     }
     new_status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    # R11-FP06: one batched read of the catalog facts every validation in this
+    # batch needs, instead of the six-plus-one-per-table each candidate's
+    # validation used to issue for itself. Each candidate's verdict is then
+    # computed from it purely, so the per-item rules below -- maker-checker,
+    # PENDING-only, the per-side authorization and the domain grant -- are
+    # untouched and still decided per candidate. A REJECT decides no evidence,
+    # so it reads nothing.
+    catalog_facts = await load_relationship_catalog_facts(
+        session, list(candidates.values()) if new_status == "APPROVED" else []
+    )
     now = datetime.now(UTC)
     results: list[RelationshipCandidateBulkDecisionItemRead] = []
     succeeded = 0
@@ -1990,7 +2002,7 @@ async def bulk_decide_relationship_candidates(
         if new_status == "APPROVED":
             # R11-FP06: the single decision's evidence gate, reported per item.
             try:
-                validation = await validate_relationship_candidate(session, candidate)
+                validation = validate_relationship_candidate_from(catalog_facts, candidate)
             except RelationshipColumnsMissingError as exc:
                 results.append(
                     RelationshipCandidateBulkDecisionItemRead(

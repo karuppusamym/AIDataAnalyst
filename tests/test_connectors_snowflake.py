@@ -295,6 +295,7 @@ def _envelope_fetch_sequence(
     views: object = None,
     functions: object = None,
     procedures: object = None,
+    sequences: object = None,
     view_ddl: list[object] | None = None,
     grants: object = None,
 ) -> list[object]:
@@ -358,6 +359,25 @@ def _envelope_fetch_sequence(
                 }
             ]
         ),
+        # R11-FP01: INFORMATION_SCHEMA.SEQUENCES, read after the two routine
+        # queries and before the GET_DDL pass. `NEXT_VALUE` is offered by that
+        # view and deliberately not selected, so it is absent from this row on
+        # purpose -- a row carrying it would be testing a query this adapter
+        # does not issue.
+        (
+            sequences
+            if sequences is not None
+            else [
+                {
+                    "sequence_schema": "PUBLIC",
+                    "sequence_name": "ORDER_SEQ",
+                    "data_type": "NUMBER(38,0)",
+                    "start_with": "5",
+                    "increment_by": "10",
+                    "comment": "Order numbering",
+                }
+            ]
+        ),
         *(view_ddl if view_ddl is not None else [[{"view_definition": _MVIEW_DDL}]]),
         (
             grants
@@ -392,9 +412,48 @@ def test_snowflake_capabilities_declare_every_implemented_envelope_axis() -> Non
     assert capabilities.routines is True
     assert capabilities.object_comments is True
     assert capabilities.grants is True
+    # R11-FP01: sequences yes, triggers no -- and `triggers is False` is not a
+    # gap here. Snowflake has no trigger object at all, which is why
+    # `discovery_selection` answers NOT_APPLICABLE for it; a `True` would claim
+    # an object the engine does not have.
+    assert capabilities.sequences is True
+    assert capabilities.triggers is False
     advertised = connector_registry.definition("snowflake").capabilities
     assert advertised["views"] is True
     assert advertised["grants"] is True
+    assert advertised["sequences"] is True
+    assert advertised["triggers"] is False
+
+
+async def test_a_snowflake_sequence_is_its_declaration_and_never_its_position() -> None:
+    """R11-FP01. `INFORMATION_SCHEMA.SEQUENCES` also carries `NEXT_VALUE`, which
+    is the value the next insert writes into a customer's row -- source data, not
+    metadata (INV-6). The adapter's query does not select it, and
+    `DiscoveredSequence` has no field it could land in.
+    """
+    catalogs = await _discover_with(_envelope_fetch_sequence())
+
+    sequence = next(
+        item for schema in catalogs[0].schemas for item in schema.sequences
+    )
+    assert sequence.name == "ORDER_SEQ"
+    assert sequence.data_type == "NUMBER(38,0)"
+    assert sequence.start_with == "5"
+    assert sequence.increment_by == "10"
+    assert sequence.source_description == "Order numbering"
+    # Snowflake reports no owning column, and says so rather than guessing.
+    assert sequence.owned_by_table is None
+    assert not hasattr(sequence, "next_value")
+
+
+async def test_snowflake_reports_no_triggers_because_it_has_none() -> None:
+    """The absence is asserted, not assumed. A schema with an empty trigger tuple
+    on an engine whose `triggers` flag is False is how `discovery_selection`
+    reaches NOT_APPLICABLE; a trigger appearing here would mean the axis had been
+    wired to an engine that cannot have one.
+    """
+    catalogs = await _discover_with(_envelope_fetch_sequence())
+    assert all(schema.triggers == () for schema in catalogs[0].schemas)
 
 
 @pytest.mark.parametrize(

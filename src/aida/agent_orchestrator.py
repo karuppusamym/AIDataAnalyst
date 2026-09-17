@@ -1160,6 +1160,14 @@ class GovernedAgentOrchestrator:
             preferred_tool_version_id=request.preferred_tool_version_id,
         )
         scope: ContextProductScope | None = None
+        #: R11-FP12 remainder: *which* product answered, not just which version of
+        #: one. Two different products both have a v2, so "version 2" on its own
+        #: identifies nothing when a run is reopened from history. Read from the
+        #: resolved version's own `product_id` rather than echoed from the request:
+        #: a surface may hand over a pre-resolved version (F01) and no key at all,
+        #: and if it sends both, the key that belongs in the trace is the one that
+        #: names the version actually used.
+        product_key: str | None = None
         if request.context_product_key is not None or request.context_product_version is not None:
             # R11-FP12: asked through a product, the answer stands on that product's own
             # references. A candidate it does not name is not evidence here, so it is dropped
@@ -1188,6 +1196,12 @@ class GovernedAgentOrchestrator:
                 )
                 raise AgentPolicyRejected(CONTEXT_PRODUCT_FORBIDDEN)
             scope = ContextProductScope.of(product_version)
+            product_key = await session.scalar(
+                select(ContextProduct.product_key).where(
+                    ContextProduct.id == product_version.product_id,
+                    ContextProduct.organization_id == request.organization_id,
+                )
+            )
             scored_candidates = [hit for hit in scored_candidates if scope.admits(hit)]
 
         retrieval_hits = scored_candidates[: self.settings.agent_retrieval_limit]
@@ -1222,6 +1236,12 @@ class GovernedAgentOrchestrator:
             # Which published context the answer was scoped to, in the trace the run keeps.
             resolved_details["context_product_version_id"] = str(scope.version_id)
             resolved_details["context_product_version"] = scope.version
+            # R11-FP12 remainder: and which product that version belongs to, so an
+            # answer reopened from history can name the product rather than only
+            # "version 2". Written even when it resolves to null -- the key being
+            # absent is itself the fact a provenance panel has to state, and a
+            # missing entry would be indistinguishable from an older run.
+            resolved_details["context_product_key"] = product_key
         ledger.advance(
             RuntimeStage.RESOLVED,
             control_type="DETERMINISTIC",

@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **489**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 436, SDK 1
+- Surfaces covered: **490**
+- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 437, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -313,6 +313,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/query-executions/{execution_id}/lineage` | REST | `aida.api.get_query_lineage` | AgentDeveloper, Analyst, Auditor, MetadataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/relationship-candidates/confidence-calibration` | REST | `aida.intelligence_api.get_relationship_candidate_confidence_calibration` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/relationship-candidates/{candidate_id}/validation` | REST | `aida.relationship_validation_api.get_relationship_candidate_validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/routines/{routine_id}/definition-history` | REST | `aida.definition_history_api.get_routine_definition_history` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/routines/{routine_id}/description` | REST | `aida.routine_description_api.get_routine_description` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/schemas/{schema_id}/table-family-candidates` | REST | `aida.table_family_api.list_table_family_candidates_for_schema` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/search/suggest` | REST | `aida.search_api.search_suggest` | Analyst, DataAdmin, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

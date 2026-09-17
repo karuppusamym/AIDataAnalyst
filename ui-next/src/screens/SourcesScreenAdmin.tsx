@@ -117,33 +117,88 @@ interface ReceiptCode {
   captured?: number;
   withheld?: number;
   truncated?: number;
+  /** R11-FP02: this facet's own read outcome, in the shared vocabulary
+   *  `aida.capability_states` defines, with the closed reason code beside it. Absent on a
+   *  receipt written before version 3, which reads as "that run did not tell these
+   *  outcomes apart" -- not as a clean read. */
+  state?: string;
+  reason?: string;
 }
+
+/** Every facet a receipt records an outcome for (`discovery_receipt.RECEIPT_FACETS`), in the
+ *  words an operator uses for it. Keyed by the server's own facet names so the facet a
+ *  connector attributes a refused read to and the facet this card names cannot drift apart. */
+const FACET_WORDS: Record<string, string> = {
+  inventory: "the object inventory",
+  view_definitions: "view code",
+  routine_bodies: "routine code",
+  constraints: "constraints",
+  indexes: "indexes",
+  partitions: "partitions",
+  grants: "grants",
+  object_comments: "source comments",
+  object_visibility: "what this login cannot see",
+};
+
+const facetWords = (facet: string): string =>
+  FACET_WORDS[facet] ?? facet.toLowerCase().replace(/_/g, " ");
+
+/** The one state that means "the source would not tell us", as opposed to any state that
+ *  means "there are none". `CapabilityState.PERMISSION_DENIED`. */
+const REFUSED = "PERMISSION_DENIED";
 
 function codeWords(label: string, facet: ReceiptCode | undefined): string | null {
   if (!facet) return null;
   if (facet.support === "UNSUPPORTED") return `${label}: not collected by this connector`;
+  // R11-FP02: a refused read returns no rows at all, so `captured`, `withheld` and
+  // `truncated` are all 0 beside it -- and "0 captured" is precisely the "none found"
+  // reading the receipt exists to prevent. The refusal is stated in the counters' place,
+  // never beside them.
+  if (facet.state === REFUSED) return `${label}: refused by the source, so not read`;
   const parts = [`${facet.captured ?? 0} captured`];
   if (facet.withheld) parts.push(`${facet.withheld} withheld`);
   if (facet.truncated) parts.push(`${facet.truncated} truncated`);
   return `${label}: ${parts.join(", ")}`;
 }
 
-/** R11-FP02: the run's receipt in one line -- how completely it took in code, and whether its
- *  stream finished. `null` for a run from before receipts, which is not "found nothing". */
+/** R11-FP02: the run's receipt in one line -- what the source refused, how completely it took
+ *  in code, and whether its stream finished. `null` for a run from before receipts, which is
+ *  not "found nothing". */
 export function receiptWords(receipt: unknown): string | null {
   if (!receipt || typeof receipt !== "object") return null;
   const body = receipt as {
     stream?: { state?: string; batches?: number };
-    facets?: { view_definitions?: ReceiptCode; routine_bodies?: ReceiptCode };
+    facets?: Record<string, ReceiptCode | undefined>;
     kinds?: Record<string, { invisible?: number | null }>;
     changes?: Record<string, number>;
   };
-  const parts = [
-    codeWords("view code", body.facets?.view_definitions),
-    codeWords("routine code", body.facets?.routine_bodies),
-  ].filter((part): part is string => part !== null);
+  // R11-FP01 / R11-FP02: the refusals lead, ahead of everything this run did take in. A
+  // facet the source refused for this login came back with nothing, so every counter the
+  // receipt keeps for it reads 0 -- and a reader who is shown those zeros concludes there
+  // is nothing there rather than that one grant is missing. Naming the refused facet is
+  // the whole value of a per-facet refusal: one missing grant now costs one facet instead
+  // of the whole scan, which only helps somebody who can see which facet to go and grant.
+  const refused = Object.entries(body.facets ?? {})
+    .filter(([, facet]) => facet?.state === REFUSED)
+    .map(([facet]) => facetWords(facet));
+  const parts: string[] = [];
+  if (refused.length > 0) {
+    parts.push(
+      `the source refused ${refused.length} read(s) for this login — unread, not empty: ` +
+        `${refused.join(", ")}. Granting the read and rescanning is what fills ` +
+        `${refused.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  parts.push(
+    ...[
+      codeWords("view code", body.facets?.view_definitions),
+      codeWords("routine code", body.facets?.routine_bodies),
+    ].filter((part): part is string => part !== null),
+  );
   // R11-FP02: what the source holds that this run's login may not see. Only stated when the
   // source could be asked: a null is "we could not ask", which is not "nothing is hidden".
+  // A visibility question the source *refused* also nulls these counts, and is named by the
+  // refusal clause above rather than by silence here.
   const invisible = Object.entries(body.kinds ?? {})
     .map(([kind, counts]) => [kind, counts?.invisible ?? 0] as const)
     .filter(([, count]) => count > 0);

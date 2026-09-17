@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -14,11 +15,22 @@ from aida.connectors.base import (
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    attach_native_objects,
     bounded_scan_scope,
+    build_sequences,
+    build_triggers,
     read_value_free_distribution,
     value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
+    FACET_CONSTRAINTS,
+    FACET_GRANTS,
+    FACET_INVENTORY,
+    FACET_OBJECT_COMMENTS,
+    FACET_ROUTINE_BODIES,
+    FACET_SEQUENCES,
+    FACET_TRIGGERS,
+    FACET_VIEW_DEFINITIONS,
     append_grouped_foreign_key_rows,
     append_grouped_key_rows,
     apply_column_descriptions,
@@ -28,6 +40,7 @@ from aida.connectors.discovery import (
     build_grants,
     build_routines,
     build_table_map_from_column_rows,
+    read_facet,
 )
 from aida.connectors.schema_scope import SchemaScope, schema_scope, scoped_sqlserver_query
 from aida.connectors.sql_execution import SqlExecutor
@@ -131,6 +144,113 @@ _ROUTINE_PARAMETER_SQL = """
       AND p.parameter_id > 0
       AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
     ORDER BY s.name, p.object_id, p.parameter_id
+"""
+
+# R11-FP01: triggers.
+#
+# `sys.triggers` carries the trigger and its parent object; `sys.trigger_events`
+# carries one row per event, which is why the three events arrive as MAX(CASE)
+# flags over a grouped join rather than as three rows per trigger. The body
+# comes from `sys.sql_modules.definition` for exactly the reason every other
+# definition in this module does (see the header note): it is `nvarchar(max)`
+# and does not truncate, where `syscomments` and INFORMATION_SCHEMA do.
+#
+# A NULL definition means the trigger is encrypted or invisible to this
+# principal, recorded as unavailable with a reason -- never as a trigger with an
+# empty body.
+#
+# `is_ms_shipped = 0` excludes system triggers. DDL and logon triggers are
+# deliberately out of scope and their absence is a scope decision rather than an
+# oversight: they have no parent table (`parent_id = 0`), so they are not a data
+# path between two objects, which is the whole reason this axis exists. The
+# `parent_class = 1` predicate is what excludes them, and it is spelled as a
+# predicate rather than left to the join so this is visible.
+# The events arrive through an `OUTER APPLY` rather than a `GROUP BY` over the
+# joined `sys.trigger_events` rows, because `sys.sql_modules.definition` is
+# `nvarchar(max)` and SQL Server refuses `MAX()` on that type -- grouping the
+# join would force exactly that aggregate and fail at run time on every
+# instance. Applying the aggregate to the event table alone keeps the body in
+# the outer projection where no aggregate touches it.
+#
+# `timing` has no BEFORE branch because SQL Server has no BEFORE trigger: a DML
+# trigger is AFTER or INSTEAD OF, full stop. `orientation` is the constant
+# STATEMENT for the same kind of reason -- T-SQL has no `FOR EACH ROW`, so every
+# DML trigger fires once per statement, and reporting it as a constant fact
+# about the engine is honest where reporting NULL would read as "unknown".
+_TRIGGER_SQL = """
+    SELECT
+        s.name AS trigger_schema,
+        tr.name AS trigger_name,
+        o.name AS table_name,
+        s.name AS table_schema,
+        CASE
+            WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsteadOfTrigger') = 1
+            THEN 'INSTEAD OF'
+            ELSE 'AFTER'
+        END AS timing,
+        'STATEMENT' AS orientation,
+        ev.on_insert AS on_insert,
+        ev.on_update AS on_update,
+        ev.on_delete AS on_delete,
+        CAST(0 AS int) AS on_truncate,
+        CASE WHEN tr.is_disabled = 1 THEN 0 ELSE 1 END AS is_enabled,
+        m.definition AS body,
+        CASE
+            WHEN m.definition IS NULL
+            THEN 'sys.sql_modules returned no definition: the module is encrypted '
+                 + 'or not visible to this principal'
+            ELSE NULL
+        END AS unavailable_reason
+    FROM sys.triggers tr
+    JOIN sys.objects o ON o.object_id = tr.parent_id
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    LEFT JOIN sys.sql_modules m ON m.object_id = tr.object_id
+    OUTER APPLY (
+        SELECT
+            MAX(CASE WHEN te.type_desc = 'INSERT' THEN 1 ELSE 0 END) AS on_insert,
+            MAX(CASE WHEN te.type_desc = 'UPDATE' THEN 1 ELSE 0 END) AS on_update,
+            MAX(CASE WHEN te.type_desc = 'DELETE' THEN 1 ELSE 0 END) AS on_delete
+        FROM sys.trigger_events te
+        WHERE te.object_id = tr.object_id
+    ) ev
+    WHERE tr.is_ms_shipped = 0
+      AND tr.parent_class = 1
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, o.name, tr.name
+"""
+
+# R11-FP01: sequences.
+#
+# `sys.sequences` also carries `current_value` and `last_used_value`, and
+# neither is selected here: they are the value the next insert writes into a
+# customer's row, which is source data rather than metadata (INV-6). Only the
+# declaration is read.
+#
+# A SQL Server sequence is standalone -- there is no owning column to report,
+# because an `IDENTITY` column is a column property and not a sequence object --
+# so `owned_by_table` / `owned_by_column` are honestly absent rather than
+# guessed from a default constraint's text.
+_SEQUENCE_SQL = """
+    SELECT
+        s.name AS sequence_schema,
+        sq.name AS sequence_name,
+        TYPE_NAME(sq.user_type_id) AS data_type,
+        CONVERT(nvarchar(64), sq.start_value) AS start_with,
+        CONVERT(nvarchar(64), sq.increment) AS increment_by,
+        CONVERT(nvarchar(64), sq.minimum_value) AS minimum_bound,
+        CONVERT(nvarchar(64), sq.maximum_value) AS maximum_bound,
+        CONVERT(nvarchar(64), sq.cache_size) AS cache_size,
+        CASE WHEN sq.is_cycling = 1 THEN 1 ELSE 0 END AS cycles,
+        CAST(ep.value AS nvarchar(max)) AS description
+    FROM sys.sequences sq
+    JOIN sys.schemas s ON s.schema_id = sq.schema_id
+    LEFT JOIN sys.extended_properties ep
+      ON ep.class = 1
+     AND ep.major_id = sq.object_id
+     AND ep.minor_id = 0
+     AND ep.name = 'MS_Description'
+    WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, sq.name
 """
 
 _TABLE_COMMENT_SQL = """
@@ -304,6 +424,76 @@ def _extract_showplan_estimate(raw_xml: str) -> QueryEstimate:
     )
 
 
+# ---------------------------------------------------------------------------
+# R11-FP02: one facet read's result, carried out of the driver thread.
+#
+# `read_facet` is a coroutine, and every read below happens inside one
+# `asyncio.to_thread` hop because `pytds` is a synchronous driver that declares
+# `threadsafety = 1` -- threads may share the module, not a connection. Giving
+# each facet its own thread hop so it could be awaited individually would pass
+# one connection between pool threads, which is exactly what that declaration
+# says not to do. So the thread reads each facet and *captures* its failure
+# instead of judging it, and the coroutine that owns the run replays each
+# capture into `read_facet`, which classifies it, records it against the facet
+# and decides whether it may be absorbed. The judgement stays in the one place
+# it belongs (`connectors.discovery`), and nothing here second-guesses it.
+#
+# What this changes about failure order, deliberately: today the first failing
+# query aborts the rest, and a captured failure lets the queries after it run
+# before it surfaces. That costs a few doomed round trips on a source that has
+# stopped answering, and buys the thing this feature is for -- a refusal of one
+# facet no longer costs the facets read after it.
+#
+# **SQL Server's SQLSTATE reality.** `pytds` exceptions carry `msg_no`,
+# `number`, `severity` and a TDS `state` byte; they carry no `sqlstate` field at
+# all (verified against the installed driver). So
+# `capability_states.is_permission_refusal` cannot see a `42501`, and a genuine
+# refusal here classifies as UNAVAILABLE / FACET_QUERY_FAILED, which `read_facet`
+# re-raises. That is the under-claim INV-9 asks for and the behaviour this
+# adapter already had; what adoption adds today is the receipt entry naming the
+# facet. The day the driver reports a SQLSTATE -- or another one replaces it --
+# the same wiring starts absorbing the refusal with no change here.
+_CapturedRead = list[Any] | BaseException
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedReads:
+    """Every discovery read of one run, in the order the thread made them.
+
+    `catalog_name` is not a facet: a login that cannot ask `DB_NAME()` has no
+    session to read anything else with, so that failure still leaves the thread
+    immediately.
+    """
+
+    catalog_name: str
+    columns: _CapturedRead
+    keys: _CapturedRead
+    foreign_keys: _CapturedRead
+    view_definitions: _CapturedRead
+    routines: _CapturedRead
+    routine_parameters: _CapturedRead
+    triggers: _CapturedRead
+    sequences: _CapturedRead
+    table_comments: _CapturedRead
+    column_comments: _CapturedRead
+    schema_comments: _CapturedRead
+    catalog_comment: _CapturedRead
+    grants: _CapturedRead
+
+
+async def _captured(read: _CapturedRead) -> Sequence[Any]:
+    """The rows a captured read returned, or the failure it captured, re-raised.
+
+    The awaitable `read_facet` takes. Raising here rather than in the thread is
+    the whole point: the exception reaches `read_facet` in the coroutine that
+    owns the `FacetReadScope`, so it is classified and recorded exactly as a
+    natively async driver's failure is (R11-FP02).
+    """
+    if isinstance(read, BaseException):
+        raise read
+    return read
+
+
 class SqlServerConnector(SqlExecutor):
     connector_type = "sqlserver"
     dialect = "tsql"
@@ -315,7 +505,7 @@ class SqlServerConnector(SqlExecutor):
         delegated_identity=False,
         approximate_statistics=True,
         # Envelope 1.1 (gap/02 N1). Each flag below is backed by a query in
-        # `_discover_sync`, which is what INV-9 requires of a `True`:
+        # `_read_facets_sync`, which is what INV-9 requires of a `True`:
         #   views            -> sys.views + sys.sql_modules.definition
         #   routines         -> sys.objects/sys.sql_modules + sys.parameters
         #   object_comments  -> sys.extended_properties, MS_Description
@@ -324,6 +514,11 @@ class SqlServerConnector(SqlExecutor):
         routines=True,
         object_comments=True,
         grants=True,
+        # R11-FP01. Each backed by a query in `_read_facets_sync`:
+        #   triggers  -> sys.triggers + sys.trigger_events + sys.sql_modules
+        #   sequences -> sys.sequences
+        triggers=True,
+        sequences=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -377,9 +572,80 @@ class SqlServerConnector(SqlExecutor):
             cursor.execute(scoped)
 
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
-        return await asyncio.to_thread(self._discover_sync)
+        """R11-FP02: each facet's read replayed through `read_facet`, then assembled.
 
-    def _discover_sync(self) -> tuple[DiscoveredCatalog, ...]:
+        The reads themselves all happened in one driver thread (see
+        `_read_facets_sync` and the `_CapturedReads` comment above). They are
+        replayed here in the order they were made, so the first failure is the
+        one that surfaces, and so a refused facet -- which `read_facet` absorbs,
+        returning no rows -- simply leaves its own `apply_*` / `build_*` call
+        with nothing to attach.
+
+        `triggers` and `sequences` are replayed *without* a facet: neither is in
+        `DISCOVERY_FACETS`, so there is no name a `FacetReadScope` would accept
+        or a receipt could publish, and naming one would turn a recoverable
+        refusal into a `ValueError`. Their failures therefore still end the run,
+        exactly as before this change (see the R11-FP02 remainder).
+        """
+        reads = await asyncio.to_thread(self._read_facets_sync)
+        column_rows = await read_facet(FACET_INVENTORY, _captured(reads.columns))
+        key_rows = await read_facet(FACET_CONSTRAINTS, _captured(reads.keys))
+        foreign_key_rows = await read_facet(FACET_CONSTRAINTS, _captured(reads.foreign_keys))
+        view_rows = await read_facet(FACET_VIEW_DEFINITIONS, _captured(reads.view_definitions))
+        routine_rows = await read_facet(FACET_ROUTINE_BODIES, _captured(reads.routines))
+        routine_parameter_rows = await read_facet(
+            FACET_ROUTINE_BODIES, _captured(reads.routine_parameters)
+        )
+        trigger_rows = await read_facet(FACET_TRIGGERS, _captured(reads.triggers))
+        sequence_rows = await read_facet(FACET_SEQUENCES, _captured(reads.sequences))
+        table_description_rows = await read_facet(
+            FACET_OBJECT_COMMENTS, _captured(reads.table_comments)
+        )
+        column_description_rows = await read_facet(
+            FACET_OBJECT_COMMENTS, _captured(reads.column_comments)
+        )
+        schema_description_rows = await read_facet(
+            FACET_OBJECT_COMMENTS, _captured(reads.schema_comments)
+        )
+        catalog_comment_rows = await read_facet(
+            FACET_OBJECT_COMMENTS, _captured(reads.catalog_comment)
+        )
+        grant_rows = await read_facet(FACET_GRANTS, _captured(reads.grants))
+
+        return _assemble_catalog(
+            reads.catalog_name,
+            list(column_rows),
+            list(key_rows),
+            list(foreign_key_rows),
+            view_rows=list(view_rows),
+            routine_rows=list(routine_rows),
+            routine_parameter_rows=list(routine_parameter_rows),
+            trigger_rows=list(trigger_rows),
+            sequence_rows=list(sequence_rows),
+            table_description_rows=list(table_description_rows),
+            column_description_rows=list(column_description_rows),
+            schema_description_rows=list(schema_description_rows),
+            # One row, read as one row: `_assemble_catalog` takes the catalog
+            # comment as a single row or None, and a refused read has none.
+            catalog_description_row=catalog_comment_rows[0] if catalog_comment_rows else None,
+            grant_rows=list(grant_rows),
+        )
+
+    def _facet_rows(self, cursor: Any, sql: str) -> _CapturedRead:
+        """One facet's read, captured rather than judged (R11-FP02).
+
+        Both halves are inside the guard, not just the `execute`: the driver
+        decides which of the two raises, and a refusal that surfaced at fetch
+        time would otherwise escape the capture and end the run.
+        """
+        try:
+            self._scoped_execute(cursor, sql)
+            rows: list[Any] = cursor.fetchall()
+        except Exception as exc:  # noqa: BLE001 -- replayed verbatim into `read_facet`
+            return exc
+        return rows
+
+    def _read_facets_sync(self) -> _CapturedReads:
         connection = self._connect(timeout_seconds=self._command_timeout, autocommit=True)
         try:
             cursor = connection.cursor()
@@ -388,7 +654,7 @@ class SqlServerConnector(SqlExecutor):
                 catalog_row = cursor.fetchone()
                 catalog_name = str(catalog_row["catalog_name"]) if catalog_row else ""
 
-                self._scoped_execute(
+                columns = self._facet_rows(
                     cursor,
                     """
                     SELECT
@@ -409,9 +675,8 @@ class SqlServerConnector(SqlExecutor):
                     ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
                     """,
                 )
-                column_rows = cursor.fetchall()
 
-                self._scoped_execute(
+                keys = self._facet_rows(
                     cursor,
                     """
                     SELECT
@@ -432,9 +697,8 @@ class SqlServerConnector(SqlExecutor):
                         kcu.ORDINAL_POSITION
                     """,
                 )
-                key_rows = cursor.fetchall()
 
-                self._scoped_execute(
+                foreign_keys = self._facet_rows(
                     cursor,
                     """
                     SELECT
@@ -465,42 +729,40 @@ class SqlServerConnector(SqlExecutor):
                         fk_kcu.ORDINAL_POSITION
                     """,
                 )
-                foreign_key_rows = cursor.fetchall()
 
-                self._scoped_execute(cursor, _VIEW_DEFINITION_SQL)
-                view_rows = cursor.fetchall()
-                self._scoped_execute(cursor, _ROUTINE_SQL)
-                routine_rows = cursor.fetchall()
-                self._scoped_execute(cursor, _ROUTINE_PARAMETER_SQL)
-                routine_parameter_rows = cursor.fetchall()
-                self._scoped_execute(cursor, _TABLE_COMMENT_SQL)
-                table_description_rows = cursor.fetchall()
-                self._scoped_execute(cursor, _COLUMN_COMMENT_SQL)
-                column_description_rows = cursor.fetchall()
-                self._scoped_execute(cursor, _SCHEMA_COMMENT_SQL)
-                schema_description_rows = cursor.fetchall()
-                self._scoped_execute(cursor, _CATALOG_COMMENT_SQL)
-                catalog_description_row = cursor.fetchone()
-                self._scoped_execute(cursor, _GRANT_SQL)
-                grant_rows = cursor.fetchall()
+                view_definitions = self._facet_rows(cursor, _VIEW_DEFINITION_SQL)
+                routines = self._facet_rows(cursor, _ROUTINE_SQL)
+                routine_parameters = self._facet_rows(cursor, _ROUTINE_PARAMETER_SQL)
+                triggers = self._facet_rows(cursor, _TRIGGER_SQL)
+                sequences = self._facet_rows(cursor, _SEQUENCE_SQL)
+                table_comments = self._facet_rows(cursor, _TABLE_COMMENT_SQL)
+                column_comments = self._facet_rows(cursor, _COLUMN_COMMENT_SQL)
+                schema_comments = self._facet_rows(cursor, _SCHEMA_COMMENT_SQL)
+                # The catalog comment is one row, read with the same `fetchall`
+                # as the rest so one capture shape covers every read;
+                # `discover()` takes the first row exactly as `fetchone` did.
+                catalog_comment = self._facet_rows(cursor, _CATALOG_COMMENT_SQL)
+                grants = self._facet_rows(cursor, _GRANT_SQL)
             finally:
                 cursor.close()
         finally:
             connection.close()
 
-        return _assemble_catalog(
-            catalog_name,
-            column_rows,
-            key_rows,
-            foreign_key_rows,
-            view_rows=view_rows,
-            routine_rows=routine_rows,
-            routine_parameter_rows=routine_parameter_rows,
-            table_description_rows=table_description_rows,
-            column_description_rows=column_description_rows,
-            schema_description_rows=schema_description_rows,
-            catalog_description_row=catalog_description_row,
-            grant_rows=grant_rows,
+        return _CapturedReads(
+            catalog_name=catalog_name,
+            columns=columns,
+            keys=keys,
+            foreign_keys=foreign_keys,
+            view_definitions=view_definitions,
+            routines=routines,
+            routine_parameters=routine_parameters,
+            triggers=triggers,
+            sequences=sequences,
+            table_comments=table_comments,
+            column_comments=column_comments,
+            schema_comments=schema_comments,
+            catalog_comment=catalog_comment,
+            grants=grants,
         )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
@@ -691,6 +953,8 @@ def _assemble_catalog(
     view_rows: list[dict[str, Any]] | None = None,
     routine_rows: list[dict[str, Any]] | None = None,
     routine_parameter_rows: list[dict[str, Any]] | None = None,
+    trigger_rows: list[dict[str, Any]] | None = None,
+    sequence_rows: list[dict[str, Any]] | None = None,
     table_description_rows: list[dict[str, Any]] | None = None,
     column_description_rows: list[dict[str, Any]] | None = None,
     schema_description_rows: list[dict[str, Any]] | None = None,
@@ -718,15 +982,22 @@ def _assemble_catalog(
         raw_description = catalog_description_row.get("description")
         if raw_description is not None:
             catalog_description = str(raw_description)
-    return assemble_catalog(
-        str(catalog_name),
-        tables,
-        routines=build_routines(routine_rows or [], routine_parameter_rows or []),
-        grants=build_grants(grant_rows or []),
-        schema_descriptions={
-            str(row["schema_name"]): str(row["description"])
-            for row in (schema_description_rows or [])
-            if row.get("description") is not None
-        },
-        catalog_description=catalog_description,
+    # R11-FP01: attached after assembly rather than passed in, because
+    # `assemble_catalog` takes no parameter for these two axes -- see
+    # `connectors.base.attach_native_objects` for why the helper lives there.
+    return attach_native_objects(
+        assemble_catalog(
+            str(catalog_name),
+            tables,
+            routines=build_routines(routine_rows or [], routine_parameter_rows or []),
+            grants=build_grants(grant_rows or []),
+            schema_descriptions={
+                str(row["schema_name"]): str(row["description"])
+                for row in (schema_description_rows or [])
+                if row.get("description") is not None
+            },
+            catalog_description=catalog_description,
+        ),
+        triggers=build_triggers(trigger_rows or []),
+        sequences=build_sequences(sequence_rows or []),
     )

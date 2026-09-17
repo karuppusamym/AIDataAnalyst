@@ -2179,7 +2179,7 @@ export interface DisagreementReportRead {
 
 /** What discovery takes in. Every list empty means unrestricted. */
 export interface DiscoverySelection {
-  object_kinds?: ("TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE")[];
+  object_kinds?: ("TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "SEQUENCE")[];
   include_schemas?: string[];
   exclude_schemas?: string[];
   include_objects?: string[];
@@ -3460,7 +3460,7 @@ export interface NotificationTestResult {
 }
 
 export interface ObjectKindCapabilityRead {
-  kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE";
+  kind: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "SEQUENCE";
   inventory: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
   definition: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
 }
@@ -4456,6 +4456,50 @@ export interface RiskTierDisagreementRateRead {
   pending: number;
   disagreement_rate: number | null;
   sufficient_sample: boolean;
+}
+
+/** R11-FP03: one routine's captured definitions, newest first. */
+export interface RoutineDefinitionHistoryRead {
+  routine_id: string;
+  routine_qualified_name: string;
+  routine_type: string;
+  signature: string;
+  status: string;
+  dialect: string;
+  footprint_basis: string;
+  footprint_parse_budget: number;
+  versions: RoutineDefinitionVersionRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** R11-FP03: one captured definition of a routine, described without its text. */
+export interface RoutineDefinitionVersionRead {
+  version_id: string;
+  version_number: number;
+  captured_at: string;
+  analysis_run_id: string | null;
+  availability: string;
+  unavailable_reason: string | null;
+  truncated: boolean;
+  change_class: string | null;
+  redaction_status: string;
+  screening_status: string;
+  definition_digest: string | null;
+  previous_definition_digest: string | null;
+  body_released: boolean;
+  withheld_marker: string | null;
+  withheld_reason_code: string | null;
+  footprint_state: string;
+  parse_completed: boolean | null;
+  unparsed_reason_codes: string[];
+  reads_table_names: string[];
+  writes_table_names: string[];
+  reads_added: string[];
+  reads_removed: string[];
+  writes_added: string[];
+  writes_removed: string[];
 }
 
 export interface RoutineDescriptionDraftEdit {

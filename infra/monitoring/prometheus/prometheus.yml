@@ -5,11 +5,15 @@
 # Prometheus-Operator form of the same intent is ../k8s/servicemonitor.yaml
 # and ../k8s/podmonitor.yaml.
 #
-# Nothing in this repository starts Prometheus. `compose.yaml` and
-# `infra/k8s/base/*` are owned elsewhere and were deliberately not edited to
-# add a monitoring service -- see ../README.md for the exact wiring a
-# deployment has to add, and for what is still an operator's number rather
-# than a measured one.
+# `compose.yaml` now starts a Prometheus that reads this file, under
+# `--profile monitoring` (or `--profile full`), and it is verified to do so:
+# on 2026-09-17 that container loaded this config and the rule file with
+# `reloadConfigSuccess: true`, `promtool check config` reported it valid, and
+# `/api/v1/targets` showed `atlas-api` up. See ../README.md for what an
+# operator still has to set for the other two jobs, and for what is an
+# operator's number rather than a measured one. `infra/k8s/base/*` is owned
+# elsewhere and is still not edited from here -- the Kubernetes form of this
+# intent is ../k8s/, a separate kustomize base.
 #
 # Two facts shape every job below, and both are decisions somebody already
 # made deliberately rather than oversights to paper over here:

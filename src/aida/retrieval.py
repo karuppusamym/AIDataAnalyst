@@ -18,7 +18,12 @@ Stage 1: Candidate fetch
   binding folds the term's definition/synonyms into the metric's candidate
   text (and the metric's identity into the term's hit metadata), so the
   binding participates in scoring in both directions instead of being a
-  static link nobody reads at query time.
+  static link nobody reads at query time. R11-FP08: a routine's *approved*
+  Atlas-authored description is one of the words that fetches it and one of the
+  words that scores it, so a procedure described in business language is
+  reachable by a question asked in business language -- inside this stage, not
+  as a channel of its own (R11-S3 defers new channels until retrieval quality
+  is measured).
 
 Stage 2: Hybrid scoring
   Score each candidate with three additive signals:
@@ -83,6 +88,8 @@ from aida.envelope_models import (
     MetadataRoutine,
     MetadataRoutineParameter,
     MetadataViewDefinition,
+    RoutineDocumentation,
+    RoutineDocumentationVersion,
 )
 from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
@@ -176,6 +183,31 @@ def _bm25_score(query_tokens: list[str], candidate_text: str) -> float:
 #: R11-FP11: a view definition match is weaker evidence than a name or description match --
 #: it says what the view is built from, not what it is.
 _DEFINITION_MATCH_WEIGHT = 0.6
+
+#: R11-FP08: how much of the coverage an *approved* routine description adds is kept.
+#:
+#: Full weight, and the number is stated rather than left implicit because the two
+#: neighbouring decisions in this file both went the other way and the difference is
+#: the whole point:
+#:
+#: * It is **not** discounted like `_DEFINITION_MATCH_WEIGHT`. That discount is for a
+#:   view's stored SQL, which says what the object is *built from*; a reviewed
+#:   description says what the routine is *for*, which is exactly what a
+#:   business-language question asks. Every other candidate in this module already
+#:   folds an object's description into its candidate text undiscounted (a table's
+#:   `source_description`, a metric's description, a concept's description), and an
+#:   Atlas-authored, independently APPROVED description is stronger evidence than any
+#:   of those -- it was reviewed, and no rescan can reword it.
+#: * It is **not** boosted above a name match either. `hybrid_retrieve` has exactly one
+#:   boost, and it belongs to published governed tools; a routine "is context for a
+#:   question, never a governed tool, and must not outrank one" (the rule the ROUTINE
+#:   candidate already carries below). Raising a description match above a name match
+#:   would need a second boost, and a routine is the wrong candidate to invent one for.
+#:
+#: Applied to the *incremental* coverage the description contributes rather than to the
+#: whole score, so this stays a real knob: at 0.6 an approved description would be
+#: discounted exactly the way a view definition is, without touching anything else.
+_APPROVED_DESCRIPTION_MATCH_WEIGHT = 1.0
 
 
 def _exact_phrase_bonus(query: str, candidate_text: str) -> float:
@@ -921,13 +953,47 @@ async def hybrid_retrieve(
                 )
 
     # 8. Stored procedures and functions (R11-FP11). A routine is found by the
-    # words in its name, its parameter names and the source's own description --
-    # never by its body, which is evidence to read on request (MCP
+    # words in its name, its parameter names, the source's own description and
+    # -- R11-FP08 -- its approved Atlas-authored description -- never by its
+    # body, which is evidence to read on request (MCP
     # `get_transformation_detail`), not text to rank. What it stands on comes only
     # from ACTIVE procedure-lineage edges: an agent's PROPOSED edge nobody has
     # decided does not steer an answer. No boost -- a routine is context for a
     # question, never a governed tool, and must not outrank one.
+    #
+    # R11-FP08: the approved description also *widens the fetch*, for the reason the
+    # table candidate's own `description_filters` were added above -- a routine
+    # described in the question's words but named nothing like them was never fetched,
+    # so its description could not score however well it was written. Only the
+    # published, APPROVED version counts, the discipline the ontology candidate carries:
+    # a DRAFT or PENDING_APPROVAL draft is a proposal nobody has decided, a SUPERSEDED
+    # version is text the platform has replaced, and a WITHDRAWN one is text a reviewer
+    # retired -- none of the three is what Atlas asserts, so none of them ranks.
     routine_filters = [func.lower(MetadataRoutine.name).contains(t) for t in query_tokens[:10]]
+    routine_scope: Any = true()
+    if routine_filters:
+        approved_description_match = (
+            select(RoutineDocumentationVersion.id)
+            .join(
+                RoutineDocumentation,
+                RoutineDocumentation.id == RoutineDocumentationVersion.documentation_id,
+            )
+            .where(
+                RoutineDocumentation.routine_id == MetadataRoutine.id,
+                RoutineDocumentation.organization_id == datasource.organization_id,
+                RoutineDocumentation.datasource_id == datasource.id,
+                RoutineDocumentationVersion.organization_id == datasource.organization_id,
+                RoutineDocumentationVersion.status == "APPROVED",
+                or_(
+                    *(
+                        func.lower(RoutineDocumentationVersion.description).contains(t)
+                        for t in query_tokens[:10]
+                    )
+                ),
+            )
+            .exists()
+        )
+        routine_scope = or_(*routine_filters, approved_description_match)
     routine_rows = (
         await session.execute(
             select(MetadataRoutine, MetadataSchema.name)
@@ -936,7 +1002,7 @@ async def hybrid_retrieve(
                 MetadataRoutine.datasource_id == datasource.id,
                 MetadataRoutine.organization_id == datasource.organization_id,
                 MetadataRoutine.status == "ACTIVE",
-                or_(*routine_filters) if routine_filters else true(),
+                routine_scope,
             )
             .limit(scan_limit)
         )
@@ -945,7 +1011,30 @@ async def hybrid_retrieve(
     parameter_names: dict[UUID, list[str]] = {}
     reads_by_routine: dict[UUID, set[str]] = {}
     writes_by_routine: dict[UUID, set[str]] = {}
+    approved_descriptions: dict[UUID, RoutineDocumentationVersion] = {}
     if routine_ids:
+        # R11-FP08: the approved description of every routine that was fetched -- the
+        # one widened into the candidate set above *and* the one found by its name,
+        # whose description still has to score. `current_routine_descriptions`' shape
+        # (ascending version, last write per routine wins) rather than a second rule.
+        approved_rows = await session.execute(
+            select(RoutineDocumentationVersion, RoutineDocumentation.routine_id)
+            .join(
+                RoutineDocumentation,
+                RoutineDocumentation.id == RoutineDocumentationVersion.documentation_id,
+            )
+            .where(
+                RoutineDocumentation.routine_id.in_(routine_ids),
+                RoutineDocumentation.organization_id == datasource.organization_id,
+                RoutineDocumentation.datasource_id == datasource.id,
+                RoutineDocumentationVersion.organization_id == datasource.organization_id,
+                RoutineDocumentationVersion.status == "APPROVED",
+            )
+            .order_by(RoutineDocumentationVersion.version)
+        )
+        approved_descriptions = {
+            routine_id: version for version, routine_id in approved_rows.all()
+        }
         parameter_rows = await session.execute(
             select(MetadataRoutineParameter.routine_id, MetadataRoutineParameter.name).where(
                 MetadataRoutineParameter.routine_id.in_(routine_ids),
@@ -975,13 +1064,33 @@ async def hybrid_retrieve(
                 writes_by_routine.setdefault(routine_id, set()).add(str(target_table_id))
 
     for routine, schema_name in routine_rows:
-        candidate_text = " ".join(
+        # The source's own words stay in the bag beside Atlas's: retrieval is about
+        # *finding* the routine, and a source comment is still words the source uses,
+        # even where `context_compiler` refuses to publish it as the platform's
+        # description. What the approved version changes is the score and the reason
+        # code, not whether the source comment is read.
+        source_text = " ".join(
             filter(
                 None,
                 [routine.name, routine.source_description, *parameter_names.get(routine.id, [])],
             )
         )
-        bm25 = _bm25_score(query_tokens, candidate_text)
+        approved = approved_descriptions.get(routine.id)
+        candidate_text = (
+            f"{source_text} {approved.description}" if approved is not None else source_text
+        )
+        source_bm25 = _bm25_score(query_tokens, source_text)
+        description_bm25 = (
+            _bm25_score(query_tokens, approved.description) if approved is not None else 0.0
+        )
+        bm25 = source_bm25
+        if approved is not None:
+            # Keep `_APPROVED_DESCRIPTION_MATCH_WEIGHT` of the coverage the approved
+            # description adds on top of what the source text already matched.
+            added = (_bm25_score(query_tokens, candidate_text) - source_bm25) * (
+                _APPROVED_DESCRIPTION_MATCH_WEIGHT
+            )
+            bm25 = min(1.0, source_bm25 + added)
         exact = _exact_phrase_bonus(question, candidate_text)
         score = round(min(1.0, bm25 + exact), 4)
         if score <= 0:
@@ -990,13 +1099,37 @@ async def hybrid_retrieve(
         if hit_id in seen_ids:
             continue
         seen_ids.add(hit_id)
+        # A name match and a meaning match are different evidence, and the grounding
+        # receipt hashes what matched -- so an approved-description match says so in its
+        # own code rather than arriving disguised as a name match. A routine reached
+        # *only* through its description carries no `BM25_ROUTINE_NAME`: that code is
+        # the existing claim about the routine's own identifiers (its name, its
+        # parameters, the source's comment) and would be false here.
+        routine_reason_codes: list[str] = []
+        if source_bm25 > 0:
+            routine_reason_codes.append("BM25_ROUTINE_NAME")
+        description_metadata: dict[str, Any] = {}
+        if approved is not None:
+            description_metadata = {
+                # The digest, never the prose: a hit's metadata is evidence a receipt
+                # hashes, the discipline `definition_digest` already carries above.
+                "description_digest": hashlib.sha256(
+                    approved.description.encode("utf-8")
+                ).hexdigest(),
+                "description_version_id": str(approved.id),
+                "description_version": approved.version,
+            }
+            if description_bm25 > 0:
+                routine_reason_codes.extend(
+                    ["BM25_ROUTINE_DESCRIPTION", "ROUTINE_DESCRIPTION_APPROVED"]
+                )
         hits.append(
             HybridRetrievalHit(
                 object_type="ROUTINE",
                 object_id=str(routine.id),
                 display_name=f"{schema_name}.{routine.name}",
                 score=score,
-                reason_codes=["BM25_ROUTINE_NAME"],
+                reason_codes=routine_reason_codes,
                 metadata={
                     "routine_id": str(routine.id),
                     "datasource_id": str(datasource.id),
@@ -1005,6 +1138,7 @@ async def hybrid_retrieve(
                     "language": routine.language,
                     "reads_table_ids": sorted(reads_by_routine.get(routine.id, set())),
                     "writes_table_ids": sorted(writes_by_routine.get(routine.id, set())),
+                    **description_metadata,
                     # Whether MCP `get_transformation_detail` would release the body:
                     # the same gate a person's parse applies.
                     "body_available": (

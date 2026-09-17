@@ -103,6 +103,14 @@ def test_the_validation_path_is_gated() -> None:
         # catalog router; the module is named per-handler so the next move
         # fails loudly here rather than silently asserting nothing.
         ("atlas.modules.catalog.router", "list_catalog_rows"),
+        # R11-FP03: a routine's captured definition history. Registered here
+        # rather than trusted to review because the subject is a routine, which
+        # has no parent table and so could not inherit the table gate every
+        # other catalog read above uses -- it is gated on the datasource
+        # instead (`ontology_api`'s ROUTINE branch, and
+        # `routine_description_api._gate_routine`), and a gate reached by a
+        # different route is exactly the case this scan exists to keep honest.
+        ("aida.definition_history_api", "get_routine_definition_history"),
     ],
 )
 def test_the_catalog_read_handlers_are_gated(module: str, handler: str) -> None:

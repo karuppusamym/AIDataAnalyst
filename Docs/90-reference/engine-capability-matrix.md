@@ -29,16 +29,16 @@ The architecture can represent several dialects. That is not the same fact as ve
 
 Every field of `ConnectorCapabilities`, per engine. A `PLANNED` engine advertises none (INV-9), which is why its whole row reads UNSUPPORTED.
 
-| Engine | `catalogs` | `schemas` | `constraints` | `indexes` | `partitions` | `explain` | `query_history` | `delegated_identity` | `approximate_statistics` | `views` | `routines` | `object_comments` | `grants` | `value_range_profiling` | `distribution_entropy_profiling` |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| bigquery | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | no | no | no |
-| databricks | yes | yes | yes | no | no | yes | no | no | yes | no | no | yes | no | no | no |
-| db2 | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no |
-| oracle | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | no | no |
-| postgres | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes |
-| snowflake | yes | yes | yes | no | yes | yes | no | yes | yes | yes | yes | yes | yes | no | no |
-| sqlserver | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | no | no |
-| teradata | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no |
+| Engine | `catalogs` | `schemas` | `constraints` | `indexes` | `partitions` | `explain` | `query_history` | `delegated_identity` | `approximate_statistics` | `views` | `routines` | `object_comments` | `grants` | `triggers` | `sequences` | `value_range_profiling` | `distribution_entropy_profiling` |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| bigquery | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | no | no | no | no | no |
+| databricks | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | no | no | no | no | no |
+| db2 | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no |
+| oracle | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes | yes | no | no |
+| postgres | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| snowflake | yes | yes | yes | no | yes | yes | no | yes | yes | yes | yes | yes | yes | no | yes | no | no |
+| sqlserver | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | yes | yes | no | no |
+| teradata | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no |
 
 Optional `Connector` methods each adapter overrides (the base class declines honestly, so an override is the capability):
 
@@ -65,18 +65,18 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | bigquery | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | bigquery | PACKAGE | ROUTINE_CONTAINER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | bigquery | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| bigquery | TRIGGER | OTHER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| bigquery | SEQUENCE | OTHER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
+| bigquery | TRIGGER | TRIGGER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
+| bigquery | SEQUENCE | SEQUENCE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | databricks | TABLE | TABLE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | PARTIAL | SUPPORTED | SUPPORTED |
-| databricks | VIEW | VIEW | SUPPORTED | UNSUPPORTED | UNSUPPORTED | PARTIAL | UNSUPPORTED | SUPPORTED |
+| databricks | VIEW | VIEW | SUPPORTED | SUPPORTED | UNSUPPORTED | PARTIAL | SUPPORTED | SUPPORTED |
 | databricks | MATERIALIZED VIEW | MATERIALIZED_VIEW | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | PARTIAL | UNSUPPORTED | UNSUPPORTED |
 | databricks | INDEXED VIEW | MATERIALIZED_VIEW | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| databricks | PROCEDURE | ROUTINE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| databricks | FUNCTION | ROUTINE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| databricks | PROCEDURE | ROUTINE | SUPPORTED | SUPPORTED | UNSUPPORTED | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
+| databricks | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | UNSUPPORTED | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | databricks | PACKAGE | ROUTINE_CONTAINER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | databricks | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| databricks | TRIGGER | OTHER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| databricks | SEQUENCE | OTHER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
+| databricks | TRIGGER | TRIGGER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
+| databricks | SEQUENCE | SEQUENCE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | db2 | TABLE | TABLE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | db2 | VIEW | VIEW | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | db2 | PROCEDURE | ROUTINE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -89,8 +89,8 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | oracle | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | oracle | PACKAGE | ROUTINE_CONTAINER | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | oracle | PACKAGE MEMBER | ROUTINE | SUPPORTED | UNAVAILABLE | UNAVAILABLE | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
-| oracle | TRIGGER | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| oracle | SEQUENCE | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| oracle | TRIGGER | TRIGGER | SUPPORTED | SUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| oracle | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | postgres | TABLE | TABLE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | SUPPORTED | SUPPORTED | SUPPORTED |
 | postgres | VIEW | VIEW | SUPPORTED | SUPPORTED | PARTIAL | SUPPORTED | SUPPORTED | SUPPORTED |
 | postgres | MATERIALIZED VIEW | MATERIALIZED_VIEW | SUPPORTED | SUPPORTED | PARTIAL | SUPPORTED | SUPPORTED | SUPPORTED |
@@ -99,10 +99,10 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | postgres | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | postgres | PACKAGE | ROUTINE_CONTAINER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | postgres | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| postgres | AGGREGATE FUNCTION | ROUTINE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| postgres | WINDOW FUNCTION | ROUTINE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| postgres | TRIGGER | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| postgres | SEQUENCE | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| postgres | AGGREGATE FUNCTION | ROUTINE | SUPPORTED | UNAVAILABLE | UNAVAILABLE | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
+| postgres | WINDOW FUNCTION | ROUTINE | SUPPORTED | UNAVAILABLE | UNAVAILABLE | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
+| postgres | TRIGGER | TRIGGER | SUPPORTED | PARTIAL | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| postgres | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | snowflake | TABLE | TABLE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | PARTIAL | SUPPORTED | SUPPORTED |
 | snowflake | VIEW | VIEW | SUPPORTED | SUPPORTED | PARTIAL | PARTIAL | SUPPORTED | SUPPORTED |
 | snowflake | MATERIALIZED VIEW | MATERIALIZED_VIEW | SUPPORTED | SUPPORTED | PARTIAL | PARTIAL | SUPPORTED | SUPPORTED |
@@ -111,8 +111,8 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | snowflake | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | snowflake | PACKAGE | ROUTINE_CONTAINER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | snowflake | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| snowflake | TRIGGER | OTHER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| snowflake | SEQUENCE | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| snowflake | TRIGGER | TRIGGER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
+| snowflake | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | sqlserver | TABLE | TABLE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | PARTIAL | SUPPORTED | SUPPORTED |
 | sqlserver | VIEW | VIEW | SUPPORTED | SUPPORTED | PARTIAL | PARTIAL | SUPPORTED | SUPPORTED |
 | sqlserver | MATERIALIZED VIEW | MATERIALIZED_VIEW | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
@@ -121,8 +121,8 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | sqlserver | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | sqlserver | PACKAGE | ROUTINE_CONTAINER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | sqlserver | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| sqlserver | TRIGGER | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| sqlserver | SEQUENCE | OTHER | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| sqlserver | TRIGGER | TRIGGER | SUPPORTED | SUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| sqlserver | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | teradata | TABLE | TABLE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | teradata | VIEW | VIEW | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | teradata | PROCEDURE | ROUTINE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -156,7 +156,7 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | VIEW | definition_retrieval | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | VIEW | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | sql_lineage_parser extracts column-level lineage and publishes its own degraded outcomes (UNRESOLVED_TABLE for a source it cannot resolve, Confidence.PARTIAL/LOW); see the construct matrix at Docs/90-reference/procedure-lineage-capability-matrix.md |
 | VIEW | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | bigquery | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- bigquery declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
-| VIEW | candidate_generation | SUPPORTED |  | bigquery, oracle, postgres, snowflake, sqlserver | view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined) |
+| VIEW | candidate_generation | SUPPORTED |  | bigquery, databricks, oracle, postgres, snowflake, sqlserver | view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined) |
 | VIEW | execution | SUPPORTED |  | bigquery, databricks, postgres, snowflake, sqlserver | governed read execution through the query gateway, cost-estimated first via the adapter's explain path |
 | MATERIALIZED VIEW | inventory | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags |
 | MATERIALIZED VIEW | definition_retrieval | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
@@ -167,34 +167,31 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | PROCEDURE | inventory | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').PROCEDURE.inventory, derived from the adapter's own capability flags |
 | PROCEDURE | definition_retrieval | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | PROCEDURE | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood' |
-| PROCEDURE | candidate_generation | PARTIAL | `CANDIDATE_SHAPE_REFUSED` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated |
+| PROCEDURE | candidate_generation | PARTIAL | `CANDIDATE_SHAPE_REFUSED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated |
 | PROCEDURE | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | FUNCTION | inventory | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').FUNCTION.inventory, derived from the adapter's own capability flags |
 | FUNCTION | definition_retrieval | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | FUNCTION | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood' |
-| FUNCTION | candidate_generation | PARTIAL | `CANDIDATE_SHAPE_REFUSED` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated |
+| FUNCTION | candidate_generation | PARTIAL | `CANDIDATE_SHAPE_REFUSED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated |
 | FUNCTION | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | TABLE | inventory | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').TABLE.inventory, derived from the adapter's own capability flags |
 | TABLE | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | databricks | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- databricks declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
 | VIEW | inventory | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').VIEW.inventory, derived from the adapter's own capability flags |
-| VIEW | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
+| VIEW | definition_retrieval | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | VIEW | parsing_lineage | UNSUPPORTED | `PARSER_REFUSES_DIALECT` | databricks | dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix |
 | VIEW | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | databricks | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- databricks declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
-| VIEW | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | MATERIALIZED VIEW | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags |
 | MATERIALIZED VIEW | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | MATERIALIZED VIEW | parsing_lineage | UNSUPPORTED | `PARSER_REFUSES_DIALECT` | databricks | dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix |
 | MATERIALIZED VIEW | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | databricks | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- databricks declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
 | MATERIALIZED VIEW | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | MATERIALIZED VIEW | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | the gateway resolves every name against the catalog, so a kind this adapter does not inventory cannot be named in a governed statement: discovery_selection.kind_capabilities('databricks').MATERIALIZED_VIEW.inventory, derived from the adapter's own capability flags |
-| PROCEDURE | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').PROCEDURE.inventory, derived from the adapter's own capability flags |
-| PROCEDURE | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
+| PROCEDURE | inventory | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').PROCEDURE.inventory, derived from the adapter's own capability flags |
+| PROCEDURE | definition_retrieval | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | PROCEDURE | parsing_lineage | UNSUPPORTED | `PARSER_REFUSES_DIALECT` | databricks | dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix |
-| PROCEDURE | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| FUNCTION | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').FUNCTION.inventory, derived from the adapter's own capability flags |
-| FUNCTION | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
+| FUNCTION | inventory | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').FUNCTION.inventory, derived from the adapter's own capability flags |
+| FUNCTION | definition_retrieval | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | FUNCTION | parsing_lineage | UNSUPPORTED | `PARSER_REFUSES_DIALECT` | databricks | dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix |
-| FUNCTION | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | databricks | no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | TABLE | inventory | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').TABLE.inventory, derived from the adapter's own capability flags |
 | TABLE | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | oracle | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- oracle declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
 | TABLE | execution | UNSUPPORTED | `NO_QUERY_ESTIMATE` | oracle | oracle declares explain=False, and the gateway will not run a statement it cannot cost first: QUERY_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR |
@@ -222,15 +219,13 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | PACKAGE MEMBER | parsing_lineage | UNAVAILABLE | `DEFINITION_HELD_BY_CONTAINER` | oracle | no text reaches the parser: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code |
 | PACKAGE MEMBER | candidate_generation | UNAVAILABLE | `DEFINITION_HELD_BY_CONTAINER` | oracle | no eligible definition to draft from: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code |
 | PACKAGE MEMBER | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
-| TRIGGER | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | no discovery query in oracle.py reads ALL_TRIGGERS, and ConnectorCapabilities declares no flag for it |
-| TRIGGER | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | the kind is not inventoried by oracle.py, so no definition is read |
-| TRIGGER | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | no text reaches the parser: the kind is not inventoried by oracle.py, so no definition is read |
-| TRIGGER | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, sqlserver | the kind is not inventoried, so no generator can be handed one |
+| TRIGGER | inventory | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by ALL_TRIGGERS in oracle.py |
+| TRIGGER | definition_retrieval | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis |
+| TRIGGER | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, sqlserver | the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated |
+| TRIGGER | candidate_generation | UNSUPPORTED | `CANDIDATE_SHAPE_REFUSED` | oracle, postgres, sqlserver | no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source |
 | TRIGGER | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
-| SEQUENCE | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | no discovery query in oracle.py reads ALL_SEQUENCES, and ConnectorCapabilities declares no flag for it |
-| SEQUENCE | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | the kind is not inventoried by oracle.py, so no definition is read |
-| SEQUENCE | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | no text reaches the parser: the kind is not inventoried by oracle.py, so no definition is read |
-| SEQUENCE | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, snowflake, sqlserver | the kind is not inventoried, so no generator can be handed one |
+| SEQUENCE | inventory | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by ALL_SEQUENCES in oracle.py |
+| SEQUENCE | candidate_generation | UNSUPPORTED | `CANDIDATE_SHAPE_REFUSED` | oracle, postgres, snowflake, sqlserver | no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source |
 | SEQUENCE | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, snowflake, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | TABLE | inventory | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').TABLE.inventory, derived from the adapter's own capability flags |
 | TABLE | profile_access | SUPPORTED |  | postgres | value-free statistics from profile_table, plus ranges and top values from an overridden profile_column_values under the value_range_profiling flag (ADR-0014's opt-in) |
@@ -244,22 +239,19 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | PROCEDURE | definition_retrieval | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | FUNCTION | inventory | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').FUNCTION.inventory, derived from the adapter's own capability flags |
 | FUNCTION | definition_retrieval | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| AGGREGATE FUNCTION | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | postgres.py's routine query restricts itself to prokind ['f', 'p'], because pg_get_functiondef raises on a prokind 'a' routine |
-| AGGREGATE FUNCTION | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the kind is not inventoried by postgres.py, so no definition is read |
-| AGGREGATE FUNCTION | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read |
-| AGGREGATE FUNCTION | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no eligible definition to draft from: the kind is not inventoried by postgres.py, so no definition is read |
+| AGGREGATE FUNCTION | inventory | SUPPORTED |  | postgres | postgres.py's routine queries accept prokind ['a', 'f', 'p', 'w'], which includes 'a'; the object's identity, signature, parameters and return type are discovered, and only its definition is absent (see the definition facet) |
+| AGGREGATE FUNCTION | definition_retrieval | UNAVAILABLE | `SOURCE_RETURNED_NO_TEXT` | postgres | postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory |
+| AGGREGATE FUNCTION | parsing_lineage | UNAVAILABLE | `SOURCE_RETURNED_NO_TEXT` | postgres | no text reaches the parser: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory |
+| AGGREGATE FUNCTION | candidate_generation | UNAVAILABLE | `SOURCE_RETURNED_NO_TEXT` | postgres | no eligible definition to draft from: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory |
 | AGGREGATE FUNCTION | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
-| WINDOW FUNCTION | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | postgres.py's routine query restricts itself to prokind ['f', 'p'], because pg_get_functiondef raises on a prokind 'w' routine |
-| WINDOW FUNCTION | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the kind is not inventoried by postgres.py, so no definition is read |
-| WINDOW FUNCTION | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read |
-| WINDOW FUNCTION | candidate_generation | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no eligible definition to draft from: the kind is not inventoried by postgres.py, so no definition is read |
+| WINDOW FUNCTION | inventory | SUPPORTED |  | postgres | postgres.py's routine queries accept prokind ['a', 'f', 'p', 'w'], which includes 'w'; the object's identity, signature, parameters and return type are discovered, and only its definition is absent (see the definition facet) |
+| WINDOW FUNCTION | definition_retrieval | UNAVAILABLE | `SOURCE_RETURNED_NO_TEXT` | postgres | postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory |
+| WINDOW FUNCTION | parsing_lineage | UNAVAILABLE | `SOURCE_RETURNED_NO_TEXT` | postgres | no text reaches the parser: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory |
+| WINDOW FUNCTION | candidate_generation | UNAVAILABLE | `SOURCE_RETURNED_NO_TEXT` | postgres | no eligible definition to draft from: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory |
 | WINDOW FUNCTION | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
-| TRIGGER | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no discovery query in postgres.py reads pg_trigger, and ConnectorCapabilities declares no flag for it |
-| TRIGGER | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the kind is not inventoried by postgres.py, so no definition is read |
-| TRIGGER | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read |
-| SEQUENCE | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no discovery query in postgres.py reads pg_sequence, and ConnectorCapabilities declares no flag for it |
-| SEQUENCE | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the kind is not inventoried by postgres.py, so no definition is read |
-| SEQUENCE | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read |
+| TRIGGER | inventory | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by pg_trigger in postgres.py |
+| TRIGGER | definition_retrieval | PARTIAL |  | postgres | discovery_selection.kind_capabilities('postgres').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis |
+| SEQUENCE | inventory | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by pg_sequence in postgres.py |
 | TABLE | inventory | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').TABLE.inventory, derived from the adapter's own capability flags |
 | TABLE | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | snowflake | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- snowflake declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
 | VIEW | inventory | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').VIEW.inventory, derived from the adapter's own capability flags |
@@ -272,9 +264,7 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | PROCEDURE | definition_retrieval | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | FUNCTION | inventory | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').FUNCTION.inventory, derived from the adapter's own capability flags |
 | FUNCTION | definition_retrieval | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| SEQUENCE | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | snowflake | no discovery query in snowflake.py reads INFORMATION_SCHEMA.SEQUENCES, SHOW SEQUENCES, and ConnectorCapabilities declares no flag for it |
-| SEQUENCE | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | snowflake | the kind is not inventoried by snowflake.py, so no definition is read |
-| SEQUENCE | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | snowflake | no text reaches the parser: the kind is not inventoried by snowflake.py, so no definition is read |
+| SEQUENCE | inventory | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by INFORMATION_SCHEMA.SEQUENCES, SHOW SEQUENCES in snowflake.py |
 | TABLE | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').TABLE.inventory, derived from the adapter's own capability flags |
 | TABLE | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- sqlserver declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
 | VIEW | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').VIEW.inventory, derived from the adapter's own capability flags |
@@ -290,12 +280,9 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | PROCEDURE | definition_retrieval | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | FUNCTION | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').FUNCTION.inventory, derived from the adapter's own capability flags |
 | FUNCTION | definition_retrieval | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| TRIGGER | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | no discovery query in sqlserver.py reads sys.triggers, and ConnectorCapabilities declares no flag for it |
-| TRIGGER | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | the kind is not inventoried by sqlserver.py, so no definition is read |
-| TRIGGER | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | no text reaches the parser: the kind is not inventoried by sqlserver.py, so no definition is read |
-| SEQUENCE | inventory | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | no discovery query in sqlserver.py reads sys.sequences, and ConnectorCapabilities declares no flag for it |
-| SEQUENCE | definition_retrieval | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | the kind is not inventoried by sqlserver.py, so no definition is read |
-| SEQUENCE | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | sqlserver | no text reaches the parser: the kind is not inventoried by sqlserver.py, so no definition is read |
+| TRIGGER | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by sys.triggers in sqlserver.py |
+| TRIGGER | definition_retrieval | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis |
+| SEQUENCE | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by sys.sequences in sqlserver.py |
 
 ### Notes on native identity
 
@@ -306,10 +293,10 @@ Engines whose cell is identical are listed together, and the two self-explanator
 - **FUNCTION** -- SQL Server's SCALAR / INLINE_TABLE / MULTI_STATEMENT_TABLE and BigQuery's SCALAR_FUNCTION / TABLE_FUNCTION are kept as `native_subtype` on the stored routine; no other adapter reports one.
 - **PACKAGE** -- Oracle only, and never a function in disguise: it is its own selectable kind, its grants follow it, and tool generation refuses it with PACKAGE_NOT_CALLABLE before reading its body.
 - **PACKAGE MEMBER** -- A subprogram a package declares (ALL_PROCEDURES with SUBPROGRAM_ID and OVERLOAD). Each is its own routine with its own parameter list, and its body is deliberately absent: the source is the package's own, so it is UNAVAILABLE here rather than withheld.
-- **TRIGGER** -- Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all.
-- **SEQUENCE** -- Not discovered by any adapter. BigQuery and Databricks have no sequence object.
-- **AGGREGATE FUNCTION** -- PostgreSQL `prokind = 'a'`. Not discovered: `pg_get_functiondef` raises on an aggregate, so the routine query restricts itself to 'f' and 'p'. Listed for PostgreSQL only -- the other engines' equivalents are real concepts this repository has no code-level opinion about, and a blank NOT_APPLICABLE would be a claim.
-- **WINDOW FUNCTION** -- PostgreSQL `prokind = 'w'`; same exclusion and same reason as the aggregate row above.
+- **TRIGGER** -- R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all.
+- **SEQUENCE** -- R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object.
+- **AGGREGATE FUNCTION** -- PostgreSQL `prokind = 'a'`. R11-FP01: discovered with its identity, signature, parameters and return type; only the *definition* is absent, because `pg_get_functiondef` raises on an aggregate and PostgreSQL exposes no CREATE statement for one. That is the difference between "the definition cannot be fetched" and "the object does not exist", and it is what `availability` + `unavailable_reason` are for. Listed for PostgreSQL only -- the other engines' equivalents are real concepts this repository has no code-level opinion about, and a blank NOT_APPLICABLE would be a claim.
+- **WINDOW FUNCTION** -- PostgreSQL `prokind = 'w'`; discovered on the same terms and with the same definition gap as the aggregate row above.
 
 ## Parsing degradation
 
@@ -347,10 +334,10 @@ Bounded coverage reporting, not resolution. Macro expansion is **not** resolved 
 
 Named here so the deferral is published rather than merely decided. Each already appears as an `UNSUPPORTED` or `NOT_APPLICABLE` cell above.
 
-- Triggers are not discovered on any adapter (UNSUPPORTED on PostgreSQL, Oracle and SQL Server; NOT_APPLICABLE elsewhere).
-- Sequences are not discovered on any adapter (UNSUPPORTED on PostgreSQL, Oracle, SQL Server and Snowflake; NOT_APPLICABLE on BigQuery and Databricks).
-- Databricks declares neither `views` nor `routines`, so its view definitions and routine bodies are UNSUPPORTED, and its dialect is refused by both lineage parsers.
-- PostgreSQL aggregate and window functions are not discovered: the routine query restricts itself to prokind 'f' and 'p'.
+- A trigger's own body produces no lineage: R11-FP01 discovers the trigger, its firing table, its events, its timing and (on Oracle and SQL Server) its redacted body, so the table -> trigger edge is a known fact -- but no pass hands that body to `procedure_lineage`, so the relations the body itself reads and writes are still invisible.
+- Discovered triggers and sequences are not persisted yet: `metadata_trigger` and `metadata_sequence` exist with their migration, and `ingestion.persist_envelope_extensions` has no writer for either, so both axes reach the envelope and stop there. Until that lands, every trigger and sequence count on a discovery receipt is zero for a reason that is not the source's.
+- Databricks now reads view definitions and routine bodies, and declares no `grants` axis: Unity Catalog's privilege model is not the SQL grant model that axis records. Its dialect is also refused by both lineage parsers, so the definitions it now captures are inventoried and never parsed.
+- PostgreSQL aggregate and window functions are discovered with their identity, signature, parameters and return type, and their definition is UNAVAILABLE: `pg_get_functiondef` refuses those prokinds, so PostgreSQL exposes no CREATE statement to capture.
 - Schema-scope pushdown reaches the source's own queries on PostgreSQL and SQL Server only; the other four adapters filter after reading, so an excluded schema is still read.
 - The push-ingestion path applies no discovery selection and records no invisible-object count, so a pushed estate has no NOT_SELECTED or visibility evidence of its own.
 - There is no definition-history read route: metadata_routine_definition_version accumulates versions that no endpoint serves.

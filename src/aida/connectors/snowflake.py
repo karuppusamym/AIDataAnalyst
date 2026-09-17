@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
@@ -36,9 +37,18 @@ from aida.connectors.base import (
     QueryLogEntry,
     QueryResult,
     TableProfileSnapshot,
+    attach_native_objects,
+    build_sequences,
     rows_to_dicts,
 )
 from aida.connectors.discovery import (
+    FACET_CONSTRAINTS,
+    FACET_GRANTS,
+    FACET_INVENTORY,
+    FACET_OBJECT_COMMENTS,
+    FACET_ROUTINE_BODIES,
+    FACET_SEQUENCES,
+    FACET_VIEW_DEFINITIONS,
     TableMap,
     append_grouped_foreign_key_rows,
     append_grouped_key_rows,
@@ -49,6 +59,7 @@ from aida.connectors.discovery import (
     build_grants,
     build_table_map_from_column_rows,
     normalize_object_type,
+    read_facet,
     view_definition_row,
 )
 from aida.connectors.sql_execution import SqlExecutor
@@ -483,10 +494,20 @@ class _SnowflakeEnvelopeRows:
     views: tuple[dict[str, Any], ...] = ()
     view_ddl: tuple[dict[str, Any], ...] = ()
     routines: tuple[dict[str, Any], ...] = ()
+    #: R11-FP01: INFORMATION_SCHEMA.SEQUENCES rows. There is no trigger field
+    #: here and never will be: Snowflake has no trigger object (see
+    #: `SnowflakeConnector.DEFAULT_CAPABILITIES`).
+    sequences: tuple[dict[str, Any], ...] = ()
     schemata: tuple[dict[str, Any], ...] = ()
     databases: tuple[dict[str, Any], ...] = ()
     grants: tuple[dict[str, Any], ...] = ()
     unavailable: tuple[tuple[str, str], ...] = ()
+    #: R11-FP02: the failures the reads above captured, as (facet, exception)
+    #: pairs in read order, for `discover()` to replay into `read_facet`.
+    #: Deliberately separate from `unavailable`: that is this adapter's own
+    #: per-axis reason for the catalog attributes, this is the input to the
+    #: platform's per-facet classification, and one refusal produces both.
+    refusals: tuple[tuple[str, BaseException], ...] = ()
 
     def reason(self, axis: str) -> str | None:
         for name, message in self.unavailable:
@@ -495,13 +516,99 @@ class _SnowflakeEnvelopeRows:
         return None
 
 
-def _fetch_optional_rows(cursor: Any, sql: str) -> tuple[tuple[dict[str, Any], ...], str | None]:
-    """Run one supplementary metadata query, turning a refusal into a reason."""
+# ---------------------------------------------------------------------------
+# R11-FP02: reads captured in the driver thread, judged in the coroutine.
+#
+# `read_facet` is a coroutine and `snowflake.connector` is a synchronous
+# driver, so every read here happens inside one `asyncio.to_thread` hop. The
+# thread captures each read's failure instead of judging it and the coroutine
+# replays the captures into `read_facet`, which classifies them, records them
+# against their facet and decides what may be absorbed. One judgement site, no
+# connection passed between pool threads.
+#
+# Two replay modes, because this adapter has always had two classes of read
+# with two different failure contracts, and adoption changes neither:
+#
+# * The v1.0 reads (the column roster, the two constraint queries) have always
+#   failed the run, so their captures are replayed *bare*: `read_facet` absorbs
+#   a refusal of the constraint facet -- which is the whole point of the
+#   feature -- and re-raises anything that is not a refusal, exactly as it
+#   propagated before.
+# * The envelope 1.1 axes have always been absorbed into a per-axis reason
+#   (`_fetch_optional_rows`), so their captures are replayed with the re-raise
+#   suppressed: the reason has already been rendered in the thread, and the
+#   replay exists to classify and record, not to change what the run does.
+#   Letting the re-raise out here would make failures this adapter has always
+#   survived start failing runs, which is a separate decision from adopting
+#   the mechanism (see the R11-FP02 remainder).
+# ---------------------------------------------------------------------------
+_CapturedRead = Sequence[dict[str, Any]] | BaseException
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedReads:
+    """One run's discovery reads, as the driver thread hands them back.
+
+    `envelope` is None when the roster read failed: there is no roster to scope
+    the envelope queries to, and a run with no objects has nothing to assemble
+    anyway -- so the thread stops there and `discover()` replays the roster
+    failure first, which ends the run the way it always did.
+    """
+
+    catalog_name: str
+    columns: _CapturedRead
+    primary_keys: _CapturedRead = ()
+    foreign_keys: _CapturedRead = ()
+    envelope: _SnowflakeEnvelopeRows | None = None
+
+
+async def _captured(read: _CapturedRead) -> Sequence[dict[str, Any]]:
+    """The rows a captured read returned, or the failure it captured, re-raised.
+
+    The awaitable `read_facet` takes. Raising here rather than in the thread is
+    the point: the exception reaches `read_facet` inside the coroutine that owns
+    the `FacetReadScope`, so it is classified and recorded exactly as a natively
+    async driver's failure is.
+    """
+    if isinstance(read, BaseException):
+        raise read
+    return read
+
+
+async def _record_refused_axes(refusals: Sequence[tuple[str, BaseException]]) -> None:
+    """Classify and record each already-absorbed axis failure against its facet.
+
+    The `read_facet` call is what does the work: it judges the failure by
+    SQLSTATE, records `(state, reason)` on the ambient scope and then re-raises
+    anything it may not absorb. That re-raise is suppressed here, and only here,
+    because this adapter's own contract for these axes already absorbed the
+    failure and already rendered its reason -- see the two replay modes above.
+    """
+    for facet, failure in refusals:
+        with suppress(Exception):
+            await read_facet(facet, _captured(failure))
+
+
+def _fetch_optional_rows(
+    cursor: Any, sql: str
+) -> tuple[tuple[dict[str, Any], ...], str | None, BaseException | None]:
+    """Run one supplementary metadata query, turning a refusal into a reason.
+
+    R11-FP02: the exception is returned beside the reason, not just rendered
+    into it, so the caller can hand it to `read_facet` and have the platform's
+    own classifier judge it -- `snowflake.connector`'s errors carry a `sqlstate`
+    field, so a refusal this driver reports as `42501` is recorded as
+    PERMISSION_DENIED rather than as the under-claiming UNAVAILABLE the drivers
+    without a SQLSTATE have to settle for. The reason string stays exactly as it
+    was: it is what the catalog's `envelope_v11_unavailable` attribute and a
+    view's own `unavailable_reason` are built from, and this change adds a
+    receipt entry rather than replacing them.
+    """
     try:
         cursor.execute(sql)
-        return tuple(rows_to_dicts(cursor, cursor.fetchall())), None
+        return tuple(rows_to_dicts(cursor, cursor.fetchall())), None, None
     except Exception as exc:
-        return (), f"{type(exc).__name__}: {exc}"
+        return (), f"{type(exc).__name__}: {exc}", exc
 
 
 def _fetch_envelope_rows(
@@ -515,22 +622,30 @@ def _fetch_envelope_rows(
     contains no row for a materialized view at all.
     """
     unavailable: list[tuple[str, str]] = []
+    refusals: list[tuple[str, BaseException]] = []
 
-    def _collect(axis: str, sql: str) -> tuple[dict[str, Any], ...]:
-        rows, reason = _fetch_optional_rows(cursor, sql)
+    def _collect(axis: str, sql: str, *, facet: str | None = None) -> tuple[dict[str, Any], ...]:
+        rows, reason, failure = _fetch_optional_rows(cursor, sql)
         if reason is not None:
             unavailable.append((axis, reason))
+        # R11-FP02: captured, not judged. The judgement is `read_facet`'s and it
+        # is a coroutine, while every read here runs inside one
+        # `asyncio.to_thread` hop -- see `SnowflakeConnector.discover`.
+        if failure is not None and facet is not None:
+            refusals.append((facet, failure))
         return rows
 
     databases = _collect(
         "catalog_comment",
         "SELECT database_name, comment FROM information_schema.databases "
         "WHERE database_name = CURRENT_DATABASE()",
+        facet=FACET_OBJECT_COMMENTS,
     )
     schemata = _collect(
         "schema_comments",
         "SELECT schema_name, comment FROM information_schema.schemata "
         "WHERE schema_name NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')",
+        facet=FACET_OBJECT_COMMENTS,
     )
     views = _collect(
         "views",
@@ -545,6 +660,7 @@ def _fetch_envelope_rows(
         FROM information_schema.views
         WHERE table_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
         """,
+        facet=FACET_VIEW_DEFINITIONS,
     )
     functions = _collect(
         "functions",
@@ -562,6 +678,7 @@ def _fetch_envelope_rows(
         FROM information_schema.functions
         WHERE function_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
         """,
+        facet=FACET_ROUTINE_BODIES,
     )
     procedures = _collect(
         "procedures",
@@ -579,6 +696,28 @@ def _fetch_envelope_rows(
         FROM information_schema.procedures
         WHERE procedure_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
         """,
+        facet=FACET_ROUTINE_BODIES,
+    )
+
+    # R11-FP01: sequences. `NEXT_VALUE` is offered by this view and is
+    # deliberately not selected -- it is the value the next insert writes into a
+    # customer's row, which is source data rather than metadata (INV-6). Only
+    # the declaration is read. Snowflake reports no owning table or column
+    # (there is no `serial`-style dependency to report), so those stay absent.
+    sequences = _collect(
+        "sequences",
+        """
+        SELECT
+            sequence_schema,
+            sequence_name,
+            data_type,
+            start_value AS start_with,
+            increment AS increment_by,
+            comment
+        FROM information_schema.sequences
+        WHERE sequence_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
+        """,
+        facet=FACET_SEQUENCES,
     )
 
     definitions = {
@@ -593,10 +732,16 @@ def _fetch_envelope_rows(
         qualified = (
             f"{database}.{schema_name}.{view_name}" if database else f"{schema_name}.{view_name}"
         )
-        rows, reason = _fetch_optional_rows(
+        rows, reason, failure = _fetch_optional_rows(
             cursor,
             f"SELECT GET_DDL('VIEW', {_quote_literal(qualified)}, TRUE) AS view_definition",  # noqa: S608 -- the identifier is quoted as a string literal, not interpolated as SQL
         )
+        # R11-FP02: GET_DDL is the second half of the same view-definition
+        # facet, so its refusal is recorded against that facet -- once, however
+        # many views it is refused for (`FacetReadScope.record` keeps the first
+        # outcome, and the first is the one that describes this login's access).
+        if failure is not None:
+            refusals.append((FACET_VIEW_DEFINITIONS, failure))
         definition = rows[0].get("view_definition") if rows else None
         view_ddl.append(
             {
@@ -622,7 +767,9 @@ def _fetch_envelope_rows(
             if database
             else _quote_identifier(schema_name)
         )
-        rows, reason = _fetch_optional_rows(cursor, f"SHOW GRANTS ON SCHEMA {qualified}")
+        rows, reason, failure = _fetch_optional_rows(cursor, f"SHOW GRANTS ON SCHEMA {qualified}")
+        if failure is not None:
+            refusals.append((FACET_GRANTS, failure))
         if reason is not None:
             unavailable.append((f"grants:{schema_name}", reason))
             continue
@@ -633,10 +780,12 @@ def _fetch_envelope_rows(
         views=views,
         view_ddl=tuple(view_ddl),
         routines=functions + procedures,
+        sequences=sequences,
         schemata=schemata,
         databases=databases,
         grants=tuple(grants),
         unavailable=tuple(unavailable),
+        refusals=tuple(refusals),
     )
 
 
@@ -748,14 +897,31 @@ def _assemble_snowflake_catalog(
         if (description := _optional_text(row.get("comment"))) is not None
     }
 
-    catalogs = assemble_catalog(
-        catalog_name,
-        table_map,
-        routines=routines,
-        grants=grants,
-        schema_descriptions=schema_descriptions,
-        catalog_description=next(
-            (_optional_text(row.get("comment")) for row in envelope.databases), None
+    # R11-FP01: sequences attached after assembly, for the reason recorded on
+    # `connectors.base.attach_native_objects`. No triggers: Snowflake has none.
+    catalogs = attach_native_objects(
+        assemble_catalog(
+            catalog_name,
+            table_map,
+            routines=routines,
+            grants=grants,
+            schema_descriptions=schema_descriptions,
+            catalog_description=next(
+                (_optional_text(row.get("comment")) for row in envelope.databases), None
+            ),
+        ),
+        sequences=build_sequences(
+            [
+                {
+                    "sequence_schema": row["sequence_schema"],
+                    "sequence_name": row["sequence_name"],
+                    "data_type": row.get("data_type"),
+                    "start_with": row.get("start_with"),
+                    "increment_by": row.get("increment_by"),
+                    "description": _optional_text(row.get("comment")),
+                }
+                for row in envelope.sequences
+            ]
         ),
     )
     if envelope.unavailable:
@@ -799,6 +965,22 @@ class SnowflakeConnector(SqlExecutor):
         routines=True,  # INFORMATION_SCHEMA.FUNCTIONS and .PROCEDURES
         object_comments=True,  # COMMENT on DATABASES/SCHEMATA/TABLES/COLUMNS/routines
         grants=True,  # SHOW GRANTS ON SCHEMA (schema-level; see gap/08 for the bound)
+        # R11-FP01: sequences yes, triggers no, and the two answers have
+        # different reasons.
+        #
+        # `sequences=True` is backed by INFORMATION_SCHEMA.SEQUENCES, read in
+        # `_fetch_envelope_rows` like every other axis above.
+        #
+        # `triggers` stays False and is *not* a gap in this adapter: Snowflake
+        # has no trigger object at all. There is no `CREATE TRIGGER`; a stream
+        # plus a task is how the same intent is expressed, and neither is a
+        # trigger (a task is scheduled, not fired by a DML statement, and a
+        # stream is a change-tracking cursor over a table). So this axis reads
+        # NOT_APPLICABLE for Snowflake rather than UNSUPPORTED -- which is a
+        # fact about the engine and lives in
+        # `discovery_selection._NO_TRIGGER_KIND`, not in a flag here. Leaving
+        # the flag False is what makes that answer reachable: INV-9's default.
+        sequences=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 60.0) -> None:
@@ -856,25 +1038,59 @@ class SnowflakeConnector(SqlExecutor):
 
         await asyncio.to_thread(_sync_test)
 
+    @staticmethod
+    def _capture(cur: Any, sql: str) -> _CapturedRead:
+        """One v1.0 read, captured rather than judged (R11-FP02).
+
+        Both halves are inside the guard, not just the `execute`: the driver
+        decides which of the two raises, and a refusal that surfaced at fetch
+        time would otherwise escape the capture.
+        """
+        try:
+            cur.execute(sql)
+            return rows_to_dicts(cur, cur.fetchall())
+        except Exception as exc:  # noqa: BLE001 -- replayed verbatim into `read_facet`
+            return exc
+
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
-        """Discover database catalogs, schemas, tables, columns, and constraints."""
+        """Discover database catalogs, schemas, tables, columns, and constraints.
 
-        def _sync_discover() -> tuple[DiscoveredCatalog, ...]:
-            conn = self._get_connection()
+        R11-FP02: the reads happen in one driver thread and are replayed here
+        through `read_facet` in the order they were made -- see the
+        `_CapturedReads` comment for the two replay modes and why they differ.
+        The assembly is a pure function of the rows, so it moved out of the
+        thread with no change to what it produces.
+        """
+        reads = await asyncio.to_thread(self._read_facets_sync)
+        column_rows = list(await read_facet(FACET_INVENTORY, _captured(reads.columns)))
+        pk_rows = list(await read_facet(FACET_CONSTRAINTS, _captured(reads.primary_keys)))
+        fk_rows = list(await read_facet(FACET_CONSTRAINTS, _captured(reads.foreign_keys)))
+        envelope = reads.envelope
+        if envelope is not None:
+            await _record_refused_axes(envelope.refusals)
+
+        # Assemble into Atlas Catalog Graph
+        return _assemble_snowflake_catalog(
+            reads.catalog_name, column_rows, pk_rows, fk_rows, envelope=envelope
+        )
+
+    def _read_facets_sync(self) -> _CapturedReads:
+        conn = self._get_connection()
+        try:
+            cur = conn.cursor()
             try:
-                cur = conn.cursor()
-                try:
-                    # Catalog / Database Name
-                    if self._params.database:
-                        catalog_name = self._params.database.upper()
-                    else:
-                        cur.execute("SELECT CURRENT_DATABASE()")
-                        row = cur.fetchone()
-                        catalog_name = str(row[0]).upper() if row and row[0] else "SNOWFLAKE_DB"
+                # Catalog / Database Name
+                if self._params.database:
+                    catalog_name = self._params.database.upper()
+                else:
+                    cur.execute("SELECT CURRENT_DATABASE()")
+                    row = cur.fetchone()
+                    catalog_name = str(row[0]).upper() if row and row[0] else "SNOWFLAKE_DB"
 
-                    # Discover Columns and Tables
-                    cur.execute(
-                        """
+                # Discover Columns and Tables
+                columns = self._capture(
+                    cur,
+                    """
                         SELECT
                             c.table_schema,
                             c.table_name,
@@ -893,13 +1109,19 @@ class SnowflakeConnector(SqlExecutor):
                          AND t.table_name = c.table_name
                         WHERE c.table_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
                         ORDER BY c.table_schema, c.table_name, c.ordinal_position
-                        """
-                    )
-                    column_rows = rows_to_dicts(cur, cur.fetchall())
+                        """,
+                )
+                if isinstance(columns, BaseException):
+                    # The roster read failed: there is nothing to scope the
+                    # envelope queries to, and nothing to assemble. `discover()`
+                    # replays this first and it ends the run, as it always has.
+                    return _CapturedReads(catalog_name=catalog_name, columns=columns)
+                column_rows = list(columns)
 
-                    # Discover Primary Keys & Unique Constraints
-                    cur.execute(
-                        """
+                # Discover Primary Keys & Unique Constraints
+                primary_keys = self._capture(
+                    cur,
+                    """
                         SELECT
                             tc.table_schema,
                             tc.table_name,
@@ -916,13 +1138,13 @@ class SnowflakeConnector(SqlExecutor):
                           AND tc.table_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
                         ORDER BY tc.table_schema, tc.table_name,
                             tc.constraint_name, kcu.ordinal_position
-                        """
-                    )
-                    pk_rows = rows_to_dicts(cur, cur.fetchall())
+                        """,
+                )
 
-                    # Discover Foreign Keys
-                    cur.execute(
-                        """
+                # Discover Foreign Keys
+                foreign_keys = self._capture(
+                    cur,
+                    """
                         SELECT
                             tc.table_schema,
                             tc.table_name,
@@ -949,39 +1171,38 @@ class SnowflakeConnector(SqlExecutor):
                           AND tc.table_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
                         ORDER BY tc.table_schema, tc.table_name,
                             tc.constraint_name, kcu.ordinal_position
-                        """
-                    )
-                    fk_rows = rows_to_dicts(cur, cur.fetchall())
+                        """,
+                )
 
-                    # Envelope 1.1 (gap/02 N1): view text, routines with bodies,
-                    # object comments and source grants.
-                    schema_names = sorted({str(row["table_schema"]) for row in column_rows})
-                    view_keys = sorted(
-                        {
-                            (str(row["table_schema"]), str(row["table_name"]))
-                            for row in column_rows
-                            if normalize_object_type(str(row.get("table_type") or ""))
-                            in _VIEW_OBJECT_TYPES
-                        }
-                    )
-                    envelope = _fetch_envelope_rows(
-                        cur,
-                        database=self._params.database or catalog_name,
-                        schema_names=schema_names,
-                        view_keys=view_keys,
-                    )
-
-                finally:
-                    cur.close()
+                # Envelope 1.1 (gap/02 N1): view text, routines with bodies,
+                # object comments and source grants.
+                schema_names = sorted({str(row["table_schema"]) for row in column_rows})
+                view_keys = sorted(
+                    {
+                        (str(row["table_schema"]), str(row["table_name"]))
+                        for row in column_rows
+                        if normalize_object_type(str(row.get("table_type") or ""))
+                        in _VIEW_OBJECT_TYPES
+                    }
+                )
+                envelope = _fetch_envelope_rows(
+                    cur,
+                    database=self._params.database or catalog_name,
+                    schema_names=schema_names,
+                    view_keys=view_keys,
+                )
             finally:
-                conn.close()
+                cur.close()
+        finally:
+            conn.close()
 
-            # Assemble into Atlas Catalog Graph
-            return _assemble_snowflake_catalog(
-                catalog_name, column_rows, pk_rows, fk_rows, envelope=envelope
-            )
-
-        return await asyncio.to_thread(_sync_discover)
+        return _CapturedReads(
+            catalog_name=catalog_name,
+            columns=column_rows,
+            primary_keys=primary_keys,
+            foreign_keys=foreign_keys,
+            envelope=envelope,
+        )
 
     async def estimate_read_query(
         self, sql: str, *, timeout_seconds: int = 30

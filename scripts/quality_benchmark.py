@@ -469,13 +469,31 @@ FOOTPRINT_CONCEPT: tuple[str, str, tuple[str, ...], str] = (
     ("closing position",),
     "fact_account_balances",
 )
+#: (routine key, its APPROVED Atlas-authored description). R11-FP08: the reviewed
+#: description of a routine is a retrieval signal, so the benchmark has to hold one
+#: -- otherwise the gate measures a catalog in which no routine has ever been
+#: described and the signal is untested at this level. Deliberately worded in
+#: business language that appears nowhere in the routine's *name*, so the corpus case
+#: it backs can only be answered through the description; and deliberately sharing no
+#: word with the other footprint questions ("closing position", "quarterly fee
+#: accrual"), so it cannot reorder their cases.
+FOOTPRINT_ROUTINE_DESCRIPTION: tuple[str, str] = (
+    "nightly_settlement_rollup",
+    "Applies the cleared interbank drafts received each night to every depositor's "
+    "holdings.",
+)
 
 
 async def enrich_footprint(session: AsyncSession, catalog: SeededCatalog) -> None:
     """Add what the database-footprint work taught Atlas to read: routines with reviewed and
-    undecided lineage (R11-FP11) and a published ontology concept mapped to a table (R11-FP09).
+    undecided lineage (R11-FP11), a published ontology concept mapped to a table (R11-FP09),
+    and -- R11-FP08 -- one routine's APPROVED Atlas-authored description.
     Deterministic ids, like `seed_catalog`, so the before/after runs compare exactly."""
-    from aida.envelope_models import MetadataRoutine
+    from aida.envelope_models import (
+        MetadataRoutine,
+        RoutineDocumentation,
+        RoutineDocumentationVersion,
+    )
     from aida.models import DataSource
     from aida.ontology_models import OntologyHead, OntologyVersion
     from aida.procedure_lineage_models import DeepProcedureLineageEdge
@@ -503,6 +521,39 @@ async def enrich_footprint(session: AsyncSession, catalog: SeededCatalog) -> Non
             )
         )
     await session.flush()
+
+    # R11-FP08: one routine carries a published, APPROVED description. Written as rows
+    # rather than through `publish_routine_documentation_version` only to keep the ids
+    # fixed like everything else here; there is no prior version to supersede, which is
+    # the one thing that function does beyond this.
+    described_key, described_text = FOOTPRINT_ROUTINE_DESCRIPTION
+    documentation_id = _fixed_id("routine-documentation", described_key)
+    session.add(
+        RoutineDocumentation(
+            id=documentation_id,
+            organization_id=organization_id,
+            datasource_id=datasource.id,
+            routine_id=_fixed_id("routine", described_key),
+        )
+    )
+    await session.flush()
+    session.add(
+        RoutineDocumentationVersion(
+            id=_fixed_id("routine-documentation-version", described_key),
+            organization_id=organization_id,
+            documentation_id=documentation_id,
+            version=1,
+            status="APPROVED",
+            description=described_text,
+            created_by="quality-benchmark",
+            approved_by="quality-benchmark",
+            # Fixed, not `now()`: nothing about this benchmark should differ between
+            # two runs, and an approval timestamp is as much a seeded fact as an id.
+            approved_at=datetime(2026, 9, 17, tzinfo=UTC),
+        )
+    )
+    await session.flush()
+
     for key, reads, writes, review_status in FOOTPRINT_ROUTINE_SEEDS:
         session.add(
             DeepProcedureLineageEdge(
@@ -930,9 +981,12 @@ def _write_report(
         lines.append(
             "The same `footprint_enrichment_corpus.json` cases against the same seeded catalog, "
             "run once as seeded and once after `enrich_footprint` adds routines with reviewed "
-            "and undecided lineage and a published ontology concept. Every question's wording "
-            "misses its target table's name and description, so only the enrichment can reach "
-            "it. Gap cases must stay unreached: their only path is lineage nobody approved."
+            "and undecided lineage, a published ontology concept, and (R11-FP08) one routine's "
+            "APPROVED Atlas-authored description. Every question's wording misses its target "
+            "table's name and description, so only the enrichment can reach it -- and the "
+            "R11-FP08 case's wording misses the routine's *name* too, so its only path is the "
+            "reviewed description. Gap cases must stay unreached: their only path is lineage "
+            "nobody approved."
         )
         lines.append("")
         lines.append("| Measure | Before enrichment | After enrichment |")

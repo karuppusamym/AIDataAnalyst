@@ -10,10 +10,11 @@ import difflib
 import os
 import sys
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 def _running_under_pytest() -> bool:
@@ -1144,6 +1145,53 @@ class Settings(BaseSettings):
                 names.add(f"AIDA_{field_name}".upper())
         return names
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Same source order pydantic-settings uses, with the dotenv source
+        filtered so a credential reference in `.env` is not a fatal error.
+
+        The two sources did not behave the same, and the difference was a real
+        defect. `reject_unrecognized_aida_env_vars` below explains why an
+        unrecognized `AIDA_*` name must be tolerated: a
+        `credential_reference="env://AIDA_SAMPLE_SOURCE_DSN"` names an env var
+        this model has never heard of, and its own comment points at
+        `.env.example` as the place that does it. But it only tolerates the
+        *process environment*, because pydantic-settings' env source drops an
+        unknown key before validation. The **dotenv** source does not drop it:
+        it hands it to the model, where `extra="forbid"` refuses it. So
+        `.env.example` shipped line 60 -- the documented sample-source
+        credential -- and anyone following the documented bootstrap
+        (`cp .env.example .env`) got a `Settings(_env_file=".env")` that raised
+        `extra_forbidden` for every host-side script, while the identical name
+        exported into the environment worked fine. Two sessions hit it
+        independently on 2026-09-17 before it was traced here.
+
+        This narrows the refusal to the case that deserves it, and nothing
+        else. `extra="forbid"` was already catching a misspelling in `.env`,
+        which is right and is kept -- the defect was that it could not tell a
+        typo from a credential reference and so refused both:
+
+        - a key that is *not* a close match of any real field is an
+          operator-named credential reference, so it is dropped here exactly as
+          the env source drops it;
+        - a key that *is* a close match is almost certainly a typo of a real
+          setting, so it is still passed through for `extra="forbid"` to refuse
+          loudly. Verified both ways before and after the change.
+        """
+        return (
+            init_settings,
+            env_settings,
+            _CredentialReferenceTolerantDotEnv(dotenv_settings, settings_cls),
+            file_secret_settings,
+        )
+
     @model_validator(mode="after")
     def reject_unrecognized_aida_env_vars(self) -> "Settings":
         # C1 (2026-08-30 audit): pydantic-settings' env source silently drops any
@@ -1272,6 +1320,47 @@ class Settings(BaseSettings):
             )
         return self
 
+
+
+class _CredentialReferenceTolerantDotEnv(PydanticBaseSettingsSource):
+    """Wraps the dotenv source and drops the `AIDA_*` keys that name a
+    credential reference rather than a setting.
+
+    See `Settings.settings_customise_sources` for why this exists. It delegates
+    rather than subclassing `DotEnvSettingsSource` so it inherits whatever
+    construction that source was given (`_env_file`, encoding, nesting) instead
+    of re-deriving it.
+    """
+
+    def __init__(
+        self, inner: PydanticBaseSettingsSource, settings_cls: type[BaseSettings]
+    ) -> None:
+        super().__init__(settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        # Never consulted: `__call__` below is overridden and does not use it.
+        # Declared because the base class makes it abstract.
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = self._inner()
+        known = Settings._known_env_names()
+        kept: dict[str, Any] = {}
+        for key, value in values.items():
+            name = f"AIDA_{key}".upper() if not key.upper().startswith("AIDA_") else key.upper()
+            if name in known or key.lower() in Settings.model_fields:
+                kept[key] = value
+                continue
+            # Not a field. Keep it only if it looks like a typo of one, so
+            # `extra="forbid"` can say so; otherwise it is a credential
+            # reference and belongs to nobody but the operator.
+            if difflib.get_close_matches(name, known, n=1, cutoff=0.84):
+                kept[key] = value
+        return kept
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._inner!r})"
 
 @lru_cache
 def get_settings() -> Settings:

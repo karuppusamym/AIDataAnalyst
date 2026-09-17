@@ -1,6 +1,6 @@
 # Quality benchmark results (AG-8)
 
-Generated 2026-09-17T01:06:28.146720+00:00 by `scripts/quality_benchmark.py`. Reproduce with `uv run python scripts/quality_benchmark.py` (requires `AIDA_ENVIRONMENT` set, e.g. `development`). Every number below comes from a real run of the live retrieval/planning code against the deterministic seeded catalog in that script's `seed_catalog` -- not hand-typed.
+Generated 2026-09-17T11:01:50.618496+00:00 by `scripts/quality_benchmark.py`. Reproduce with `uv run python scripts/quality_benchmark.py` (requires `AIDA_ENVIRONMENT` set, e.g. `development`). Every number below comes from a real run of the live retrieval/planning code against the deterministic seeded catalog in that script's `seed_catalog` -- not hand-typed.
 
 Scope: this is the quality/accuracy counterpart to PF-3's latency ratchet (`Docs/90-reference/perf-baseline.json`), not the bank-scale 1M-object benchmark tracked separately as RT-8/PF-1, which this sandbox has no infrastructure for.
 
@@ -38,11 +38,11 @@ Vector-similarity signal: available and exercised.
 
 ## Footprint enrichment (R11-FP13)
 
-The same `footprint_enrichment_corpus.json` cases against the same seeded catalog, run once as seeded and once after `enrich_footprint` adds routines with reviewed and undecided lineage and a published ontology concept. Every question's wording misses its target table's name and description, so only the enrichment can reach it. Gap cases must stay unreached: their only path is lineage nobody approved.
+The same `footprint_enrichment_corpus.json` cases against the same seeded catalog, run once as seeded and once after `enrich_footprint` adds routines with reviewed and undecided lineage, a published ontology concept, and (R11-FP08) one routine's APPROVED Atlas-authored description. Every question's wording misses its target table's name and description, so only the enrichment can reach it -- and the R11-FP08 case's wording misses the routine's *name* too, so its only path is the reviewed description. Gap cases must stay unreached: their only path is lineage nobody approved.
 
 | Measure | Before enrichment | After enrichment |
 |---|---|---|
-| Recall within bound (4 cases) | 0.0000 | 1.0000 |
+| Recall within bound (5 cases) | 0.0000 | 1.0000 |
 | Gap preservation (1 cases) | — | 1.0000 |
 
 | Metric | Value | Baseline | Change |
@@ -56,6 +56,7 @@ The same `footprint_enrichment_corpus.json` cases against the same seeded catalo
 | concept-alias-reaches-mapped-table | closing position | TABLE:fact_account_balances | not found | 3 |
 | routine-found-by-name | nightly settlement rollup | ROUTINE:nightly_settlement_rollup | not found | 1 |
 | routine-lineage-reaches-written-table | nightly settlement rollup | TABLE:fact_account_balances | not found | 4 |
+| routine-found-by-approved-description | cleared interbank drafts each night | ROUTINE:nightly_settlement_rollup | not found | 1 |
 | gap-proposed-lineage-steers-nothing | quarterly fee accrual | TABLE:fact_fraud_alerts (must stay absent) | not found | not found |
 
 Not measured here: whether answers over enriched context are *correct*. That is `execution_match_benchmark.py` against a live model route (paid calls), and the acceptance thresholds for both are for the domain owner to set before that run.

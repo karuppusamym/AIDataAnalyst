@@ -70,6 +70,7 @@ from aida.capability_states import (
     REASON_NO_QUERY_ESTIMATE,
     REASON_PARSER_DEGRADES_EXPLICITLY,
     REASON_PARSER_REFUSES_DIALECT,
+    REASON_SOURCE_RETURNED_NO_TEXT,
     CapabilityState,
 )
 from aida.connectors.base import Connector, ConnectorCapabilities
@@ -152,6 +153,16 @@ _CATEGORY_VIEW: Final = "VIEW"
 _CATEGORY_MATERIALIZED: Final = "MATERIALIZED_VIEW"
 _CATEGORY_ROUTINE: Final = "ROUTINE"
 _CATEGORY_ROUTINE_CONTAINER: Final = "ROUTINE_CONTAINER"
+#: R11-FP01. A trigger and a sequence were both `OTHER` while neither was
+#: discovered, which cost nothing then and would cost the certification gate its
+#: only handle now: `_claim_is_unbacked` in
+#: `tests/test_engine_capability_matrix.py` dispatches on the graph category, so
+#: two kinds sharing a catch-all category could only ever share one rule. They
+#: are also genuinely different categories -- a trigger is code attached to a
+#: table, a sequence is a generator read by a column -- which is the same
+#: argument the native-kind rows themselves rest on.
+_CATEGORY_TRIGGER: Final = "TRIGGER"
+_CATEGORY_SEQUENCE: Final = "SEQUENCE"
 _CATEGORY_OTHER: Final = "OTHER"
 
 _ALL_IMPLEMENTED: Final[frozenset[str]] = frozenset(_ADAPTER_CLASSES)
@@ -344,11 +355,15 @@ _KIND_SPECS: Final[tuple[_KindSpec, ...]] = (
         prokind=_PROKIND_AGGREGATE,
         queryable=False,
         profilable=False,
-        note="PostgreSQL `prokind = 'a'`. Not discovered: `pg_get_functiondef` "
-        "raises on an aggregate, so the routine query restricts itself to "
-        "'f' and 'p'. Listed for PostgreSQL only -- the other engines' "
-        "equivalents are real concepts this repository has no code-level "
-        "opinion about, and a blank NOT_APPLICABLE would be a claim.",
+        note="PostgreSQL `prokind = 'a'`. R11-FP01: discovered with its "
+        "identity, signature, parameters and return type; only the *definition* "
+        "is absent, because `pg_get_functiondef` raises on an aggregate and "
+        "PostgreSQL exposes no CREATE statement for one. That is the difference "
+        "between \"the definition cannot be fetched\" and \"the object does not "
+        "exist\", and it is what `availability` + `unavailable_reason` are for. "
+        "Listed for PostgreSQL only -- the other engines' equivalents are real "
+        "concepts this repository has no code-level opinion about, and a blank "
+        "NOT_APPLICABLE would be a claim.",
     ),
     _KindSpec(
         name="WINDOW FUNCTION",
@@ -360,34 +375,46 @@ _KIND_SPECS: Final[tuple[_KindSpec, ...]] = (
         prokind=_PROKIND_WINDOW,
         queryable=False,
         profilable=False,
-        note="PostgreSQL `prokind = 'w'`; same exclusion and same reason as "
-        "the aggregate row above.",
+        note="PostgreSQL `prokind = 'w'`; discovered on the same terms and with "
+        "the same definition gap as the aggregate row above.",
     ),
     _KindSpec(
         name="TRIGGER",
-        graph_category=_CATEGORY_OTHER,
+        graph_category=_CATEGORY_TRIGGER,
         native_on=frozenset({"postgres", "oracle", "sqlserver"}),
         emit_when_not_native=True,
-        selection_kind=None,
+        selection_kind="TRIGGER",
         catalog_probes=_TRIGGER_PROBES,
         prokind=None,
         queryable=False,
         profilable=False,
-        note="Not discovered by any adapter. Snowflake, BigQuery and "
-        "Databricks have no trigger object at all.",
+        note="R11-FP01: its own selectable kind, never a routine in disguise -- "
+        "it is not called but fires, on a named table, for a named event, at a "
+        "named time, and the envelope carries all four. The firing table is a "
+        "data path nothing else can see. PostgreSQL's definition facet is "
+        "PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger "
+        "has no body of its own, so the adapter records the action function's "
+        "name and that function's body arrives on the routine axis. Snowflake, "
+        "BigQuery and Databricks have no trigger object at all.",
     ),
     _KindSpec(
         name="SEQUENCE",
-        graph_category=_CATEGORY_OTHER,
+        graph_category=_CATEGORY_SEQUENCE,
         native_on=frozenset({"postgres", "oracle", "sqlserver", "snowflake"}),
         emit_when_not_native=True,
-        selection_kind=None,
+        selection_kind="SEQUENCE",
         catalog_probes=_SEQUENCE_PROBES,
         prokind=None,
         queryable=False,
         profilable=False,
-        note="Not discovered by any adapter. BigQuery and Databricks have no "
-        "sequence object.",
+        note="R11-FP01: its own selectable kind, never a table in disguise -- it "
+        "holds no rows and is read by somebody else's default expression, which "
+        "PostgreSQL's `pg_depend` names. Its declaration is its metadata, so "
+        "there is no definition text to retrieve and that facet is "
+        "NOT_APPLICABLE everywhere. The sequence's current position is "
+        "deliberately never read: it is the value the next insert writes into a "
+        "customer's row, which is source data (INV-6). BigQuery and Databricks "
+        "have no sequence object.",
     ),
 )
 
@@ -643,7 +670,8 @@ def _inventory_cell(kind: _KindSpec, definition: ConnectorDefinition, engine: st
                 "discovery_selection.kind_capabilities("
                 f"{engine!r}).{kind.selection_kind}.inventory, derived from the "
                 "adapter's own capability flags"
-            ),
+            )
+            + _probe_evidence(kind, engine, state),
         )
     if kind.name == "INDEXED VIEW":
         state = selection["VIEW"].inventory
@@ -672,12 +700,14 @@ def _inventory_cell(kind: _KindSpec, definition: ConnectorDefinition, engine: st
         if kind.prokind in accepted:
             return FacetCell(
                 facet=FACET_INVENTORY,
-                state=CapabilityState.PARTIAL.value,
+                state=CapabilityState.SUPPORTED.value,
                 reason="",
                 evidence=(
-                    f"{engine}.py's routine query now accepts prokind "
-                    f"{sorted(accepted)}, which includes {kind.prokind!r}; this row's "
-                    "UNSUPPORTED claim is stale -- re-derive the facet from the new query"
+                    f"{engine}.py's routine queries accept prokind "
+                    f"{sorted(accepted)}, which includes {kind.prokind!r}; the "
+                    "object's identity, signature, parameters and return type are "
+                    "discovered, and only its definition is absent (see the "
+                    "definition facet)"
                 ),
             )
         return FacetCell(
@@ -691,16 +721,6 @@ def _inventory_cell(kind: _KindSpec, definition: ConnectorDefinition, engine: st
             ),
         )
     probes = kind.catalog_probes.get(engine, ())
-    if probes and _reads_any_catalog_object(engine, probes):
-        return FacetCell(
-            facet=FACET_INVENTORY,
-            state=CapabilityState.PARTIAL.value,
-            reason="",
-            evidence=(
-                f"{engine}.py now mentions {', '.join(probes)}; this row's "
-                "UNSUPPORTED claim is stale -- re-derive the facet from the new query"
-            ),
-        )
     return FacetCell(
         facet=FACET_INVENTORY,
         state=CapabilityState.UNSUPPORTED.value,
@@ -713,12 +733,56 @@ def _inventory_cell(kind: _KindSpec, definition: ConnectorDefinition, engine: st
     )
 
 
+def _probe_evidence(kind: _KindSpec, engine: str, state: str) -> str:
+    """The catalog objects behind a claimed inventory, cited or named as missing.
+
+    R11-FP01 turned the trigger and sequence rows from "no adapter reads this"
+    into flag-derived rows, which would have left `catalog_probes` and
+    `_reads_any_catalog_object` as dead machinery. They are kept and repointed
+    at a better job: cross-checking the flag. A claimed inventory whose adapter
+    source does not mention the catalog objects the kind would have to be read
+    from is a flag with no query behind it -- the exact INV-9 failure the flag
+    convention exists to prevent -- and the published evidence says so in words
+    rather than being silently identical to a backed claim.
+    `tests/test_engine_capability_matrix.py` holds every claimed cell to citing
+    its probe, so the discrepancy is a failing gate and not only a footnote.
+    """
+    probes = kind.catalog_probes.get(engine, ())
+    if not probes or state not in {
+        CapabilityState.SUPPORTED.value,
+        CapabilityState.PARTIAL.value,
+    }:
+        return ""
+    if _reads_any_catalog_object(engine, probes):
+        return f", and backed by {', '.join(probes)} in {engine}.py"
+    return (
+        f", which no query in {engine}.py backs: none of {', '.join(probes)} is "
+        "read there"
+    )
+
+
 def _definition_cell(kind: _KindSpec, definition: ConnectorDefinition, engine: str) -> FacetCell:
     selection = _selection_states(definition)
     if kind.selection_kind is not None and kind.selection_kind in selection:
         state = selection[kind.selection_kind].definition
         if kind.graph_category == _CATEGORY_TABLE:
             evidence = "a base relation has no defining text; its columns are the fact"
+        elif kind.graph_category == _CATEGORY_SEQUENCE:
+            evidence = (
+                "a sequence has no defining text; its declaration -- increment, "
+                "bounds, cache, cycle -- is the fact, and is carried by the "
+                "inventory. Its current position is never read (INV-6)"
+            )
+        elif kind.graph_category == _CATEGORY_TRIGGER:
+            evidence = (
+                "discovery_selection.kind_capabilities("
+                f"{engine!r}).TRIGGER.definition; a captured trigger body is "
+                "literal-redacted, fingerprinted and screened exactly as a routine "
+                "body is, and keeps `truncated` / `unavailable_reason`. PARTIAL "
+                "where the engine keeps the code outside the trigger: a PostgreSQL "
+                "trigger has no body, and the adapter records the action function "
+                "whose own body arrives on the routine axis"
+            )
         else:
             evidence = (
                 "discovery_selection.kind_capabilities("
@@ -751,6 +815,24 @@ def _definition_cell(kind: _KindSpec, definition: ConnectorDefinition, engine: s
                 "as withheld code"
             ),
         )
+    if kind.prokind is not None and kind.prokind in _pg_prokinds():
+        # R11-FP01. The one place in this matrix where the *source* is the thing
+        # that cannot answer: `pg_get_functiondef` raises on an aggregate or a
+        # window function, so PostgreSQL exposes no CREATE statement for either.
+        # UNAVAILABLE with SOURCE_RETURNED_NO_TEXT rather than UNSUPPORTED,
+        # because the adapter asks and the engine declines -- blaming the adapter
+        # would send somebody to implement a read that cannot exist.
+        return FacetCell(
+            facet=FACET_DEFINITION,
+            state=CapabilityState.UNAVAILABLE.value,
+            reason=REASON_SOURCE_RETURNED_NO_TEXT,
+            evidence=(
+                f"{engine}.py discovers the object without asking for a definition: "
+                "pg_get_functiondef raises on this prokind, so the routine is stored "
+                "with availability=UNAVAILABLE and the refusal as its "
+                "unavailable_reason rather than being left out of the inventory"
+            ),
+        )
     return FacetCell(
         facet=FACET_DEFINITION,
         state=CapabilityState.UNSUPPORTED.value,
@@ -776,11 +858,50 @@ def _parsing_cell(
             reason="",
             evidence="a base relation has no defining text, so there is nothing to parse",
         )
+    if kind.graph_category == _CATEGORY_SEQUENCE:
+        return FacetCell(
+            facet=FACET_PARSING,
+            state=CapabilityState.NOT_APPLICABLE.value,
+            reason="",
+            evidence=(
+                "a sequence is a declaration, not code: there is no statement to "
+                "parse and no relation for it to read or write"
+            ),
+        )
+    if kind.graph_category == _CATEGORY_TRIGGER:
+        # R11-FP01, and the honest half of what this pass did not do. The
+        # firing table *is* discovered and carried on the envelope, so the "what
+        # runs when this table changes" edge exists; what does not exist is a
+        # pass that hands a trigger body to `procedure_lineage` and turns its own
+        # reads and writes into edges. UNSUPPORTED with ADAPTER_NOT_IMPLEMENTED
+        # rather than PARTIAL: PARTIAL is a claim, and nothing in this
+        # repository yet produces a lineage edge from a trigger. Named in
+        # `_DECLARED_GAPS` so the deferral is published, not merely decided.
+        if definition_cell.state not in {
+            CapabilityState.SUPPORTED.value,
+            CapabilityState.PARTIAL.value,
+        }:
+            return FacetCell(
+                facet=FACET_PARSING,
+                state=definition_cell.state,
+                reason=definition_cell.reason,
+                evidence=f"no text reaches the parser: {definition_cell.evidence}",
+            )
+        return FacetCell(
+            facet=FACET_PARSING,
+            state=CapabilityState.UNSUPPORTED.value,
+            reason=REASON_ADAPTER_NOT_IMPLEMENTED,
+            evidence=(
+                "the firing table is discovered and carried on the envelope, so the "
+                "table -> trigger edge is a known fact; no pass hands a trigger body "
+                "to procedure_lineage, so the relations the body itself reads and "
+                "writes produce no edge. Declared as a gap rather than approximated"
+            ),
+        )
     if kind.graph_category == _CATEGORY_OTHER:
-        # A trigger body and a sequence's declaration are real code in the
-        # engine; the adapter does not read them. That is UNSUPPORTED, carried
-        # from the definition facet -- calling it NOT_APPLICABLE would say the
-        # engine has no such code, which is a different and false claim.
+        # Any future kind in the catch-all category: carried from the definition
+        # facet, because UNSUPPORTED there means no text reaches the parser and
+        # NOT_APPLICABLE would claim the engine has no such code.
         return FacetCell(
             facet=FACET_PARSING,
             state=definition_cell.state,
@@ -900,6 +1021,24 @@ def _candidate_cell(
                 "multi_table_blueprint.build_multi_table_blueprint drafts a single- or "
                 "multi-table candidate; a join step requires an APPROVED relationship "
                 "and is refused with UnjoinableTablesError otherwise"
+            ),
+        )
+    if kind.graph_category in {_CATEGORY_TRIGGER, _CATEGORY_SEQUENCE}:
+        # R11-FP01: inventoried now, and still not draftable -- which is the
+        # right answer rather than a gap. A governed tool is a read the gateway
+        # can cost and run; a trigger is not invoked by a caller at all and a
+        # sequence can only be read by advancing it, which mutates the source.
+        # `REASON_CANDIDATE_SHAPE_REFUSED` is the same code the package row
+        # carries for the same class of reason: the shape is not one callable
+        # read, so no generator is offered one.
+        return FacetCell(
+            facet=FACET_CANDIDATE,
+            state=CapabilityState.UNSUPPORTED.value,
+            reason=REASON_CANDIDATE_SHAPE_REFUSED,
+            evidence=(
+                "no blueprint generator drafts this kind, and none should: a trigger "
+                "is fired by a statement rather than called, and reading a sequence "
+                "means advancing it, which writes to the source"
             ),
         )
     if kind.graph_category == _CATEGORY_OTHER:
@@ -1199,15 +1338,25 @@ def _dbt_coverage() -> tuple[DbtCoverageRow, ...]:
 #: Each is a row in the published matrix already; naming them together is what
 #: makes the deferral honest instead of quiet.
 _DECLARED_GAPS: Final[tuple[str, ...]] = (
-    "Triggers are not discovered on any adapter (UNSUPPORTED on PostgreSQL, "
-    "Oracle and SQL Server; NOT_APPLICABLE elsewhere).",
-    "Sequences are not discovered on any adapter (UNSUPPORTED on PostgreSQL, "
-    "Oracle, SQL Server and Snowflake; NOT_APPLICABLE on BigQuery and Databricks).",
-    "Databricks declares neither `views` nor `routines`, so its view "
-    "definitions and routine bodies are UNSUPPORTED, and its dialect is refused "
-    "by both lineage parsers.",
-    "PostgreSQL aggregate and window functions are not discovered: the routine "
-    "query restricts itself to prokind 'f' and 'p'.",
+    "A trigger's own body produces no lineage: R11-FP01 discovers the trigger, "
+    "its firing table, its events, its timing and (on Oracle and SQL Server) its "
+    "redacted body, so the table -> trigger edge is a known fact -- but no pass "
+    "hands that body to `procedure_lineage`, so the relations the body itself "
+    "reads and writes are still invisible.",
+    "Discovered triggers and sequences are not persisted yet: "
+    "`metadata_trigger` and `metadata_sequence` exist with their migration, and "
+    "`ingestion.persist_envelope_extensions` has no writer for either, so both "
+    "axes reach the envelope and stop there. Until that lands, every trigger "
+    "and sequence count on a discovery receipt is zero for a reason that is not "
+    "the source's.",
+    "Databricks now reads view definitions and routine bodies, and declares no "
+    "`grants` axis: Unity Catalog's privilege model is not the SQL grant model "
+    "that axis records. Its dialect is also refused by both lineage parsers, so "
+    "the definitions it now captures are inventoried and never parsed.",
+    "PostgreSQL aggregate and window functions are discovered with their "
+    "identity, signature, parameters and return type, and their definition is "
+    "UNAVAILABLE: `pg_get_functiondef` refuses those prokinds, so PostgreSQL "
+    "exposes no CREATE statement to capture.",
     "Schema-scope pushdown reaches the source's own queries on PostgreSQL and "
     "SQL Server only; the other four adapters filter after reading, so an "
     "excluded schema is still read.",

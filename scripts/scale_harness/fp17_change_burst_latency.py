@@ -48,6 +48,18 @@ crash mid-measurement still tidies. `--keep` leaves the scope for inspection and
 `--cleanup-only` deletes a scope a previous `--keep` left behind. It never
 touches a row outside its own organization.
 
+The cleanup deletes more than the catalog chain, because on a deployment whose
+change-signal pass is switched on the burst is *consumed* rather than merely
+observed, and the consumer writes rows of its own: a `data_quality_incident`
+per reshaped table, an `audit_event` per sweep, an `outbox_event` per hold.
+`audit_event` and `outbox_event` are `ON DELETE RESTRICT` against
+`organization`, so a cleanup that skipped them failed on the final
+`DELETE FROM organization` and left the whole synthetic scope behind. Measured
+on the 2026-09-17 dev stack: 10 signals over 5 tables produced 5 incidents, 8
+audit events and 5 outbox events, and the organization delete raised
+`ForeignKeyViolationError`. Anything a future pass writes into this
+organization has to be added here for the same reason.
+
 **Requires a running stack, and will say so rather than start one.** It needs
 the dev stack's `postgres` reachable at `Settings.database_url`, and
 `AIDA_ENVIRONMENT` set in the shell (the same requirement every other script in
@@ -63,14 +75,38 @@ this directory has). It starts, stops, restarts and rebuilds nothing.
       .venv/Scripts/python.exe scripts/scale_harness/fp17_change_burst_latency.py \\
       --cleanup-only
 
+**A `.env` derived from `.env.example` makes the invocation above fail**, and
+not for any reason belonging to this script: `.env.example` ships
+`AIDA_SAMPLE_SOURCE_DSN`, which is a `credential_reference="env://..."` target
+rather than a `Settings` field, and pydantic-settings rejects an unmatched key
+read from a *dotenv file* under `extra="forbid"` even though
+`reject_unrecognized_aida_env_vars` deliberately tolerates the same name in the
+process environment. `get_settings()` therefore raises `extra_forbidden` for
+every host-side script, while the containers -- which receive the same variable
+as real process env and have no `.env` on their filesystem -- are unaffected.
+Until that is decided in `atlas.platform.config` (or in `.env.example`), run
+from a directory holding a `.env` with that one line removed; `_env_file=".env"`
+resolves against the working directory, and the package is an editable install,
+so nothing else changes:
+
+    cd <scratch dir with the filtered .env>
+    env AIDA_ENVIRONMENT=development \\
+      <repo>/.venv/Scripts/python.exe \\
+      <repo>/scripts/scale_harness/fp17_change_burst_latency.py --samples 200
+
 **What this is not.** Read this before quoting a number from it.
 
-* **Not a measurement of the processing pass.** It floods the queue; it does not
-  run `change_signal_processing`. `change_signal_processing_interval_minutes`
-  ships at 0, so on a default deployment nothing drains this queue anyway, and
-  measuring the reads against a queue that is not being drained is the
-  worst-case shape -- which is the right one for a latency claim, and the wrong
-  one for a throughput claim. There is no throughput claim here.
+* **It does not control whether the processing pass runs, and says which it
+  measured.** It floods the queue; it never calls `change_signal_processing`
+  itself. But `change_signal_processing_interval_minutes` defaults to 0 only in
+  `Settings` -- a deployment that sets it (the 2026-09-17 dev stack ships
+  `AIDA_CHANGE_SIGNAL_PROCESSING_INTERVAL_MINUTES=1`) has a fleet scheduler
+  draining this queue on a 10-second poll, concurrently and out of process.
+  Those are two different measurements: an undrained queue is the worst case for
+  the read, a drained one adds a second writer the reads compete with. The
+  report prints the interval it found and the queue's PENDING/PROCESSED split at
+  the end, so which one was measured is in the output rather than assumed. There
+  is no throughput claim either way.
 * **Not HTTP.** No server, no serialization, no auth middleware, no connection
   reuse across a network. It measures the database work an interactive read
   does, which is the part a change burst can plausibly affect, and excludes
@@ -90,6 +126,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import statistics
 import sys
 import time
@@ -97,13 +134,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, func, insert, select, text
+from sqlalchemy.exc import IntegrityError
 
 from aida.api import list_tables
 from aida.change_signal_models import MetadataChangeSignal
 from aida.footprint_gaps import footprint_gaps
 from aida.models import (
     DataDomain,
+    DataQualityIncident,
     DataSource,
     LineOfBusiness,
     MetadataCatalog,
@@ -115,7 +154,7 @@ from aida.models import (
 )
 from aida.security_types import SecurityContext
 from atlas.platform.config import get_settings
-from atlas.platform.db import get_session_factory
+from atlas.platform.db import Base, get_session_factory
 
 DEFAULT_ORG_SLUG = "scale-harness-fp17"
 DEFAULT_DATASOURCE_NAME = "scale-harness-fp17-datasource"
@@ -338,7 +377,84 @@ async def _ensure_scope(
     return org.id, datasource.id
 
 
-async def _cleanup(session, org_slug: str) -> None:
+#: Every ordinary `public` table that carries an `organization_id` column, asked
+#: of the database rather than held as a list here -- see `_sweep_residue`.
+_ORG_SCOPED_TABLES = text(
+    "SELECT c.relname FROM pg_class c "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'organization_id' "
+    "  AND a.attnum > 0 AND NOT a.attisdropped "
+    "WHERE c.relkind = 'r' AND n.nspname = 'public'"
+)
+#: Table names come from `pg_class`, not from a caller, and are still checked
+#: before being interpolated: a harness that builds a DELETE by string should
+#: not be the one place in this repository where that is taken on trust.
+_SAFE_TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+async def _sweep_residue(session_factory, org_id: UUID) -> list[str]:
+    """Delete this organization's rows from every `organization_id`-scoped table
+    the database actually has. Returns the tables that would not clear.
+
+    The chain in `_cleanup` is the harness's own rows. This is what a
+    *background pass* wrote into the synthetic scope while the harness was
+    running, and on the 2026-09-17 dev stack that was three passes and four
+    tables the chain never named: change-signal processing's
+    `data_quality_incident` holds with the `audit_event` and `outbox_event`
+    rows behind them, the vector-index rebuild's `embedding` rows, and a
+    `notification_rule`. `audit_event`, `outbox_event`, `embedding` and
+    `notification_rule` are all `ON DELETE RESTRICT` against `organization`, so
+    each one on its own is enough to fail the final delete and leave the whole
+    scope behind -- which is what the harness did the first time it was run.
+
+    Asking the database which tables are organization-scoped, rather than
+    extending a list, is the point: a hand-held list is one release behind
+    whichever pass an operator turns on next, and the failure mode is a
+    `ForeignKeyViolationError` at the end of a measurement run.
+
+    Ordered by reversed `Base.metadata.sorted_tables` (children before parents),
+    then retried to a fixpoint so a table whose parent has not gone yet is a
+    later pass rather than a failure. Every statement is
+    `DELETE ... WHERE organization_id = :org_id` (INV-5) -- never an unscoped
+    delete, and never a delete derived from anything but this organization's id.
+    """
+    rank = {
+        table.name: index for index, table in enumerate(reversed(Base.metadata.sorted_tables))
+    }
+    async with session_factory() as session:
+        names = [
+            name
+            for (name,) in (await session.execute(_ORG_SCOPED_TABLES)).all()
+            if _SAFE_TABLE_NAME.match(name)
+        ]
+    # An unmapped table sorts first: it is likelier to be a leaf than a parent,
+    # and the fixpoint below corrects the guess either way.
+    pending = sorted(names, key=lambda name: rank.get(name, -1))
+    while True:
+        blocked: list[str] = []
+        for name in pending:
+            # S608: `name` is a pg_class relname matched against
+            # _SAFE_TABLE_NAME and double-quoted as an identifier; the only
+            # value in the statement is the bound organization id.
+            statement = f'DELETE FROM "{name}" WHERE organization_id = :org_id'  # noqa: S608
+            async with session_factory() as session:
+                try:
+                    result = await session.execute(text(statement), {"org_id": org_id})
+                    await session.commit()
+                except IntegrityError:
+                    # A child of this table has not gone yet. INV-6: the driver's
+                    # own message is never printed -- the table name is enough.
+                    await session.rollback()
+                    blocked.append(name)
+                    continue
+            if result.rowcount:
+                print(f"  {name}: {result.rowcount} row(s) deleted (background pass residue)")
+        if not blocked or len(blocked) == len(pending):
+            return blocked
+        pending = blocked
+
+
+async def _cleanup(session_factory, org_slug: str) -> None:
     """Delete the synthetic organization and everything under it, bottom-up.
 
     Every table here carries `organization_id`, so each stage is a plain
@@ -346,34 +462,52 @@ async def _cleanup(session, org_slug: str) -> None:
     scoping guarantee as `ct2_cleanup.py`. Never a bulk delete over the whole
     catalog.
     """
-    org = await session.scalar(
-        select(Organization).where(Organization.slug == org_slug)
-    )
-    if org is None:
-        print(f"no organization with slug {org_slug!r} -- nothing to clean up")
+    async with session_factory() as session:
+        org = await session.scalar(select(Organization).where(Organization.slug == org_slug))
+        if org is None:
+            print(f"no organization with slug {org_slug!r} -- nothing to clean up")
+            return
+        org_id = org.id
+        for label, statement in [
+            (
+                "change_signals",
+                delete(MetadataChangeSignal).where(MetadataChangeSignal.organization_id == org_id),
+            ),
+            ("columns", delete(MetadataColumn).where(MetadataColumn.organization_id == org_id)),
+            ("tables", delete(MetadataTable).where(MetadataTable.organization_id == org_id)),
+            ("schemas", delete(MetadataSchema).where(MetadataSchema.organization_id == org_id)),
+            (
+                "catalogs",
+                delete(MetadataCatalog).where(MetadataCatalog.organization_id == org_id),
+            ),
+            ("datasources", delete(DataSource).where(DataSource.organization_id == org_id)),
+            ("projects", delete(Project).where(Project.organization_id == org_id)),
+            ("data_domains", delete(DataDomain).where(DataDomain.organization_id == org_id)),
+            (
+                "lines_of_business",
+                delete(LineOfBusiness).where(LineOfBusiness.organization_id == org_id),
+            ),
+        ]:
+            result = await session.execute(statement)
+            await session.commit()
+            print(f"  {label}: {result.rowcount} row(s) deleted")
+
+    blocked = await _sweep_residue(session_factory, org_id)
+    if blocked:
+        # Say which table is holding the scope open instead of raising a driver
+        # error out of the final delete, and leave the organization in place so
+        # `--cleanup-only` can be re-run once whatever wrote it has stopped.
+        print(
+            "  organization NOT deleted: rows remain in "
+            + ", ".join(sorted(blocked))
+            + f". Re-run with `--cleanup-only --org-slug {org_slug}`."
+        )
         return
-    org_id = org.id
-    for label, statement in [
-        (
-            "change_signals",
-            delete(MetadataChangeSignal).where(MetadataChangeSignal.organization_id == org_id),
-        ),
-        ("columns", delete(MetadataColumn).where(MetadataColumn.organization_id == org_id)),
-        ("tables", delete(MetadataTable).where(MetadataTable.organization_id == org_id)),
-        ("schemas", delete(MetadataSchema).where(MetadataSchema.organization_id == org_id)),
-        ("catalogs", delete(MetadataCatalog).where(MetadataCatalog.organization_id == org_id)),
-        ("datasources", delete(DataSource).where(DataSource.organization_id == org_id)),
-        ("projects", delete(Project).where(Project.organization_id == org_id)),
-        ("data_domains", delete(DataDomain).where(DataDomain.organization_id == org_id)),
-        (
-            "lines_of_business",
-            delete(LineOfBusiness).where(LineOfBusiness.organization_id == org_id),
-        ),
-        ("organization", delete(Organization).where(Organization.id == org_id)),
-    ]:
-        result = await session.execute(statement)
+
+    async with session_factory() as session:
+        result = await session.execute(delete(Organization).where(Organization.id == org_id))
         await session.commit()
-        print(f"  {label}: {result.rowcount} row(s) deleted")
+        print(f"  organization: {result.rowcount} row(s) deleted")
 
 
 # ---------------------------------------------------------------------------
@@ -498,28 +632,41 @@ async def _run(args: argparse.Namespace) -> int:
     session_factory = get_session_factory()
 
     if args.cleanup_only:
-        async with session_factory() as session:
-            print(f"deleting organization slug={args.org_slug!r} and everything under it...")
-            await _cleanup(session, args.org_slug)
+        print(f"deleting organization slug={args.org_slug!r} and everything under it...")
+        await _cleanup(session_factory, args.org_slug)
         print("cleanup complete")
         return 0
 
+    processing_interval = get_settings().change_signal_processing_interval_minutes
     report: dict[str, object] = {
         "org_slug": args.org_slug,
         "tables": args.tables,
         "signals": args.signals,
         "signal_batch_size": args.signal_batch_size,
         "samples_per_phase": args.samples,
+        "change_signal_processing_interval_minutes": processing_interval,
     }
+    if processing_interval > 0:
+        print(
+            f"NOTE: change_signal_processing_interval_minutes={processing_interval} on this "
+            "deployment, so a fleet scheduler will drain this burst concurrently and out of "
+            "process. The report says how much of it was consumed."
+        )
+
+    # `_ensure_scope` is outside the `try` on purpose. It refuses when the slug
+    # already exists and tells the caller to run `--cleanup-only` -- and a
+    # `finally` covering that refusal would delete the very scope the refusal
+    # declined to touch, which for a mistyped `--org-slug` would mean deleting
+    # somebody's real organization one line after saying it would not.
+    async with session_factory() as session:
+        print(f"creating scope slug={args.org_slug!r} with {args.tables} tables...")
+        organization_id, datasource_id = await _ensure_scope(
+            session,
+            org_slug=args.org_slug,
+            datasource_name=args.datasource_name,
+            tables=args.tables,
+        )
     try:
-        async with session_factory() as session:
-            print(f"creating scope slug={args.org_slug!r} with {args.tables} tables...")
-            organization_id, datasource_id = await _ensure_scope(
-                session,
-                org_slug=args.org_slug,
-                datasource_name=args.datasource_name,
-                tables=args.tables,
-            )
         async with session_factory() as session:
             table_ids = list(
                 (
@@ -587,18 +734,37 @@ async def _run(args: argparse.Namespace) -> int:
         await reader
         burst_seconds = time.perf_counter() - burst_started
 
+        # PENDING and PROCESSED separately. The previous form asked only whether
+        # *any* signal row survived, which is True for a fully consumed queue as
+        # well as an untouched one -- so the one field describing what the reads
+        # were measured against could not distinguish the two cases it exists to
+        # tell apart.
         async with session_factory() as session:
-            pending = await session.scalar(
-                select(MetadataChangeSignal.id)
-                .where(MetadataChangeSignal.organization_id == organization_id)
-                .limit(1)
+            queue = dict(
+                (
+                    await session.execute(
+                        select(MetadataChangeSignal.status, func.count())
+                        .where(MetadataChangeSignal.organization_id == organization_id)
+                        .group_by(MetadataChangeSignal.status)
+                    )
+                ).all()
+            )
+            incidents = await session.scalar(
+                select(func.count())
+                .select_from(DataQualityIncident)
+                .where(DataQualityIncident.organization_id == organization_id)
             )
         report.update(
             {
                 "signals_written": written,
-                "queue_non_empty_at_end": pending is not None,
+                "pending_at_end": int(queue.get("PENDING", 0)),
+                "processed_at_end": int(queue.get("PROCESSED", 0)),
+                "incidents_opened_by_live_pass": int(incidents or 0),
                 "baseline_seconds": round(baseline_seconds, 3),
                 "burst_seconds": round(burst_seconds, 3),
+                "burst_writes_per_second": (
+                    round(written / burst_seconds, 1) if burst_seconds > 0 else None
+                ),
                 "writer_finished_before_reader": burst_gaps.count < args.samples,
                 "baseline": {
                     baseline_gaps.label: baseline_gaps.summary(),
@@ -619,9 +785,8 @@ async def _run(args: argparse.Namespace) -> int:
                 f"Delete it with `--cleanup-only --org-slug {args.org_slug}`."
             )
         else:
-            async with session_factory() as session:
-                print("cleaning up...")
-                await _cleanup(session, args.org_slug)
+            print("cleaning up...")
+            await _cleanup(session_factory, args.org_slug)
 
 
 def _render(report: dict[str, object], *, as_json: bool) -> None:
@@ -640,6 +805,34 @@ def _render(report: dict[str, object], *, as_json: bool) -> None:
         f"tables={report['tables']}  signals_written={report.get('signals_written')}  "
         f"batch={report['signal_batch_size']}  samples/phase={report['samples_per_phase']}"
     )
+    print(
+        f"burst: {report.get('burst_writes_per_second')} signals/s over "
+        f"{report.get('burst_seconds')}s  "
+        f"change_signal_processing_interval_minutes="
+        f"{report.get('change_signal_processing_interval_minutes')}"
+    )
+    print(
+        f"queue at end: PENDING={report.get('pending_at_end')} "
+        f"PROCESSED={report.get('processed_at_end')}  "
+        f"incidents opened by the live pass={report.get('incidents_opened_by_live_pass')}"
+    )
+    processed = int(report.get("processed_at_end") or 0)
+    written_total = int(report.get("signals_written") or 0)
+    if processed and written_total:
+        share = 100 * processed / written_total
+        print(
+            f"=> a fleet scheduler consumed {processed} of {written_total} signals "
+            f"({share:.2f}%) concurrently and out of process, so the reads below competed "
+            "with that second writer as well. At this share the queue the reads saw still "
+            "grew monotonically, so this remains close to the undrained worst case; a "
+            "deployment whose pass keeps up would be measuring something else."
+        )
+    elif written_total:
+        print(
+            "=> nothing drained the queue during the burst, so the reads below were measured "
+            "against a monotonically growing queue -- the worst case for the read and the "
+            "wrong shape for any throughput claim."
+        )
     if report.get("writer_finished_before_reader"):
         print(
             "NOTE: the writer finished before the reader reached its sample count, so the "
@@ -679,10 +872,17 @@ def _render(report: dict[str, object], *, as_json: bool) -> None:
             f"p95 {p95_before:.2f} -> {p95_after:.2f} ms ({_ratio(p95_before, p95_after)})"
         )
     print()
+    # Say how thin the p99 actually is at the sample count this run used, rather
+    # than describing the default: a reader who raised --samples is exactly the
+    # reader about to quote a p99, and "~3 samples" would be wrong for them.
+    samples_per_phase = int(report.get("samples_per_phase") or 0)
+    tail = max(1, round(samples_per_phase * 0.01))
     print(
-        "p99 at the default sample count rests on ~3 samples and is low confidence; "
-        "raise --samples before quoting one. This is one machine's number against a "
-        "queue nothing is draining -- see this script's docstring for what it is not."
+        f"p99 at --samples {samples_per_phase} rests on ~{tail} sample(s) and is the least "
+        "trustworthy figure above; raise --samples before quoting one. This is one "
+        "machine's number, against the queue state printed above -- see this script's "
+        "docstring for what it is not. It is not a capacity result: it says nothing about "
+        "any target capacity or topology, and closes nothing that depends on them."
     )
 
 

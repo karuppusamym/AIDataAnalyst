@@ -11,7 +11,9 @@ name the catalog already shows, and, where the record carries one, the stable co
 (`UNAVAILABLE`, a signal type, an unparsed reason). Never a definition, a body, or a value --
 those have their own gated routes. `SOURCE_OBJECTS_INVISIBLE` is the honest empty case: those
 objects are not in the catalog at all, so there is nothing here to name, and the route says so
-rather than returning an empty list that reads like "none".
+rather than returning an empty list that reads like "none". `SOURCE_READS_REFUSED` is the same
+case for a sharper reason -- a refused read returned no rows, so the count is of facets and
+there is no object behind it at all (R11-FP02).
 
 **Bounded.** At most `MAX_OBJECTS` per request, oldest-first by name so the list is stable
 between reads, with `truncated` saying when a source has more than a person can act on at once.
@@ -54,6 +56,26 @@ UNNAMEABLE_NOTE: Final = (
     "own catalog and was not allowed to read them, so Atlas has no name, no id and nothing else "
     "to show. Granting the scanning principal read access and rescanning is what names them."
 )
+
+#: R11-FP02: the refused-read gap has nothing to list either, and for a sharper reason -- a
+#: refused read returns no rows at all, so there is not even a count of objects behind it, only
+#: the facets. An empty `objects` list with no note here would read as "none", which is the
+#: false-clean reading this gap exists to prevent.
+REFUSED_READS: Final = "SOURCE_READS_REFUSED"
+REFUSED_READS_NOTE: Final = (
+    "There are no objects to list: the source refused these reads, so nothing came back to "
+    "name. The count is of facets, and the last completed run's receipt "
+    "(`analysis_run.discovery_receipt`) names which ones. What Atlas already holds for a "
+    "refused facet is kept as it was and never retired over the refusal, so the gap is "
+    "staleness, not loss. Granting the scanning principal the read and rescanning closes it."
+)
+
+#: Gap kinds whose count can never be expanded into a list of objects, and the reason each
+#: one cannot, so an empty list is never served bare.
+_UNLISTABLE_NOTES: Final[dict[str, str]] = {
+    UNNAMEABLE: UNNAMEABLE_NOTE,
+    REFUSED_READS: REFUSED_READS_NOTE,
+}
 
 
 class FootprintGapObjectRead(ApiModel):
@@ -432,7 +454,7 @@ async def footprint_gap_objects(
     if kind not in GAP_DEFINITIONS:
         raise UnknownGapKind(kind)
     resolution, owner, explanation = GAP_DEFINITIONS[kind]
-    note = UNNAMEABLE_NOTE if kind == UNNAMEABLE else None
+    note = _UNLISTABLE_NOTES.get(kind)
     objects: list[FootprintGapObjectRead] = []
     if kind in ("CODE_WITHHELD", "CODE_TRUNCATED", "CODE_QUARANTINED"):
         objects = await _code_objects(session, organization_id, datasource_id, kind=kind)

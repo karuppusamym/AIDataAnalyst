@@ -525,4 +525,72 @@ describe("run receipt (R11-FP02)", () => {
       }),
     ).toBeNull();
   });
+
+  /* -------------------------------------------------------------------------
+     R11-FP01 / R11-FP02 -- a facet the source refused.
+
+     The feature being reported on is that one missing grant now costs one
+     facet instead of a whole scan. That is only worth having if the run card
+     names the facet, so these assert the two halves of the sentence that
+     matters: the refusal is *stated*, and it is never stated as a count.
+  ------------------------------------------------------------------------- */
+
+  it("names every facet the source refused, and says so before what the run did take in", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 2 },
+        facets: {
+          inventory: { support: "SUPPORTED", state: "SUPPORTED", reason: null },
+          view_definitions: {
+            support: "SUPPORTED", captured: 4, withheld: 0, truncated: 0,
+            state: "SUPPORTED", reason: null,
+          },
+          routine_bodies: {
+            // A refused read returns no rows, so every counter beside it is 0.
+            support: "SUPPORTED", captured: 0, withheld: 0, truncated: 0,
+            state: "PERMISSION_DENIED", reason: "SOURCE_DENIED_READ",
+          },
+          grants: { support: "SUPPORTED", state: "PERMISSION_DENIED", reason: "SOURCE_DENIED_READ" },
+        },
+      }),
+    ).toBe(
+      "the source refused 2 read(s) for this login — unread, not empty: routine code, grants. " +
+        "Granting the read and rescanning is what fills them. · " +
+        "view code: 4 captured · routine code: refused by the source, so not read",
+    );
+  });
+
+  it("never renders a refused facet as a count, and speaks for a facet with no counters of its own", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    // "0 captured" is the "none found" reading the whole receipt exists to prevent.
+    const refusedCode = receiptWords({
+      stream: { state: "COMPLETE", batches: 1 },
+      facets: {
+        routine_bodies: {
+          support: "SUPPORTED", captured: 0, withheld: 0, truncated: 0,
+          state: "PERMISSION_DENIED", reason: "SOURCE_DENIED_READ",
+        },
+      },
+    });
+    expect(refusedCode).not.toContain("0 captured");
+    expect(refusedCode).toContain("routine code: refused by the source, so not read");
+    // The visibility question has no counters at all: a refusal nulls `invisible`, which the
+    // kinds loop reads as "could not ask" and therefore says nothing about. Before the
+    // refusal clause this run card was silent about a refused visibility read.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        kinds: { TABLE: { discovered: 4, excluded: 0, invisible: null } },
+        facets: {
+          object_visibility: {
+            state: "PERMISSION_DENIED", reason: "SOURCE_DENIED_READ", asked: false,
+          },
+        },
+      }),
+    ).toBe(
+      "the source refused 1 read(s) for this login — unread, not empty: what this login cannot " +
+        "see. Granting the read and rescanning is what fills it.",
+    );
+  });
 });

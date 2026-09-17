@@ -170,3 +170,44 @@ def test_settings_construct_from_env_example_template(monkeypatch: pytest.Monkey
 
     assert settings.environment == "development"
     assert settings.identity_provider == "development"
+
+
+def test_env_example_boots_as_an_actual_dotenv_file(tmp_path: Path) -> None:
+    """The documented bootstrap is `cp .env.example .env`, so the shipped
+    template has to work when it is *read as a dotenv file* -- not only when its
+    keys are already exported.
+
+    This is the gap that let the defect ship. The test above loads `.env.example`
+    into the environment and passes `_env_file=None`, which exercises the env
+    source; the env source silently drops a key that matches no field. The
+    dotenv source does not drop it, it hands it to the model, and `extra="forbid"`
+    refused it -- so `.env.example`'s own `AIDA_SAMPLE_SOURCE_DSN` line (a
+    `credential_reference="env://..."` target, deliberately not a Settings field)
+    made `Settings(_env_file=".env")` raise `extra_forbidden` for every host-side
+    script, while the identical name exported into the environment worked.
+    """
+    env_example = Path(__file__).resolve().parent.parent / ".env.example"
+    target = tmp_path / ".env"
+    target.write_text(env_example.read_text(encoding="utf-8"), encoding="utf-8")
+
+    settings = Settings(_env_file=str(target))
+
+    assert settings.environment == "development"
+    assert settings.identity_provider == "development"
+
+
+def test_a_misspelled_setting_in_a_dotenv_file_is_still_refused(tmp_path: Path) -> None:
+    """Tolerating a credential reference must not tolerate a typo.
+
+    The fix drops only an `AIDA_*` key that is *not* a close match of a real
+    field, on the same fuzzy rule `reject_unrecognized_aida_env_vars` uses for
+    the process environment. A near-miss of a real setting is the case
+    `extra="forbid"` exists for, and it stays refused.
+    """
+    target = tmp_path / ".env"
+    target.write_text(
+        "AIDA_ENVIRONMENT=development\nAIDA_ENVIRONMNET=development\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=str(target))

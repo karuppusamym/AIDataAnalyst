@@ -1,0 +1,52 @@
+/* Definition history (R11-FP03). Mounted inside the Operations screen's
+   knowledge-gap expansion, so it borrows `.ops__*`'s spacing rhythm and
+   `ProfilePanel`'s label/value/source type scale: a derived claim about a
+   routine should read the same way as a measured one about a table, because a
+   steward is comparing them.
+
+   The basis line carries real weight on purpose, exactly as `.prof__scope`
+   does: it is the sentence that decides what every table name under it is
+   worth, and a reader who skips it reads an unreviewed parse as approved
+   lineage. */
+
+.dhist{margin-top:8px}
+
+.dhist__toggle{background:none;border:1px solid var(--line);border-radius:var(--radius-sm);color:var(--ink-2);font-size:12px;padding:4px 9px;cursor:pointer}
+.dhist__toggle:hover{color:var(--ink);border-color:var(--ink-3)}
+
+.dhist__body{margin-top:9px;padding-left:11px;border-left:2px solid var(--line-soft)}
+
+/* Said first, and not styled as fine print: the reader has to know the text is
+   not on offer before they start looking for a control that would reveal it. */
+.dhist__never{font-size:12px;color:var(--ink-2);line-height:1.45;margin:0 0 9px}
+
+.dhist__basis{font-size:12px;line-height:1.45;color:var(--ink);margin:0;border-left:2px solid var(--warn);padding:2px 0 2px 10px}
+.dhist__meta{font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:6px;line-height:1.4}
+.dhist__none{font-size:12px;color:var(--ink-3);line-height:1.45;margin:0}
+
+.dhist__list{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:13px}
+.dhist__row{border-left:2px solid var(--line);padding:1px 0 1px 11px}
+
+.dhist__head{display:flex;align-items:center;flex-wrap:wrap;gap:7px;min-width:0}
+.dhist__when{font-size:12.5px;color:var(--ink);font-weight:600}
+.dhist__ver{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--ink-3)}
+
+/* The answer the panel exists for, given the most visual weight in the row. */
+.dhist__changes{list-style:none;margin:5px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+.dhist__changes li{font-size:12.5px;color:var(--ink);line-height:1.45}
+.dhist__same{font-size:12px;color:var(--ink-3);margin:5px 0 0;line-height:1.45}
+
+/* A state other than a plain derivation is a sentence, not a blank. */
+.dhist__state{font-size:11.5px;color:var(--ink-3);margin:4px 0 0;line-height:1.4}
+.dhist__partial{font-size:11.5px;color:var(--warn);margin:4px 0 0;line-height:1.4}
+
+.dhist__facts{display:flex;flex-wrap:wrap;gap:4px 16px;margin:5px 0 0}
+.dhist__facts>div{min-width:0}
+.dhist__facts dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.dhist__facts dd{margin:1px 0 0;font-size:12px;color:var(--ink);word-break:break-word}
+
+.dhist__withheld{margin-top:5px;font-family:var(--mono);font-size:11px;color:var(--warn)}
+.dhist__note{font-family:var(--sans,inherit);font-size:11.5px;color:var(--ink-3);margin-top:2px;line-height:1.4}
+
+.dhist__digest{font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:5px;line-height:1.4}
+.dhist__more{font-size:11.5px;color:var(--ink-3);margin:9px 0 0;line-height:1.4}

@@ -46,10 +46,13 @@ from aida.connectors.base import (
     DiscoveredRoutine,
     DiscoveredRoutineParameter,
     DiscoveredSchema,
+    DiscoveredSequence,
     DiscoveredTable,
+    DiscoveredTrigger,
     DiscoveredViewDefinition,
 )
 from aida.connectors.registry import ConnectorDefinition
+from aida.discovery_receipt import FACET_SEQUENCES, FACET_TRIGGERS
 from aida.envelope_models import (
     AVAILABLE,
     UNAVAILABLE,
@@ -57,7 +60,9 @@ from aida.envelope_models import (
     MetadataRoutine,
     MetadataRoutineDefinitionVersion,
     MetadataRoutineParameter,
+    MetadataSequence,
     MetadataSourceGrant,
+    MetadataTrigger,
     MetadataViewDefinition,
 )
 from aida.ingest_screening import CLEAN, SCREENING_VERSION, screen_text
@@ -431,6 +436,36 @@ def grant_key(grant: DiscoveredGrant) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# R11-FP01: which axes a delivery is authoritative for.
+#
+# The five original 1.1 axes are reconciled on any FULL delivery that declared
+# envelope 1.1, because the envelope has a field for each of them: a producer
+# that declares 1.1 and sends no views is saying there are none. The two
+# native-object axes are different and the difference is load-bearing --
+# **no envelope version carries a trigger or a sequence at all**. They reach
+# storage only from a connector's own `discover_streaming`.
+#
+# So a FULL push batch says exactly as much about triggers as a 1.0 producer
+# says about views: nothing. Reconciling that silence would tombstone every
+# trigger and sequence a pull scan discovered, on the first nightly push after
+# this feature shipped -- the same defect `refused_facet_existing` was written
+# for, arriving through a different door. The gate is therefore the same shape
+# as the `envelope_version != "1.0"` gate the push paths already apply, and it
+# fails closed: a caller that says nothing reconciles neither axis.
+#
+# It is per axis rather than one flag because the pull path's authority is per
+# axis too: `ConnectorCapabilities.triggers` and `.sequences` are two flags for
+# six engines that disagree per kind (Snowflake has sequences and no trigger
+# object), and a Snowflake run must reconcile its sequences while retiring none
+# of the triggers it was never able to look for (INV-9).
+#
+# The names are the `ConnectorCapabilities` field names, which are also the
+# receipt's facet names -- imported rather than respelled so the gate that
+# decides what may retire and the facet a reader sees cannot drift apart.
+NATIVE_OBJECT_AXES: frozenset[str] = frozenset({FACET_TRIGGERS, FACET_SEQUENCES})
+
+
 @dataclass(slots=True)
 class EnvelopeScope:
     """Envelope-1.1 object identities observed across one or many chunks.
@@ -447,6 +482,12 @@ class EnvelopeScope:
     routine_parameter_ids: set[UUID] = field(default_factory=set)
     object_description_ids: set[UUID] = field(default_factory=set)
     grant_ids: set[UUID] = field(default_factory=set)
+    # R11-FP01: the two native-object axes. Held here with the other five so one
+    # accumulator still carries a whole delivery's identities across every chunk
+    # (INV-11) -- but reconciled only when the caller says it actually read them; see
+    # `NATIVE_OBJECT_AXES` below.
+    trigger_ids: set[UUID] = field(default_factory=set)
+    sequence_ids: set[UUID] = field(default_factory=set)
 
     def object_counts(self) -> dict[str, int]:
         return {
@@ -455,6 +496,8 @@ class EnvelopeScope:
             "routine_parameters": len(self.routine_parameter_ids),
             "object_descriptions": len(self.object_description_ids),
             "grants": len(self.grant_ids),
+            "triggers": len(self.trigger_ids),
+            "sequences": len(self.sequence_ids),
         }
 
 
@@ -515,7 +558,19 @@ def _catalog_carries_extensions(catalog: DiscoveredCatalog) -> bool:
 
 
 def _schema_carries_extensions(schema: DiscoveredSchema) -> bool:
-    if schema.source_description is not None or schema.routines or schema.grants:
+    # R11-FP01: `triggers` and `sequences` belong in this test, not just in the loop
+    # below. `assemble_catalog`/`attach_native_objects` deliberately add a schema that
+    # holds *only* triggers or sequences -- an audit schema with no tables and no
+    # routines is a real shape -- and without them here that schema would be skipped
+    # before its own loop ever ran, which is the silent-drop this whole task exists to
+    # end.
+    if (
+        schema.source_description is not None
+        or schema.routines
+        or schema.grants
+        or schema.triggers
+        or schema.sequences
+    ):
         return True
     return any(_table_carries_extensions(table) for table in schema.tables)
 
@@ -809,6 +864,169 @@ async def _upsert_routine_parameter(
     return existing
 
 
+async def _upsert_trigger(
+    session: AsyncSession,
+    datasource: DataSource,
+    schema: MetadataSchema,
+    discovered: DiscoveredTrigger,
+    tracker: _ExtensionTracker,
+) -> MetadataTrigger:
+    """R11-FP01: one trigger, written exactly as `_upsert_routine` writes a routine body.
+
+    Deliberately the same shape as the routine writer above, line for line where the
+    facts are the same: the same `_availability` split, the same `_store_source_sql`
+    call at the single write point, the same NOT_STORABLE fallback, the same
+    reactivating `status`/`deprecated_at` pair, the same `fingerprint` over the whole
+    discovered row. A trigger body is SQL, so it carries source values in its literals
+    (INV-6) and it reaches model context by the paths a procedure body does -- the
+    redaction, the fingerprint over the *original* and the write-time screening verdict
+    are not optional extras on this axis, they are the reason the axis is storable at
+    all. Nothing here ever sees the raw text again after that one call.
+
+    **Identity is `(schema_id, table_name, name)`**, which is `MetadataTrigger`'s own
+    unique constraint and the tighter of the two engine rules: PostgreSQL scopes a
+    trigger name to its table, so two tables in one schema may both own `audit_trg`.
+    Keyed `(schema_id, name)` those two would collide and each FULL rescan would
+    tombstone one of them -- the overload defect `routine_signature` exists to prevent,
+    in a second place.
+
+    **INV-5**: `organization_id` and `datasource_id` are restated in the predicate
+    beside `schema_id`. The sibling routine and grant writers lean on `schema_id`
+    alone, which is sound (a schema belongs to one datasource) but is not the
+    invariant's wording; the reconciliation query below and
+    `discovery_selection`'s own trigger read both restate both, and a new axis is
+    worth starting on the stricter side of that split rather than the looser.
+
+    **No change signal.** A redefined trigger is a real change and it is not recorded,
+    because `metadata_change_signal.subject_kind` is a CHECK-constrained vocabulary of
+    TABLE / VIEW / ROUTINE / GRANT / ONTOLOGY. Emitting `TRIGGER` would need that
+    constraint widened by a migration in a module this task does not own, plus a
+    consumer that does something with it -- so it is named as remaining work rather
+    than half-built here, and the facts it would be derived from (`body_fingerprint`,
+    `availability`, `status`) are all persisted and diffable in the meantime.
+    """
+    existing = await session.scalar(
+        select(MetadataTrigger).where(
+            MetadataTrigger.organization_id == datasource.organization_id,
+            MetadataTrigger.datasource_id == datasource.id,
+            MetadataTrigger.schema_id == schema.id,
+            MetadataTrigger.table_name == discovered.table_name,
+            MetadataTrigger.name == discovered.name,
+        )
+    )
+    row_fingerprint = _fingerprint(asdict(discovered))
+    tracker.observe(existing, row_fingerprint)
+    availability, default_reason = _availability(discovered.body_sql)
+    _prepared_body = redact_for_storage(discovered.body_sql, dialect=datasource.dialect)
+    if _prepared_body is not None and _prepared_body.redacted is None:
+        availability, default_reason = UNAVAILABLE, "BODY_NOT_STORABLE"
+    # The connector's own reason wins: on PostgreSQL there is no trigger body to give
+    # (`action_routine` names the function that has one), and that is a different fact
+    # from a body the source refused. Overwriting it with the generic default would
+    # collapse exactly the distinction `MetadataTrigger`'s docstring tabulates.
+    reason = discovered.unavailable_reason or (
+        default_reason if availability == UNAVAILABLE else None
+    )
+    if existing is None:
+        existing = MetadataTrigger(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            schema_id=schema.id,
+            name=discovered.name,
+            table_name=discovered.table_name,
+            fingerprint=row_fingerprint,
+        )
+        session.add(existing)
+    existing.status = "ACTIVE"
+    existing.deprecated_at = None
+    existing.table_schema_name = discovered.table_schema
+    existing.timing = discovered.timing
+    existing.events = list(discovered.events)
+    existing.orientation = discovered.orientation
+    existing.is_enabled = discovered.is_enabled
+    existing.action_routine = discovered.action_routine
+    (
+        existing.body_sql_redacted,
+        existing.body_fingerprint,
+        existing.redaction_status,
+        existing.screening_status,
+        existing.screening_reason_codes,
+        existing.screening_version,
+    ) = _store_source_sql(discovered.body_sql, dialect=datasource.dialect)
+    existing.truncated = discovered.truncated
+    existing.availability = availability
+    existing.unavailable_reason = reason
+    existing.attributes = dict(discovered.attributes)
+    existing.fingerprint = row_fingerprint
+    return existing
+
+
+async def _upsert_sequence(
+    session: AsyncSession,
+    datasource: DataSource,
+    schema: MetadataSchema,
+    discovered: DiscoveredSequence,
+    tracker: _ExtensionTracker,
+) -> MetadataSequence:
+    """R11-FP01: one sequence, as its declaration and never as its position.
+
+    Shorter than every other writer in this module because a sequence has no text:
+    there is no `availability` pair to set, no redaction to run and no screening
+    verdict to record, for the reason `MetadataSequence`'s docstring gives -- its
+    declaration *is* its metadata, the way a base relation's columns are the fact
+    rather than a `CREATE TABLE` statement. A sequence whose declaration the source
+    withheld does not arrive at all, and the run's invisible-object count is where
+    that is reported.
+
+    **What this function cannot write, by construction.** A sequence's current
+    position (`pg_sequences.last_value`, `ALL_SEQUENCES.LAST_NUMBER`,
+    `sys.sequences.current_value`) is the value the next insert will write into a
+    customer's row -- source data, changing on every insert, and forbidden in the
+    control plane by INV-6. `DiscoveredSequence` carries no field for it and
+    `MetadataSequence` has no column for it, so there is no value here to drop and
+    no assignment below to review: the peer made it unreachable one layer up and
+    this writer inherits that rather than restating it as a rule to be remembered.
+
+    Identity is `(schema_id, name)` -- `MetadataSequence`'s own unique constraint.
+    No engine overloads a sequence name within a schema, so unlike a routine there
+    is no signature to derive. INV-5 as on `_upsert_trigger` above.
+    """
+    existing = await session.scalar(
+        select(MetadataSequence).where(
+            MetadataSequence.organization_id == datasource.organization_id,
+            MetadataSequence.datasource_id == datasource.id,
+            MetadataSequence.schema_id == schema.id,
+            MetadataSequence.name == discovered.name,
+        )
+    )
+    row_fingerprint = _fingerprint(asdict(discovered))
+    tracker.observe(existing, row_fingerprint)
+    if existing is None:
+        existing = MetadataSequence(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            schema_id=schema.id,
+            name=discovered.name,
+            fingerprint=row_fingerprint,
+        )
+        session.add(existing)
+    existing.status = "ACTIVE"
+    existing.deprecated_at = None
+    existing.data_type = discovered.data_type
+    existing.start_with = discovered.start_with
+    existing.increment_by = discovered.increment_by
+    existing.minimum_bound = discovered.minimum_bound
+    existing.maximum_bound = discovered.maximum_bound
+    existing.cache_size = discovered.cache_size
+    existing.cycles = discovered.cycles
+    existing.owned_by_table = discovered.owned_by_table
+    existing.owned_by_column = discovered.owned_by_column
+    existing.source_description = discovered.source_description
+    existing.attributes = dict(discovered.attributes)
+    existing.fingerprint = row_fingerprint
+    return existing
+
+
 async def _upsert_grant(
     session: AsyncSession,
     datasource: DataSource,
@@ -906,6 +1124,7 @@ async def deprecate_missing_envelope_extensions(
     scope: EnvelopeScope,
     *,
     analysis_run_id: UUID | None = None,
+    native_axes_read: frozenset[str] = frozenset(),
 ) -> int:
     """Soft-deprecate 1.1 rows absent from an authoritative full snapshot.
 
@@ -914,17 +1133,29 @@ async def deprecate_missing_envelope_extensions(
     1.1: a 1.0 producer is authoritative for the 1.0 inventory and says nothing
     at all about views, routines, descriptions or grants, so reconciling its
     silence would retire metadata on a producer downgrade.
+
+    `native_axes_read` names which of `NATIVE_OBJECT_AXES` this delivery actually
+    looked at, and defaults to neither. The default is the whole point: no envelope
+    version carries a trigger or a sequence, so every push caller is by construction
+    silent about both and must retire neither, and a pull caller has to say which
+    axes its connector collects (`ConnectorCapabilities.triggers` / `.sequences`).
+    See `NATIVE_OBJECT_AXES` for the full argument.
     """
     now = datetime.now(UTC)
     deprecated = 0
     signals: list[ChangeSignal] = []
-    for model, observed in (
+    axes: tuple[tuple[Any, set[UUID]], ...] = (
         (MetadataViewDefinition, scope.view_definition_ids),
         (MetadataRoutine, scope.routine_ids),
         (MetadataRoutineParameter, scope.routine_parameter_ids),
         (MetadataObjectDescription, scope.object_description_ids),
         (MetadataSourceGrant, scope.grant_ids),
-    ):
+    )
+    if FACET_TRIGGERS in native_axes_read:
+        axes = (*axes, (MetadataTrigger, scope.trigger_ids))
+    if FACET_SEQUENCES in native_axes_read:
+        axes = (*axes, (MetadataSequence, scope.sequence_ids))
+    for model, observed in axes:
         existing = set(
             await session.scalars(
                 select(model.id).where(
@@ -1046,6 +1277,7 @@ async def persist_envelope_extensions(
     scope: EnvelopeScope | None = None,
     deprecate_missing: bool = False,
     analysis_run_id: UUID | None = None,
+    native_axes_read: frozenset[str] = frozenset(),
 ) -> dict[str, int]:
     """Persist the envelope-1.1 axes for an already-persisted 1.0 snapshot.
 
@@ -1058,6 +1290,11 @@ async def persist_envelope_extensions(
     An object the 1.0 pass did not create is skipped rather than invented. That
     can only happen when the two calls are given different trees, and inventing a
     parent would put a view definition under a table that does not exist.
+
+    `native_axes_read` is forwarded to the reconciliation pass untouched; it governs
+    what may retire, never what is written. Writing is always driven by what the tree
+    in hand actually holds, so a connector that collects no triggers contributes none
+    and needs no flag to say so.
     """
     working_scope = scope if scope is not None else EnvelopeScope()
     tracker = _ExtensionTracker(run_started_at=await _run_started_at(session, analysis_run_id))
@@ -1067,6 +1304,8 @@ async def persist_envelope_extensions(
         "routine_parameters": 0,
         "object_descriptions": 0,
         "grants": 0,
+        "triggers": 0,
+        "sequences": 0,
     }
 
     for discovered_catalog in catalogs:
@@ -1132,6 +1371,30 @@ async def persist_envelope_extensions(
                     working_scope.routine_parameter_ids.add(parameter.id)
                     counts["routine_parameters"] += 1
 
+            # R11-FP01: both axes hang off the schema, beside the routines, and not off
+            # a table. A trigger *names* its firing table (`table_name`) but is not a
+            # child of it: Oracle lets the two live in different schemas, and discovery
+            # can be schema-scoped so the firing table may not be in the tree at all.
+            # Looking the table up and skipping the trigger when it is missing -- the
+            # rule the view-definition loop below rightly applies -- would silently drop
+            # exactly the cross-schema and scoped cases the `table_name`-as-a-name
+            # design was chosen to keep.
+            for discovered_trigger in discovered_schema.triggers:
+                trigger = await _upsert_trigger(
+                    session, datasource, schema, discovered_trigger, tracker
+                )
+                await session.flush()
+                working_scope.trigger_ids.add(trigger.id)
+                counts["triggers"] += 1
+
+            for discovered_sequence in discovered_schema.sequences:
+                sequence = await _upsert_sequence(
+                    session, datasource, schema, discovered_sequence, tracker
+                )
+                await session.flush()
+                working_scope.sequence_ids.add(sequence.id)
+                counts["sequences"] += 1
+
             for discovered_grant in discovered_schema.grants:
                 grant = await _upsert_grant(
                     session, datasource, schema, discovered_grant, tracker
@@ -1171,7 +1434,11 @@ async def persist_envelope_extensions(
     )
     if deprecate_missing:
         tracker.deprecated = await deprecate_missing_envelope_extensions(
-            session, datasource, working_scope, analysis_run_id=analysis_run_id
+            session,
+            datasource,
+            working_scope,
+            analysis_run_id=analysis_run_id,
+            native_axes_read=native_axes_read,
         )
     return {
         **counts,

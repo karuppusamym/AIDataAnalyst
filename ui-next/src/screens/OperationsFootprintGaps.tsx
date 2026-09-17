@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { FootprintGapDetailRead, FootprintGapsRead } from "../lib/types";
 import { ApiError } from "../lib/api";
 import { fetchFootprintGapObjects, fetchFootprintGaps } from "../lib/api/footprintGaps";
+import { DefinitionHistoryPanel } from "../components/DefinitionHistoryPanel";
 import { ErrorState } from "../components/primitives";
 
 /* ---------------------------------------------------------------------------
@@ -27,6 +28,10 @@ const KIND_WORDS: Record<string, string> = {
   LINEAGE_UNPARSED_STATEMENTS: "Statements lineage cannot read",
   LINEAGE_AWAITING_REVIEW: "Lineage waiting for review",
   SOURCE_OBJECTS_INVISIBLE: "Objects this login may not see",
+  // R11-FP02: counted per facet, not per object -- a refused read returns nothing, so
+  // there is no object behind the number. The row's own note says so when it is expanded;
+  // the label has to at least not read as a code.
+  SOURCE_READS_REFUSED: "Reads refused by the source",
   SOURCE_CHANGE_HOLDS: "Tables held after a source change",
   CHANGE_SIGNALS_PENDING: "Source changes not yet processed",
 };
@@ -109,6 +114,24 @@ function GapRow({
                       <span className="ops__kind">{object.object_type}</span>{" "}
                       {object.qualified_name}
                       {object.detail ? <span className="ops__sub"> — {object.detail}</span> : null}
+                      {/* R11-FP03: a steward who has just been told that this
+                          procedure's body is withheld, truncated, quarantined
+                          or unparsed asks the same next question every time --
+                          "then what changed in it, and when?" -- and the
+                          answer had no screen. It does not need the body to be
+                          readable: the change class, the digests and the
+                          derived table footprint are all value-free, which is
+                          exactly why this belongs on the row that says the body
+                          is not. Offered only for a ROUTINE, because
+                          `metadata_routine_definition_version` is a routine's
+                          history; a view's definition has no equivalent table
+                          (see `RoutineDocumentationVersion`'s note on why). */}
+                      {object.object_type === "ROUTINE" ? (
+                        <DefinitionHistoryPanel
+                          routineId={object.object_id}
+                          qualifiedName={object.qualified_name}
+                        />
+                      ) : null}
                     </li>
                   ))}
                 </ul>

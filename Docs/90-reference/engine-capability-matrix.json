@@ -26,10 +26,10 @@
     }
   ],
   "declared_gaps": [
-    "Triggers are not discovered on any adapter (UNSUPPORTED on PostgreSQL, Oracle and SQL Server; NOT_APPLICABLE elsewhere).",
-    "Sequences are not discovered on any adapter (UNSUPPORTED on PostgreSQL, Oracle, SQL Server and Snowflake; NOT_APPLICABLE on BigQuery and Databricks).",
-    "Databricks declares neither `views` nor `routines`, so its view definitions and routine bodies are UNSUPPORTED, and its dialect is refused by both lineage parsers.",
-    "PostgreSQL aggregate and window functions are not discovered: the routine query restricts itself to prokind 'f' and 'p'.",
+    "A trigger's own body produces no lineage: R11-FP01 discovers the trigger, its firing table, its events, its timing and (on Oracle and SQL Server) its redacted body, so the table -> trigger edge is a known fact -- but no pass hands that body to `procedure_lineage`, so the relations the body itself reads and writes are still invisible.",
+    "Discovered triggers and sequences are not persisted yet: `metadata_trigger` and `metadata_sequence` exist with their migration, and `ingestion.persist_envelope_extensions` has no writer for either, so both axes reach the envelope and stop there. Until that lands, every trigger and sequence count on a discovery receipt is zero for a reason that is not the source's.",
+    "Databricks now reads view definitions and routine bodies, and declares no `grants` axis: Unity Catalog's privilege model is not the SQL grant model that axis records. Its dialect is also refused by both lineage parsers, so the definitions it now captures are inventoried and never parsed.",
+    "PostgreSQL aggregate and window functions are discovered with their identity, signature, parameters and return type, and their definition is UNAVAILABLE: `pg_get_functiondef` refuses those prokinds, so PostgreSQL exposes no CREATE statement to capture.",
     "Schema-scope pushdown reaches the source's own queries on PostgreSQL and SQL Server only; the other four adapters filter after reading, so an excluded schema is still read.",
     "The push-ingestion path applies no discovery selection and records no invisible-object count, so a pushed estate has no NOT_SELECTED or visibility evidence of its own.",
     "There is no definition-history read route: metadata_routine_definition_version accumulates versions that no endpoint serves.",
@@ -58,6 +58,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "SUPPORTED",
         "schemas": "SUPPORTED",
+        "sequences": "UNSUPPORTED",
+        "triggers": "UNSUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
         "views": "SUPPORTED"
       },
@@ -87,15 +89,17 @@
         "object_comments": "SUPPORTED",
         "partitions": "UNSUPPORTED",
         "query_history": "UNSUPPORTED",
-        "routines": "UNSUPPORTED",
+        "routines": "SUPPORTED",
         "schemas": "SUPPORTED",
+        "sequences": "UNSUPPORTED",
+        "triggers": "UNSUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
-        "views": "UNSUPPORTED"
+        "views": "SUPPORTED"
       },
       "implementation_status": "IMPLEMENTED",
       "live_validation": "NOT_EXERCISED",
       "maturity": "BETA",
-      "notes": "Pull discovery of Unity Catalog catalogs/schemas/tables/columns via per-catalog INFORMATION_SCHEMA, PRIMARY KEY/UNIQUE constraints, best-effort FOREIGN KEY discovery (degrades to none rather than failing on older metastores), table/column/schema/catalog comments, EXPLAIN COST-based query estimation, and bounded profiling. PAT auth only (no delegated/workload identity); view/routine/grant axes not yet implemented. Code complete; never exercised against a live Databricks workspace -- same honesty gap as the Snowflake, Oracle and BigQuery rows.",
+      "notes": "Pull discovery of Unity Catalog catalogs/schemas/tables/columns via per-catalog INFORMATION_SCHEMA, PRIMARY KEY/UNIQUE constraints, best-effort FOREIGN KEY discovery (degrades to none rather than failing on older metastores), table/column/schema/catalog comments, view definitions and routine bodies with parameters (R11-FP01, read from Unity Catalog's information_schema through the same best-effort path), EXPLAIN COST-based query estimation, and bounded profiling. PAT auth only (no delegated/workload identity); the grant axis is not implemented, because Unity Catalog's privilege model is not the SQL grant model that axis records. Unity Catalog has no trigger and no sequence object, so both of those read NOT_APPLICABLE rather than unsupported. Code complete; never exercised against a live Databricks workspace -- same honesty gap as the Snowflake, Oracle and BigQuery rows.",
       "overridden_methods": [],
       "parser_dialect_supported": false
     },
@@ -118,6 +122,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "UNSUPPORTED",
         "schemas": "UNSUPPORTED",
+        "sequences": "UNSUPPORTED",
+        "triggers": "UNSUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
         "views": "UNSUPPORTED"
       },
@@ -147,6 +153,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "SUPPORTED",
         "schemas": "SUPPORTED",
+        "sequences": "SUPPORTED",
+        "triggers": "SUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
         "views": "SUPPORTED"
       },
@@ -176,6 +184,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "SUPPORTED",
         "schemas": "SUPPORTED",
+        "sequences": "SUPPORTED",
+        "triggers": "SUPPORTED",
         "value_range_profiling": "SUPPORTED",
         "views": "SUPPORTED"
       },
@@ -210,6 +220,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "SUPPORTED",
         "schemas": "SUPPORTED",
+        "sequences": "SUPPORTED",
+        "triggers": "UNSUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
         "views": "SUPPORTED"
       },
@@ -241,6 +253,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "SUPPORTED",
         "schemas": "SUPPORTED",
+        "sequences": "SUPPORTED",
+        "triggers": "SUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
         "views": "SUPPORTED"
       },
@@ -272,6 +286,8 @@
         "query_history": "UNSUPPORTED",
         "routines": "UNSUPPORTED",
         "schemas": "UNSUPPORTED",
+        "sequences": "UNSUPPORTED",
+        "triggers": "UNSUPPORTED",
         "value_range_profiling": "UNSUPPORTED",
         "views": "UNSUPPORTED"
       },
@@ -708,10 +724,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "TRIGGER",
       "native_concept": false,
       "native_object_kind": "TRIGGER",
-      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+      "note": "R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all."
     },
     {
       "engine": "bigquery",
@@ -753,10 +769,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "SEQUENCE",
       "native_concept": false,
       "native_object_kind": "SEQUENCE",
-      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+      "note": "R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object."
     },
     {
       "engine": "databricks",
@@ -807,16 +823,16 @@
       "engine": "databricks",
       "facets": {
         "candidate_generation": {
-          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "evidence": "view_tool_blueprint.build_view_tool_blueprint drafts from any view whose captured definition passes the eligibility gate (present, AVAILABLE, value-free, not quarantined)",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "definition_retrieval": {
           "evidence": "discovery_selection.kind_capabilities('databricks').VIEW.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "execution": {
           "evidence": "governed read execution through the query gateway, cost-estimated first via the adapter's explain path",
@@ -942,16 +958,16 @@
       "engine": "databricks",
       "facets": {
         "candidate_generation": {
-          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
         },
         "definition_retrieval": {
           "evidence": "discovery_selection.kind_capabilities('databricks').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -962,8 +978,8 @@
         "inventory": {
           "evidence": "discovery_selection.kind_capabilities('databricks').PROCEDURE.inventory, derived from the adapter's own capability flags",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
           "evidence": "dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix",
@@ -987,16 +1003,16 @@
       "engine": "databricks",
       "facets": {
         "candidate_generation": {
-          "evidence": "no eligible definition to draft from: discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
+          "evidence": "procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "CANDIDATE_SHAPE_REFUSED",
+          "state": "PARTIAL"
         },
         "definition_retrieval": {
           "evidence": "discovery_selection.kind_capabilities('databricks').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -1007,8 +1023,8 @@
         "inventory": {
           "evidence": "discovery_selection.kind_capabilities('databricks').FUNCTION.inventory, derived from the adapter's own capability flags",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
           "evidence": "dialect 'databricks' is not a key of sql_lineage_parser._SQLGLOT_DIALECT_MAP, so both parsers refuse it outright ('unsupported dialect: ...', Confidence.LOW) rather than guessing -- this engine is unsupported for parsing, not absent from the parser matrix",
@@ -1158,10 +1174,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "TRIGGER",
       "native_concept": false,
       "native_object_kind": "TRIGGER",
-      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+      "note": "R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all."
     },
     {
       "engine": "databricks",
@@ -1203,10 +1219,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "SEQUENCE",
       "native_concept": false,
       "native_object_kind": "SEQUENCE",
-      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+      "note": "R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object."
     },
     {
       "engine": "db2",
@@ -1752,16 +1768,16 @@
       "engine": "oracle",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by oracle.py, so no definition is read",
+          "evidence": "discovery_selection.kind_capabilities('oracle').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -1770,13 +1786,13 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in oracle.py reads ALL_TRIGGERS, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('oracle').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by ALL_TRIGGERS in oracle.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by oracle.py, so no definition is read",
+          "evidence": "the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated",
           "facet": "parsing_lineage",
           "reason": "ADAPTER_NOT_IMPLEMENTED",
           "state": "UNSUPPORTED"
@@ -1788,25 +1804,25 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "TRIGGER",
       "native_concept": true,
       "native_object_kind": "TRIGGER",
-      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+      "note": "R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all."
     },
     {
       "engine": "oracle",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by oracle.py, so no definition is read",
+          "evidence": "a sequence has no defining text; its declaration -- increment, bounds, cache, cycle -- is the fact, and is carried by the inventory. Its current position is never read (INV-6)",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -1815,16 +1831,16 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in oracle.py reads ALL_SEQUENCES, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('oracle').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by ALL_SEQUENCES in oracle.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by oracle.py, so no definition is read",
+          "evidence": "a sequence is a declaration, not code: there is no statement to parse and no relation for it to read or write",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "NOT_APPLICABLE"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -1833,10 +1849,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "SEQUENCE",
       "native_concept": true,
       "native_object_kind": "SEQUENCE",
-      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+      "note": "R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object."
     },
     {
       "engine": "postgres",
@@ -2202,16 +2218,16 @@
       "engine": "postgres",
       "facets": {
         "candidate_generation": {
-          "evidence": "no eligible definition to draft from: the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "no eligible definition to draft from: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "SOURCE_RETURNED_NO_TEXT",
+          "state": "UNAVAILABLE"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "SOURCE_RETURNED_NO_TEXT",
+          "state": "UNAVAILABLE"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -2220,16 +2236,16 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "postgres.py's routine query restricts itself to prokind ['f', 'p'], because pg_get_functiondef raises on a prokind 'a' routine",
+          "evidence": "postgres.py's routine queries accept prokind ['a', 'f', 'p', 'w'], which includes 'a'; the object's identity, signature, parameters and return type are discovered, and only its definition is absent (see the definition facet)",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "no text reaches the parser: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "SOURCE_RETURNED_NO_TEXT",
+          "state": "UNAVAILABLE"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -2241,22 +2257,22 @@
       "graph_category": "ROUTINE",
       "native_concept": true,
       "native_object_kind": "AGGREGATE FUNCTION",
-      "note": "PostgreSQL `prokind = 'a'`. Not discovered: `pg_get_functiondef` raises on an aggregate, so the routine query restricts itself to 'f' and 'p'. Listed for PostgreSQL only -- the other engines' equivalents are real concepts this repository has no code-level opinion about, and a blank NOT_APPLICABLE would be a claim."
+      "note": "PostgreSQL `prokind = 'a'`. R11-FP01: discovered with its identity, signature, parameters and return type; only the *definition* is absent, because `pg_get_functiondef` raises on an aggregate and PostgreSQL exposes no CREATE statement for one. That is the difference between \"the definition cannot be fetched\" and \"the object does not exist\", and it is what `availability` + `unavailable_reason` are for. Listed for PostgreSQL only -- the other engines' equivalents are real concepts this repository has no code-level opinion about, and a blank NOT_APPLICABLE would be a claim."
     },
     {
       "engine": "postgres",
       "facets": {
         "candidate_generation": {
-          "evidence": "no eligible definition to draft from: the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "no eligible definition to draft from: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "SOURCE_RETURNED_NO_TEXT",
+          "state": "UNAVAILABLE"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "SOURCE_RETURNED_NO_TEXT",
+          "state": "UNAVAILABLE"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -2265,16 +2281,16 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "postgres.py's routine query restricts itself to prokind ['f', 'p'], because pg_get_functiondef raises on a prokind 'w' routine",
+          "evidence": "postgres.py's routine queries accept prokind ['a', 'f', 'p', 'w'], which includes 'w'; the object's identity, signature, parameters and return type are discovered, and only its definition is absent (see the definition facet)",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "no text reaches the parser: postgres.py discovers the object without asking for a definition: pg_get_functiondef raises on this prokind, so the routine is stored with availability=UNAVAILABLE and the refusal as its unavailable_reason rather than being left out of the inventory",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "SOURCE_RETURNED_NO_TEXT",
+          "state": "UNAVAILABLE"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -2286,22 +2302,22 @@
       "graph_category": "ROUTINE",
       "native_concept": true,
       "native_object_kind": "WINDOW FUNCTION",
-      "note": "PostgreSQL `prokind = 'w'`; same exclusion and same reason as the aggregate row above."
+      "note": "PostgreSQL `prokind = 'w'`; discovered on the same terms and with the same definition gap as the aggregate row above."
     },
     {
       "engine": "postgres",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "discovery_selection.kind_capabilities('postgres').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "PARTIAL"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -2310,13 +2326,13 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in postgres.py reads pg_trigger, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('postgres').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by pg_trigger in postgres.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated",
           "facet": "parsing_lineage",
           "reason": "ADAPTER_NOT_IMPLEMENTED",
           "state": "UNSUPPORTED"
@@ -2328,25 +2344,25 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "TRIGGER",
       "native_concept": true,
       "native_object_kind": "TRIGGER",
-      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+      "note": "R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all."
     },
     {
       "engine": "postgres",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "a sequence has no defining text; its declaration -- increment, bounds, cache, cycle -- is the fact, and is carried by the inventory. Its current position is never read (INV-6)",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -2355,16 +2371,16 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in postgres.py reads pg_sequence, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('postgres').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by pg_sequence in postgres.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by postgres.py, so no definition is read",
+          "evidence": "a sequence is a declaration, not code: there is no statement to parse and no relation for it to read or write",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "NOT_APPLICABLE"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -2373,10 +2389,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "SEQUENCE",
       "native_concept": true,
       "native_object_kind": "SEQUENCE",
-      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+      "note": "R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object."
     },
     {
       "engine": "snowflake",
@@ -2778,25 +2794,25 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "TRIGGER",
       "native_concept": false,
       "native_object_kind": "TRIGGER",
-      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+      "note": "R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all."
     },
     {
       "engine": "snowflake",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by snowflake.py, so no definition is read",
+          "evidence": "a sequence has no defining text; its declaration -- increment, bounds, cache, cycle -- is the fact, and is carried by the inventory. Its current position is never read (INV-6)",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -2805,16 +2821,16 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in snowflake.py reads INFORMATION_SCHEMA.SEQUENCES, SHOW SEQUENCES, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('snowflake').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by INFORMATION_SCHEMA.SEQUENCES, SHOW SEQUENCES in snowflake.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by snowflake.py, so no definition is read",
+          "evidence": "a sequence is a declaration, not code: there is no statement to parse and no relation for it to read or write",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "NOT_APPLICABLE"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -2823,10 +2839,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "SEQUENCE",
       "native_concept": true,
       "native_object_kind": "SEQUENCE",
-      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+      "note": "R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object."
     },
     {
       "engine": "sqlserver",
@@ -3192,16 +3208,16 @@
       "engine": "sqlserver",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by sqlserver.py, so no definition is read",
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -3210,13 +3226,13 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in sqlserver.py reads sys.triggers, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by sys.triggers in sqlserver.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by sqlserver.py, so no definition is read",
+          "evidence": "the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated",
           "facet": "parsing_lineage",
           "reason": "ADAPTER_NOT_IMPLEMENTED",
           "state": "UNSUPPORTED"
@@ -3228,25 +3244,25 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "TRIGGER",
       "native_concept": true,
       "native_object_kind": "TRIGGER",
-      "note": "Not discovered by any adapter. Snowflake, BigQuery and Databricks have no trigger object at all."
+      "note": "R11-FP01: its own selectable kind, never a routine in disguise -- it is not called but fires, on a named table, for a named event, at a named time, and the envelope carries all four. The firing table is a data path nothing else can see. PostgreSQL's definition facet is PARTIAL and that is the engine, not the adapter: a PostgreSQL trigger has no body of its own, so the adapter records the action function's name and that function's body arrives on the routine axis. Snowflake, BigQuery and Databricks have no trigger object at all."
     },
     {
       "engine": "sqlserver",
       "facets": {
         "candidate_generation": {
-          "evidence": "the kind is not inventoried, so no generator can be handed one",
+          "evidence": "no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source",
           "facet": "candidate_generation",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
+          "reason": "CANDIDATE_SHAPE_REFUSED",
           "state": "UNSUPPORTED"
         },
         "definition_retrieval": {
-          "evidence": "the kind is not inventoried by sqlserver.py, so no definition is read",
+          "evidence": "a sequence has no defining text; its declaration -- increment, bounds, cache, cycle -- is the fact, and is carried by the inventory. Its current position is never read (INV-6)",
           "facet": "definition_retrieval",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "ENGINE_LACKS_CONCEPT",
+          "state": "NOT_APPLICABLE"
         },
         "execution": {
           "evidence": "the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL",
@@ -3255,16 +3271,16 @@
           "state": "UNSUPPORTED"
         },
         "inventory": {
-          "evidence": "no discovery query in sqlserver.py reads sys.sequences, and ConnectorCapabilities declares no flag for it",
+          "evidence": "discovery_selection.kind_capabilities('sqlserver').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by sys.sequences in sqlserver.py",
           "facet": "inventory",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: the kind is not inventoried by sqlserver.py, so no definition is read",
+          "evidence": "a sequence is a declaration, not code: there is no statement to parse and no relation for it to read or write",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "",
+          "state": "NOT_APPLICABLE"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -3273,10 +3289,10 @@
           "state": "NOT_APPLICABLE"
         }
       },
-      "graph_category": "OTHER",
+      "graph_category": "SEQUENCE",
       "native_concept": true,
       "native_object_kind": "SEQUENCE",
-      "note": "Not discovered by any adapter. BigQuery and Databricks have no sequence object."
+      "note": "R11-FP01: its own selectable kind, never a table in disguise -- it holds no rows and is read by somebody else's default expression, which PostgreSQL's `pg_depend` names. Its declaration is its metadata, so there is no definition text to retrieve and that facet is NOT_APPLICABLE everywhere. The sequence's current position is deliberately never read: it is the value the next insert writes into a customer's row, which is source data (INV-6). BigQuery and Databricks have no sequence object."
     },
     {
       "engine": "teradata",

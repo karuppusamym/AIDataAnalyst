@@ -148,6 +148,19 @@ async def _indexable_objects(
     # (`retrieval_stages` logs that as `retrieval_vector_index_gap`). The text is the one the
     # live path composes -- `schema.name`, the display name a ROUTINE hit carries -- so moving a
     # routine into the index changes what it costs and not how it ranks.
+    #
+    # R11-FP08 deliberately did NOT change this text. An approved routine description joins
+    # retrieval as a *lexical* signal (`retrieval.hybrid_retrieve`'s ROUTINE candidate), and
+    # the embedded text has one hard constraint that a lexical candidate text does not: it
+    # must be byte-identical to what `retrieval_stages._live_vector_scores` composes, which is
+    # `build_embedding_text(name=hit.display_name, object_type=hit.object_type)` and nothing
+    # else. Adding the description here alone would make every indexed routine's vector
+    # describe text the live path never produces -- a silent divergence that the coverage gap
+    # cannot report, because the entry *is* present. Adding it on both sides is a different
+    # change: it needs the live composer (owned by `retrieval_stages`) and a full re-embed of
+    # every routine on the next publish or withdrawal of a description, which is a re-index
+    # trigger this builder has no notion of. Until both halves move together, the description
+    # ranks lexically and the vector channel ranks the name.
     routine_stmt = (
         select(MetadataSchema.name, MetadataRoutine.id, MetadataRoutine.name)
         .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)

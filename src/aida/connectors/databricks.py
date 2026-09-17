@@ -13,17 +13,33 @@ exercised against a live Databricks workspace; see the registry notes for the sa
 "implemented, unverified live" honesty already carried by the Snowflake, Oracle and
 BigQuery rows (Docs/20-modules/02-connectivity.md).
 
-Scope deliberately excludes the "envelope 1.1" axes (view text, routine bodies,
-grants) that the Snowflake and BigQuery adapters carry: Unity Catalog exposes the
-ANSI-shaped views those axes would read (``VIEWS``, ``ROUTINES``, ``PARAMETERS``,
-``TABLE_PRIVILEGES``/``SCHEMA_PRIVILEGES``/``CATALOG_PRIVILEGES``), but without a
-live workspace to verify column shapes and refusal modes against, claiming those
-capabilities here would be exactly the kind of overclaim INV-9 exists to prevent.
+R11-FP01 closes two of the three "envelope 1.1" axes this adapter used to skip.
+``views`` and ``routines`` are now read from Unity Catalog's own ANSI-shaped
+``information_schema.views`` / ``.routines`` / ``.parameters``, through the same
+best-effort pattern the foreign-key and comment queries already use: a workspace
+or metastore version that does not expose a column, or a principal without
+``USE SCHEMA`` on a dataset, shrinks the envelope and records the reason on the
+catalog rather than failing discovery. That is what makes the flags claimable
+without a live workspace -- the honest failure mode is built into the query
+path, not assumed away. The previous text of this docstring argued the opposite
+and it was right about the risk and wrong about the remedy: the remedy is a
+refusal-shaped read, not an unimplemented axis.
+
+``grants`` stays False. Unity Catalog's privilege model is not the SQL grant
+model these three views describe -- ``TABLE_PRIVILEGES`` reports only what the
+*current* principal was granted directly, not the estate's grants, so a read of
+it would answer a different question from the one ``MetadataSourceGrant``
+records and would look like a complete grant inventory while being one
+principal's own row. That is a modelling decision to make with a live workspace,
+and it stays unimplemented and honestly declared until then.
+
+``triggers`` and ``sequences`` stay False too, and for a different reason
+again: Unity Catalog has neither object. See
+``DatabricksConnector.DEFAULT_CAPABILITIES``.
+
 Table/column/schema/catalog *comments* are simple, single-valued, well-documented
 INFORMATION_SCHEMA columns with no refusal-vs-empty ambiguity, so they are
-implemented and ``object_comments`` is honestly set True; ``views``, ``routines``
-and ``grants`` stay False until a certified adapter closes CN-2a-equivalent work
-for Databricks with real verification.
+implemented and ``object_comments`` is honestly set True.
 """
 
 from __future__ import annotations
@@ -31,6 +47,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -49,10 +67,18 @@ from aida.connectors.base import (
     value_free_distribution_expressions,
 )
 from aida.connectors.discovery import (
+    FACET_CONSTRAINTS,
+    FACET_INVENTORY,
+    FACET_OBJECT_COMMENTS,
+    FACET_ROUTINE_BODIES,
+    FACET_VIEW_DEFINITIONS,
     append_grouped_foreign_key_rows,
     append_grouped_key_rows,
+    apply_view_definitions,
     assemble_catalog,
+    build_routines,
     build_table_map_from_column_rows,
+    read_facet,
 )
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -221,6 +247,220 @@ def _extract_databricks_explain_cost(plan_text: str) -> QueryEstimate:
     )
 
 
+# R11-FP01: the envelope 1.1 axes Unity Catalog genuinely exposes.
+#
+# Column lists are the ANSI INFORMATION_SCHEMA names Databricks documents, and
+# are deliberately the same ones the BigQuery adapter reads from its own
+# INFORMATION_SCHEMA -- the two warehouses implement the same standard views, so
+# a second spelling here would be a second thing to keep right.
+#
+# `_VIEW_COLUMNS_NARROW` is the retry. `is_updatable` and `check_option` are in
+# the standard's VIEWS shape and are the two columns a metastore version is
+# most likely not to have; losing them must cost the *columns*, not the whole
+# axis, so the primary query is retried without them before the axis is
+# recorded as unavailable. Nothing else here is optional: a VIEWS relation
+# without `view_definition` is not a VIEWS relation.
+_VIEW_COLUMNS = "table_schema, table_name, view_definition, is_updatable, check_option"
+_VIEW_COLUMNS_NARROW = "table_schema, table_name, view_definition"
+_ROUTINE_COLUMNS = (
+    "routine_schema, routine_name, specific_name, routine_type, data_type, "
+    "routine_body, routine_definition, external_language, is_deterministic, "
+    "security_type, comment"
+)
+_ROUTINE_PARAMETER_COLUMNS = (
+    "specific_schema, specific_name, ordinal_position, parameter_mode, is_result, "
+    "parameter_name, data_type, parameter_default"
+)
+
+
+def _view_definition_rows(view_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape `information_schema.views` rows for the shared `apply_view_definitions`.
+
+    A NULL `view_definition` is left NULL rather than coerced to an empty
+    string: `apply_view_definitions` records that as *unavailable with a reason*,
+    which is the state a principal without `USE SCHEMA` on the view's own schema
+    produces -- and which a downstream parser has to tell apart from a view whose
+    body really is empty.
+    """
+    return [
+        {
+            "table_schema": row["table_schema"],
+            "table_name": row["table_name"],
+            "definition": row.get("view_definition"),
+            "is_updatable": row.get("is_updatable"),
+            "check_option": _optional_text(row.get("check_option")),
+            "unavailable_reason": (
+                None
+                if row.get("view_definition") is not None
+                else "information_schema.views returned no definition text: the view's "
+                "schema is not readable by this principal"
+            ),
+        }
+        for row in view_rows
+    ]
+
+
+def _routine_rows(routine_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape `information_schema.routines` rows for the shared `build_routines`.
+
+    `external_language` is preferred over `routine_body` for `language` because
+    it names what a Python UDF actually is, where `routine_body` answers the
+    standard's own SQL/EXTERNAL dichotomy and would report every Python UDF as
+    `EXTERNAL`.
+    """
+    return [
+        {
+            "routine_schema": row["routine_schema"],
+            "routine_name": row["routine_name"],
+            "specific_name": row.get("specific_name") or row["routine_name"],
+            "routine_type": row.get("routine_type") or "FUNCTION",
+            "language": _optional_text(row.get("external_language"))
+            or _optional_text(row.get("routine_body")),
+            "body": row.get("routine_definition"),
+            "return_type": _optional_text(row.get("data_type")),
+            "is_deterministic": row.get("is_deterministic"),
+            "security_mode": _optional_text(row.get("security_type")),
+            "description": _optional_text(row.get("comment")),
+            "unavailable_reason": (
+                None
+                if row.get("routine_definition") is not None
+                else "information_schema.routines returned no definition text: the "
+                "routine's schema is not readable by this principal, or the routine "
+                "body is held outside the metastore"
+            ),
+        }
+        for row in routine_rows
+    ]
+
+
+def _routine_parameter_rows(parameter_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape `information_schema.parameters` rows for the shared `build_routines`.
+
+    `is_result` rows are the function's *return*, not a parameter, and are
+    dropped -- the same distinction Oracle's `POSITION = 0` carries.
+    """
+    return [
+        {
+            "routine_schema": row["specific_schema"],
+            "specific_name": row["specific_name"],
+            "parameter_name": _optional_text(row.get("parameter_name")),
+            "ordinal_position": row["ordinal_position"],
+            "parameter_mode": _optional_text(row.get("parameter_mode")) or "IN",
+            "data_type": row.get("data_type") or "",
+            "parameter_default": _optional_text(row.get("parameter_default")),
+        }
+        for row in parameter_rows
+        if not _truthy(row.get("is_result"))
+    ]
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().upper() in {"YES", "Y", "TRUE", "T", "1"}
+
+
+# ---------------------------------------------------------------------------
+# R11-FP02: reads captured in the driver thread, judged in the coroutine.
+#
+# `read_facet` is a coroutine and `databricks-sql-connector` is a synchronous
+# driver that declares `threadsafety = 1` -- threads may share the module, not
+# a connection -- so every read happens inside one `asyncio.to_thread` hop.
+# The thread captures each read's failure instead of judging it, and the
+# coroutine replays the captures into `read_facet`, which classifies them,
+# records them against their facet and decides what may be absorbed. The
+# judgement stays in `connectors.discovery`, where all six adapters share it.
+#
+# Two replay modes, matching the two failure contracts this adapter already
+# had -- adoption changes neither:
+#
+# * The column roster and the primary-key read have always failed the run, so
+#   they are replayed bare. The roster goes under `FACET_INVENTORY`, which
+#   `RETIREMENT_BEARING_FACETS` holds, so its refusal is recorded and then
+#   still ends the run: a FULL run completing over zero objects would retire
+#   the estate.
+# * The foreign-key, comment and envelope reads have always degraded to no
+#   rows (`_collect`, and the two `try`/`except` comment reads), so those are
+#   replayed with the re-raise suppressed. The refusal now reaches the
+#   receipt; what the run does is unchanged.
+#
+# **Databricks' SQLSTATE reality, and it is the interesting one.** The driver's
+# `ServerOperationError` has no `sqlstate` attribute, so
+# `capability_states.is_permission_refusal` returns False and a refusal here
+# classifies as UNAVAILABLE / FACET_QUERY_FAILED. But the SQLSTATE *is* there:
+# the installed 4.4.0 driver carries it in `exc.context["sqlState"]` (verified
+# against the class), and Unity Catalog reports an insufficient-privilege error
+# as `42501`. Reading it would mean teaching the shared classifier a second
+# place to look, which is a change to `capability_states` and not to an
+# adapter, so this adapter under-claims for now and the finding is recorded as
+# an R11-FP02 remainder rather than patched around here.
+# ---------------------------------------------------------------------------
+_CapturedRead = Sequence[Mapping[str, Any]] | BaseException
+
+
+@dataclass(frozen=True, slots=True)
+class _CapturedReads:
+    """One run's discovery reads, as the driver thread hands them back.
+
+    The three envelope axes are plain row lists rather than captures: `_collect`
+    absorbs their failures where it renders their reason, and hands the
+    exception over in `refusals` for `discover()` to replay.
+    """
+
+    catalog_name: str
+    columns: _CapturedRead
+    primary_keys: _CapturedRead = ()
+    foreign_keys: _CapturedRead = ()
+    schema_comments: _CapturedRead = ()
+    catalog_comments: _CapturedRead = ()
+    view_rows: Sequence[Mapping[str, Any]] = ()
+    routine_rows: Sequence[Mapping[str, Any]] = ()
+    routine_parameter_rows: Sequence[Mapping[str, Any]] = ()
+    unavailable: tuple[tuple[str, str], ...] = ()
+    refusals: tuple[tuple[str, BaseException], ...] = ()
+
+
+async def _captured(read: _CapturedRead) -> Sequence[Mapping[str, Any]]:
+    """The rows a captured read returned, or the failure it captured, re-raised.
+
+    The awaitable `read_facet` takes. Raising here rather than in the thread is
+    the point: the exception reaches `read_facet` inside the coroutine that owns
+    the `FacetReadScope`, so it is classified and recorded there.
+    """
+    if isinstance(read, BaseException):
+        raise read
+    return read
+
+
+async def _read_absorbed(facet: str, read: _CapturedRead) -> list[dict[str, Any]]:
+    """A read this adapter has always absorbed, now also classified and recorded.
+
+    `read_facet` judges the failure and records it against `facet`; the re-raise
+    it may make is suppressed here, because this read's pre-R11-FP02 contract
+    was to shrink the envelope rather than fail the run -- the contract this
+    adapter's own module docstring calls "a refusal-shaped read". Narrowing it
+    is a separate decision, and while this driver reports no SQLSTATE that
+    `read_facet` can see, a bare replay would narrow it for every failure at
+    once.
+    """
+    with suppress(Exception):
+        return [dict(row) for row in await read_facet(facet, _captured(read))]
+    return []
+
+
+async def _record_refused_axes(refusals: Sequence[tuple[str, BaseException]]) -> None:
+    """Classify and record each already-absorbed axis failure against its facet.
+
+    Same reasoning as `_read_absorbed`, for the axes whose rows `_collect` has
+    already turned into an empty list and a reason string.
+    """
+    for facet, failure in refusals:
+        with suppress(Exception):
+            await read_facet(facet, _captured(failure))
+
+
 def _assemble_databricks_catalog(
     catalog_name: str,
     column_rows: list[dict[str, Any]],
@@ -228,12 +468,31 @@ def _assemble_databricks_catalog(
     fk_rows: list[dict[str, Any]],
     schema_rows: list[dict[str, Any]],
     catalog_rows: list[dict[str, Any]],
+    *,
+    view_rows: list[dict[str, Any]] | None = None,
+    routine_rows: list[dict[str, Any]] | None = None,
+    routine_parameter_rows: list[dict[str, Any]] | None = None,
+    unavailable: tuple[tuple[str, str], ...] = (),
 ) -> tuple[DiscoveredCatalog, ...]:
-    """Assemble the catalog graph and fold table/column/schema/catalog comments onto it."""
+    """Assemble the catalog graph and fold table/column/schema/catalog comments onto it.
+
+    The R11-FP01 row sets default to `None` so a caller that collected only the
+    1.0 axes produces an envelope where the others are genuinely absent rather
+    than empty, which is the same contract the Oracle, Snowflake and BigQuery
+    assemblers carry.
+    """
     table_map = build_table_map_from_column_rows(column_rows)
     append_grouped_key_rows(table_map, pk_rows, constraint_type_map=_CONSTRAINT_TYPE_MAP)
     append_grouped_foreign_key_rows(table_map, fk_rows)
-    catalogs = assemble_catalog(catalog_name, table_map)
+    apply_view_definitions(table_map, _view_definition_rows(view_rows or []))
+    catalogs = assemble_catalog(
+        catalog_name,
+        table_map,
+        routines=build_routines(
+            _routine_rows(routine_rows or []),
+            _routine_parameter_rows(routine_parameter_rows or []),
+        ),
+    )
 
     table_comments = {
         (str(row["table_schema"]), str(row["table_name"])): _optional_text(row.get("table_comment"))
@@ -287,8 +546,18 @@ def _assemble_databricks_catalog(
                     source_description=schema_comments.get(schema.name),
                 )
             )
+        attributes = (
+            {**catalog.attributes, "envelope_v11_unavailable": dict(unavailable)}
+            if unavailable
+            else catalog.attributes
+        )
         rebuilt.append(
-            replace(catalog, schemas=tuple(schemas), source_description=catalog_comment)
+            replace(
+                catalog,
+                schemas=tuple(schemas),
+                source_description=catalog_comment,
+                attributes=attributes,
+            )
         )
     return tuple(rebuilt)
 
@@ -325,13 +594,34 @@ class DatabricksConnector(SqlExecutor):
         # PAT-only auth for now (see `_parse_dsn`); no delegated/workload identity path.
         delegated_identity=False,
         approximate_statistics=True,
-        # Comments are simple, unambiguous INFORMATION_SCHEMA columns with no
-        # refusal-vs-empty distinction to model, so they are implemented and
-        # honestly claimed. Views/routines/grants are not (see module docstring).
-        views=False,
-        routines=False,
+        # R11-FP01. Each flag below is backed by a query in `discover()`, which
+        # is what INV-9 requires of a `True`:
+        #   views           -> information_schema.views.view_definition
+        #   routines        -> information_schema.routines / .parameters
+        #   object_comments -> the comment columns on the queries above
+        views=True,
+        routines=True,
         object_comments=True,
+        # Not implemented, and not the same kind of gap as each other -- see the
+        # module docstring. `grants` is an unimplemented axis on an engine that
+        # has the concept in a different shape; `triggers` and `sequences` are
+        # NOT_APPLICABLE, because Unity Catalog has neither object:
+        #
+        #   * no trigger of any kind. There is no `CREATE TRIGGER`; a Delta
+        #     Live Tables pipeline or a job is scheduled or streamed, not fired
+        #     by a DML statement against a table.
+        #   * no sequence. `GENERATED ALWAYS AS IDENTITY` and a generated column
+        #     are properties *of a Delta table's column* -- there is no separate
+        #     object with an increment, bounds, a cache and a cycle flag, and
+        #     nothing to inventory under its own name.
+        #
+        # Both stay False (INV-9's default), which is what makes
+        # `discovery_selection` answer NOT_APPLICABLE for them rather than
+        # UNSUPPORTED; the engine facts themselves live in
+        # `discovery_selection._NO_TRIGGER_KIND` / `_NO_SEQUENCE_KIND`.
         grants=False,
+        triggers=False,
+        sequences=False,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 60.0) -> None:
@@ -383,29 +673,76 @@ class DatabricksConnector(SqlExecutor):
 
         await asyncio.to_thread(_sync_test)
 
+    @staticmethod
+    def _capture(cur: Any, sql: str) -> _CapturedRead:
+        """One read, captured rather than judged (R11-FP02).
+
+        Both halves are inside the guard, not just the `execute`: the driver
+        decides which of the two raises, and a refusal that surfaced at fetch
+        time would otherwise escape the capture -- the same reasoning `_collect`
+        below already carries for the envelope axes.
+        """
+        try:
+            cur.execute(sql)
+            return rows_to_dicts(cur, cur.fetchall())
+        except Exception as exc:  # noqa: BLE001 -- replayed verbatim into `read_facet`
+            return exc
+
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
-        """Discover Unity Catalog catalogs, schemas, tables, columns, and constraints."""
+        """Discover Unity Catalog catalogs, schemas, tables, columns, and constraints.
 
-        def _sync_discover() -> tuple[DiscoveredCatalog, ...]:
-            conn = self._get_connection()
+        R11-FP02: the reads happen in one driver thread and are replayed here
+        through `read_facet` in the order they were made -- see the
+        `_CapturedReads` comment above for the two replay modes and why they
+        differ. The assembly is a pure function of the rows, so it moved out of
+        the thread with them and produces exactly what it produced before.
+        """
+        reads = await asyncio.to_thread(self._read_facets_sync)
+        column_rows = [
+            dict(row) for row in await read_facet(FACET_INVENTORY, _captured(reads.columns))
+        ]
+        pk_rows = [
+            dict(row) for row in await read_facet(FACET_CONSTRAINTS, _captured(reads.primary_keys))
+        ]
+        fk_rows = await _read_absorbed(FACET_CONSTRAINTS, reads.foreign_keys)
+        schema_rows = await _read_absorbed(FACET_OBJECT_COMMENTS, reads.schema_comments)
+        catalog_rows = await _read_absorbed(FACET_OBJECT_COMMENTS, reads.catalog_comments)
+        await _record_refused_axes(reads.refusals)
+
+        return _assemble_databricks_catalog(
+            reads.catalog_name,
+            column_rows,
+            pk_rows,
+            fk_rows,
+            schema_rows,
+            catalog_rows,
+            view_rows=[dict(row) for row in reads.view_rows],
+            routine_rows=[dict(row) for row in reads.routine_rows],
+            routine_parameter_rows=[dict(row) for row in reads.routine_parameter_rows],
+            unavailable=reads.unavailable,
+        )
+
+    def _read_facets_sync(self) -> _CapturedReads:
+        conn = self._get_connection()
+        try:
+            cur = conn.cursor()
             try:
-                cur = conn.cursor()
-                try:
-                    if self._params.catalog:
-                        catalog_name = self._params.catalog
-                    else:
-                        cur.execute("SELECT current_catalog()")
-                        row = cur.fetchone()
-                        catalog_name = str(row[0]) if row and row[0] else "hive_metastore"
+                if self._params.catalog:
+                    catalog_name = self._params.catalog
+                else:
+                    cur.execute("SELECT current_catalog()")
+                    row = cur.fetchone()
+                    catalog_name = str(row[0]) if row and row[0] else "hive_metastore"
 
-                    quoted_catalog = _quote_identifier(catalog_name)
+                quoted_catalog = _quote_identifier(catalog_name)
 
-                    # Columns and tables. INFORMATION_SCHEMA.COLUMNS carries no table
-                    # type or comment of its own, so the table type/comment come from
-                    # a join against INFORMATION_SCHEMA.TABLES (same shape as the
-                    # Snowflake adapter's discovery query).
-                    cur.execute(
-                        f"""
+                # Columns and tables. INFORMATION_SCHEMA.COLUMNS carries no table
+                # type or comment of its own, so the table type/comment come from
+                # a join against INFORMATION_SCHEMA.TABLES (same shape as the
+                # Snowflake adapter's discovery query).
+                columns = self._capture(
+                    cur,
+                    f"""
                         SELECT
                             c.table_schema,
                             c.table_name,
@@ -424,16 +761,16 @@ class DatabricksConnector(SqlExecutor):
                          AND t.table_name = c.table_name
                         WHERE c.table_schema <> '{_EXCLUDED_SCHEMA}'
                         ORDER BY c.table_schema, c.table_name, c.ordinal_position
-                        """  # noqa: S608 -- catalog identifier is backtick-quoted, not interpolated as a literal
-                    )
-                    column_rows = rows_to_dicts(cur, cur.fetchall())
+                        """,  # noqa: S608 -- catalog identifier is backtick-quoted, not interpolated as a literal
+                )
 
-                    # Primary keys and unique constraints. Unity Catalog PK/UNIQUE
-                    # constraints are informational (not enforced), but the metadata
-                    # is real and is exposed through the same ANSI-shaped views
-                    # PostgreSQL and Snowflake use.
-                    cur.execute(
-                        f"""
+                # Primary keys and unique constraints. Unity Catalog PK/UNIQUE
+                # constraints are informational (not enforced), but the metadata
+                # is real and is exposed through the same ANSI-shaped views
+                # PostgreSQL and Snowflake use.
+                primary_keys = self._capture(
+                    cur,
+                    f"""
                         SELECT
                             tc.table_schema,
                             tc.table_name,
@@ -450,20 +787,21 @@ class DatabricksConnector(SqlExecutor):
                           AND tc.table_schema <> '{_EXCLUDED_SCHEMA}'
                         ORDER BY tc.table_schema, tc.table_name,
                             tc.constraint_name, kcu.ordinal_position
-                        """  # noqa: S608
-                    )
-                    pk_rows = rows_to_dicts(cur, cur.fetchall())
+                        """,  # noqa: S608
+                )
 
-                    # Foreign keys. Best-effort: Unity Catalog FK support (and the
-                    # REFERENTIAL_CONSTRAINTS / CONSTRAINT_COLUMN_USAGE views that
-                    # expose it) is a comparatively newer surface than PK/UNIQUE, so a
-                    # workspace or metastore version that does not have it yet must not
-                    # fail discovery -- it degrades to "no foreign keys observed"
-                    # rather than to a thrown exception, matching how the BigQuery
-                    # adapter treats its own optional key query.
-                    try:
-                        cur.execute(
-                            f"""
+                # Foreign keys. Best-effort: Unity Catalog FK support (and the
+                # REFERENTIAL_CONSTRAINTS / CONSTRAINT_COLUMN_USAGE views that
+                # expose it) is a comparatively newer surface than PK/UNIQUE, so a
+                # workspace or metastore version that does not have it yet must not
+                # fail discovery -- it degrades to "no foreign keys observed"
+                # rather than to a thrown exception, matching how the BigQuery
+                # adapter treats its own optional key query. R11-FP02: that
+                # degradation is unchanged, and `discover()` now replays the
+                # failure through `read_facet` so the receipt carries it too.
+                foreign_keys = self._capture(
+                    cur,
+                    f"""
                             SELECT
                                 tc.table_schema,
                                 tc.table_name,
@@ -490,47 +828,114 @@ class DatabricksConnector(SqlExecutor):
                               AND tc.table_schema <> '{_EXCLUDED_SCHEMA}'
                             ORDER BY tc.table_schema, tc.table_name,
                                 tc.constraint_name, kcu.ordinal_position
-                            """  # noqa: S608
-                        )
-                        fk_rows = rows_to_dicts(cur, cur.fetchall())
-                    except Exception:
-                        fk_rows = []
+                            """,  # noqa: S608
+                )
 
-                    # Schema and catalog comments. Best-effort for the same reason as
-                    # foreign keys: a permission or version gap here must shrink the
-                    # envelope, not fail discovery outright.
-                    try:
-                        cur.execute(
-                            f"""
+                # Schema and catalog comments. Best-effort for the same reason as
+                # foreign keys: a permission or version gap here must shrink the
+                # envelope, not fail discovery outright.
+                schema_comments = self._capture(
+                    cur,
+                    f"""
                             SELECT schema_name, comment
                             FROM {quoted_catalog}.information_schema.schemata
                             WHERE schema_name <> '{_EXCLUDED_SCHEMA}'
-                            """  # noqa: S608
-                        )
-                        schema_rows = rows_to_dicts(cur, cur.fetchall())
-                    except Exception:
-                        schema_rows = []
+                            """,  # noqa: S608
+                )
 
-                    try:
-                        cur.execute(
-                            f"""
+                catalog_comments = self._capture(
+                    cur,
+                    f"""
                             SELECT catalog_name, comment
                             FROM {quoted_catalog}.information_schema.catalogs
+                            """,  # noqa: S608
+                )
+
+                # R11-FP01: the two axes this adapter used to skip. Read
+                # through `_collect`, so a metastore version without a view
+                # and a principal without `USE SCHEMA` both shrink the
+                # envelope with a recorded reason instead of failing the run
+                # or, worse, reading as "this catalog has no views".
+                unavailable: list[tuple[str, str]] = []
+                refusals: list[tuple[str, BaseException]] = []
+
+                def _collect(axis: str, sql: str, *, facet: str) -> list[dict[str, Any]]:
+                    # Both halves are inside the guard, not just the
+                    # `execute`: the driver decides which of the two raises,
+                    # and a refusal that surfaced at fetch time would
+                    # otherwise fail the whole run -- the same shape the
+                    # foreign-key and comment reads above already have.
+                    try:
+                        cur.execute(sql)
+                        return rows_to_dicts(cur, cur.fetchall())
+                    except Exception as exc:
+                        unavailable.append((axis, f"{type(exc).__name__}: {exc}"))
+                        # R11-FP02: captured, not judged -- `read_facet` is a
+                        # coroutine and this runs inside the driver thread.
+                        refusals.append((facet, exc))
+                        return []
+
+                def _view_query(columns: str) -> str:
+                    return f"""
+                            SELECT {columns}
+                            FROM {quoted_catalog}.information_schema.views
+                            WHERE table_schema <> '{_EXCLUDED_SCHEMA}'
+                            ORDER BY table_schema, table_name
                             """  # noqa: S608
-                        )
-                        catalog_rows = rows_to_dicts(cur, cur.fetchall())
-                    except Exception:
-                        catalog_rows = []
-                finally:
-                    cur.close()
+
+                view_rows = _collect(
+                    "views", _view_query(_VIEW_COLUMNS), facet=FACET_VIEW_DEFINITIONS
+                )
+                if not view_rows and unavailable and unavailable[-1][0] == "views":
+                    # The two optional ANSI columns are the likely cause;
+                    # retry without them rather than lose the whole axis.
+                    # A second failure keeps both reasons, so the log says
+                    # the narrow read failed too and the axis is genuinely
+                    # unavailable rather than merely column-shy.
+                    view_rows = _collect(
+                        "views",
+                        _view_query(_VIEW_COLUMNS_NARROW),
+                        facet=FACET_VIEW_DEFINITIONS,
+                    )
+
+                routine_rows = _collect(
+                    "routines",
+                    f"""
+                        SELECT {_ROUTINE_COLUMNS}
+                        FROM {quoted_catalog}.information_schema.routines
+                        WHERE routine_schema <> '{_EXCLUDED_SCHEMA}'
+                        ORDER BY routine_schema, routine_name, specific_name
+                        """,  # noqa: S608
+                    facet=FACET_ROUTINE_BODIES,
+                )
+                routine_parameter_rows = _collect(
+                    "parameters",
+                    f"""
+                        SELECT {_ROUTINE_PARAMETER_COLUMNS}
+                        FROM {quoted_catalog}.information_schema.parameters
+                        WHERE specific_schema <> '{_EXCLUDED_SCHEMA}'
+                        ORDER BY specific_schema, specific_name, ordinal_position
+                        """,  # noqa: S608
+                    facet=FACET_ROUTINE_BODIES,
+                )
             finally:
-                conn.close()
+                cur.close()
+        finally:
+            conn.close()
 
-            return _assemble_databricks_catalog(
-                catalog_name, column_rows, pk_rows, fk_rows, schema_rows, catalog_rows
-            )
-
-        return await asyncio.to_thread(_sync_discover)
+        return _CapturedReads(
+            catalog_name=catalog_name,
+            columns=columns,
+            primary_keys=primary_keys,
+            foreign_keys=foreign_keys,
+            schema_comments=schema_comments,
+            catalog_comments=catalog_comments,
+            view_rows=view_rows,
+            routine_rows=routine_rows,
+            routine_parameter_rows=routine_parameter_rows,
+            unavailable=tuple(unavailable),
+            refusals=tuple(refusals),
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int = 30) -> QueryEstimate:
         """Run EXPLAIN COST and extract row/byte estimates from the Spark plan text."""

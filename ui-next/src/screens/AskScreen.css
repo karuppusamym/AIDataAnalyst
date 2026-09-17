@@ -6,12 +6,13 @@
 .askscreen__stats b{color:var(--ink);font-weight:600}
 .tnum{font-variant-numeric:tabular-nums}
 
-.askscreen__form{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px}
-.askscreen__form .field:nth-child(1){width:220px;flex:none}
-.askscreen__form .field:nth-child(2){flex:1;min-width:280px}
+.askscreen__form{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);align-items:start;gap:12px;flex:none;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px}
+.askscreen__form .field{min-width:0}
+.askscreen__form .field:nth-child(3){grid-column:1 / -1}
+.askscreen__form select{width:100%;min-width:0}
 .askscreen__textarea{width:100%;box-sizing:border-box;resize:vertical;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk);color:var(--ink)}
-.askscreen__submitrow{display:flex;align-items:center;gap:12px;flex:none}
-.askscreen__hint{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+.askscreen__submitrow{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;grid-column:1 / -1}
+.askscreen__hint{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:normal;overflow-wrap:anywhere}
 
 .askrefusal{border:1px solid var(--warn);border-left:3px solid var(--warn);border-radius:var(--radius);background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:8px;flex:none}
 .askrefusal__t{font-weight:600;font-size:14px;color:var(--ink)}
@@ -63,6 +64,10 @@
   .askscreen__history{flex:none;order:2}
   .askscreen__main .vlist{height:240px;flex:none}
   .askscreen__main>.evp{flex:none;width:auto;max-height:none}
+}
+@media (max-width:600px){
+  .askscreen{padding:14px}
+  .askscreen__form{grid-template-columns:minmax(0,1fr)}
 }
 .askscreen__pickerr{margin:0;font-size:12px;color:var(--bad)}
 .askrefusal__params{display:flex;flex-direction:column;gap:10px;margin-top:12px;max-width:420px}
