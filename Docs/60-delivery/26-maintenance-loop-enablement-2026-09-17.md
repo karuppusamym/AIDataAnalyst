@@ -24,7 +24,7 @@ records as deliberate.
 |---|---|---|
 | `AIDA_CHANGE_SIGNAL_PROCESSING_INTERVAL_MINUTES` | `15` | Signals become holds |
 | `AIDA_CONTEXT_REBUILD_INTERVAL_MINUTES` | `30` | Holds become drafts, and release when nothing is stale |
-| `AIDA_SAMPLE_SOURCE_DSN` | the sample container's own local-only credential | `Sample Bank Source` had no live binding, so nothing could scan it — the prerequisite F05 names |
+| `AIDA_SAMPLE_SOURCE_DSN` | the sample container's own local-only credential | The datasource's credential reference (`env://AIDA_SAMPLE_SOURCE_DSN`) resolved to nothing, so no scan could read the source |
 
 The two intervals are the runbook's own documented values
 ([16-deployment-alignment-and-enablement-runbook.md](../40-engineering/16-deployment-alignment-and-enablement-runbook.md)).
@@ -73,10 +73,12 @@ agents in this estate was not part of this change.
 
 ## Remaining, unchanged by this cycle
 
-- **F05 posture and delivery.** Binding `Sample Bank Source` removes one of the three blockers the
-  enforcement-readiness endpoint reports. Two datasources remain unbound, unresolved-workspace
-  requests still proceed undecided, and the one ACTIVE workspace is still in SHADOW. No
-  notification destination is configured, so the delivery worker still has nothing verifiable to
-  deliver to.
+- **F05 posture and delivery. Unchanged, and an earlier draft of this document said otherwise.**
+  Setting the source credential lets a scan read the source; it is not the binding the
+  enforcement-readiness endpoint asks for. That endpoint's `NO_BINDING_FOR_DATASOURCE` is a
+  *workspace* resolution (`workspace_access`), and re-running it after this change still reports
+  `ready: false` with both datasources unbound, unresolved scope proceeding undecided, and no
+  workspace enforcing. No notification destination is configured either, so the delivery worker
+  still has nothing verifiable to deliver to.
 - **F06.5 live answer evaluation.** Still blocked on thresholds nobody has signed off and on an
   enriched live datasource.
