@@ -66,7 +66,22 @@ _VERDICT = re.compile(r"^\**(Yes|No|Partial|n/a)\b", re.IGNORECASE)
 #: requires saying why in the same commit. Without the ratchet a new row could
 #: dodge the gate simply by citing nothing, which is the failure mode a
 #: documentation gate is most prone to.
-MAX_UNCHECKABLE_REACHABLE_YES = 11
+#:
+#: Raised 11 -> 13 on 2026-09-17, for two rows that have no `src/aida` module to
+#: cite rather than a missing one, which is the case this bound cannot
+#: distinguish and so has to be told about:
+#:   - "Interactive latency under a change burst is measured rather than
+#:     assumed" cites `scripts/scale_harness/fp17_change_burst_latency.py`. A
+#:     measurement harness is not reachable from an app entry point and never
+#:     will be; that is what makes it a harness.
+#:   - "The alert rules load, and none of them can never fire" cites
+#:     `infra/monitoring/`. Rule files are not Python.
+#: A third new row, "The shipped bootstrap produces a config that loads", does
+#: cite the module that makes it true -- `src/atlas/platform/config.py` -- but
+#: `aida_modules` deliberately excludes `src/atlas/...` because the reachability
+#: graph walks `src/aida` only, so it lands here too rather than being counted
+#: as unevidenced.
+MAX_UNCHECKABLE_REACHABLE_YES = 13
 
 
 @dataclass(frozen=True, slots=True)

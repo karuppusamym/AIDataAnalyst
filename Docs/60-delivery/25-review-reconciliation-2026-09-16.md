@@ -192,3 +192,80 @@ Passing tests do not establish deployment parity, answer quality, or any of the
 customer-specific release evidence the review's §7 gate names. The full backend suite was
 still running when this document was written; its result is recorded separately rather than
 predicted here.
+
+## Follow-on cycle — 2026-09-17
+
+The review's own findings were closed on 2026-09-16. This cycle worked **section P's
+remainders**, which is the tracker's job rather than this document's, so what is recorded here
+is only what a future reader would otherwise have to reconstruct.
+
+### Two features were half-built, and nothing was failing
+
+The most useful thing this cycle produced is not a feature. Two workstreams ended with a
+feature that looked complete and was not:
+
+- **Trigger and sequence discovery** built the models, the migration, the per-engine queries
+  and 66 tests — and nothing persisted a row. A scan discovered triggers, built them, and
+  dropped them on the floor.
+- **The per-facet refusal mechanism** was complete, wired into the receipt, the gap register
+  and the reconciliation — and no adapter called it. A real source's refusal still failed the
+  whole run.
+
+Neither gap failed a test, and neither could: a feature that discovers and discards is green
+all the way down, and a mechanism nobody calls is green too. They were found by reading the
+handover notes, because both agents wrote plainly that they had stopped at a file boundary
+someone else owned. That is the only reason both were closed the same day, and it is the
+argument for those notes being part of the work rather than a courtesy.
+
+Three **reverse-guards** — tests deliberately written to assert a gap exists and to fail when
+it closes — did exactly their job and were flipped to positive assertions.
+
+### Deliberate decisions, so they are not re-litigated
+
+- **Sample rows (R11-FP04)** — an ADR-0014 addendum is now drafted and marked **NOT ADOPTED**,
+  so the block has a stated exit instead of none. It is honest that whole rows of arbitrary
+  columns are a categorically larger decision than the one-temporal-value freshness addendum it
+  follows, and that the value-free half already shipping means the product does not need it to
+  work. Adoption is Architecture and Data Governance's, not this cycle's.
+- **FP13 thresholds** — proposed with reasoning rather than copied from a measurement: 1.0 for
+  the three safety-shaped metrics (a refusal for the wrong reason is not a correct refusal), 0.9
+  for evidence support because it measures retrieval, which this repository already treats as
+  tolerance-bearing. Every `minimum` is left null pending sign-off, and the three metrics that
+  need the paid live run are left unproposed — proposing a number for a metric nothing has
+  measured is the failure that file warns about.
+- **`AIDA_WORKER_METRICS_PORT` was not set.** 12 of the 24 alert rules have no data until it is,
+  because the registry is per-process. Compose's own comment says opening a port is the
+  operator's decision, and this is one developer's machine rather than a monitored estate.
+- **The quality-benchmark baseline was again not accepted** despite the metrics sitting above
+  it, for the same reason as last cycle: the run reports `path=LIVE_EMBED`, so ratcheting in an
+  environment-dependent figure would recreate the F09 defect.
+- **The relationship/cross-source merge stays declined** on the review's own constraint.
+
+### A defect in the shipped bootstrap (R11-D18)
+
+Two sessions hit it independently, an hour apart, each attributing it to the other. `.env.example`
+ships a `credential_reference` target that is deliberately not a `Settings` field; the env source
+drops such a key before validation but the **dotenv** source hands it to the model, where
+`extra="forbid"` refuses it. So `cp .env.example .env` produced a config that raised for every
+host-side script. It shipped because the existing test loaded the template into the *environment*
+and passed `_env_file=None` — exercising the source that always worked, never the one that was
+broken. Worth recording as a shape: a test that covers the mechanism rather than the documented
+path can be green while the documented path is broken.
+
+### Evidence
+
+| Check | Result |
+|---|---|
+| Backend suite | **11,653 passed, 0 failed**, 169 skipped, 1 xfailed |
+| Frontend | **921 passed across 100 files**; typecheck and build clean |
+| mypy strict | 388 source files |
+| Import contracts | 12 kept, 0 broken |
+| Alembic | one head, `d4a8c1e6b520`; migration/ORM drift green against **real PostgreSQL**, run before the configured database was touched |
+| Live-engine evidence | triggers and sequences created, scanned, dropped and rescanned on PostgreSQL and SQL Server; a genuinely refused facet on PostgreSQL with the run completing |
+| Deployment | redeployed; parity **8 matched / 0 drifted**, 17 services healthy, the new tables present and 12 native object kinds answering on the live capability matrix |
+| Change-burst latency | measured, and the answer is a split — see R11-FP17. It proves the shape of the degradation and no magnitude at any target scale, so **R11-B15 is untouched** |
+| Playwright journey, paid answer evaluation | not run this cycle, and not claimed |
+
+One frontend a11y case failed in the first full run and passed alone and in its own file; it was
+CPU contention with the concurrently running backend suite, which has a per-case time budget. The
+921 above is from a clean run.
