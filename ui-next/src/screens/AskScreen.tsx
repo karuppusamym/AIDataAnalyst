@@ -820,6 +820,7 @@ export function AskScreen() {
 
   // History: independent from the ask flow above, its own in-flight request.
   const [historyItems, setHistoryItems] = useState<AgentRunRead[]>([]);
+  const [showHistory, setShowHistory] = useState(true);
   const [historyTotal, setHistoryTotal] = useState<number | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
@@ -1047,8 +1048,19 @@ export function AskScreen() {
         />
       ) : null}
 
+      <div className="askscreen__viewtools">
+        <button
+          type="button"
+          className="btn btn--quiet"
+          aria-expanded={showHistory}
+          aria-controls="ask-history"
+          onClick={() => setShowHistory((shown) => !shown)}
+        >
+          {showHistory ? "Hide history" : "Show history"}
+        </button>
+      </div>
       <div className="askscreen__main">
-        <div className="askscreen__history">
+        <div id="ask-history" className="askscreen__history" hidden={!showHistory}>
           <div className="askscreen__historyhead">
             <h2 className="askscreen__h2">History</h2>
             <span className="askscreen__historycount">
@@ -1104,7 +1116,11 @@ export function AskScreen() {
             error={panelError}
             onClose={() => setParams({ run: null })}
           />
-        ) : null}
+        ) : (
+          <div className="askscreen__answeridle">
+            <Empty title="Your answer appears here" hint="Ask a question or open a past run to inspect its evidence." />
+          </div>
+        )}
       </div>
     </div>
   );

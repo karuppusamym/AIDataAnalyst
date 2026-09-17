@@ -23,7 +23,11 @@
 .askrefusal__altdef{font-size:12.5px;color:var(--ink-2);margin-top:3px;line-height:1.45}
 
 .askscreen__main{display:flex;gap:14px;flex:1;min-height:0}
-.askscreen__history{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px;min-height:0}
+.askscreen__history{flex:0 0 260px;min-width:0;display:flex;flex-direction:column;gap:8px;min-height:0}
+.askscreen__history[hidden]{display:none}
+.askscreen__main>.evp{flex:1;min-width:0;width:auto}
+.askscreen__viewtools{display:flex;justify-content:flex-end;flex:none}
+.askscreen__answeridle{flex:1;min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:24px}
 .askscreen__historyhead{display:flex;align-items:baseline;gap:8px;flex:none}
 .askscreen__h2{margin:0;font-size:14px}
 .askscreen__historycount{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
@@ -33,7 +37,7 @@
 .histrow--sel{outline:2px solid var(--accent);outline-offset:-1px}
 .histrow__click{all:unset;display:block;width:100%;box-sizing:border-box;padding:11px 13px;cursor:pointer}
 .histrow__badges{display:flex;gap:5px;margin-bottom:6px}
-.histrow__meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:flex;gap:6px}
+.histrow__meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:flex;gap:6px;flex-wrap:wrap;overflow-wrap:anywhere}
 .histrow__fail{font-size:12px;color:var(--bad);margin:6px 0 0}
 
 .ask__trustwarn{border:1px solid var(--bad);border-left:3px solid var(--bad);border-radius:var(--radius);background:var(--surface);padding:12px 14px;display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
@@ -56,8 +60,9 @@
 @media (max-width:1100px){
   .askscreen{height:auto;min-height:100%}
   .askscreen__main{flex-direction:column;min-height:0}
-  .askscreen__main .vlist{height:52vh;flex:none}
-  .evp{width:auto;max-height:none}
+  .askscreen__history{flex:none;order:2}
+  .askscreen__main .vlist{height:240px;flex:none}
+  .askscreen__main>.evp{flex:none;width:auto;max-height:none}
 }
 .askscreen__pickerr{margin:0;font-size:12px;color:var(--bad)}
 .askrefusal__params{display:flex;flex-direction:column;gap:10px;margin-top:12px;max-width:420px}

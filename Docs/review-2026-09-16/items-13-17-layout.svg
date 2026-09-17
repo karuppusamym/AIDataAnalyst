@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="890" viewBox="0 0 1200 890" role="img" aria-labelledby="title desc">
+  <title id="title">Atlas answer-first and stewardship workspace design</title>
+  <desc id="desc">Design wireframe, not a screenshot. Ask has a compact history rail and a large answer. Result, query and evidence views are proposed. Stewardship groups work queue, bulk actions and automation without duplicating Documentation or independent Review.</desc>
+  <defs>
+    <style>
+      text{font-family:Segoe UI,Arial,sans-serif;fill:#162b40} .title{font-size:27px;font-weight:700} .heading{font-size:18px;font-weight:600} .body{font-size:15px} .small{font-size:13px;fill:#52677b} .label{font-size:12px;font-weight:700;letter-spacing:1px;fill:#24736e} .muted{fill:#eef3f8;stroke:#cbd6e0} .card{fill:white;stroke:#cbd6e0} .rule{stroke:#dce4eb}
+    </style>
+  </defs>
+  <rect width="1200" height="890" rx="18" fill="#f5f8fb"/>
+  <text x="32" y="44" class="title">More room for the answer. Fewer competing destinations.</text>
+  <text x="32" y="70" class="small">Items 13–17 • design wireframe • proposed controls are labelled; this is not a deployed screenshot</text>
+  <rect x="30" y="94" width="1140" height="424" rx="12" class="card"/>
+  <text x="52" y="126" class="heading">Ask Atlas</text>
+  <text x="52" y="150" class="small">Source: Sales PostgreSQL   /   Context: Approved revenue v3</text>
+  <rect x="51" y="166" width="1096" height="42" rx="6" class="muted"/>
+  <text x="66" y="193" class="body">What is net revenue by region?</text>
+  <text x="1043" y="193" class="heading">Ask →</text>
+  <rect x="51" y="226" width="222" height="266" rx="7" class="muted"/>
+  <text x="68" y="253" class="heading">History</text>
+  <text x="68" y="277" class="small">Compact and collapsible</text>
+  <line x1="65" y1="294" x2="260" y2="294" class="rule"/>
+  <text x="68" y="319" class="body">Recent run · completed</text>
+  <text x="68" y="340" class="small">Open evidence</text>
+  <line x1="65" y1="357" x2="260" y2="357" class="rule"/>
+  <text x="68" y="382" class="body">Previous run</text>
+  <text x="68" y="404" class="small">No retained result rows</text>
+  <text x="68" y="473" class="label">LAYOUT FIX IMPLEMENTED</text>
+  <rect x="289" y="226" width="858" height="266" rx="7" class="card"/>
+  <text x="309" y="254" class="heading">Current answer</text>
+  <text x="1040" y="254" class="small">Hide history</text>
+  <rect x="307" y="269" width="99" height="31" rx="5" fill="#dff0ed"/>
+  <text x="324" y="290" class="body">Results</text>
+  <text x="434" y="290" class="body">Query</text>
+  <text x="529" y="290" class="body">Evidence</text>
+  <text x="695" y="290" class="small">View tabs: proposed next slice</text>
+  <rect x="309" y="316" width="817" height="112" rx="4" class="muted"/>
+  <text x="328" y="342" class="heading">Region</text><text x="720" y="342" class="heading">Net revenue</text>
+  <line x1="309" y1="354" x2="1126" y2="354" class="rule"/>
+  <text x="328" y="379" class="body">Authorized result rows</text><text x="720" y="379" class="body">Returned by the query gateway</text>
+  <text x="328" y="411" class="small">Wide tables scroll within this area. Values shown here are placeholders.</text>
+  <text x="309" y="455" class="small">Context version · source freshness · query receipt · trust warnings remain accessible</text>
+  <text x="309" y="478" class="label">ANSWER USES THE AVAILABLE WIDTH</text>
+  <rect x="30" y="542" width="1140" height="266" rx="12" class="card"/>
+  <text x="52" y="575" class="heading">Stewardship — proposed navigation</text>
+  <text x="52" y="600" class="small">One place to find work and apply changes; keep Documentation, Meaning and Review as clear destinations.</text>
+  <rect x="52" y="618" width="150" height="34" rx="5" fill="#dff0ed"/>
+  <text x="70" y="641" class="body">Work queue</text><text x="236" y="641" class="body">Bulk actions</text><text x="401" y="641" class="body">Automation</text>
+  <rect x="52" y="669" width="666" height="112" rx="6" class="muted"/>
+  <text x="72" y="696" class="body">Needs owner   ·   Expiring ownership   ·   Documentation gaps</text>
+  <text x="72" y="724" class="small">One selection → appropriate existing action → review when required</text>
+  <text x="72" y="753" class="small">Rejected or suppressed proposals remain inspectable, not silently discarded.</text>
+  <rect x="738" y="618" width="409" height="163" rx="6" class="muted"/>
+  <text x="758" y="645" class="heading">Related task destinations</text>
+  <text x="758" y="676" class="body">Documentation → priorities / drafts / imports</text>
+  <text x="758" y="707" class="body">Business Meaning → glossary / ontology</text>
+  <text x="758" y="738" class="body">Review queue → independent decisions</text>
+  <text x="758" y="762" class="small">Reuse workflows; preserve permission boundaries.</text>
+  <text x="32" y="841" class="body">GraphQL → authorized service reads and explicit gateway execution</text>
+  <text x="32" y="868" class="body">OKF → object documents + source/product indexes → the same approved wiki and agent context</text>
+</svg>
