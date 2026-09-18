@@ -88,11 +88,27 @@ result. `CREATE TEMP TABLE ... [ON COMMIT ...] AS` is an intermediate exactly
 like a T-SQL `#temp`. A dollar-quoted body may carry any tag --
 `pg_get_functiondef`, which the PostgreSQL connector stores, returns
 `$function$`/`$procedure$`, not `$$`.
+
+Triggers (R11-FP01, 2026-09-17). A trigger body is the same artifact as a
+routine body and is parsed by the same walk -- `CREATE [OR REPLACE] TRIGGER` is
+recognised as a header to strip, so a SQL Server or Oracle trigger's own
+`BEGIN ... END` is walked rather than becoming one opaque `Command` chunk. It
+has one thing a routine body does not: an **implicit subject**. `NEW`/`OLD`
+(PostgreSQL), `INSERTED`/`DELETED` (SQL Server) are the firing table's row, and
+the firing table is named nowhere in the body, so a body writing `audit` from
+`NEW.*` states a path out of a table whose name the text does not contain. Only
+the catalog knows which table that is, so `parse_trigger_lineage` takes it and
+binds it to those names (`TRIGGER_SUBJECT_RELATIONS`) before any edge is built.
+Where the binding cannot be made -- Oracle spells the same rows `:NEW`/`:OLD`,
+which is bind-variable syntax sqlglot resolves to a placeholder, leaving no table
+reference to bind -- the parse records an UNRESOLVED_TRIGGER_SUBJECT marker
+rather than reporting a body whose sources it does not actually know.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Final
@@ -101,6 +117,7 @@ from aida.sql_lineage_parser import (
     _SQLGLOT_AVAILABLE,
     _SQLGLOT_DIALECT_MAP,
     PROCEDURE_RESULT_TARGET,
+    STAR_COLUMN_MARKER,
     UNRESOLVED_TABLE,
     Confidence,
     LineageEdge,
@@ -140,6 +157,10 @@ class UnparsedReason(StrEnum):
     UNSUPPORTED_STATEMENT_SHAPE = "UNSUPPORTED_STATEMENT_SHAPE"
     PARSE_ERROR = "PARSE_ERROR"
     UNRESOLVED_CONTROL_FLOW = "UNRESOLVED_CONTROL_FLOW"
+    # R11-FP01: a trigger body's implicit subject -- the firing table's row --
+    # could not be bound on this engine, so the reads attributed to it are not
+    # stated rather than guessed. See `parse_trigger_lineage`.
+    UNRESOLVED_TRIGGER_SUBJECT = "UNRESOLVED_TRIGGER_SUBJECT"
 
 
 # Marker `transformation_type` for an UNPARSED edge -- deliberately not added
@@ -156,6 +177,102 @@ UNPARSED_MARKER: Final[str] = "<UNPARSED>"
 # assignment or a discarded `PERFORM` row set. Not a table, not the routine's
 # result: edges into it are always non-write intermediates.
 PROCEDURE_LOCAL_TARGET: Final[str] = "<LOCAL>"
+
+
+# ---------------------------------------------------------------------------
+# R11-FP01: a trigger body's implicit subject. See the module docstring.
+# ---------------------------------------------------------------------------
+#: What each dialect calls the firing table's row inside a trigger body. The
+#: values are the *names a body writes*, not tables: `trigger_subject_aliases`
+#: turns them into alias entries pointing at the firing table the catalog holds.
+TRIGGER_SUBJECT_RELATIONS: Final[dict[str, tuple[str, ...]]] = {
+    "postgres": ("NEW", "OLD"),
+    "tsql": ("INSERTED", "DELETED"),
+}
+#: Oracle's `:NEW.col` / `:OLD.col`. Deliberately not in the map above: sqlglot
+#: reads the leading colon as a bind-variable placeholder, so the parsed
+#: statement carries no table-qualified reference for any binding to attach to.
+#: A body that uses one is reported unresolved, never parsed as though the row
+#: reference were absent.
+_BIND_SUBJECT_RE = re.compile(r":\s*(?:NEW|OLD)\b\s*\.", re.IGNORECASE)
+#: Any spelling of a firing-row reference, for a dialect this module has no
+#: vocabulary for at all.
+_ANY_SUBJECT_RE = re.compile(
+    r"(?::\s*)?\b(?:NEW|OLD|INSERTED|DELETED)\b\s*\.", re.IGNORECASE
+)
+
+
+def trigger_subject_aliases(dialect: str, firing_table: str) -> dict[str, str]:
+    """Alias entries binding this dialect's firing-row names to `firing_table`.
+
+    Registered in every case a body may have written, because alias resolution
+    (`sql_lineage_parser._resolve_alias_to_table`) is an exact dictionary
+    lookup on the identifier as the source spelled it. Empty for a dialect with
+    no firing-row vocabulary here, which `unbound_trigger_subject` reports.
+    """
+    aliases: dict[str, str] = {}
+    for name in TRIGGER_SUBJECT_RELATIONS.get(dialect, ()):
+        for spelling in (name, name.lower(), name.capitalize()):
+            aliases[spelling] = firing_table
+    return aliases
+
+
+def unbound_trigger_subject(sql: str, dialect: str) -> bool:
+    """True when `sql` refers to the firing row in a form no binding can reach.
+
+    Only the *presence* of the reference is read; the text is never returned,
+    stored or quoted (INV-6).
+    """
+    if dialect not in TRIGGER_SUBJECT_RELATIONS:
+        return bool(_ANY_SUBJECT_RE.search(sql))
+    return bool(_BIND_SUBJECT_RE.search(sql))
+
+
+def unbound_subject_aliases(dialect: str) -> dict[str, str]:
+    """This dialect's firing-row names, bound to nothing.
+
+    Applied to every parse that is *not* a trigger's, which is what a PostgreSQL
+    trigger function's parse is: it lives on the routine axis, its body says
+    `NEW.customer_id`, and no firing table is in sight -- the same function may be
+    attached to several tables, so the routine axis cannot resolve the reference
+    even in principle. Without this the qualifier resolved to itself, because
+    `sql_lineage_parser._resolve_or_mark_unresolved` treats any non-empty
+    reference as resolved, and the parse reported an edge out of a table called
+    `NEW`. An invented table is worse than an admitted gap (INV-9), so the empty
+    binding makes it honestly UNRESOLVED instead.
+    """
+    return {
+        spelling: ""
+        for name in TRIGGER_SUBJECT_RELATIONS.get(dialect, ())
+        for spelling in (name, name.lower(), name.capitalize())
+    }
+
+
+def _bind_subject(aliases: dict[str, str], subject: Mapping[str, str]) -> None:
+    """Point every reference to a firing-row name at the firing table, or, where
+    there is no firing table, at nothing.
+
+    Two steps, because a body may name the row directly (`NEW.amount`) or behind
+    an alias the statement itself declared (`FROM inserted i`, then `i.amount`,
+    where the walk above has already recorded `i -> inserted`): an alias whose
+    target is a firing-row name is remapped first, then the names themselves are
+    added. Applied after the walk so a real binding wins over the raw name.
+
+    An *empty* binding never overwrites what the walk found, because a routine on
+    an engine whose firing-row name is an ordinary identifier may legitimately
+    select from a table of that name -- `FROM inserted` outside a T-SQL trigger is
+    a real table. The empty binding only fills a name the walk saw no table for.
+    """
+    bound = {name.lower(): table for name, table in subject.items() if table}
+    for key, value in list(aliases.items()):
+        table = bound.get(value.lower())
+        if table is not None:
+            aliases[key] = table
+    for name, table in subject.items():
+        if table:
+            aliases[name] = table
+        else:
+            aliases.setdefault(name, "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,8 +355,13 @@ class ProcedureParseResult:
 
 # R11-FP07: `DO $$ ... $$` is an anonymous block -- a body with no name, whose statements
 # are read exactly like a routine's.
+# R11-FP01: `TRIGGER` joins them. A SQL Server or Oracle trigger keeps its code
+# in the trigger itself, and without this its whole `CREATE TRIGGER ... AS BEGIN`
+# header became one opaque `Command` chunk -- an UNPARSED marker on a body that
+# is in fact perfectly readable once the header is off.
 _HEADER_RE = re.compile(
-    r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION)|DO)\b", re.IGNORECASE
+    r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|TRIGGER)|DO)\b",
+    re.IGNORECASE,
 )
 #: T-SQL inline table-valued function: its body is the query of `AS RETURN ( ... )`.
 _TSQL_INLINE_RETURN_RE = re.compile(r"\bAS\s+RETURN\s*\(", re.IGNORECASE)
@@ -610,10 +732,15 @@ def _table_function_name(table: object) -> str | None:
     return ".".join(parts) if parts else None
 
 
-def _collect_table_aliases_with_temp(statement: object) -> tuple[dict[str, str], set[str]]:
+def _collect_table_aliases_with_temp(
+    statement: object, subject: Mapping[str, str] | None = None
+) -> tuple[dict[str, str], set[str]]:
     """Mirrors `sql_lineage_parser._collect_table_aliases`'s exact walk
     order (so alias resolution stays consistent) while additionally
-    recording which resolved names are temp tables/variables."""
+    recording which resolved names are temp tables/variables.
+
+    `subject` is a trigger's firing-row binding (`trigger_subject_aliases`);
+    `None` -- every routine-body caller -- leaves the walk exactly as it was."""
     aliases: dict[str, str] = {}
     temp: set[str] = set()
     if not _SQLGLOT_AVAILABLE or not isinstance(statement, exp.Expression):
@@ -633,6 +760,8 @@ def _collect_table_aliases_with_temp(statement: object) -> tuple[dict[str, str],
             aliases[table.name] = fqn
         if is_temp:
             temp.add(fqn)
+    if subject:
+        _bind_subject(aliases, subject)
     return aliases, temp
 
 
@@ -676,7 +805,7 @@ def _where_filter_edges(
 
 
 def _extract_edges_from_update(
-    statement: exp.Update, dialect: str
+    statement: exp.Update, dialect: str, subject: Mapping[str, str] | None = None
 ) -> tuple[list[LineageEdge], str]:
     """UPDATE ... SET ... [FROM ...] [WHERE ...] -- not handled by
     `sql_lineage_parser._extract_from_statement` at all. Supports both the
@@ -686,7 +815,7 @@ def _extract_edges_from_update(
     FROM -- resolved through the same alias table JOIN/FROM tables
     contribute, exactly like a SELECT's FROM/JOIN.
     """
-    aliases, _temp = _collect_table_aliases_with_temp(statement)
+    aliases, _temp = _collect_table_aliases_with_temp(statement, subject)
     raw_target = (
         _resolve_table_name(statement.this) if isinstance(statement.this, exp.Table) else ""
     )
@@ -727,7 +856,7 @@ def _extract_edges_from_update(
 
 
 def _extract_edges_from_merge(
-    statement: exp.Merge, dialect: str
+    statement: exp.Merge, dialect: str, subject: Mapping[str, str] | None = None
 ) -> tuple[list[LineageEdge], str]:
     """MERGE INTO target USING source ON (...) WHEN MATCHED THEN UPDATE SET
     ... WHEN NOT MATCHED THEN INSERT (...) VALUES (...) -- column-level for
@@ -813,7 +942,7 @@ def _extract_edges_from_merge(
 
 
 def _extract_edges_from_insert(
-    statement: exp.Insert, dialect: str
+    statement: exp.Insert, dialect: str, subject: Mapping[str, str] | None = None
 ) -> tuple[list[LineageEdge], str]:
     """INSERT INTO t [(col, ...)] SELECT ... -- not fully handled by
     `sql_lineage_parser._extract_from_statement`, in two ways this fixes:
@@ -853,10 +982,13 @@ def _extract_edges_from_insert(
     if not target_table:
         return [], ""
 
-    table_aliases, _ = _collect_table_aliases_with_temp(statement)
+    table_aliases, _ = _collect_table_aliases_with_temp(statement, subject)
     inner_select = statement.find(exp.Union) or statement.find(exp.Select)
     if inner_select is None:
-        return [], target_table
+        return (
+            _edges_from_values(statement, target_table, target_columns, dialect, table_aliases),
+            target_table,
+        )
 
     if not target_columns:
         return (
@@ -900,6 +1032,79 @@ def _extract_edges_from_insert(
                 )
             )
     return edges, target_table
+
+
+def _edges_from_values(
+    statement: exp.Insert,
+    target_table: str,
+    target_columns: list[str] | None,
+    dialect: str,
+    table_aliases: dict[str, str],
+) -> list[LineageEdge]:
+    """`INSERT INTO t (a, b) VALUES (x.a, f(x.b))` -- a row built from
+    expressions rather than from a query.
+
+    Added for R11-FP01, because it is the shape a row trigger's write almost
+    always has (`INSERT INTO audit (...) VALUES (NEW....)`) and with no branch
+    for it the statement parsed cleanly and produced no edge at all: a body
+    reported fully parsed with no lineage in it, which is the one outcome INV-9
+    forbids. Literals contribute nothing and are never inspected -- only column
+    references become edges -- so a VALUES list of constants is honestly
+    edge-free rather than unparsed.
+
+    Without an explicit column list the target columns are positional, and this
+    module is deliberately catalog-free so it cannot know the table's column
+    order. One `TABLE_STAR` edge per source table is recorded instead, the same
+    honest table-level evidence `_extract_star_edges` gives a `SELECT *`, rather
+    than guessing a name onto each position.
+    """
+    values = statement.find(exp.Values)
+    if values is None:
+        return []
+    if target_columns is None:
+        found: set[str] = set()
+        for tuple_expr in values.expressions:
+            for table_ref, _col_name in _extract_source_columns(tuple_expr):
+                resolved, ok = _resolve_or_mark_unresolved(table_ref, table_aliases)
+                if ok:
+                    found.add(resolved)
+        sources = sorted(found)
+        return [
+            LineageEdge(
+                source_table=source,
+                source_column=STAR_COLUMN_MARKER,
+                target_table=target_table,
+                target_column=STAR_COLUMN_MARKER,
+                transformation_type=TransformationType.TABLE_STAR.value,
+                confidence=Confidence.PARTIAL.value,
+                dialect=dialect,
+                source_resolved=True,
+            )
+            for source in sources
+        ]
+    edges: list[LineageEdge] = []
+    for tuple_expr in values.expressions:
+        expressions = (
+            list(tuple_expr.expressions) if isinstance(tuple_expr, exp.Tuple) else [tuple_expr]
+        )
+        for target_col, source_expr in zip(target_columns, expressions, strict=False):
+            has_agg = _has_aggregate_functions(source_expr)
+            transformation = _classify_transformation(source_expr, has_agg)
+            for table_ref, col_name in _extract_source_columns(source_expr):
+                resolved, ok = _resolve_or_mark_unresolved(table_ref, table_aliases)
+                edges.append(
+                    LineageEdge(
+                        source_table=resolved if ok else UNRESOLVED_TABLE,
+                        source_column=col_name,
+                        target_table=target_table,
+                        target_column=target_col,
+                        transformation_type=transformation,
+                        confidence=Confidence.FULL.value if ok else Confidence.PARTIAL.value,
+                        dialect=dialect,
+                        source_resolved=ok,
+                    )
+                )
+    return edges
 
 
 def _extract_edges_from_select_into(
@@ -957,7 +1162,11 @@ def _matching_paren(text: str, open_index: int) -> int | None:
 
 
 def _local_statement(
-    ordinal: int, node: exp.Expr, dialect: str, context: str | None
+    ordinal: int,
+    node: exp.Expr,
+    dialect: str,
+    context: str | None,
+    subject: Mapping[str, str] | None = None,
 ) -> ParsedStatement:
     """A query whose rows stay inside the routine. Its reads are real
     dependencies, so its edges are kept -- into `PROCEDURE_LOCAL_TARGET`, marked
@@ -969,7 +1178,7 @@ def _local_statement(
             target_table=None, is_intermediate_target=False, node=node, edges=(),
         )
     edges = _extract_edges_from_select(
-        node, PROCEDURE_LOCAL_TARGET, dialect, _collect_table_aliases_with_temp(node)[0]
+        node, PROCEDURE_LOCAL_TARGET, dialect, _collect_table_aliases_with_temp(node, subject)[0]
     )
     return ParsedStatement(
         ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=False,
@@ -980,7 +1189,12 @@ def _local_statement(
 
 
 def _parse_local_query(
-    ordinal: int, sql: str, dialect: str, sqlglot_dialect: str, context: str | None
+    ordinal: int,
+    sql: str,
+    dialect: str,
+    sqlglot_dialect: str,
+    context: str | None,
+    subject: Mapping[str, str] | None = None,
 ) -> ParsedStatement:
     try:
         node = sqlglot.parse_one(sql, dialect=sqlglot_dialect, error_level=ErrorLevel.RAISE)
@@ -994,11 +1208,16 @@ def _parse_local_query(
             f"{UnparsedReason.UNSUPPORTED_STATEMENT_SHAPE.value}: "
             f"PL/pgSQL expression is not a query ({sql[:120]!r})",
         )
-    return _local_statement(ordinal, node, dialect, context)
+    return _local_statement(ordinal, node, dialect, context, subject)
 
 
 def _classify_plpgsql_statement(
-    ordinal: int, remainder: str, dialect: str, sqlglot_dialect: str, context: str | None
+    ordinal: int,
+    remainder: str,
+    dialect: str,
+    sqlglot_dialect: str,
+    context: str | None,
+    subject: Mapping[str, str] | None = None,
 ) -> tuple[ParsedStatement | None, str]:
     """Resolve a PL/pgSQL statement that is not plain SQL -- `(statement, "")` --
     or return `(None, sql)` with the SQL still to dispatch."""
@@ -1020,11 +1239,11 @@ def _classify_plpgsql_statement(
                 f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: {call.group('callee')}",
             ), ""
         return _parse_local_query(
-            ordinal, f"SELECT {expression}", dialect, sqlglot_dialect, context
+            ordinal, f"SELECT {expression}", dialect, sqlglot_dialect, context, subject
         ), ""
     if match := _PLPGSQL_ASSIGNMENT_RE.match(remainder):
         return _parse_local_query(
-            ordinal, f"SELECT {match.group('expr')}", dialect, sqlglot_dialect, context
+            ordinal, f"SELECT {match.group('expr')}", dialect, sqlglot_dialect, context, subject
         ), ""
     remainder = _PLPGSQL_INTO_STRICT_RE.sub("INTO", remainder)
     return None, _PLPGSQL_RETURNING_INTO_RE.sub(r"\g<returning>", remainder)
@@ -1036,7 +1255,12 @@ def _classify_plpgsql_statement(
 
 
 def _classify_and_extract(
-    ordinal: int, raw_chunk: str, dialect: str, sqlglot_dialect: str, plpgsql: bool = False
+    ordinal: int,
+    raw_chunk: str,
+    dialect: str,
+    sqlglot_dialect: str,
+    plpgsql: bool = False,
+    subject: Mapping[str, str] | None = None,
 ) -> list[ParsedStatement]:
     peeled = _peel_control_flow_prefix(raw_chunk)
     results: list[ParsedStatement] = []
@@ -1044,7 +1268,7 @@ def _classify_and_extract(
     if peeled.cursor_loop_source_sql:
         results.extend(
             _classify_and_extract(
-                ordinal, peeled.cursor_loop_source_sql, dialect, sqlglot_dialect, plpgsql
+                ordinal, peeled.cursor_loop_source_sql, dialect, sqlglot_dialect, plpgsql, subject
             )
         )
 
@@ -1074,7 +1298,7 @@ def _classify_and_extract(
         remainder = _PG_TEMP_ON_COMMIT_RE.sub(r"\g<head>", remainder, count=1)
     if plpgsql:
         plpgsql_statement, remainder = _classify_plpgsql_statement(
-            ordinal, remainder, dialect, sqlglot_dialect, peeled.control_flow_context
+            ordinal, remainder, dialect, sqlglot_dialect, peeled.control_flow_context, subject
         )
         if plpgsql_statement is not None:
             results.append(plpgsql_statement)
@@ -1130,11 +1354,13 @@ def _classify_and_extract(
         )
         return results
 
-    table_aliases, _ = _collect_table_aliases_with_temp(node)
+    table_aliases, _ = _collect_table_aliases_with_temp(node, subject)
 
     if plpgsql and isinstance(node, exp.Select) and node.args.get("into") is not None:
         # PL/pgSQL `SELECT ... INTO target` assigns variables; it creates no table.
-        results.append(_local_statement(ordinal, node, dialect, peeled.control_flow_context))
+        results.append(
+            _local_statement(ordinal, node, dialect, peeled.control_flow_context, subject)
+        )
         return results
 
     if isinstance(node, exp.Select | exp.Union):
@@ -1152,7 +1378,7 @@ def _classify_and_extract(
         return results
 
     if isinstance(node, exp.Insert):
-        edges, target = _extract_edges_from_insert(node, dialect)
+        edges, target = _extract_edges_from_insert(node, dialect, subject)
         temp = target in _collect_table_aliases_with_temp(node)[1]
         results.append(
             ParsedStatement(
@@ -1165,7 +1391,7 @@ def _classify_and_extract(
         return results
 
     if isinstance(node, exp.Update):
-        edges, target = _extract_edges_from_update(node, dialect)
+        edges, target = _extract_edges_from_update(node, dialect, subject)
         temp = target in _collect_table_aliases_with_temp(node)[1]
         results.append(
             ParsedStatement(
@@ -1178,7 +1404,7 @@ def _classify_and_extract(
         return results
 
     if isinstance(node, exp.Delete):
-        aliases, temp_set = _collect_table_aliases_with_temp(node)
+        aliases, temp_set = _collect_table_aliases_with_temp(node, subject)
         target_expr = node.this
         target = _resolve_table_name(target_expr) if isinstance(target_expr, exp.Table) else ""
         target = aliases.get(target, target)
@@ -1197,7 +1423,7 @@ def _classify_and_extract(
         return results
 
     if isinstance(node, exp.Merge):
-        edges, target = _extract_edges_from_merge(node, dialect)
+        edges, target = _extract_edges_from_merge(node, dialect, subject)
         temp = target in _collect_table_aliases_with_temp(node)[1]
         results.append(
             ParsedStatement(
@@ -1456,7 +1682,9 @@ def _dedupe_edges(
 # ---------------------------------------------------------------------------
 
 
-def _attributed(statement: ParsedStatement) -> ParsedStatement:
+def _attributed(
+    statement: ParsedStatement, subject: Mapping[str, str] | None = None
+) -> ParsedStatement:
     """A statement with exactly one source attributes its unqualified columns to it.
 
     `SELECT customer_id, net_revenue FROM s.customer_revenue` qualifies nothing, so every column
@@ -1465,9 +1693,13 @@ def _attributed(statement: ParsedStatement) -> ParsedStatement:
     """
     if statement.node is None or not statement.edges:
         return statement
+    bound = {name.lower(): table for name, table in (subject or {}).items() if table}
     names = {
-        _table_function_name(table) or _resolve_table_name(table)
-        for table in statement.node.find_all(exp.Table)
+        bound.get(raw.lower(), raw)
+        for raw in (
+            _table_function_name(table) or _resolve_table_name(table)
+            for table in statement.node.find_all(exp.Table)
+        )
     }
     names.discard("")
     names.discard(statement.target_table or "")
@@ -1512,7 +1744,9 @@ def _table_function_markers(statement: ParsedStatement, dialect: str) -> list[Pa
     return markers
 
 
-def walk_procedure_statements(sql: str, dialect: str) -> list[ParsedStatement]:
+def walk_procedure_statements(
+    sql: str, dialect: str, subject: Mapping[str, str] | None = None
+) -> list[ParsedStatement]:
     """Split, peel, and classify every top-level statement in a procedure
     body. Exposed (not just an internal helper of `parse_procedure_lineage`)
     because `procedure_tool_blueprint.py` (N12) needs the parsed AST nodes
@@ -1521,14 +1755,19 @@ def walk_procedure_statements(sql: str, dialect: str) -> list[ParsedStatement]:
     if not _SQLGLOT_AVAILABLE or dialect not in _SQLGLOT_DIALECT_MAP:
         return []
     sqlglot_dialect = _SQLGLOT_DIALECT_MAP[dialect]
+    # A body with no firing table still names firing rows if it is a trigger
+    # function; see `unbound_subject_aliases`.
+    subject = subject or unbound_subject_aliases(dialect)
     plpgsql = _is_plpgsql(sql, dialect)
     body = _extract_body(sql)
     chunks = _split_top_level_statements(body)
     statements: list[ParsedStatement] = []
     ordinal = 0
     for chunk in chunks:
-        for parsed in _classify_and_extract(ordinal, chunk, dialect, sqlglot_dialect, plpgsql):
-            statement = _attributed(parsed)
+        for parsed in _classify_and_extract(
+            ordinal, chunk, dialect, sqlglot_dialect, plpgsql, subject
+        ):
+            statement = _attributed(parsed, subject)
             statements.append(statement)
             ordinal += 1
             for marker in _table_function_markers(statement, dialect):
@@ -1537,13 +1776,20 @@ def walk_procedure_statements(sql: str, dialect: str) -> list[ParsedStatement]:
     return statements
 
 
-def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ProcedureParseResult:
+def parse_procedure_lineage(
+    sql: str, dialect: str = "postgres", subject: Mapping[str, str] | None = None
+) -> ProcedureParseResult:
     """Procedure-aware column-level lineage extraction (N3). See the module
     docstring for the algorithm and its explicit, code-derived limitations.
 
     The SQL is never executed. Literal values are never inspected for
     anything but statement-hashing (`_compute_sql_hash`, which itself
     redacts first).
+
+    `subject` binds names the body uses for a relation it does not declare to
+    real tables -- a trigger's firing row, the only such case today. Callers
+    with a routine body pass nothing and get exactly the parse they always did;
+    `parse_trigger_lineage` is the one that supplies it.
     """
     sql_hash = _compute_sql_hash(sql)
     if dialect not in _SQLGLOT_DIALECT_MAP:
@@ -1557,7 +1803,7 @@ def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ProcedurePar
             errors=["sqlglot library is not available"],
         )
 
-    statements = walk_procedure_statements(sql, dialect)
+    statements = walk_procedure_statements(sql, dialect, subject)
     if not statements:
         return ProcedureParseResult(
             confidence=Confidence.LOW.value, dialect=dialect, sql_hash=sql_hash,
@@ -1596,4 +1842,71 @@ def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ProcedurePar
         errors=list(unparsed_reasons),
         is_fully_parsed=is_fully_parsed,
         is_read_only=is_read_only,
+    )
+
+
+def unparsed_marker_result(
+    *, reason: str, dialect: str, sql_hash: str, via_routine: str | None = None
+) -> ProcedureParseResult:
+    """A parse result holding one UNPARSED marker and nothing else.
+
+    For a caller that could not reach a body at all -- R11-FP01's PostgreSQL
+    trigger whose action routine is not captured here is the case that needed it.
+    Never an empty result: a zero-edge parse reads as an object that touches
+    nothing, which is the false-clean reading INV-9 forbids. The marker is built
+    by the same helper every in-body gap uses, so its shape cannot drift from
+    theirs, and `reason` is the caller's own value-free code -- no body text
+    reaches it, because there is none to reach.
+    """
+    marker = _unparsed_statement(0, dialect, None, reason)
+    edges = [replace(edge, via_routine=via_routine) for edge in marker.edges]
+    return ProcedureParseResult(
+        edges=edges,
+        statement_count=1,
+        confidence=Confidence.LOW.value,
+        dialect=dialect,
+        sql_hash=sql_hash,
+        errors=[reason],
+        is_fully_parsed=False,
+        is_read_only=False,
+    )
+
+
+def parse_trigger_lineage(
+    sql: str, *, dialect: str, firing_table: str
+) -> ProcedureParseResult:
+    """One captured trigger body's lineage, with its implicit subject bound.
+
+    The same parse a routine body gets -- a trigger body is the same artifact
+    under the same screening rules -- plus the binding a routine body has no
+    need of: `firing_table` is attached to this dialect's firing-row names
+    before any edge is built, so `INSERT INTO audit ... NEW.customer_id` states
+    an edge *from the firing table* rather than from the parser's `UNRESOLVED`
+    placeholder. That is the direction that matters: without it the write is
+    recorded with no upstream, which reads as a table that changes by itself.
+
+    A firing-row reference this parser cannot bind adds an
+    UNRESOLVED_TRIGGER_SUBJECT marker and clears `is_fully_parsed`: the body was
+    read, so its writes stand, but the claim that its *sources* are known does
+    not. `is_read_only` is cleared with it -- a body whose subject is unbound has
+    not been proven to touch nothing.
+
+    Nothing here stores, returns, logs or quotes the body: the marker's reason
+    carries the dialect and nothing else (INV-6).
+    """
+    subject = trigger_subject_aliases(dialect, firing_table)
+    result = parse_procedure_lineage(sql, dialect, subject or None)
+    if not unbound_trigger_subject(sql, dialect):
+        return result
+    reason = f"{UnparsedReason.UNRESOLVED_TRIGGER_SUBJECT.value}: {dialect}"
+    marker = _unparsed_statement(result.statement_count, dialect, None, reason)
+    return ProcedureParseResult(
+        edges=[*result.edges, *marker.edges],
+        statement_count=result.statement_count + 1,
+        confidence=Confidence.PARTIAL.value if result.edges else Confidence.LOW.value,
+        dialect=result.dialect,
+        sql_hash=result.sql_hash,
+        errors=[*result.errors, reason],
+        is_fully_parsed=False,
+        is_read_only=False,
     )

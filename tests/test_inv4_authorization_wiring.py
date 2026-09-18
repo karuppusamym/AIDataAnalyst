@@ -123,6 +123,25 @@ def test_the_retrieval_preview_is_gated() -> None:
     assert reaches_call("aida.api", "preview_agent_retrieval", _GATE_CALLS)
 
 
+@pytest.mark.parametrize(
+    "handler",
+    ["inspect_okf_bundle", "download_okf_bundle"],
+)
+def test_the_okf_bundle_reads_are_gated(handler: str) -> None:
+    """R11-OKF01: an OKF bundle is assembled context a reader takes away, so it is gated like
+    the retrieval preview above and not like a catalog row.
+
+    Registered here rather than trusted to review for the reason that applies to every entry in
+    this module, plus one specific to this surface: acceptance OKF-D requires an unauthorized
+    dependency to be absent from a bundle's *counts*, and the only thing standing between a
+    count and a leak is that `aida.okf_snapshot._admit_datasources` decided each datasource
+    before anything was assembled. The scan follows the handler through `_build` and
+    `freeze_snapshot` to that decision; if a refactor ever assembles first and filters after,
+    the gate stops being reachable from the handler and this fails.
+    """
+    assert reaches_call("aida.okf_export_api", handler, _GATE_CALLS)
+
+
 def test_the_scan_would_notice_if_a_gate_were_removed() -> None:
     """The meta-test. Every assertion above is worth exactly what this one is.
 

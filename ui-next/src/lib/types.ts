@@ -3465,6 +3465,29 @@ export interface ObjectKindCapabilityRead {
   definition: "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "NOT_APPLICABLE" | "NOT_SELECTED";
 }
 
+/** One document in an OKF bundle: where it sits, its digest and its size. */
+export interface OkfBundleFileRead {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** An OKF bundle's Atlas manifest plus its file index -- never the documents themselves. */
+export interface OkfBundleRead {
+  okf_version: string;
+  spec_revision: string;
+  spec_conformance: string;
+  profile: string;
+  content_snapshot_digest: string;
+  bundle_content_digest: string;
+  scope_digest: string;
+  document_count: number;
+  valid: boolean;
+  findings: string[];
+  files: OkfBundleFileRead[];
+  manifest: Record<string, unknown>;
+}
+
 export interface OntologyCreate {
   ontology_key: string;
   base_version?: number;

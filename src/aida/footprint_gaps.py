@@ -2,9 +2,9 @@
 
 The footprint work records gaps honestly where they occur -- a withheld definition keeps its
 reason, an unreadable statement is an UNPARSED marker, an undecided lineage edge stays PROPOSED,
-a source change opens a hold -- but nothing put them in one place, so a gap was something a person
-had to go and find. This read model counts them per datasource and names, for each kind, the one
-route that closes it:
+a source change opens a hold, a trigger body nothing can be read from keeps its reason -- but
+nothing put them in one place, so a gap was something a person had to go and find. This read
+model counts them per datasource and names, for each kind, the one route that closes it:
 
 * `AGENT` -- bounded work an existing task agent does (the lineage agent's backlog);
 * `HUMAN_REVIEW` -- a decision a person makes in an existing queue;
@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Select, exists, func, or_, select
+from sqlalchemy import Select, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import AuthorizationDenied, gate
@@ -35,10 +35,16 @@ from aida.capability_states import CapabilityState
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE
 from aida.config import Settings
-from aida.envelope_models import AVAILABLE, UNAVAILABLE, MetadataRoutine, MetadataViewDefinition
+from aida.envelope_models import (
+    AVAILABLE,
+    UNAVAILABLE,
+    MetadataRoutine,
+    MetadataTrigger,
+    MetadataViewDefinition,
+)
 from aida.ingest_screening import CLEAN
 from aida.models import AnalysisRun, DataQualityIncident, DataSource, ViewLineageEdge
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.routine_call_descent import CALLEE_BODY_WITHHELD, CALLEE_NOT_CAPTURED
 from aida.schemas import ApiModel
 from aida.security import SecurityContext
@@ -67,23 +73,28 @@ GAP_DEFINITIONS: Final[dict[str, tuple[str, str, str]]] = {
     ),
     "LINEAGE_AWAITING_PARSE": (
         "AGENT",
-        "agent:lineage (VIEW_LINEAGE, PROCEDURE_LINEAGE)",
-        "Eligible views and routines with no parsed lineage yet -- the lineage agent's backlog.",
+        "agent:lineage (VIEW_LINEAGE, PROCEDURE_LINEAGE, TRIGGER_LINEAGE)",
+        "Eligible views, routines and triggers with no parsed lineage yet -- the lineage "
+        "agent's backlog. A trigger counts once its body, or the function its action names, "
+        "is something the parser can be handed; a trigger with neither is not waiting on an "
+        "agent and is counted as withheld code instead.",
     ),
     "LINEAGE_UNPARSED_STATEMENTS": (
         "EXPLAINED",
         "none",
-        "Routines with statements lineage cannot read, such as dynamic SQL. Recorded once as "
-        "UNPARSED and examined again only when the body changes structurally.",
+        "Routines and triggers with statements lineage cannot read, such as dynamic SQL, or -- "
+        "for a trigger -- a firing-row reference this engine spells in a form the parser cannot "
+        "bind to the firing table. Recorded once as UNPARSED and examined again only when the "
+        "body changes structurally.",
     ),
     "LINEAGE_UNRESOLVED_CALLEE": (
         "SOURCE_ACCESS",
         "source administrator",
         "Routines whose call to another routine, or read of a table function, could not be read "
-        "through because the callee is not captured here or its body is withheld. Widening the "
-        "discovery selection or granting read access, then rescanning, closes it. An ambiguous "
-        "overload, a cycle or the descent bound is explained instead, and stays in the count "
-        "above.",
+        "through because the callee is not captured here or its body is withheld, and triggers "
+        "whose action routine could not be reached the same way. Widening the discovery "
+        "selection or granting read access, then rescanning, closes it. An ambiguous overload, "
+        "a cycle or the descent bound is explained instead, and stays in the count above.",
     ),
     "LINEAGE_AWAITING_REVIEW": (
         "HUMAN_REVIEW",
@@ -283,40 +294,115 @@ async def footprint_gaps(
             )
             .group_by(MetadataRoutine.datasource_id),
         )
-        counts["LINEAGE_AWAITING_PARSE"] = _merge(eligible_views, eligible_routines)
-        counts["LINEAGE_UNPARSED_STATEMENTS"] = await _grouped(
+        # R11-FP01: a trigger is waiting on the lineage agent when there is
+        # something to hand the parser -- its own eligible body, or the function
+        # its `action_routine` names, which is where PostgreSQL keeps the code.
+        # A trigger with neither is not the agent's to close: the source withheld
+        # the body, and `CODE_WITHHELD` is where that belongs.
+        eligible_triggers = await _grouped(
             session,
-            select(
-                DeepProcedureLineageEdge.datasource_id,
-                func.count(func.distinct(DeepProcedureLineageEdge.routine_id)),
-            )
+            select(MetadataTrigger.datasource_id, func.count())
             .where(
-                DeepProcedureLineageEdge.organization_id == organization_id,
-                DeepProcedureLineageEdge.datasource_id.in_(ids),
-                DeepProcedureLineageEdge.review_status == "ACTIVE",
-                DeepProcedureLineageEdge.transformation_type == "UNPARSED",
+                MetadataTrigger.organization_id == organization_id,
+                MetadataTrigger.datasource_id.in_(ids),
+                MetadataTrigger.status == "ACTIVE",
+                or_(
+                    and_(
+                        MetadataTrigger.availability == AVAILABLE,
+                        MetadataTrigger.redaction_status.in_(
+                            sorted(VALUE_FREE_REDACTION_STATUSES)
+                        ),
+                        MetadataTrigger.screening_status == CLEAN,
+                    ),
+                    and_(
+                        MetadataTrigger.action_routine.is_not(None),
+                        MetadataTrigger.action_routine != "",
+                    ),
+                ),
+                ~exists().where(TriggerLineageEdge.trigger_id == MetadataTrigger.id),
             )
-            .group_by(DeepProcedureLineageEdge.datasource_id),
+            .group_by(MetadataTrigger.datasource_id),
+        )
+        counts["LINEAGE_AWAITING_PARSE"] = _merge(
+            eligible_views, eligible_routines, eligible_triggers
+        )
+        counts["LINEAGE_UNPARSED_STATEMENTS"] = _merge(
+            await _grouped(
+                session,
+                select(
+                    DeepProcedureLineageEdge.datasource_id,
+                    func.count(func.distinct(DeepProcedureLineageEdge.routine_id)),
+                )
+                .where(
+                    DeepProcedureLineageEdge.organization_id == organization_id,
+                    DeepProcedureLineageEdge.datasource_id.in_(ids),
+                    DeepProcedureLineageEdge.review_status == "ACTIVE",
+                    DeepProcedureLineageEdge.transformation_type == "UNPARSED",
+                )
+                .group_by(DeepProcedureLineageEdge.datasource_id),
+            ),
+            await _grouped(
+                session,
+                select(
+                    TriggerLineageEdge.datasource_id,
+                    func.count(func.distinct(TriggerLineageEdge.trigger_id)),
+                )
+                .where(
+                    TriggerLineageEdge.organization_id == organization_id,
+                    TriggerLineageEdge.datasource_id.in_(ids),
+                    TriggerLineageEdge.review_status == "ACTIVE",
+                    TriggerLineageEdge.transformation_type == "UNPARSED",
+                )
+                .group_by(TriggerLineageEdge.datasource_id),
+            ),
         )
         # R11-FP05/FP07: the calls `routine_call_descent` could not read through for a reason
         # someone can act on.
-        counts["LINEAGE_UNRESOLVED_CALLEE"] = await _grouped(
-            session,
-            select(
-                DeepProcedureLineageEdge.datasource_id,
-                func.count(func.distinct(DeepProcedureLineageEdge.routine_id)),
-            )
-            .where(
-                DeepProcedureLineageEdge.organization_id == organization_id,
-                DeepProcedureLineageEdge.datasource_id.in_(ids),
-                DeepProcedureLineageEdge.review_status == "ACTIVE",
-                DeepProcedureLineageEdge.transformation_type == "UNPARSED",
-                or_(
-                    DeepProcedureLineageEdge.unparsed_reason.like(f"%({CALLEE_NOT_CAPTURED})"),
-                    DeepProcedureLineageEdge.unparsed_reason.like(f"%({CALLEE_BODY_WITHHELD})"),
-                ),
-            )
-            .group_by(DeepProcedureLineageEdge.datasource_id),
+        # R11-FP01: a PostgreSQL trigger whose action routine is not captured here,
+        # or whose body that routine withholds, is the same gap with the same
+        # route, and `routine_lineage_edges` writes it in the same two words on
+        # purpose so this pattern reaches both.
+        counts["LINEAGE_UNRESOLVED_CALLEE"] = _merge(
+            await _grouped(
+                session,
+                select(
+                    DeepProcedureLineageEdge.datasource_id,
+                    func.count(func.distinct(DeepProcedureLineageEdge.routine_id)),
+                )
+                .where(
+                    DeepProcedureLineageEdge.organization_id == organization_id,
+                    DeepProcedureLineageEdge.datasource_id.in_(ids),
+                    DeepProcedureLineageEdge.review_status == "ACTIVE",
+                    DeepProcedureLineageEdge.transformation_type == "UNPARSED",
+                    or_(
+                        DeepProcedureLineageEdge.unparsed_reason.like(
+                            f"%({CALLEE_NOT_CAPTURED})"
+                        ),
+                        DeepProcedureLineageEdge.unparsed_reason.like(
+                            f"%({CALLEE_BODY_WITHHELD})"
+                        ),
+                    ),
+                )
+                .group_by(DeepProcedureLineageEdge.datasource_id),
+            ),
+            await _grouped(
+                session,
+                select(
+                    TriggerLineageEdge.datasource_id,
+                    func.count(func.distinct(TriggerLineageEdge.trigger_id)),
+                )
+                .where(
+                    TriggerLineageEdge.organization_id == organization_id,
+                    TriggerLineageEdge.datasource_id.in_(ids),
+                    TriggerLineageEdge.review_status == "ACTIVE",
+                    TriggerLineageEdge.transformation_type == "UNPARSED",
+                    or_(
+                        TriggerLineageEdge.unparsed_reason.like(f"%({CALLEE_NOT_CAPTURED})"),
+                        TriggerLineageEdge.unparsed_reason.like(f"%({CALLEE_BODY_WITHHELD})"),
+                    ),
+                )
+                .group_by(TriggerLineageEdge.datasource_id),
+            ),
         )
         counts["LINEAGE_AWAITING_REVIEW"] = _merge(
             await _grouped(
@@ -338,6 +424,16 @@ async def footprint_gaps(
                     DeepProcedureLineageEdge.review_status == "PROPOSED",
                 )
                 .group_by(DeepProcedureLineageEdge.datasource_id),
+            ),
+            await _grouped(
+                session,
+                select(TriggerLineageEdge.datasource_id, func.count())
+                .where(
+                    TriggerLineageEdge.organization_id == organization_id,
+                    TriggerLineageEdge.datasource_id.in_(ids),
+                    TriggerLineageEdge.review_status == "PROPOSED",
+                )
+                .group_by(TriggerLineageEdge.datasource_id),
             ),
         )
         counts["SOURCE_CHANGE_HOLDS"] = await _grouped(

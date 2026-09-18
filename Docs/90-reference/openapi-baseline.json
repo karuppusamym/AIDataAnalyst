@@ -20909,6 +20909,108 @@
         "title": "ObjectKindCapabilityRead",
         "type": "object"
       },
+      "OkfBundleFileRead": {
+        "additionalProperties": false,
+        "description": "One document in an OKF bundle: where it sits, its digest and its size.\n\nR11-OKF01. The index a caller can read without downloading the archive, so a client can\ncompare digests for drift, or fetch only what changed, without moving bytes.",
+        "properties": {
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "bytes"
+        ],
+        "title": "OkfBundleFileRead",
+        "type": "object"
+      },
+      "OkfBundleRead": {
+        "additionalProperties": false,
+        "description": "An OKF bundle's Atlas manifest plus its file index -- never the documents themselves.\n\nR11-OKF01. Deliberately a separate contract from `ContextCompilationRead` rather than a new\n`ContextCompilerTarget`: the design's instruction is to \"keep single-file compile responses\ncompatible: use a separate bundle job/download contract if necessary rather than putting a\nZIP into a text-content field\". Existing compiler responses are untouched, and an archive\nis fetched from the download route beside this one.\n\n`manifest` is the Atlas extension described in `Docs/90-reference/okf-export-profile.md`.\nIt is typed as a free-form mapping on purpose: it records compiler/profile version, selected\nproduct version, file hashes, source-object versions, policy partition and scope digest, and\npinning each of those into the OpenAPI surface would make every manifest field an API\ncompatibility promise before the format has been through a second consumer.",
+        "properties": {
+          "bundle_content_digest": {
+            "title": "Bundle Content Digest",
+            "type": "string"
+          },
+          "content_snapshot_digest": {
+            "title": "Content Snapshot Digest",
+            "type": "string"
+          },
+          "document_count": {
+            "title": "Document Count",
+            "type": "integer"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/OkfBundleFileRead"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "findings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "manifest": {
+            "additionalProperties": true,
+            "title": "Manifest",
+            "type": "object"
+          },
+          "okf_version": {
+            "title": "Okf Version",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "scope_digest": {
+            "title": "Scope Digest",
+            "type": "string"
+          },
+          "spec_conformance": {
+            "title": "Spec Conformance",
+            "type": "string"
+          },
+          "spec_revision": {
+            "title": "Spec Revision",
+            "type": "string"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "okf_version",
+          "spec_revision",
+          "spec_conformance",
+          "profile",
+          "content_snapshot_digest",
+          "bundle_content_digest",
+          "scope_digest",
+          "document_count",
+          "valid",
+          "findings",
+          "files",
+          "manifest"
+        ],
+        "title": "OkfBundleRead",
+        "type": "object"
+      },
       "OntologyCreate": {
         "additionalProperties": false,
         "properties": {
@@ -42095,6 +42197,262 @@
         "summary": "Request Context Product Deprecation",
         "tags": [
           "context-products"
+        ]
+      }
+    },
+    "/v1/context-product-versions/{version_id}/okf-bundle": {
+      "get": {
+        "description": "The bundle's manifest and file index, without moving the documents.\n\nReturns the validation verdict alongside it rather than refusing an invalid bundle: the\nfindings are how a caller learns *why* an export would not publish, and\n`validate_atlas_publish_policy` is strictly stronger than OKF conformance, so a `valid:\nfalse` here is an Atlas policy answer and not a statement that the bundle is unreadable.",
+        "operationId": "inspect_okf_bundle_v1_context_product_versions__version_id__okf_bundle_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfBundleRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Inspect Okf Bundle",
+        "tags": [
+          "okf-export"
+        ]
+      }
+    },
+    "/v1/context-product-versions/{version_id}/okf-bundle/download": {
+      "get": {
+        "description": "The bundle as a deterministic archive, refused unless it satisfies the publish policy.\n\nStricter than the manifest route on purpose. Inspecting findings is how a caller diagnoses\nan export; handing out a file is publication, and a file cannot be recalled -- \"a downloaded\nfile cannot be remotely revoked\". So the download refuses what the manifest is willing to\ndescribe.",
+        "operationId": "download_okf_bundle_v1_context_product_versions__version_id__okf_bundle_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Okf Bundle",
+        "tags": [
+          "okf-export"
         ]
       }
     },

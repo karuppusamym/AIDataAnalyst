@@ -593,4 +593,153 @@ describe("run receipt (R11-FP02)", () => {
         "see. Granting the read and rescanning is what fills it.",
     );
   });
+
+  /* -------------------------------------------------------------------------
+     A facet whose read did not complete -- the same lie one state along.
+
+     `UNAVAILABLE` is what `connectors.discovery.classify_read_failure` records
+     for a facet read that failed without a privilege SQLSTATE, so the read got
+     nothing and every counter beside it is 0 by construction. "0 captured" then
+     tells a reader there was nothing there. These pin the four answers and the
+     order the screen puts them in, including the one `UNAVAILABLE` that is not
+     a failure at all.
+  ------------------------------------------------------------------------- */
+
+  it("never renders a failed read as a count, and names the facet that failed", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    const failedCode = receiptWords({
+      stream: { state: "COMPLETE", batches: 1 },
+      facets: {
+        view_definitions: {
+          support: "SUPPORTED", captured: 4, withheld: 0, truncated: 0,
+          state: "SUPPORTED", reason: null,
+        },
+        routine_bodies: {
+          // A failed facet query returns no rows, so the counters are zeros by construction.
+          support: "SUPPORTED", captured: 0, withheld: 0, truncated: 0,
+          state: "UNAVAILABLE", reason: "FACET_QUERY_FAILED",
+        },
+      },
+    });
+    expect(failedCode).not.toContain("0 captured");
+    expect(failedCode).toBe(
+      "1 read(s) did not complete — unread, not empty: routine code. Rescanning is what " +
+        "retries it; a refusal the driver did not spell out lands here too, so the grant is " +
+        "worth checking. · view code: 4 captured · routine code: the read did not complete, " +
+        "so nothing was captured",
+    );
+  });
+
+  it("speaks for a failed read of a facet that has no counters of its own", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    // `indexes` is a flagged facet: state and reason, no counters. Before this clause a
+    // failed read of one was not mis-stated -- it was not stated at all, and the card read
+    // as a clean scan. Silence is the same lie with fewer words.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        facets: {
+          indexes: { support: "SUPPORTED", state: "UNAVAILABLE", reason: "FACET_QUERY_FAILED" },
+          partitions: { support: "SUPPORTED", state: "UNAVAILABLE", reason: "FACET_QUERY_FAILED" },
+        },
+      }),
+    ).toBe(
+      "2 read(s) did not complete — unread, not empty: indexes, partitions. Rescanning is " +
+        "what retries them; a refusal the driver did not spell out lands here too, so the " +
+        "grant is worth checking.",
+    );
+  });
+
+  it("puts the refusal before the failure, and never lets a failure hide a refusal", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    // Both are true of the same run, so the order is the decision: a refusal names the one
+    // thing to change, a failure is not yet diagnosed.
+    const both = receiptWords({
+      stream: { state: "COMPLETE", batches: 1 },
+      facets: {
+        grants: { support: "SUPPORTED", state: "PERMISSION_DENIED", reason: "SOURCE_DENIED_READ" },
+        indexes: { support: "SUPPORTED", state: "UNAVAILABLE", reason: "FACET_QUERY_FAILED" },
+      },
+    });
+    expect(both?.indexOf("the source refused")).toBe(0);
+    expect(both).toContain("grants");
+    expect(both?.indexOf("did not complete")).toBeGreaterThan(both?.indexOf("refused") ?? -1);
+    // An adapter that does not collect the facet outranks both: there was no read to refuse
+    // or to fail, so the counters are not the story and neither clause applies.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        facets: {
+          routine_bodies: {
+            support: "UNSUPPORTED", captured: 0, withheld: 0, truncated: 0,
+            state: "UNSUPPORTED", reason: "ADAPTER_NOT_IMPLEMENTED",
+          },
+        },
+      }),
+    ).toBe("routine code: not collected by this connector");
+  });
+
+  it("does not call a question it could not put to the source a failed read", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    // `object_visibility` reports UNAVAILABLE / ADAPTER_NOT_IMPLEMENTED when the adapter has
+    // no unfiltered catalog to ask (`discovery_receipt.as_json`). Suggesting a rescan for
+    // that would send an operator after something a rescan cannot fix.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        kinds: { TABLE: { discovered: 4, excluded: 0, invisible: null } },
+        facets: {
+          object_visibility: {
+            state: "UNAVAILABLE", reason: "ADAPTER_NOT_IMPLEMENTED", asked: false,
+          },
+        },
+      }),
+    ).toBeNull();
+    // A visibility read that genuinely failed is a different answer, and is named.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        kinds: { TABLE: { discovered: 4, excluded: 0, invisible: null } },
+        facets: {
+          object_visibility: {
+            state: "UNAVAILABLE", reason: "FACET_QUERY_FAILED", asked: false,
+          },
+        },
+      }),
+    ).toContain("what this login cannot see");
+  });
+
+  it("keeps the withheld count when the source answered with no text at all", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    // UNAVAILABLE also arrives from the counters: every object was read and none of them
+    // had text (`discovery_receipt`'s `facet_state`). "0 captured" is still the wrong
+    // leading claim, but `withheld` is a real number and is worth more than "it failed".
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        facets: {
+          view_definitions: {
+            support: "SUPPORTED", captured: 0, withheld: 5, truncated: 0,
+            state: "UNAVAILABLE", reason: "SOURCE_RETURNED_NO_TEXT",
+          },
+        },
+      }),
+    ).toBe(
+      "1 read(s) did not complete — unread, not empty: view code. Rescanning is what retries " +
+        "it; a refusal the driver did not spell out lands here too, so the grant is worth " +
+        "checking. · view code: no text arrived for 5 object(s), so none was captured",
+    );
+  });
+
+  it("still prints the counters of a receipt written before facet states existed", async () => {
+    const { receiptWords } = await import("./SourcesScreenAdmin");
+    // A version-2 receipt has no `state`. That run did not tell these outcomes apart, and
+    // inventing the distinction retroactively would be a worse lie than the bare counters.
+    expect(
+      receiptWords({
+        stream: { state: "COMPLETE", batches: 1 },
+        facets: { view_definitions: { support: "SUPPORTED", captured: 0, withheld: 0, truncated: 0 } },
+      }),
+    ).toBe("view code: 0 captured");
+  });
 });

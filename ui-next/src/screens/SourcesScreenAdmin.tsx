@@ -143,27 +143,104 @@ const FACET_WORDS: Record<string, string> = {
 const facetWords = (facet: string): string =>
   FACET_WORDS[facet] ?? facet.toLowerCase().replace(/_/g, " ");
 
-/** The one state that means "the source would not tell us", as opposed to any state that
- *  means "there are none". `CapabilityState.PERMISSION_DENIED`. */
+/* ---------------------------------------------------------------------------
+   R11-FP02 -- the four answers to "should I look into this?", and their order.
+
+   A receipt facet can give four different answers, and three of them make the
+   counters beside them zero *by construction*:
+
+     UNSUPPORTED        this connector does not collect the facet at all
+     PERMISSION_DENIED  the source refused this read for this login
+     UNAVAILABLE        a read was attempted and did not get it
+     (a read completed) the counters mean what they say
+
+   Only the fourth licenses "0 captured", and there it is a finding: asked, and
+   there are none. Under the other three it prints an absence of evidence as
+   evidence of absence, which is the one reading this receipt exists to prevent.
+   UNAVAILABLE is where that is most dangerous, not least:
+   `connectors.discovery.classify_read_failure` deliberately under-claims, so a
+   driver that reports no SQLSTATE -- Oracle's ORA-01031, SQL Server's error 229,
+   both privilege errors -- lands here rather than on PERMISSION_DENIED. An
+   UNAVAILABLE facet may be a refusal nobody could prove, and "0 captured" would
+   then be wrong twice over.
+
+   Precedence, first match wins. It is deliberately the server's own order
+   (`discovery_receipt.as_json`'s `facet_state`) read back out rather than a
+   second one invented here: if the card and the receipt disagreed about which
+   answer wins, one of them would be lying about the same run.
+
+     1. UNSUPPORTED       there was no read, so nothing about one can be true.
+                          Nothing done to this source or this login changes it.
+     2. PERMISSION_DENIED a read happened and was refused. Names the single
+                          thing to change: grant it to this login, rescan.
+     3. UNAVAILABLE       a read happened and did not complete. Actionable --
+                          rescan, and check the grant anyway, per the
+                          under-claim above -- but not yet diagnosed.
+     4. the counters.
+
+   Read as "what does the operator do next", that is narrowest remedy first:
+   nothing, then one grant, then a retry, then read the numbers.
+
+   Two things this order is careful about:
+
+   * UNAVAILABLE carries two answers, told apart by the reason code.
+     `ADAPTER_NOT_IMPLEMENTED` is not a failed read -- it is how a facet with no
+     capability flag of its own reports what UNSUPPORTED reports, and it is how
+     `object_visibility` says this adapter has no unfiltered catalog to ask. A
+     question that could not be put is classified with UNSUPPORTED, not with the
+     failures, so a rescan is never suggested for something a rescan cannot fix.
+   * A receipt written before version 3 carries no `state`. Its counters are
+     printed with no state claim beside them, because that run genuinely did not
+     tell these outcomes apart (`ReceiptCode.state`); `support` still decides
+     UNSUPPORTED, a key that predates version 3. Inventing the distinction
+     retroactively would be a worse lie than the bare counters are.
+--------------------------------------------------------------------------- */
+
+/** `CapabilityState.PERMISSION_DENIED`: the source would not tell us, as opposed to any
+ *  state that means "there are none". */
 const REFUSED = "PERMISSION_DENIED";
+/** `CapabilityState.UNAVAILABLE`: the read was attempted and did not complete. */
+const INCOMPLETE = "UNAVAILABLE";
+/** `capability_states.REASON_ADAPTER_NOT_IMPLEMENTED` -- the one UNAVAILABLE that is not a
+ *  failure: the question could not be put to the source at all. */
+const CANNOT_ASK = "ADAPTER_NOT_IMPLEMENTED";
+
+type FacetAnswer = "UNSUPPORTED" | "REFUSED" | "INCOMPLETE" | "READ";
+
+/** One facet's answer, by the precedence above. The only place that order is decided. */
+function facetAnswer(facet: ReceiptCode): FacetAnswer {
+  if (facet.support === "UNSUPPORTED" || facet.state === "UNSUPPORTED") return "UNSUPPORTED";
+  if (facet.state === REFUSED) return "REFUSED";
+  if (facet.state === INCOMPLETE) return facet.reason === CANNOT_ASK ? "UNSUPPORTED" : "INCOMPLETE";
+  return "READ";
+}
 
 function codeWords(label: string, facet: ReceiptCode | undefined): string | null {
   if (!facet) return null;
-  if (facet.support === "UNSUPPORTED") return `${label}: not collected by this connector`;
-  // R11-FP02: a refused read returns no rows at all, so `captured`, `withheld` and
-  // `truncated` are all 0 beside it -- and "0 captured" is precisely the "none found"
-  // reading the receipt exists to prevent. The refusal is stated in the counters' place,
-  // never beside them.
-  if (facet.state === REFUSED) return `${label}: refused by the source, so not read`;
+  const answer = facetAnswer(facet);
+  if (answer === "UNSUPPORTED") return `${label}: not collected by this connector`;
+  // A refused read returns no rows at all, so `captured`, `withheld` and `truncated` are
+  // all 0 beside it. The refusal is stated in the counters' place, never beside them.
+  if (answer === "REFUSED") return `${label}: refused by the source, so not read`;
+  if (answer === "INCOMPLETE") {
+    // The same rule one state along, and the defect this clause fixes: the read failed, so
+    // of course nothing was captured, and "0 captured" told the reader there was nothing
+    // there. Where `withheld` is non-zero the read did reach objects and got no text back
+    // from any of them, which is a real count and more use than "the read failed" alone.
+    const withheld = facet.withheld ?? 0;
+    return withheld > 0
+      ? `${label}: no text arrived for ${withheld} object(s), so none was captured`
+      : `${label}: the read did not complete, so nothing was captured`;
+  }
   const parts = [`${facet.captured ?? 0} captured`];
   if (facet.withheld) parts.push(`${facet.withheld} withheld`);
   if (facet.truncated) parts.push(`${facet.truncated} truncated`);
   return `${label}: ${parts.join(", ")}`;
 }
 
-/** R11-FP02: the run's receipt in one line -- what the source refused, how completely it took
- *  in code, and whether its stream finished. `null` for a run from before receipts, which is
- *  not "found nothing". */
+/** R11-FP02: the run's receipt in one line -- what the source refused, what it was asked for
+ *  and did not hand over, how completely it took in code, and whether its stream finished.
+ *  `null` for a run from before receipts, which is not "found nothing". */
 export function receiptWords(receipt: unknown): string | null {
   if (!receipt || typeof receipt !== "object") return null;
   const body = receipt as {
@@ -172,21 +249,41 @@ export function receiptWords(receipt: unknown): string | null {
     kinds?: Record<string, { invisible?: number | null }>;
     changes?: Record<string, number>;
   };
-  // R11-FP01 / R11-FP02: the refusals lead, ahead of everything this run did take in. A
-  // facet the source refused for this login came back with nothing, so every counter the
-  // receipt keeps for it reads 0 -- and a reader who is shown those zeros concludes there
-  // is nothing there rather than that one grant is missing. Naming the refused facet is
-  // the whole value of a per-facet refusal: one missing grant now costs one facet instead
-  // of the whole scan, which only helps somebody who can see which facet to go and grant.
-  const refused = Object.entries(body.facets ?? {})
-    .filter(([, facet]) => facet?.state === REFUSED)
-    .map(([facet]) => facetWords(facet));
+  // R11-FP01 / R11-FP02: what was *not* read leads, ahead of everything this run did take
+  // in, refusals before failures as the precedence above orders them. A facet the source
+  // refused for this login came back with nothing, so every counter the receipt keeps for
+  // it reads 0 -- and a reader who is shown those zeros concludes there is nothing there
+  // rather than that one grant is missing. Naming the facet is the whole value of a
+  // per-facet outcome: one missing grant now costs one facet instead of the whole scan,
+  // which only helps somebody who can see which facet to go and grant.
+  //
+  // A facet whose read did not complete is named here for a second reason: most facets
+  // (constraints, indexes, partitions, grants, source comments) have no counters on the
+  // receipt at all, so before this clause a failed read of one of them was not mis-stated
+  // as "0 captured" -- it was not stated anywhere, and the card read as a clean scan.
+  // Silence is the same lie with fewer words. UNSUPPORTED facets are deliberately not
+  // listed: that is a property of the connector rather than of this run, and there is
+  // nothing for an operator to do about it.
+  const unread = (answer: FacetAnswer): string[] =>
+    Object.entries(body.facets ?? {})
+      .filter(([, facet]) => facet !== undefined && facetAnswer(facet) === answer)
+      .map(([facet]) => facetWords(facet));
+  const refused = unread("REFUSED");
+  const incomplete = unread("INCOMPLETE");
   const parts: string[] = [];
   if (refused.length > 0) {
     parts.push(
       `the source refused ${refused.length} read(s) for this login — unread, not empty: ` +
         `${refused.join(", ")}. Granting the read and rescanning is what fills ` +
         `${refused.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (incomplete.length > 0) {
+    parts.push(
+      `${incomplete.length} read(s) did not complete — unread, not empty: ` +
+        `${incomplete.join(", ")}. Rescanning is what retries ` +
+        `${incomplete.length === 1 ? "it" : "them"}; a refusal the driver did not spell out ` +
+        `lands here too, so the grant is worth checking.`,
     );
   }
   parts.push(
@@ -197,8 +294,10 @@ export function receiptWords(receipt: unknown): string | null {
   );
   // R11-FP02: what the source holds that this run's login may not see. Only stated when the
   // source could be asked: a null is "we could not ask", which is not "nothing is hidden".
-  // A visibility question the source *refused* also nulls these counts, and is named by the
-  // refusal clause above rather than by silence here.
+  // A visibility question the source *refused*, or one whose read did not complete, also
+  // nulls these counts and is named by the two clauses above rather than by silence here --
+  // while an adapter with no unfiltered catalog to ask is still silent, because there was no
+  // read to report on (`facetAnswer`'s `CANNOT_ASK`).
   const invisible = Object.entries(body.kinds ?? {})
     .map(([kind, counts]) => [kind, counts?.invisible ?? 0] as const)
     .filter(([, count]) => count > 0);

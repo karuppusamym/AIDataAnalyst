@@ -380,6 +380,9 @@ async def test_the_state_endpoint_names_the_dedicated_queue(session: AsyncSessio
     } == {
         ("VIEW_LINEAGE", QUEUE_PARSED_LINEAGE, None),
         ("PROCEDURE_LINEAGE", QUEUE_PARSED_LINEAGE, None),
+        # R11-FP01. The third capability is exercised in `tests/test_trigger_lineage.py`;
+        # this set is the closed list of what the agent declares.
+        ("TRIGGER_LINEAGE", QUEUE_PARSED_LINEAGE, None),
     }
 
 

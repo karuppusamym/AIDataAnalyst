@@ -308,6 +308,7 @@ Every `PARTIAL` parsing cell degrades explicitly, with one of these named reason
 - `UNSUPPORTED_STATEMENT_SHAPE`
 - `PARSE_ERROR`
 - `UNRESOLVED_CONTROL_FLOW`
+- `UNRESOLVED_TRIGGER_SUBJECT`
 
 Per-construct detail is in [the parser capability matrix](procedure-lineage-capability-matrix.md). Per-object completion is persisted on `routine_parse_coverage`, so "was this routine fully understood?" is a stored answer rather than something re-derived by hunting for `UNPARSED` edges.
 

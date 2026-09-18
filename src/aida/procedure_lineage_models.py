@@ -32,6 +32,21 @@ repository writes `models.ProcedureLineageEdge` any more. The table is kept
 deliberately: a deployment's existing rows are still read by the unified
 lineage graph, the parsed-edge review queue and the description drafter, and
 `DeepProcedureLineageEdge` here is where new procedure lineage lands.
+
+**A third table, 2026-09-17 (R11-FP01): `TriggerLineageEdge`.** Trigger lineage
+is not procedure lineage wearing a different hat, and the same argument this
+docstring already makes against overloading `models.ProcedureLineageEdge`
+applies to overloading `deep_procedure_lineage_edge` with it. `routine_id` there
+is NOT NULL and is the table's identity: `footprint_gaps` counts distinct
+routines through it, the lineage agent decides whether a routine has been parsed
+by its presence, and `persist_routine_edges` replaces a routine's rows by it. A
+SQL Server trigger has no routine at all, so its edges would need that column
+NULL -- silently dropping them out of every one of those counts -- while a
+PostgreSQL trigger's edges come from a routine that the agent must still be free
+to parse in its own right, so filing them under its id would make the routine
+look done. A dedicated table with a real `trigger_id` keeps both facts straight,
+and `via_routine` (already there for R11-FP07) says which routine's body a
+PostgreSQL trigger's edge was read from.
 """
 
 from datetime import datetime
@@ -146,6 +161,105 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
     review_reason: Mapped[str | None] = mapped_column(String(2000))
     previous_edge_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("deep_procedure_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class TriggerLineageEdge(Base, TimestampMixin):
+    """R11-FP01: one lineage fact read out of one trigger's body.
+
+    Same shape and same vocabulary as `DeepProcedureLineageEdge` -- the parse is
+    literally the same one (`procedure_lineage.parse_trigger_lineage` is
+    `parse_procedure_lineage` with the firing row bound), so an `UNPARSED` marker
+    means here exactly what it means there -- with the identity changed and one
+    thing added.
+
+    **`trigger_id` is the identity, and `routine_id` is nullable on purpose.**
+    A SQL Server or Oracle trigger carries its own body and has no routine, so
+    the column is NULL. A PostgreSQL trigger has no body at all: the code lives
+    in the function its `action_routine` names, discovered on the routine axis,
+    and that function's id goes here so a reader can see which body was actually
+    read. It is not the edge's owner -- the trigger is -- which is why this is a
+    table of its own; see the module docstring.
+
+    **The source of a firing-row edge is the firing table**, resolved before any
+    edge was built, because the firing table's name is nowhere in the body text.
+    An engine whose firing-row reference could not be bound gets an `UNPARSED`
+    marker carrying `UNRESOLVED_TRIGGER_SUBJECT` instead of edges that quietly
+    claim an unknown source.
+    """
+
+    __tablename__ = "trigger_lineage_edge"
+    __table_args__ = (
+        Index("ix_trigger_lineage_edge_org_target", "organization_id", "target_table_id"),
+        Index("ix_trigger_lineage_edge_datasource", "datasource_id"),
+        Index("ix_trigger_lineage_edge_trigger", "trigger_id"),
+        # `deep_procedure_lineage_edge`'s natural key with `trigger_id` in place
+        # of `routine_id`, for the same reasons that one lists each part.
+        UniqueConstraint(
+            "datasource_id",
+            "trigger_id",
+            "statement_ordinal",
+            "source_table",
+            "source_column",
+            "target_table",
+            "target_column",
+            "transformation_type",
+            "via_temp_table",
+            name="uq_trigger_lineage_edge_natural_key",
+        ),
+        Index("ix_trigger_lineage_edge_review_status", "review_status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    trigger_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_trigger.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The routine whose body this edge was read from -- PostgreSQL's
+    #: `action_routine`. NULL on an engine whose trigger carries its own body.
+    routine_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="SET NULL"), index=True
+    )
+    statement_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_table: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_table: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    target_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    transformation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(30), nullable=False)
+    dialect: Mapped[str] = mapped_column(String(50), nullable=False)
+    is_write: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_intermediate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    control_flow_context: Mapped[str | None] = mapped_column(String(30))
+    unparsed_reason: Mapped[str | None] = mapped_column(String(400))
+    via_temp_table: Mapped[str | None] = mapped_column(String(500))
+    via_routine: Mapped[str | None] = mapped_column(String(500))
+    sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # ADR-0026's review lifecycle, exactly as the routine table carries it: an
+    # agent writes PROPOSED, only ACTIVE steers retrieval and tool generation,
+    # and an UNPARSED marker records a gap rather than an edge so it is never put
+    # in front of a reviewer.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trigger_lineage_edge.id", ondelete="SET NULL")
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
 

@@ -4307,3 +4307,45 @@ class RoutineParseCoverageRead(ApiModel):
     confidence: str
     source_mapping_granularity: str
     parsed_at: datetime
+
+
+class OkfBundleFileRead(ApiModel):
+    """One document in an OKF bundle: where it sits, its digest and its size.
+
+    R11-OKF01. The index a caller can read without downloading the archive, so a client can
+    compare digests for drift, or fetch only what changed, without moving bytes.
+    """
+
+    path: str
+    sha256: str
+    bytes: int
+
+
+class OkfBundleRead(ApiModel):
+    """An OKF bundle's Atlas manifest plus its file index -- never the documents themselves.
+
+    R11-OKF01. Deliberately a separate contract from `ContextCompilationRead` rather than a new
+    `ContextCompilerTarget`: the design's instruction is to "keep single-file compile responses
+    compatible: use a separate bundle job/download contract if necessary rather than putting a
+    ZIP into a text-content field". Existing compiler responses are untouched, and an archive
+    is fetched from the download route beside this one.
+
+    `manifest` is the Atlas extension described in `Docs/90-reference/okf-export-profile.md`.
+    It is typed as a free-form mapping on purpose: it records compiler/profile version, selected
+    product version, file hashes, source-object versions, policy partition and scope digest, and
+    pinning each of those into the OpenAPI surface would make every manifest field an API
+    compatibility promise before the format has been through a second consumer.
+    """
+
+    okf_version: str
+    spec_revision: str
+    spec_conformance: str
+    profile: str
+    content_snapshot_digest: str
+    bundle_content_digest: str
+    scope_digest: str
+    document_count: int
+    valid: bool
+    findings: list[str]
+    files: list[OkfBundleFileRead]
+    manifest: dict[str, Any]

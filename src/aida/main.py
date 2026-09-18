@@ -69,6 +69,7 @@ from aida.observability import (
     traced,
 )
 from aida.observability_api import router as observability_router
+from aida.okf_export_api import router as okf_export_router
 from aida.ontology_api import router as ontology_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
@@ -439,6 +440,8 @@ app.include_router(parsed_lineage_review_router)
 app.include_router(lineage_evidence_export_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)
+# R11-OKF01: the OKF bundle target, beside the single-file compiler rather than inside it.
+app.include_router(okf_export_router)
 app.include_router(product_marketplace_router)
 app.include_router(marketplace_discovery_router)
 app.include_router(search_router)

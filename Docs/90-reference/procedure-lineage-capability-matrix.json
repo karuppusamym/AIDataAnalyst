@@ -182,13 +182,14 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-16T00:26:30.465156+00:00",
+  "generated_at": "2026-09-18T01:26:55.180631+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",
     "TABLE_FUNCTION_READ",
     "UNSUPPORTED_STATEMENT_SHAPE",
     "PARSE_ERROR",
-    "UNRESOLVED_CONTROL_FLOW"
+    "UNRESOLVED_CONTROL_FLOW",
+    "UNRESOLVED_TRIGGER_SUBJECT"
   ]
 }

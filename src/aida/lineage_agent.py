@@ -6,7 +6,7 @@ routine's body at ingestion (`MetadataViewDefinition`, `MetadataRoutine`) and
 then never parses them. Lineage from either existed only when a person asked
 for a parse.
 
-Two capabilities:
+Three capabilities:
 
 * **VIEW_LINEAGE.** Views whose captured definition is eligible -- ACTIVE,
   AVAILABLE, literal-redacted and screened CLEAN, the gate
@@ -24,8 +24,19 @@ Two capabilities:
   out of a temp table or table variable is the procedure's own plumbing -- the
   parser's transitive edge through it is proposed instead -- an edge into
   `<RESULT>` is a result set, and an UNPARSED marker is a gap, not an edge.
+* **TRIGGER_LINEAGE** (R11-FP01). Triggers whose stored lineage is older than the
+  trigger row itself, which includes having none. `procedure_lineage.parse_trigger_lineage`
+  parses the same kind of body through the same gate, with one thing the other two
+  do not have: the firing table is bound to the body's firing-row names
+  (`NEW`/`OLD`, `INSERTED`/`DELETED`) before any edge is built, so a trigger that
+  writes an audit table states a path *from the table it fires on*. On PostgreSQL,
+  where a trigger has no body at all, `routine_lineage_edges.trigger_body` follows
+  `action_routine` to the function that does and records which one it read; a
+  function it cannot reach becomes a marker naming why, never silence. What the
+  parser cannot bind -- Oracle's `:NEW` -- is an UNPARSED marker too. Edges land in
+  `trigger_lineage_edge`.
 
-Both:
+All three:
 
 * **Proposal.** Each edge lands PROPOSED, always, with `created_by` the
   agent's identity -- whatever `lineage_parsed_edges_review_mode` or the
@@ -40,7 +51,10 @@ Both:
   lineage describes a definition that no longer exists. A literal-only change does
   not count, because lineage does not depend on literals. A definition or body it
   could not turn into lineage is recorded once, so the same dead end is not
-  re-examined on every run until it changes.
+  re-examined on every run until it changes. A trigger has no change signal to
+  read -- `metadata_change_signal.subject_kind` is a closed TABLE / VIEW / ROUTINE
+  / GRANT / ONTOLOGY vocabulary -- so its own `updated_at` stands in: an edge older
+  than the last rewrite of the trigger row may describe a definition that is gone.
 
 Nothing here calls a model.
 """
@@ -59,7 +73,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signals import CHANGE_STRUCTURAL, SIGNAL_DEFINITION_CHANGED, SIGNAL_REACTIVATED
 from aida.cost_metrics import Parser, classify_parse, parser_span, record_parser_spend
-from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataViewDefinition
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataTrigger,
+    MetadataViewDefinition,
+)
 from aida.ingest_screening import CLEAN
 from aida.lineage_table_resolution import resolve_lineage_table_ids
 from aida.models import AgentTask, DataSource, MetadataSchema, MetadataTable, ViewLineageEdge
@@ -69,17 +88,21 @@ from aida.procedure_lineage import (
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
     parse_procedure_lineage,
+    parse_trigger_lineage,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
     RoutineEdgeKey,
+    persist_trigger_edges,
     persistable_table,
     record_routine_parse_coverage,
     require_eligible_routine_body,
     resolve_routine_table_ids,
     routine_edge_key,
     routine_edge_row,
+    trigger_body,
+    unreachable_body_marker,
 )
 from aida.security import SecurityContext
 from aida.sql_lineage_parser import parse_view_lineage
@@ -102,13 +125,18 @@ from atlas.platform.config import Settings
 
 CAPABILITY_VIEW_LINEAGE: Final = "VIEW_LINEAGE"
 CAPABILITY_PROCEDURE_LINEAGE: Final = "PROCEDURE_LINEAGE"
+CAPABILITY_TRIGGER_LINEAGE: Final = "TRIGGER_LINEAGE"
 #: What the queue decides: one parsed column-level edge, from a view ...
 EDGE_OBJECT_TYPE: Final = "VIEW_LINEAGE_EDGE"
 #: ... or from a routine.
 PROCEDURE_EDGE_OBJECT_TYPE: Final = "PROCEDURE_LINEAGE_EDGE"
-#: The unit of work the ledger links to: the definition, or the routine, parsed.
+#: ... or from a trigger (R11-FP01).
+TRIGGER_EDGE_OBJECT_TYPE: Final = "TRIGGER_LINEAGE_EDGE"
+#: The unit of work the ledger links to: the definition, the routine, or the
+#: trigger, parsed.
 _PROPOSAL_REF_TYPE: Final = "VIEW_DEFINITION"
 _ROUTINE_REF_TYPE: Final = "ROUTINE"
+_TRIGGER_REF_TYPE: Final = "TRIGGER"
 
 # Skips: an object the agent examined and deliberately left alone.
 SKIP_UNSUPPORTED_DIALECT: Final = "unsupported_dialect"
@@ -136,6 +164,7 @@ def _reparse_signal() -> ColumnElement[bool]:
 _EDGE_TABLES: Final[tuple[tuple[str, Any], ...]] = (
     (EDGE_OBJECT_TYPE, ViewLineageEdge),
     (PROCEDURE_EDGE_OBJECT_TYPE, DeepProcedureLineageEdge),
+    (TRIGGER_EDGE_OBJECT_TYPE, TriggerLineageEdge),
 )
 
 
@@ -206,6 +235,16 @@ LINEAGE_AGENT: Final = TaskAgentSpec(
             object_type=PROCEDURE_EDGE_OBJECT_TYPE,
             intent="lineage.propose_procedure_lineage",
             producer="procedure_lineage: routine bodies captured at ingestion",
+            queue=QUEUE_PARSED_LINEAGE,
+        ),
+        TaskAgentCapability(
+            key=CAPABILITY_TRIGGER_LINEAGE,
+            object_type=TRIGGER_EDGE_OBJECT_TYPE,
+            intent="lineage.propose_trigger_lineage",
+            producer=(
+                "procedure_lineage: trigger bodies captured at ingestion, with the "
+                "firing table bound as their implicit subject"
+            ),
             queue=QUEUE_PARSED_LINEAGE,
         ),
     ),
@@ -649,9 +688,197 @@ async def _propose_procedure_lineage(
     )
 
 
+
+
+async def _trigger_lineage(run: TaskAgentRun) -> None:
+    session = run.session
+    # R11-FP01: a trigger's code is either its own body (SQL Server, Oracle) or
+    # the function `action_routine` names (PostgreSQL). Either makes it a
+    # candidate; a trigger with neither is not one, because there is nothing to
+    # hand the parser. `trigger_body` applies the real gate to whichever it is.
+    has_own_body = and_(
+        MetadataTrigger.availability == AVAILABLE,
+        MetadataTrigger.redaction_status.in_(sorted(VALUE_FREE_REDACTION_STATUSES)),
+        MetadataTrigger.screening_status == CLEAN,
+    )
+    names_a_routine = and_(
+        MetadataTrigger.action_routine.is_not(None),
+        MetadataTrigger.action_routine != "",
+    )
+    # No edge newer than the row's last rewrite -- which covers "no edge at all".
+    # See the module docstring for why `updated_at` stands in for a change signal.
+    unparsed_or_stale = ~exists().where(
+        TriggerLineageEdge.trigger_id == MetadataTrigger.id,
+        TriggerLineageEdge.created_at >= MetadataTrigger.updated_at,
+    )
+    # A trigger examined since it last changed -- proposed from, or declined.
+    already_examined = exists().where(
+        AgentTask.organization_id == run.organization_id,
+        AgentTask.agent_principal_id == run.principal_id,
+        AgentTask.proposal_ref_type == _TRIGGER_REF_TYPE,
+        AgentTask.proposal_ref_id == MetadataTrigger.id,
+        AgentTask.started_at >= MetadataTrigger.updated_at,
+    )
+    filters: list[Any] = [
+        MetadataTrigger.organization_id == run.organization_id,
+        MetadataTrigger.status == "ACTIVE",
+        or_(has_own_body, names_a_routine),
+        unparsed_or_stale,
+        ~already_examined,
+    ]
+    if run.datasource_id is not None:
+        filters.append(MetadataTrigger.datasource_id == run.datasource_id)
+    rows = (
+        await session.execute(
+            select(MetadataTrigger, MetadataSchema, DataSource)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTrigger.schema_id)
+            .join(DataSource, DataSource.id == MetadataTrigger.datasource_id)
+            .where(*filters)
+            .order_by(MetadataSchema.name, MetadataTrigger.name, MetadataTrigger.id)
+            .limit(run.outcome.limit * _EXAMINE_FACTOR)
+        )
+    ).all()
+    proposed = 0
+    for trigger, schema, datasource in rows:
+        if proposed >= run.outcome.limit:
+            return
+        if not await run.may_continue():
+            return
+        item = run.add(
+            await run.guarded(
+                CAPABILITY_TRIGGER_LINEAGE,
+                subject_id=trigger.id,
+                subject_name=f"{schema.name}.{trigger.name}",
+                work=partial(_propose_trigger_lineage, run, trigger, schema, datasource),
+            )
+        )
+        if item.action in (ACTION_PROPOSED, ACTION_WOULD_PROPOSE):
+            proposed += 1
+
+
+async def _propose_trigger_lineage(
+    run: TaskAgentRun,
+    trigger: MetadataTrigger,
+    schema: MetadataSchema,
+    datasource: DataSource,
+) -> TaskAgentItem:
+    capability = CAPABILITY_TRIGGER_LINEAGE
+    session = run.session
+    trigger_id, trigger_name = trigger.id, f"{schema.name}.{trigger.name}"
+    datasource_id = datasource.id
+    # Value-free: which trigger, at which version of its definition.
+    inputs = {
+        "capability": capability,
+        "trigger_id": str(trigger_id),
+        "body_fingerprint": trigger.body_fingerprint or trigger.fingerprint,
+    }
+
+    async def decline(reason: str) -> TaskAgentItem:
+        return await run.declined(
+            capability,
+            subject_id=trigger_id,
+            subject_name=trigger_name,
+            reason=reason,
+            inputs=inputs,
+            proposal_ref_type=_TRIGGER_REF_TYPE,
+            proposal_ref_id=trigger_id,
+        )
+
+    body = await trigger_body(session, datasource, trigger)
+    if body.sql is None:
+        # PostgreSQL's action routine is not captured here, or its body is
+        # withheld. Recorded as a marker rather than as nothing: a trigger whose
+        # code cannot be read is a gap, and zero edges would read as a trigger
+        # that touches nothing.
+        result = unreachable_body_marker(
+            body, dialect=datasource.dialect, sql_hash=trigger.body_fingerprint or ""
+        )
+    else:
+        # R11-FP17: the same cost record a routine parse makes, at the same
+        # granularity. The label is `procedure_lineage` because that is the parse
+        # this runs -- `parse_trigger_lineage` binds the subject and delegates.
+        with parser_span(
+            Parser.PROCEDURE_LINEAGE, dialect=datasource.dialect, sql=body.sql
+        ) as parse_span:
+            result = parse_trigger_lineage(
+                body.sql, dialect=datasource.dialect, firing_table=body.firing_table
+            )
+            parse_span.observed(
+                classify_parse(result.errors, has_edges=bool(result.edges)),
+                statements=max(1, result.statement_count),
+            )
+    await record_parser_spend(
+        session,
+        organization_id=run.organization_id,
+        datasource_id=datasource_id,
+        statements=max(1, result.statement_count),
+    )
+    if any(error.startswith("unsupported dialect") for error in result.errors):
+        return await decline(SKIP_UNSUPPORTED_DIALECT)
+
+    proposable = proposable_procedure_edges(result)
+    if not run.proposing:
+        if not proposable:
+            return await decline(SKIP_UNPARSEABLE if result.errors else SKIP_NO_LINEAGE)
+        return run.item(
+            capability,
+            action=ACTION_WOULD_PROPOSE,
+            subject_id=trigger_id,
+            subject_name=trigger_name,
+            confidence=edge_confidence_as_float(result.confidence),
+        )
+
+    # One writer for both halves, so the trigger's rows are replaced rather than
+    # duplicated on a re-parse and the natural key cannot be violated.
+    # `agent_proposal` makes every real edge PROPOSED whatever the organization's
+    # review mode says; a marker stays ACTIVE because it is a gap, not an edge.
+    written = await persist_trigger_edges(
+        session,
+        datasource=datasource,
+        trigger=trigger,
+        result=result,
+        review_mode="require_review",
+        threshold=1.0,
+        created_by=run.principal_id,
+        routine_id=body.routine_id,
+        agent_proposal=True,
+    )
+    await session.flush()
+    edges = [row for row in written if row.review_status == "PROPOSED"]
+    markers = [
+        row for row in written if row.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+    ]
+    if not edges:
+        # The gap is still recorded above; only the *proposal* is declined.
+        return await decline(SKIP_UNPARSEABLE if result.errors else SKIP_NO_LINEAGE)
+    return await run.proposed_in_queue(
+        capability,
+        proposal_ref_type=_TRIGGER_REF_TYPE,
+        proposal_ref_id=trigger_id,
+        subject_id=trigger_id,
+        subject_name=trigger_name,
+        inputs=inputs,
+        pending_added=len(edges),
+        evidence={
+            "edge_ids": [str(row.id) for row in edges],
+            "edge_count": len(edges),
+            # Markers, plumbing, result sets and unresolved sources.
+            "withheld_edges": len(result.edges) - len(edges),
+            "unparsed_statements": len(markers),
+            "statement_count": result.statement_count,
+            "is_fully_parsed": result.is_fully_parsed,
+            "body_reached": body.sql is not None,
+            "via_routine": body.via_routine,
+            "sql_hash": result.sql_hash,
+        },
+        confidence=edge_confidence_as_float(result.confidence),
+    )
+
+
 LINEAGE_WORK: Final[Mapping[str, CapabilityWork]] = {
     CAPABILITY_VIEW_LINEAGE: _view_lineage,
     CAPABILITY_PROCEDURE_LINEAGE: _procedure_lineage,
+    CAPABILITY_TRIGGER_LINEAGE: _trigger_lineage,
 }
 
 

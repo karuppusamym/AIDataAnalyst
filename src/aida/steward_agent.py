@@ -25,10 +25,13 @@ Its four capabilities:
   procedures and functions, never packages -- that have no approved
   description, were not deliberately retired and have no draft open. Each gets
   `routine_description_service`'s evidence-composed draft, which says what
-  state the routine's body is in and never quotes a line of it. Unlike the two
-  above there is no worklist ordering, because no usage signal in this codebase
-  is keyed by routine; see `_undescribed_routines` for why an invented one
-  would be worse than name order.
+  state the routine's body is in and never quotes a line of it. Ordered, like
+  the two above, by the worklist a human steward is shown -- the routine half of
+  it (`rank_routine_documentation_worklist`), whose usage is *borrowed* from the
+  tables a routine's ACTIVE lineage says it writes because a routine has no
+  traffic of its own. See `_undescribed_routines`: this capability drafted in
+  name order until that ranker existed, and the argument for name order is
+  recorded there because it expired rather than being overturned.
 * **GLOSSARY_LINK.** GL-8's approved-label exact matches
   (`glossary_link_candidates`), each proposed and submitted. A link a reviewer
   rejected is never raised again.
@@ -74,8 +77,15 @@ from aida.column_description_service import (
 from aida.column_description_service import OPEN_DRAFT_STATUSES as _COLUMN_OPEN_DRAFT_STATUSES
 from aida.column_documentation import current_descriptions_by_column_id
 from aida.description_withdrawal import withdrawn_column_versions
-from aida.documentation_worklist import rank_documentation_worklist
-from aida.documentation_worklist_signals import gather_documentation_worklist_signals
+from aida.documentation_worklist import (
+    RoutineDocumentationWorklistEntry,
+    rank_documentation_worklist,
+    rank_routine_documentation_worklist,
+)
+from aida.documentation_worklist_signals import (
+    gather_documentation_worklist_signals,
+    gather_routine_documentation_worklist_signals,
+)
 from aida.envelope_models import MetadataRoutine, RoutineDescriptionDraft
 from aida.glossary_link_candidates import (
     GlossaryLinkCandidate,
@@ -562,47 +572,96 @@ async def _draft_column_description(
 # ---------------------------------------------------------------------------
 
 
-async def _undescribed_routines(run: TaskAgentRun) -> list[MetadataRoutine]:
-    """Describable, active routines in scope with nothing said about them yet.
+async def _undescribed_routines(
+    run: TaskAgentRun,
+) -> tuple[list[RoutineDocumentationWorklistEntry], dict[UUID, MetadataRoutine]]:
+    """The routine worklist's entries in the steward's own order, and the
+    describable routines in the run's scope that still have a gap.
 
     Three exclusions, each matching the column capability's reasoning:
 
     * a package is not a callable unit, so there is nothing to describe
       (`is_describable_routine`);
-    * a routine with an approved description is not a gap;
+    * a routine with an approved description is not a gap
+      (`current_routine_descriptions`);
     * a routine whose description was *retired* through review is not a gap
       either -- it is a decision, and drafting over it would quietly re-propose
       what a reviewer retired.
 
-    There is deliberately no ranking. The table and column capabilities order
-    their work by the AT-5 documentation worklist, which ranks on query volume
-    and retrieval demand per *table*; no equivalent usage signal is keyed by
-    routine anywhere in this codebase, and inventing one (routine name length,
-    parameter count, lineage breadth) would be a priority order that looks
-    measured and is not. Name order, bounded by the run's own limit, is the
-    honest answer until a real routine-demand signal exists.
+    The third cannot be delegated to the ranker, and the reason is worth stating
+    because the two consumers want opposite things from the same row: a
+    WITHDRAWN version is not APPROVED, so the worklist's `is_documented` is
+    False and a retired routine comes *back* onto the list a human is shown --
+    which is the entire point of retiring a description. A human seeing it again
+    is the feature; this agent drafting over it is the defect. So the ranker
+    orders, and the exclusions are still decided here, where they are argued for.
+
+    Order: `rank_routine_documentation_worklist`
+    ---------------------------------------------
+    R11-FP08's routine worklist, the same list and the same order a human
+    steward is shown, exactly as the table and column capabilities take
+    `rank_documentation_worklist`'s.
+
+    This capability ordered by `MetadataRoutine.name` until that ranker landed,
+    and the argument for name order is recorded here because it *expired* rather
+    than being overturned. It ran: no usage signal in this codebase was keyed by
+    routine, and inventing one (routine name length, parameter count, lineage
+    breadth) would have been a priority order that looked measured and was not,
+    so name order -- arbitrary, and legibly arbitrary -- was the honest answer
+    **until a real routine-demand signal existed**. That signal now exists, and
+    it is a measurement rather than an invention: usage is *borrowed* from the
+    tables a routine's ACTIVE, non-intermediate lineage says it writes (nobody
+    queries a procedure, but what it produces is queried), impact is write reach
+    rather than the foreign-key in-degree a table uses, and routines are ranked
+    in a list of their own precisely so a borrowed number is never compared with
+    a measured one. With that in hand, name order stopped being honest: on any
+    estate larger than the run's limit it described whatever sorted first, while
+    the table capability beside it worked the ranked backlog.
+
+    What name order was right about is kept rather than discarded: where there is
+    no signal there is still no order. Usage is a term of a *product*, so a
+    routine whose written tables nobody has queried or read scores zero and
+    sorts behind every routine that has a signal, tie-broken by name. An estate
+    with no query history at all is therefore worked in exactly the order this
+    function used before, and arbitrary order is confined to the routines that
+    have nothing to be ordered by.
+
+    Cost: `include_zero_volume=True`, so a quiet estate is still worked -- the
+    table worklist's own setting here. The two volume aggregates the gather
+    spends scan budget on are the same two `_worklist` already spends it on in
+    the same run, and the ranked page is bounded at
+    `run.outcome.limit * _EXAMINE_FACTOR` -- the bound the `.limit()` on the
+    name-ordered query carried -- so the per-routine reads below (descriptions,
+    withdrawal history, then evidence and drafts) cover the same number of
+    routines a name-ordered run covered. INV-5: organization-scoped here and in
+    the gather, narrowed to the run's datasource when it has one.
     """
     session = run.session
+    signals = await gather_routine_documentation_worklist_signals(
+        session,
+        organization_id=run.organization_id,
+        scan_limit=run.settings.agent_retrieval_scan_limit,
+        include_zero_volume=True,
+    )
+    entries, _total = rank_routine_documentation_worklist(
+        signals, limit=run.outcome.limit * _EXAMINE_FACTOR, include_zero_volume=True
+    )
+    if not entries:
+        return [], {}
     filters: list[Any] = [
         MetadataRoutine.organization_id == run.organization_id,
+        MetadataRoutine.id.in_([entry.routine_id for entry in entries]),
         MetadataRoutine.status == "ACTIVE",
     ]
     if run.datasource_id is not None:
         filters.append(MetadataRoutine.datasource_id == run.datasource_id)
     routines = [
         routine
-        for routine in (
-            await session.scalars(
-                select(MetadataRoutine)
-                .where(*filters)
-                .order_by(MetadataRoutine.name, MetadataRoutine.id)
-                .limit(run.outcome.limit * _EXAMINE_FACTOR)
-            )
-        ).all()
+        for routine in (await session.scalars(select(MetadataRoutine).where(*filters))).all()
         if is_describable_routine(routine)
     ]
     if not routines:
-        return []
+        return list(entries), {}
     routine_ids = [routine.id for routine in routines]
     described = await current_routine_descriptions(session, routine_ids)
     candidates = [routine for routine in routines if routine.id not in described]
@@ -611,12 +670,14 @@ async def _undescribed_routines(run: TaskAgentRun) -> list[MetadataRoutine]:
         for routine in candidates
         if await latest_withdrawn_routine_version(session, routine.id) is not None
     }
-    return [routine for routine in candidates if routine.id not in retired]
+    return list(entries), {
+        routine.id: routine for routine in candidates if routine.id not in retired
+    }
 
 
 async def _routine_descriptions(run: TaskAgentRun) -> None:
     session = run.session
-    routines = await _undescribed_routines(run)
+    entries, routines = await _undescribed_routines(run)
     if not routines:
         return
     open_drafts = set(
@@ -624,14 +685,21 @@ async def _routine_descriptions(run: TaskAgentRun) -> None:
             await session.scalars(
                 select(RoutineDescriptionDraft.routine_id).where(
                     RoutineDescriptionDraft.organization_id == run.organization_id,
-                    RoutineDescriptionDraft.routine_id.in_([r.id for r in routines]),
+                    RoutineDescriptionDraft.routine_id.in_(list(routines)),
                     RoutineDescriptionDraft.status.in_(_ROUTINE_OPEN_DRAFT_STATUSES),
                 )
             )
         ).all()
     )
     proposed = 0
-    for routine in routines:
+    # Worked in the ranked order, not the order the routines happened to be
+    # fetched in -- `_table_descriptions`' own loop shape. An entry whose routine
+    # is not in the map was excluded (a package, described, or retired) or is
+    # outside this run's datasource.
+    for entry in entries:
+        routine = routines.get(entry.routine_id)
+        if routine is None:
+            continue
         if proposed >= run.outcome.limit:
             return
         if routine.id in open_drafts:
@@ -642,6 +710,7 @@ async def _routine_descriptions(run: TaskAgentRun) -> None:
                     subject_id=routine.id,
                     subject_name=routine.name,
                     reason=SKIP_OPEN_DRAFT,
+                    rank=entry.rank,
                 )
             )
             continue
@@ -652,7 +721,8 @@ async def _routine_descriptions(run: TaskAgentRun) -> None:
                 CAPABILITY_ROUTINE_DESCRIPTION,
                 subject_id=routine.id,
                 subject_name=routine.name,
-                work=partial(_draft_routine_description, run, routine),
+                rank=entry.rank,
+                work=partial(_draft_routine_description, run, routine, entry.rank),
             )
         )
         if item.action in (ACTION_PROPOSED, ACTION_WOULD_PROPOSE):
@@ -660,7 +730,7 @@ async def _routine_descriptions(run: TaskAgentRun) -> None:
 
 
 async def _draft_routine_description(
-    run: TaskAgentRun, routine: MetadataRoutine
+    run: TaskAgentRun, routine: MetadataRoutine, rank: int
 ) -> TaskAgentItem:
     capability = CAPABILITY_ROUTINE_DESCRIPTION
     session = run.session
@@ -682,6 +752,7 @@ async def _draft_routine_description(
             subject_id=routine_id,
             subject_name=routine_name,
             reason=SKIP_WITHDRAWN_BEFORE if refusal == REFUSED_WITHDRAWN else SKIP_REJECTED_BEFORE,
+            rank=rank,
         )
     scores = score_routine_evidence(evidence)
     # The shared submission bar (`ensure_reviewable`). A draft under it could
@@ -696,6 +767,7 @@ async def _draft_routine_description(
             subject_name=routine_name,
             reason=SKIP_BELOW_EVIDENCE_BAR,
             confidence=scores.overall,
+            rank=rank,
         )
     if not run.proposing:
         return run.item(
@@ -704,6 +776,7 @@ async def _draft_routine_description(
             subject_id=routine_id,
             subject_name=routine_name,
             confidence=scores.overall,
+            rank=rank,
         )
     draft = RoutineDescriptionDraft(
         organization_id=run.organization_id,
@@ -719,6 +792,11 @@ async def _draft_routine_description(
         evidence={
             **payload,
             "origin": ORIGIN_METADATA,
+            # The ranked position this routine was chosen at, on the draft a
+            # reviewer opens -- the same `worklist_rank` the table and column
+            # drafts carry. A proposal whose order cannot be explained without
+            # reading this module is the defect ranking was meant to end.
+            "worklist_rank": rank,
             "agent_run": run.outcome.run_id,
         },
         # Submitted as it is created: the agent's draft *is* its request for
@@ -737,6 +815,7 @@ async def _draft_routine_description(
         details={
             "routine_id": str(routine_id),
             "overall_score": scores.overall,
+            "worklist_rank": rank,
         },
     )
     draft.governance_review_id = review.id
@@ -752,6 +831,7 @@ async def _draft_routine_description(
             "text_fingerprint": fingerprint,
         },
         confidence=scores.overall,
+        rank=rank,
     )
 
 

@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **490**
-- By family: BULK 11, EXPORT 6, JOB 26, MCP 9, REST 437, SDK 1
+- Surfaces covered: **492**
+- By family: BULK 11, EXPORT 7, JOB 26, MCP 9, REST 438, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -72,6 +72,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/relationship-candidates/bulk-decision` | BULK | `aida.intelligence_api.bulk_decide_relationship_candidates` | DataSteward, MetadataReviewer, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/compliance/packs/{pack_id}/download` | EXPORT | `aida.compliance_api.download_compliance_pack` | ComplianceOfficer, DataSteward, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/compile/download` | EXPORT | `aida.context_compiler_api.download_context_compilation` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle/download` | EXPORT | `aida.okf_export_api.download_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/datasources/{datasource_id}/model/export.xlsx` | EXPORT | `aida.model_export_api.export_datasource_model` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export` | EXPORT | `aida.lineage_evidence_export_api.export_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/evidence/export` | EXPORT | `aida.asset_evidence_api.export_asset_evidence` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
@@ -146,6 +147,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/composite-relationship-candidates/{group_id}/validation` | REST | `aida.relationship_validation_api.get_composite_relationship_candidate_validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/connectors/capability-matrix` | REST | `atlas.modules.ingestion.router.connector_capability_matrix` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/compile` | REST | `aida.context_compiler_api.compile_context_product_version` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle` | REST | `aida.okf_export_api.inspect_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/scope` | REST | `aida.context_product_api.get_context_product_version_scope` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}` | REST | `aida.context_product_api.get_context_product_version` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-products/{product_id}/bindings` | REST | `aida.context_product_api.list_context_product_consumer_bindings` | Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |

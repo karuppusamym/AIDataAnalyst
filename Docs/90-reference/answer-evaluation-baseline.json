@@ -5,6 +5,12 @@
   "estate": "core-warehouse",
   "generated_at": "2026-09-16T12:50:25.246121+00:00",
   "live_run": {
+    "blocked_on": [
+      "Acceptance thresholds, the domain owner's decision. Every `minimum` below is still null and nothing here proposes changing that.",
+      "The governed enrichment on the live estate, which is control-plane state no init script can create: the `end_of_day_position` concept published with its `closing position` alias and an approved mapping to `fact_account_balances`, `nightly_settlement_rollup`'s discovered write lineage reviewed to ACTIVE, and its Atlas-authored description approved. `scripts/seed_sample_estate.py` does not seed any of the three.",
+      "The paid call itself, which the user has declined twice."
+    ],
+    "blocker_lifted_2026-09-17": "The estate half. The tracker recorded this run as blocked on 'an enriched live datasource -- infra/sample-source/init.sql seeds three tables with no routines, lineage or ontology'. That file now also builds a `warehouse` schema in `bank_demo`: the four fact tables the corpus names, with rows, two routines whose bodies Atlas's own parsers derive the corpus's read/write lineage from, two views, a materialized view over one of them, a trigger, a sequence and nine described columns whose names carry no meaning. `tests/test_answer_evaluation_estate.py` asserts all of it from the corpora rather than from a hand-kept list; 16 of its 19 assertions fail against the previous revision of that file. What this did *not* move is any number in `metrics` below, and it could not have: the offline mode seeds `quality_benchmark.seed_catalog` in process and never reads the live source, so the figures here are unchanged from the 2026-09-16 run and remain what the no-provider mode can measure. Two blockers remain, above.",
     "command": "uv run python scripts/answer_evaluation_benchmark.py --live --i-understand-this-costs-money --base-url http://localhost:8000 --org sample-bank",
     "has_been_run": false,
     "note": "The live evaluation places one paid model call per non-refusal case and has not been run. Until it has, `metrics` holds only what the no-provider mode can measure honestly: evidence support over the enriched footprint, and the refusals the platform decides before retrieval. Answer tables, answer text and result sets are null there, meaning not measured -- not zero, and not a pass."
