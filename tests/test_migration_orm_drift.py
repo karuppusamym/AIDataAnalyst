@@ -78,6 +78,7 @@ from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
     ontology_models,
     procedure_lineage_models,
     quality_rule_proposal_model,
+    sql_workspace_models,
 )
 from aida.db import Base
 from atlas.platform.config import get_settings

@@ -435,6 +435,43 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.queryByText("The question could not be answered")).not.toBeInTheDocument();
   });
 
+  it("offers the tables an ambiguous question matched and asks again naming the chosen one (R11-OKF02)", async () => {
+    const { ApiError } = await import("../lib/api");
+    runAgentAnalysis.mockRejectedValueOnce(
+      new ApiError(409, "the question matches 'warehouse.retail.orders' and 'warehouse.staging.orders' equally", {
+        details: {
+          code: "AMBIGUOUS_KNOWLEDGE",
+          message: "the question matches two tables equally",
+          required_parameters: [],
+          tool_version_id: null,
+          candidates: ["warehouse.retail.orders", "warehouse.staging.orders"],
+        },
+      }),
+    );
+    runAgentAnalysis.mockResolvedValueOnce(ANALYSIS_RESPONSE);
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "how many orders" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const refusal = await screen.findByRole("alert", { name: "Ambiguous knowledge refusal" });
+    expect(within(refusal).getByText("Which one do you mean?")).toBeInTheDocument();
+    // Not the tool-parameter form, and not a generic failure.
+    expect(within(refusal).queryByRole("button", { name: "Ask with these values" })).toBeNull();
+    fireEvent.click(within(refusal).getByRole("button", { name: "warehouse.staging.orders" }));
+
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toEqual({
+      question: "how many orders (warehouse.staging.orders)",
+    });
+    expect((screen.getByLabelText("Question") as HTMLTextAreaElement).value).toBe(
+      "how many orders (warehouse.staging.orders)",
+    );
+    expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+  });
+
   it("collects the inputs a governed tool asked for and asks again, pinning that tool (R11-B1)", async () => {
     // With model generation off, an approved tool is the only path to an
     // answer and it refuses until its inputs arrive. Before this, Ask showed

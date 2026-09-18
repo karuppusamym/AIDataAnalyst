@@ -32,6 +32,7 @@ from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import DataSource
 from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.sql_validation import SqlValidationReport
 
 router = APIRouter(prefix="/v1", tags=["sql-validation"])
 
@@ -129,6 +130,11 @@ async def validate_sql(
     except Exception as exc:  # pragma: no cover - source dry run failed
         raise HTTPException(status_code=502, detail="source query estimate failed") from exc
 
+    return validation_response(report)
+
+
+def validation_response(report: SqlValidationReport) -> GatewaySqlValidationResponse:
+    """The report as the API returns it; shared with the SQL review workspace (R11-SQL01)."""
     payload = report.as_dict()
     return GatewaySqlValidationResponse(
         valid=report.valid,

@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **509**
-- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 26, MCP 9, REST 443, SDK 1
+- Surfaces covered: **511**
+- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 27, MCP 9, REST 444, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -112,6 +112,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/steward-agent/run` | JOB | `aida.steward_agent_api.start_steward_agent_run` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/tool-agent/run` | JOB | `aida.tool_agent_api.start_tool_agent_run` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |
 | `POST /v1/playbooks/{playbook_id}/run` | JOB | `aida.playbooks_api.run_playbook_now` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/sql-drafts/{receipt_id}/run` | JOB | `aida.sql_workspace_api.run_sql_draft` | Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/tool-certification-runs/{run_id}/decision` | JOB | `aida.tool_api.decide_tool_certification` | PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/tool-versions/{version_id}/certification-runs` | JOB | `aida.tool_api.execute_tool_certification` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |
 | `PUT /v1/agent-runs/{agent_run_id}/feedback` | JOB | `aida.intelligence_api.upsert_query_feedback` | AgentDeveloper, Analyst, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -417,6 +418,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/query-executions` | REST | `aida.api.execute_query` | Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/relationship-candidates/discover-composite` | REST | `aida.intelligence_api.discover_composite_relationship_candidates` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/relationship-candidates/discover` | REST | `aida.intelligence_api.discover_relationship_candidates` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/datasources/{datasource_id}/sql-drafts` | REST | `aida.sql_workspace_api.create_sql_draft` | Analyst, PlatformAdmin | yes | yes | writes | yes | cooperative |
 | `POST /v1/datasources/{datasource_id}/sql-validations` | REST | `aida.sql_validation_api.validate_sql` | AgentDeveloper, Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/test` | REST | `atlas.modules.connectivity.router.test_datasource` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/dbt-projects/{dbt_project_id}/artifact-imports` | REST | `aida.dbt_api.import_dbt_manifest` | DataAdmin, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |

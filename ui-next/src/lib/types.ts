@@ -4965,6 +4965,56 @@ export interface SourceEntitlementRead {
   expires_at: string | null;
 }
 
+export interface SqlDraftReceiptRead {
+  id: string;
+  origin: string;
+  status: string;
+  statement_digest: string;
+  redacted_sql?: string | null;
+  context_product_version_id?: string | null;
+  workspace_id?: string | null;
+  max_rows?: number | null;
+  applied_row_limit?: number | null;
+  referenced_tables: string[];
+  agent_run_id?: string | null;
+  query_execution_id?: string | null;
+  failure_reason?: string | null;
+  expires_at: string;
+  executed_at?: string | null;
+}
+
+/** A question to draft SQL for, or a statement to validate -- exactly one. */
+export interface SqlDraftRequest {
+  question?: string | null;
+  sql?: string | null;
+  max_rows?: number | null;
+  context_product_key?: string | null;
+  workspace_id?: string | null;
+}
+
+export interface SqlDraftResponse {
+  origin: string;
+  sql?: string | null;
+  agent_run_id?: string | null;
+  generation_source?: string | null;
+  reason?: string | null;
+  selected_tool_version_id?: string | null;
+  validation?: GatewaySqlValidationResponse | null;
+  receipt?: SqlDraftReceiptRead | null;
+}
+
+export interface SqlDraftRunRequest {
+  sql: string;
+  max_rows?: number | null;
+  context_product_key?: string | null;
+  workspace_id?: string | null;
+}
+
+export interface SqlDraftRunResponse {
+  receipt: SqlDraftReceiptRead;
+  execution: QueryExecutionResponse;
+}
+
 export interface SqlFindingRead {
   code: string;
   severity: string;

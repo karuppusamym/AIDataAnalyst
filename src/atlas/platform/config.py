@@ -913,6 +913,10 @@ class Settings(BaseSettings):
     # the schema metadata the knowledge explains. 48,000 is the selection's hard ceiling.
     okf_context_default_max_chars: int = Field(default=16_000, ge=1_000, le=48_000)
     okf_context_ask_max_chars: int = Field(default=8_000, ge=1_000, le=48_000)
+    # R11-SQL01: how long a validated SQL draft's receipt may be run on. Short on purpose: a
+    # receipt proves the statement passed validation *then*; Run re-validates in full anyway,
+    # and a stale receipt is refused rather than trusted.
+    sql_draft_receipt_ttl_minutes: int = Field(default=15, ge=1, le=1_440)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     # AG-7: query-memory similarity/adaptation. Off by default so a tenant that has
     # not reviewed the feature keeps today's MODEL_GATEWAY-only behaviour; flipping

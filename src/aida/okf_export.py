@@ -107,7 +107,9 @@ EXPORT_PROFILE: Final = "atlas-okf-export"
 #: "3": an object wider than `MAX_COLUMNS_PER_DOCUMENT` is split into column-set documents.
 #: Narrower objects render as they did under "2"; the bump is for the wide ones, whose stored
 #: single document must be re-rendered rather than served as current.
-EXPORT_PROFILE_VERSION: Final = "3"
+#: "4": catalog labels and table cells are escaped as literal Markdown (`md_text`, `md_code`).
+#: A name made of letters, digits and `_ . - $` renders exactly as under "3".
+EXPORT_PROFILE_VERSION: Final = "4"
 #: The actor convention of spec §7: `process:<id>` for an automated process.
 EXPORTER_ACTOR: Final = "process:atlas-okf-export"
 MANIFEST_VERSION: Final = "1"
@@ -875,6 +877,59 @@ def _absolute(path: str) -> str:
     return "/" + path
 
 
+#: Line breaks and other control characters. A catalog label is one line in every place it is
+#: printed; a newline in a quoted identifier would otherwise end a list item or a table row.
+_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]+")
+#: What makes Markdown syntax inside a line: escapes, code, emphasis, links, autolinks, HTML and
+#: table cells. `_` is handled on its own below, because it is ordinary inside a word.
+_MD_SPECIAL: Final = frozenset("\\`*[]<>|")
+
+
+def md_text(value: str) -> str:
+    """A catalog label -- a name the *source* chose -- as literal Markdown text.
+
+    Never markup, never a link and never a second line. A table named ``x](https://evil) [y`` is
+    written as the characters it is, instead of a link out of the bundle -- which the publish
+    policy would then refuse, so one odd name made a whole product's bundle unpublishable. A
+    label made of letters, digits, spaces and ``_ . - $`` renders exactly as it did before;
+    ``_`` is escaped only where it could start or end emphasis, never inside a word.
+    """
+    flat = _CONTROL.sub(" ", value)
+    out: list[str] = []
+    for index, char in enumerate(flat):
+        if char in _MD_SPECIAL:
+            out.append("\\" + char)
+        elif char == "_" and not (
+            0 < index < len(flat) - 1 and flat[index - 1].isalnum() and flat[index + 1].isalnum()
+        ):
+            out.append("\\_")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def md_code(value: str, *, table_cell: bool = False) -> str:
+    """A catalog label as a Markdown code span that nothing inside it can close.
+
+    The fence is one backtick longer than the longest run in the value, padded when the value
+    starts or ends with a backtick, as CommonMark requires; in a table cell a ``|`` is escaped,
+    because GFM splits cells on it even inside code. An ordinary identifier renders exactly as
+    `` `name` `` did before.
+    """
+    flat = _CONTROL.sub(" ", value)
+    longest = max((len(run) for run in re.findall(r"`+", flat)), default=0)
+    fence = "`" * (longest + 1)
+    pad = (
+        " "
+        if flat.startswith("`")
+        or flat.endswith("`")
+        or (len(flat) > 1 and flat.startswith(" ") and flat.endswith(" ") and flat.strip())
+        else ""
+    )
+    body = flat.replace("|", "\\|") if table_cell else flat
+    return f"{fence}{pad}{body}{pad}{fence}"
+
+
 def _purpose_section(description: OkfDescription, subject: str) -> list[str]:
     """What the object is for, or an explicit statement that Atlas does not know.
 
@@ -1151,7 +1206,7 @@ def _link_lines(
                 "when freezing the snapshot rather than publishing a dead link"
             )
         label = labels.get(link.target_key, link.target_key)
-        rendered.append(f"* [{label}]({_absolute(path)}) - {link.relation}")
+        rendered.append(f"* [{md_text(label)}]({_absolute(path)}) - {link.relation}")
     lines.extend(sorted(set(rendered)))
     lines.append("")
     return lines
@@ -1270,7 +1325,7 @@ def _column_set_index(obj: OkfObjectFacts, column_sets: Sequence[_ColumnSet]) ->
         "",
     ]
     for item in column_sets:
-        names = ", ".join(f"`{column.name}`" for column in item.columns)
+        names = ", ".join(md_code(column.name) for column in item.columns)
         lines.append(
             f"* [{item.label}]({_absolute(item.path)}) - {len(item.columns)} columns: {names}"
         )
@@ -1293,8 +1348,9 @@ def _column_rows(columns: Sequence[OkfColumnFacts]) -> list[str]:
             meaning = "_not established_"
         lifecycle = "" if column.lifecycle.upper() == "ACTIVE" else f" ({column.lifecycle})"
         lines.append(
-            f"| `{column.name}`{lifecycle} | `{column.physical_type}` | "
-            f"{'yes' if column.nullable else 'no'} | {column.classification} | "
+            f"| {md_code(column.name, table_cell=True)}{lifecycle} | "
+            f"{md_code(column.physical_type, table_cell=True)} | "
+            f"{'yes' if column.nullable else 'no'} | {md_text(column.classification)} | "
             f"{meaning.replace('|', '\\|')} |"
         )
     return lines
@@ -1357,7 +1413,8 @@ def _column_set_document(
     kind = obj.kind.lower().replace("_", " ")
     body = [
         f"Column set {number} of {len(sets)} of the {kind} "
-        f"[{obj.qualified_name}]({_absolute(paths.objects[obj.key])}), which carries its "
+        f"[{md_text(obj.qualified_name)}]({_absolute(paths.objects[obj.key])}), which carries "
+        "its "
         "purpose, dependencies and coverage.",
         "",
         "# Schema",
@@ -1459,18 +1516,18 @@ def _interface_section(routine: OkfRoutineFacts) -> list[str]:
     lines = ["# Interface", ""]
     lines.append(f"* Kind: {routine.routine_type}.")
     if routine.native_subtype:
-        lines.append(f"* Native subtype: `{routine.native_subtype}`.")
-    lines.append(f"* Signature: `{routine.signature or '()'}`.")
+        lines.append(f"* Native subtype: {md_code(routine.native_subtype)}.")
+    lines.append(f"* Signature: {md_code(routine.signature or '()')}.")
     if routine.package_name:
-        lines.append(f"* Package member of `{routine.package_name}`.")
+        lines.append(f"* Package member of {md_code(routine.package_name)}.")
     if routine.language:
-        lines.append(f"* Language: `{routine.language}`.")
+        lines.append(f"* Language: {md_code(routine.language)}.")
     if routine.return_type:
-        lines.append(f"* Returns: `{routine.return_type}`.")
+        lines.append(f"* Returns: {md_code(routine.return_type)}.")
     if routine.is_deterministic is not None:
         lines.append(f"* Deterministic: {'yes' if routine.is_deterministic else 'no'}.")
     if routine.security_mode:
-        lines.append(f"* Security mode: `{routine.security_mode}`.")
+        lines.append(f"* Security mode: {md_code(routine.security_mode)}.")
     lines.append("")
     if routine.parameters:
         lines.extend(
@@ -1481,7 +1538,8 @@ def _interface_section(routine: OkfRoutineFacts) -> list[str]:
         )
         for parameter in sorted(routine.parameters, key=lambda item: item.ordinal):
             lines.append(
-                f"| `{parameter.name}` | {parameter.mode} | `{parameter.physical_type}` |"
+                f"| {md_code(parameter.name, table_cell=True)} | {md_text(parameter.mode)} | "
+                f"{md_code(parameter.physical_type, table_cell=True)} |"
             )
         lines.append("")
     else:
@@ -1609,7 +1667,7 @@ def _concept_document(
                      "definition for this concept.", ""])
     if concept.aliases:
         body.extend(["# Also called", ""])
-        body.extend(f"* {' '.join(alias.split())}" for alias in concept.aliases)
+        body.extend(f"* {md_text(' '.join(alias.split()))}" for alias in concept.aliases)
         body.append("")
     mapped = tuple(
         OkfLink(target_key=key, relation="mapped object")
@@ -1624,11 +1682,12 @@ def _concept_document(
             path = paths.concepts.get(relation.target_key or "")
             if path is not None:
                 body.append(
-                    f"* {relation.predicate}: [{relation.target_name}]({_absolute(path)})"
+                    f"* {md_text(relation.predicate)}: "
+                    f"[{md_text(relation.target_name)}]({_absolute(path)})"
                 )
             else:
                 body.append(
-                    f"* {relation.predicate}: {relation.target_name} "
+                    f"* {md_text(relation.predicate)}: {md_text(relation.target_name)} "
                     "(not in this bundle's scope)"
                 )
         body.append("")
@@ -1731,7 +1790,9 @@ def _index_document(
 
 
 def _entry(label: str, target: str, description: str) -> str:
-    return f"* [{label}]({target}) - {description}"
+    """One index line. `label` is a catalog name, so it is escaped; `description` is either
+    Atlas's own words or approved prose, which is already the text it is meant to be."""
+    return f"* [{md_text(label)}]({target}) - {description}"
 
 
 def _root_index(snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
@@ -1868,7 +1929,7 @@ def _schema_index(schema: OkfSchemaFacts, snapshot: OkfSnapshot, paths: _Paths) 
         (
             "Schema",
             [
-                f"* Catalog: `{schema.catalog_name}`.",
+                f"* Catalog: {md_code(schema.catalog_name)}.",
                 f"* Lifecycle: {schema.lifecycle}.",
                 "* Navigational only: no business purpose is asserted for a schema.",
             ],
@@ -2004,7 +2065,9 @@ def _tool_document(
         body.extend(["| Input | Type | Required |", "|---|---|---|"])
         for item in sorted(tool.inputs, key=lambda entry: entry.name):
             body.append(
-                f"| `{item.name}` | `{item.physical_type}` | {'yes' if item.required else 'no'} |"
+                f"| {md_code(item.name, table_cell=True)} | "
+                f"{md_code(item.physical_type, table_cell=True)} | "
+                f"{'yes' if item.required else 'no'} |"
             )
         body.append("")
     else:
@@ -2026,7 +2089,9 @@ def _tool_document(
     source_path = paths.sources.get(tool.source_key)
     if source_path is not None:
         label = source_names.get(tool.source_key, tool.source_key)
-        body.extend(["# Source", "", f"* [{label}]({_absolute(source_path)}) - queries", ""])
+        body.extend(
+            ["# Source", "", f"* [{md_text(label)}]({_absolute(source_path)}) - queries", ""]
+        )
     if tool.description.state == DESCRIPTION_APPROVED:
         approval = tool.description.approval
         attribution = (
@@ -2549,7 +2614,7 @@ def _log_plan(snapshot: OkfSnapshot, history: Sequence[OkfLogEntry]) -> list[_Pl
                 partial(
                     _log_document,
                     f"{prefix}log.md",
-                    f"Refresh history: {source.name}",
+                    f"Refresh history: {md_text(source.name)}",
                     history,
                     prefix=prefix,
                 ),
@@ -2868,6 +2933,19 @@ _CODE_FENCE = re.compile(r"^\s*(```|~~~)", re.MULTILINE)
 _LOG_DATE = re.compile(r"^## \d{4}-\d{2}-\d{2}$")
 
 
+#: A backslash escape of ASCII punctuation: the character is text, never syntax (CommonMark 2.4).
+_ESCAPED: Final = re.compile(r"\\[!-/:-@\[-`{-~]")
+
+
+def _as_syntax(text: str) -> str:
+    r"""`text` with every backslash-escaped punctuation character blanked, so a syntax check sees
+    only what a Markdown renderer would treat as syntax. `md_text` escapes a hostile catalog name
+    -- ``\[x\](https://outside)`` -- and without this the checks below still read it as a link
+    and refused the bundle; an escaped backslash (``\\``) is consumed as a pair, so the ``<``
+    after it is still seen as markup."""
+    return _ESCAPED.sub("  ", text)
+
+
 def _split_frontmatter(text: str) -> tuple[str | None, str]:
     match = _FRONTMATTER.match(text)
     if match is None:
@@ -2947,6 +3025,17 @@ def validate_okf_conformance(documents: Mapping[str, str]) -> OkfValidation:
     return OkfValidation(valid=not findings, findings=tuple(findings[:200]))
 
 
+def _frontmatter_description(frontmatter: str | None) -> str | None:
+    if frontmatter is None:
+        return None
+    try:
+        parsed = yaml.safe_load(frontmatter)
+    except yaml.YAMLError:
+        return None
+    value = parsed.get("description") if isinstance(parsed, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def validate_atlas_publish_policy(bundle: OkfBundle) -> OkfValidation:
     """Atlas's stronger export rules, on top of conformance.
 
@@ -2971,15 +3060,23 @@ def validate_atlas_publish_policy(bundle: OkfBundle) -> OkfValidation:
         if path.startswith("/") or ".." in segments or "\\" in path:
             findings.append(f"UNSAFE_PATH:{path}")
         text = documents[path]
-        _frontmatter, body = _split_frontmatter(text)
-        if _RAW_MARKUP.search(body):
+        frontmatter, body = _split_frontmatter(text)
+        syntax = _as_syntax(body)
+        if _RAW_MARKUP.search(syntax):
             findings.append(f"FORBIDDEN_RAW_MARKUP:{path}")
         if _CODE_FENCE.search(text):
             # Defence in depth for INV-6. No snapshot field can hold a body today; this makes
             # a field that could be added tomorrow fail the gate instead of shipping.
             findings.append(f"FORBIDDEN_CODE_FENCE:{path}")
-        targets = _LINK.findall(text)
-        targets.extend(angle or plain for angle, plain in _REFERENCE_LINK.findall(body))
+        # Links are read from the body and from `description`, the one frontmatter value that is
+        # prose a consumer may render as Markdown. `title` is a name, displayed as text: a
+        # hostile name there is not a link, and refusing the bundle for it would let one odd
+        # identifier make a whole product unpublishable.
+        targets = _LINK.findall(syntax)
+        targets.extend(angle or plain for angle, plain in _REFERENCE_LINK.findall(syntax))
+        description = _frontmatter_description(frontmatter)
+        if description:
+            targets.extend(_LINK.findall(_as_syntax(description)))
         for target in targets:
             if target.startswith(("http://", "https://", "mailto:", "//")):
                 findings.append(f"EXTERNAL_LINK:{path}:{target}")

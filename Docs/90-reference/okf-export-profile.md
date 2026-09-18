@@ -46,6 +46,19 @@ checks reference-style Markdown link definitions against the same destination ru
 inline links. These restrictions do not change the general OKF conformance verdict. A
 future wiki renderer still needs its own sanitization; the exporter is not an HTML sanitizer.
 
+**Catalog labels are literal text (profile `4`).** A name is chosen by the source, and a
+quoted identifier may hold `]`, `|`, a backtick or a line break. Every label is written through
+`md_text` (a link label or plain text: Markdown punctuation backslash-escaped, `_` only at a
+word edge, control characters flattened to a space) or `md_code` (a code span whose fence
+outruns any backtick inside it, with `|` escaped in a table cell). A table named
+`` x](https://outside) [y `` is therefore shown, not linked, and a column named `amount|total`
+stays one cell of one row. An ordinary identifier renders exactly as it did under profile `3`.
+The publish policy reads a backslash escape the way a renderer does -- the escaped character is
+text -- so escaped names no longer trip its link and markup checks, while a real link or tag in
+approved prose, including one after an escaped backslash, is still refused. Links are checked
+in the body and in the frontmatter `description`; a `title` is a name and is displayed as text.
+`tests/test_okf_markdown_safety.py` renders the output with a CommonMark and GFM-table parser.
+
 | Function | Question it answers |
 |---|---|
 | `validate_okf_conformance` | Is this a conformant OKF v0.2 bundle? Nothing stricter. |

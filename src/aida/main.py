@@ -100,6 +100,7 @@ from aida.search_api import router as search_router
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
 from aida.sql_validation_api import router as sql_validation_router
+from aida.sql_workspace_api import router as sql_workspace_router
 from aida.steward_agent_api import router as steward_agent_router
 from aida.stewardship_api import router as stewardship_router
 from aida.studio_api import router as studio_router
@@ -432,6 +433,7 @@ app.include_router(openlineage_router)
 app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
 app.include_router(sql_validation_router)
+app.include_router(sql_workspace_router)
 app.include_router(quality_router)
 app.include_router(ingestion_router)
 app.include_router(glossary_router)

@@ -20,6 +20,7 @@ import {
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker, datasourceName } from "../lib/useDatasourcePicker";
 import { QueryResultTable } from "../components/QueryResultTable";
+import { SqlWorkspace } from "../components/SqlWorkspace";
 import { VirtualList } from "../components/VirtualList";
 import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
@@ -79,7 +80,10 @@ const statusTone = (status: string): Tone => {
 };
 
 const ERROR_TITLE: Record<
-  Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION" | AgentAskContextProductKind>,
+  Exclude<
+    AgentAskErrorKind,
+    "AMBIGUOUS_DEFINITION" | "AMBIGUOUS_KNOWLEDGE" | AgentAskContextProductKind
+  >,
   string
 > = {
   DATASOURCE_DISABLED: "This datasource is disabled",
@@ -206,10 +210,12 @@ function ClarificationForm({
   );
 }
 
-function AskRefusal({ error, onRetry, onClarify, onClearProduct, busy }: {
+function AskRefusal({ error, onRetry, onClarify, onChoose, onClearProduct, busy }: {
   error: AgentAskError;
   onRetry: () => void;
   onClarify: (values: Record<string, string>) => void;
+  /** Ask again naming one of an ambiguity's candidates (R11-OKF02). */
+  onChoose: (candidate: string) => void;
   /** Drop the context product from the URL, which is the one action a
    *  context-product refusal actually has available. */
   onClearProduct: () => void;
@@ -248,6 +254,32 @@ function AskRefusal({ error, onRetry, onClarify, onClearProduct, busy }: {
               ))}
             </ul>
           </>
+        ) : (
+          <p className="askrefusal__lede">{error.detail}</p>
+        )}
+        <Button onClick={onRetry}>Rephrase and ask again</Button>
+      </div>
+    );
+  }
+  if (error.kind === "AMBIGUOUS_KNOWLEDGE") {
+    // R11-OKF02: the product's knowledge names two subjects equally for this question. Asked
+    // again naming the chosen one, its qualified name is what breaks the tie.
+    return (
+      <div className="askrefusal" role="alert" aria-label="Ambiguous knowledge refusal">
+        <div className="askrefusal__t">Which one do you mean?</div>
+        <p className="askrefusal__lede">
+          This question matches more than one table in the context product's knowledge equally,
+          so it was not answered rather than answered from a guess. Pick the one you mean and it
+          is asked again naming it.
+        </p>
+        {error.candidates.length > 0 ? (
+          <div className="askscreen__submitrow" aria-label="Candidates">
+            {error.candidates.map((candidate) => (
+              <Button key={candidate} disabled={busy} onClick={() => onChoose(candidate)}>
+                {candidate}
+              </Button>
+            ))}
+          </div>
         ) : (
           <p className="askrefusal__lede">{error.detail}</p>
         )}
@@ -845,8 +877,13 @@ export function AskScreen() {
   const askSeq = useRef(0);
 
   const submitQuestion = useCallback(
-    async (clarification?: { toolParameters: Record<string, string>; toolVersionId: string | null }) => {
-    const trimmed = question.trim();
+    async (
+      clarification?: { toolParameters: Record<string, string>; toolVersionId: string | null },
+      /** Ask this instead of the input's current text -- a choice made in a refusal state,
+       *  applied before React has re-rendered the input with it. */
+      override?: string,
+    ) => {
+    const trimmed = (override ?? question).trim();
     if (!dsId || trimmed.length < MIN_QUESTION_LEN || trimmed.length > MAX_QUESTION_LEN) return;
 
     askInflight.current?.abort();
@@ -892,6 +929,7 @@ export function AskScreen() {
           alternatives: [],
           requiredParameters: [],
           toolVersionId: null,
+          candidates: [],
         });
       }
     } finally {
@@ -911,6 +949,8 @@ export function AskScreen() {
   }, [dsId]);
 
   // History: independent from the ask flow above, its own in-flight request.
+  // R11-SQL01: the review-first path -- draft or paste SQL, validate, then run it on purpose.
+  const [showSqlWorkspace, setShowSqlWorkspace] = useState(false);
   const [historyItems, setHistoryItems] = useState<AgentRunRead[]>([]);
   const [showHistory, setShowHistory] = useState(true);
   const [historyTotal, setHistoryTotal] = useState<number | null>(null);
@@ -1154,6 +1194,11 @@ export function AskScreen() {
           onClarify={(values) =>
             void submitQuestion({ toolParameters: values, toolVersionId: askError.toolVersionId })
           }
+          onChoose={(candidate) => {
+            const chosen = `${question.trim()} (${candidate})`;
+            setQuestion(chosen);
+            void submitQuestion(undefined, chosen);
+          }}
           onClearProduct={() => {
             setParams({ product: null, run: null });
             setAskError(null);
@@ -1162,7 +1207,20 @@ export function AskScreen() {
         />
       ) : null}
 
+      {showSqlWorkspace && dsId ? (
+        <SqlWorkspace datasourceId={dsId} productKey={askedThroughKey} question={question} />
+      ) : null}
+
       <div className="askscreen__viewtools">
+        <button
+          type="button"
+          className="btn btn--quiet"
+          aria-expanded={showSqlWorkspace}
+          disabled={!dsId}
+          onClick={() => setShowSqlWorkspace((shown) => !shown)}
+        >
+          {showSqlWorkspace ? "Hide SQL review" : "Review SQL first"}
+        </button>
         <button
           type="button"
           className="btn btn--quiet"

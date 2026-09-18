@@ -21,6 +21,7 @@ from aida import (  # noqa: F401
     ontology_models,
     procedure_lineage_models,
     quality_rule_proposal_model,
+    sql_workspace_models,
 )
 from aida.config import get_settings
 from aida.db import Base

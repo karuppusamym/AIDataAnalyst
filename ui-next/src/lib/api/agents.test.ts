@@ -15,6 +15,22 @@ import { classifyAgentAskError } from "./agents";
 --------------------------------------------------------------------------- */
 
 describe("classifyAgentAskError", () => {
+  it("reads an ambiguous-knowledge clarification as a choice between its candidates (R11-OKF02)", () => {
+    const classified = classifyAgentAskError(
+      new ApiError(409, "matches two tables", {
+        details: { code: "AMBIGUOUS_KNOWLEDGE", candidates: ["a.orders", "b.orders", 7] },
+      }),
+    );
+    expect(classified.kind).toBe("AMBIGUOUS_KNOWLEDGE");
+    expect(classified.candidates).toEqual(["a.orders", "b.orders"]);
+    // A clarification without that code is still the tool-parameter one.
+    const tool = classifyAgentAskError(
+      new ApiError(409, "needs input", { details: { code: "MISSING_TOOL_PARAMETERS", required_parameters: ["x"] } }),
+    );
+    expect(tool.kind).toBe("CLARIFICATION_NEEDED");
+    expect(tool.candidates).toEqual([]);
+  });
+
   it("names a 403 as a refusal rather than an unknown failure", () => {
     const classified = classifyAgentAskError(new ApiError(403, "DENIED_BY_POLICY"));
 

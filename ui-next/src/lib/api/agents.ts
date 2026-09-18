@@ -173,6 +173,7 @@ export function fetchAgentRunGroundingReceipts(
  *  `alternatives` degrades to `[]` and the raw `detail` is still shown. */
 export type AgentAskErrorKind =
   | "AMBIGUOUS_DEFINITION"
+  | "AMBIGUOUS_KNOWLEDGE"
   | "DATASOURCE_DISABLED"
   | "NOT_AUTHORIZED"
   | "POLICY_REJECTED"
@@ -229,6 +230,10 @@ export interface AgentAskError {
   /** The tool version those parameters belong to, so a retry can pin the same
    *  tool instead of re-racing retrieval and possibly selecting another. */
   toolVersionId: string | null;
+  /** Only populated for `AMBIGUOUS_KNOWLEDGE` (R11-OKF02): the subjects the context product's
+   *  knowledge names equally for this question, read from the server's structured `detail`,
+   *  so the person picks one instead of the model choosing silently. */
+  candidates: string[];
 }
 
 const AMBIGUOUS_DEFINITION_RE =
@@ -262,6 +267,7 @@ const NO_CLARIFICATION = {
   alternatives: [] as AgentAskErrorAlternative[],
   requiredParameters: [] as string[],
   toolVersionId: null,
+  candidates: [] as string[],
 };
 
 /** Narrow the wire body's `unknown` to the string list this field is specified
@@ -284,6 +290,18 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
       alternatives: parseAmbiguousAlternatives(detail),
       requiredParameters: [],
       toolVersionId: null,
+      candidates: [],
+    };
+  }
+  if (status === 409 && error.details?.code === "AMBIGUOUS_KNOWLEDGE") {
+    return {
+      kind: "AMBIGUOUS_KNOWLEDGE",
+      status,
+      detail,
+      alternatives: [],
+      requiredParameters: [],
+      toolVersionId: null,
+      candidates: stringList(error.details?.candidates),
     };
   }
   if (status === 409) {
@@ -295,6 +313,7 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
       requiredParameters: stringList(error.details?.required_parameters),
       toolVersionId:
         typeof error.details?.tool_version_id === "string" ? error.details.tool_version_id : null,
+      candidates: [],
     };
   }
   // A refusal is not a failure, and telling them apart is the whole point of

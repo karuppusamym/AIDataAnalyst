@@ -203,6 +203,26 @@ class AgentOrchestrationResult:
     explanation: str
 
 
+#: R11-SQL01: the run status of a generation-only Ask. Not a `RuntimeStage`: the run stops at
+#: GENERATED on purpose, and a person decides whether the statement ever runs.
+DRAFTED = "DRAFTED"
+#: A draft whose plan chose an approved governed tool: no SQL is handed out, because running a
+#: tool's rendered SQL as ad-hoc SQL would drop the tool's own governance.
+DRAFT_TOOL_ANSWERS = "GOVERNED_TOOL_ANSWERS"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDraftResult:
+    """What a generation-only Ask produced: SQL to review, and never an execution."""
+
+    agent_run: AgentRun
+    sql: str | None
+    strategy: str
+    generation_source: str | None
+    selected_tool_version_id: str | None
+    reason: str | None = None
+
+
 # One implementation of the trace-entry shape, shared with `RunLedger`
 # (`aida.orchestration_stages`) so a stage that records a step and a stage that
 # advances the state cannot produce differently-shaped entries.
@@ -1102,6 +1122,78 @@ class GovernedAgentOrchestrator:
         )
         executed = await self._stage_execute(session, request, ledger, retrieved, statement)
         return await self._stage_explain(session, request, ledger, planned, statement, executed)
+
+    async def draft(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        context: SecurityContext,
+        correlation_id: str,
+        question: str,
+        requested_limit: int | None,
+        agent_asset_version_id: UUID | None = None,
+        context_product_key: str | None = None,
+    ) -> AgentDraftResult:
+        """R11-SQL01: Ask up to the SQL, and stop -- the generation-only draft stage.
+
+        The same screen, retrieve, plan and validate stages `run` composes, with every refusal
+        they make, including the context product's hold on what the model wrote. What is left
+        out is the cost check and the execution: the run ends at GENERATED with status
+        `DRAFTED`, so a generated statement causes no execution until a person runs it through
+        a validation receipt (`aida.sql_workspace`). A plan that chose an approved governed tool
+        produces no SQL at all (`DRAFT_TOOL_ANSWERS`): that question is answered by asking it.
+        """
+        request = OrchestrationRequest(
+            datasource=datasource,
+            context=context,
+            correlation_id=correlation_id,
+            question=question,
+            candidate_sql=None,
+            preferred_tool_version_id=None,
+            tool_parameters={},
+            requested_limit=requested_limit,
+            agent_asset_version_id=agent_asset_version_id,
+            context_product_key=context_product_key,
+        )
+        ledger = await self._open_run(session, request)
+        screened = await self._stage_screen(session, request, ledger)
+        retrieved = await self._stage_retrieve(session, request, ledger, screened)
+        planned = await self._stage_plan(session, request, ledger, screened, retrieved)
+        agent_run = ledger.agent_run
+        plan = planned.plan
+        if plan.strategy == "GOVERNED_TOOL" and plan.selected_tool_version_id:
+            agent_run.generation_source = "GOVERNED_TOOL"
+            agent_run.status = DRAFTED
+            ledger.plan_evidence["sql_draft"] = {
+                "drafted": False,
+                "reason": DRAFT_TOOL_ANSWERS,
+                "selected_tool_version_id": plan.selected_tool_version_id,
+            }
+            ledger.publish_plan_evidence()
+            agent_run.step_trace = ledger.trace
+            return AgentDraftResult(
+                agent_run=agent_run,
+                sql=None,
+                strategy=plan.strategy,
+                generation_source=None,
+                selected_tool_version_id=plan.selected_tool_version_id,
+                reason=DRAFT_TOOL_ANSWERS,
+            )
+        statement = await self._stage_validate(
+            session, request, ledger, screened, retrieved, planned
+        )
+        agent_run.status = DRAFTED
+        ledger.plan_evidence["sql_draft"] = {"drafted": True, "executed": False}
+        ledger.publish_plan_evidence()
+        agent_run.step_trace = ledger.trace
+        return AgentDraftResult(
+            agent_run=agent_run,
+            sql=statement.sql,
+            strategy=plan.strategy,
+            generation_source=statement.generation_source,
+            selected_tool_version_id=None,
+        )
 
     # ------------------------------------------------------------------
     # Stage 0 -- open the run
