@@ -350,6 +350,7 @@ describe("BusinessMeaningScreen Glossary tab (P1-03)", () => {
 
 describe("the governed ontology is authored from Business meaning (R11-S13 M4)", () => {
   it("opens the ontology manager and reads this organization's versions", async () => {
+    const consoleError = vi.spyOn(console, "error");
     const BusinessMeaningScreen = await loadScreen();
     render(<BusinessMeaningScreen />);
     await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
@@ -376,6 +377,10 @@ describe("the governed ontology is authored from Business meaning (R11-S13 M4)",
     expect(
       within(dialog).getByRole("button", { name: "Save ontology draft" }),
     ).toBeInTheDocument();
+    expect(consoleError.mock.calls.some((args) =>
+      args.some((arg) => String(arg).includes("same key")),
+    )).toBe(false);
+    consoleError.mockRestore();
   });
 
   it("is a dialog rather than a fourth ?view= tab, so the read axis is unchanged", async () => {
