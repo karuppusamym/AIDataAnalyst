@@ -1,5 +1,16 @@
 # Items 13–17: GraphQL, open knowledge context and workspace design
 
+> **Re-reviewed 2026-09-17 against `9896a11`:** OKF export is now implemented as a pure
+> renderer plus manifest/download routes; the original design-only status below is historical.
+> GraphQL remains queued. R11-OKF01/02/03 and R11-GQL01/02 in the delivery tracker own pickup.
+> This pass fixed Atlas publication checks for raw markup/reference links and Ask reading order
+> (answer first, history right on desktop/below on mobile, matching DOM order). The earlier
+> wireframe is a proposal, not an exact screenshot of this layout. Verification: 46 exporter
+> tests, 72 Ask/accessibility tests, targeted Ruff/mypy and the production UI build passed.
+> Durable consistent snapshots, preview/download binding, early resource limits, literal
+> metadata rendering, knowledge UI/incremental consumption and the remaining answer views
+> are explicitly tracked; no full-suite or live browser/deployment certification is claimed.
+
 Date: 2026-09-16. Source inspected from `66dd878`; concurrent implementation continues.
 
 This is the restarted design/implementation review requested for items 13–17. It extends the [footprint design](20-database-footprint-and-agent-context.md) and the [current review](../review-2026-09-16/REVIEW.md). The [delivery tracker](../60-delivery/03-tracker.md) remains the status authority. Task labels below are acceptance slices for incorporation into that queue, not a competing completion tracker.
@@ -185,6 +196,12 @@ Stewardship navigation should lead with **Work queue / Bulk actions / Automation
 Before removing any screen/module, inventory its actions, APIs, role visibility, URL parameters and tests. Merge the entry point only after each action has a reachable replacement, old links have aliases and equivalent permission/unsaved-edit behavior is verified. Shared components should replace actual duplicate controllers; keep distinct domain services where rules differ.
 
 ## Delivery sequence and acceptance ownership
+
+**Pickup reconciled 2026-09-17:** these slices now have canonical rows in [tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11): 13A → R11-GQL01, 13B → R11-GQL02, 14A → R11-OKF01, 14B → R11-OKF02, 14C → R11-OKF03, 16A/16B → R11-UX16. Items 15/17 extend R11-S13. Read those rows for current state; the table below describes dependencies and scope, not a second queue.
+
+**Implementation review correction:** the initial answer-first CSS did not account for the new context-product field: it expanded the second field rather than the question and kept its long guidance on one line. The follow-up uses two bounded selector columns, a full-width question row, wrapping guidance and a single column on small screens. History now cancels and invalidates first-page and paginated reads on source changes, excludes stale responses and stops pagination when hidden or when the server returns an empty page. A pagination error also stops automatic retries until history is refreshed. The mobile visual order still differs from DOM order; retain that explicit keyboard/screen-reader pickup rather than claiming visual acceptance from component tests.
+
+**Contract details retained for pickup:** GraphQL idempotency needs a durable caller-scoped execution record; an uncertain provider outcome must remain unknown/pending for reconciliation instead of being retried as a new execution. OKF determinism requires a frozen content snapshot, not just a product version pointing to mutable current catalog rows. Publish bundle contents and manifest atomically. Metadata authorization and approved status are not interchangeable, and an imported human-verification string is never proof of an Atlas approval.
 
 | Slice | Existing work to extend | Exit |
 |---|---|---|

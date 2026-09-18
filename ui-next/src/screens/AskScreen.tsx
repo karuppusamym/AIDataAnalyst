@@ -1098,6 +1098,31 @@ export function AskScreen() {
         </button>
       </div>
       <div className="askscreen__main">
+        {runId ? (
+          <AnswerPanel
+            runId={runId}
+            askResult={askResult}
+            askedAt={askedAt}
+            contextProduct={
+              selectedProduct
+                ? {
+                    key: selectedProduct.product_key,
+                    name: selectedProduct.latest_version?.name ?? selectedProduct.product_key,
+                  }
+                : null
+            }
+            detail={panelDetail}
+            receipts={panelReceipts}
+            loading={panelLoading}
+            error={panelError}
+            onClose={() => setParams({ run: null })}
+          />
+        ) : (
+          <div className="askscreen__answeridle">
+            <Empty title="Your answer appears here" hint="Ask a question or open a past run to inspect its evidence." />
+          </div>
+        )}
+
         <div id="ask-history" className="askscreen__history" hidden={!showHistory}>
           <div className="askscreen__historyhead">
             <h2 className="askscreen__h2">History</h2>
@@ -1134,31 +1159,6 @@ export function AskScreen() {
             />
           )}
         </div>
-
-        {runId ? (
-          <AnswerPanel
-            runId={runId}
-            askResult={askResult}
-            askedAt={askedAt}
-            contextProduct={
-              selectedProduct
-                ? {
-                    key: selectedProduct.product_key,
-                    name: selectedProduct.latest_version?.name ?? selectedProduct.product_key,
-                  }
-                : null
-            }
-            detail={panelDetail}
-            receipts={panelReceipts}
-            loading={panelLoading}
-            error={panelError}
-            onClose={() => setParams({ run: null })}
-          />
-        ) : (
-          <div className="askscreen__answeridle">
-            <Empty title="Your answer appears here" hint="Ask a question or open a past run to inspect its evidence." />
-          </div>
-        )}
       </div>
     </div>
   );

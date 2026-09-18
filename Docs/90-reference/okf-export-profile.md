@@ -41,6 +41,11 @@ is exactly what the status string above says.
 
 ## Two verdicts, deliberately separate
 
+The Atlas publication gate also refuses raw HTML/angle autolinks in document bodies and
+checks reference-style Markdown link definitions against the same destination rules as
+inline links. These restrictions do not change the general OKF conformance verdict. A
+future wiki renderer still needs its own sanitization; the exporter is not an HTML sanitizer.
+
 | Function | Question it answers |
 |---|---|
 | `validate_okf_conformance` | Is this a conformant OKF v0.2 bundle? Nothing stricter. |
@@ -69,12 +74,12 @@ bundle/index.md                          # bundle root; the only index with fron
 bundle/sources/source-<key>/index.md
 bundle/sources/source-<key>/schemas/schema-<key>/index.md
 bundle/sources/source-<key>/schemas/schema-<key>/tables/table-<key>.md
+bundle/sources/source-<key>/schemas/schema-<key>/tables/table-<key>-columns-<n>.md  # wide objects
 bundle/sources/source-<key>/schemas/schema-<key>/views/view-<key>.md
 bundle/sources/source-<key>/schemas/schema-<key>/routines/routine-<key>.md
 bundle/sources/source-<key>/schemas/schema-<key>/packages/package-<key>.md
 bundle/concepts/index.md
 bundle/concepts/concept-<key>.md
-bundle/sources/source-<key>/schemas/schema-<key>/tables/table-<key>-columns-<n>.md  # wide objects
 bundle/tools/index.md                    # R11-OKF02
 bundle/tools/tool-version-<key>.md       # R11-OKF02
 bundle/log.md                            # R11-OKF02, stored bundles only
@@ -88,11 +93,6 @@ document under that source, so a change elsewhere leaves its bytes, and its hash
 written as code spans rather than links, because an old entry may name a document a later
 publication removed. A bundle rendered directly from a snapshot, with no stored history, has no
 log.
-
-Every `<key>` is the first 128 bits of a SHA-256 over the JSON-encoded Atlas identity tuple, not
-over a row's UUID: a UUID changes when an object is dropped and rediscovered and differs between
-environments holding the same catalog, so a UUID-keyed bundle would report a content change where
-there is none.
 
 The manifest sits outside `bundle/` so a reader pointed at the OKF bundle root never needs an
 Atlas extension to consume it.
@@ -111,6 +111,11 @@ alone can place it. An object at or under the limit renders as it did under prof
 
 ### Stable identities
 
+Every `<key>` is the first 128 bits of a SHA-256 over the JSON-encoded Atlas identity tuple, not
+over a row's UUID: a UUID changes when an object is dropped and rediscovered and differs between
+environments holding the same catalog, so a UUID-keyed bundle would report a content change where
+there is none.
+
 | Kind | Identity tuple |
 |---|---|
 | Source | `("source", datasource_id)` |
@@ -119,12 +124,12 @@ alone can place it. An object at or under the limit renders as it did under prof
 | Routine | `("routine", datasource_id, catalog, schema, package_name, name, signature)` |
 | Routine package | `("package", datasource_id, catalog, schema, package_name)` |
 | Business concept | `("concept", ontology_key, ontology_version, concept_name)` |
+| Tool version | `("tool-version", project_id, tool_slug, version)` |
 
 `signature` keeps PostgreSQL overloads apart, `package_name` keeps a packaged member apart from a
 standalone routine of the same name, and the leading kind token keeps a routine apart from a table
 of the same name. Object kind is deliberately *not* part of a table-like identity: tables and
 views share one namespace in every supported engine, so a rescan that reclassifies one must not
-| Tool version | `("tool-version", project_id, tool_slug, version)` |
 move its document. A collision refuses the export rather than overwriting a document.
 
 ## Concept types
@@ -206,16 +211,16 @@ module, resolved as one by `tests/test_doc_claims.py`, and a frontmatter key is 
 | `definition` | Coverage of a definition, never a definition: `definition.available`, `definition.digest`, `definition.truncated`, `definition.lineage`, `definition.capture_version`, `definition.captured_at`, `definition.reason_codes`. |
 | `routine` | Routine identity and behaviour: `routine.routine_type`, `routine.signature`, `routine.package_name`, `routine.language`, `routine.return_type`, `routine.is_deterministic`, `routine.security_mode`. |
 | `concept` | Business concept identity: `concept.key`, `concept.name`, `concept.ontology_key`, `concept.ontology_version`, `concept.lifecycle`. |
+| `tool` | On a tool-version document only: `tool.key`, `tool.tool_version_id`, `tool.slug`, `tool.version`, `tool.lifecycle`, `tool.fingerprint`, and `tool.invocation` (the MCP tool name and the REST execute route). No SQL and no executor. |
 | `statements` | Which parts of the document an Atlas approval covers (`statements.approved`) and which are derived (`statements.derived`). This is the per-statement answer OKF's single document-level `verified` cannot give. |
 | `scope` | The export's scope: `scope.kind`, `scope.product_key`, `scope.product_version`, `scope.policy_partition_digest`. |
 | `withheld` | On a concept document only: `withheld.reason_codes` when screening refused released text. |
-
-## The Atlas manifest
-| `tool` | On a tool-version document only: `tool.key`, `tool.tool_version_id`, `tool.slug`, `tool.version`, `tool.lifecycle`, `tool.fingerprint`, and `tool.invocation` (the MCP tool name and the REST execute route). No SQL and no executor. |
-
-`atlas-manifest.json` is an Atlas extension, not an OKF requirement. Keys: `manifest_version`,
 | `column_sets` | On a wide object's own document only: one entry per column set, with its `path`, `first_ordinal`, `last_ordinal` and `columns` count. |
 | `part_of` | On a column-set document only: the object it belongs to and where it sits -- `part_of.key`, `part_of.path`, `part_of.qualified_name`, `part_of.set`, `part_of.sets`, `part_of.first_ordinal`, `part_of.last_ordinal`. |
+
+## The Atlas manifest
+
+`atlas-manifest.json` is an Atlas extension, not an OKF requirement. Keys: `manifest_version`,
 `atlas_extension`, `okf_version`, `bundle_root`, `specification` (repository, path, revision,
 sha256, conformance), `compiler`, `captured_at`, `scope`, `policy_partition` (with its digest),
 `scope_digest`, `content_snapshot_digest`, `bundle_content_digest`, `counts` (including `tools`
@@ -297,11 +302,6 @@ than storing a mixed snapshot. A scope whose pins or column count exceed the bun
 refused before the freeze runs. A bundle whose documents contain a fenced code block is never
 stored.
 
-## Value freedom
-
-No exported document contains a routine body, a view definition, a column or parameter default
-expression, a source comment, a sample row or a profile statistic. This is structural: no field on
-any snapshot value type can hold one, and a column's `default_expression` is never selected. A
 ## Question-specific context
 
 A bundle is many small documents so that a reader can take the few a question needs.
@@ -334,6 +334,11 @@ any other. Inside Ask, the sections join the SQL-generation payload as grounding
 tables and columns answer the question; every identifier the SQL uses must still come from the
 metadata context, and the product boundary is enforced on the statement afterwards.
 
+## Value freedom
+
+No exported document contains a routine body, a view definition, a column or parameter default
+expression, a source comment, a sample row or a profile statistic. This is structural: no field on
+any snapshot value type can hold one, and a column's `default_expression` is never selected. A
 definition is represented by a SHA-256 of the **stored value-free** text plus availability,
 truncation and parse state. A connector's free-text `unavailable_reason` is reduced to a bounded
 reason code rather than exported verbatim. Approved Atlas description text is screened at export
@@ -360,10 +365,10 @@ existence leak acceptance OKF-D exists to catch.
 | `GET /v1/context-product-versions/{version_id}/okf-bundle/publications` | The reader's own lineage of publications: trigger, counts, what changed (R11-OKF02). |
 | `GET /v1/metadata/tables/{table_id}/okf-knowledge` | One catalog object's document from each product bundle the reader may read (R11-OKF02). |
 | MCP `resources/read` of `atlas://context-products/{key}/versions/{n}/okf` | The same stored manifest and file index; append a bundle path to read one document (R11-OKF02). |
+| `POST /v1/context-product-versions/{version_id}/okf-bundle/context` | The sections of the stored bundle a question needs, with receipts: see [Question-specific context](#question-specific-context). The question travels in the body, never the URL. |
+| MCP `tools/call` of `atlas__get_knowledge_context` | The same selection for an agent that has a question rather than a path: Markdown to read, then the structured selection. |
 
 These are new surfaces beside the single-file context compiler, which is untouched: no
 `ContextCompilerTarget` value was added and no compile response shape changed, so an existing
 consumer sees no difference. A downloaded file cannot be remotely revoked; export permissions,
 classification and expiry notices govern distribution, and no offline revocation is promised.
-| `POST /v1/context-product-versions/{version_id}/okf-bundle/context` | The sections of the stored bundle a question needs, with receipts: see [Question-specific context](#question-specific-context). The question travels in the body, never the URL. |
-| MCP `tools/call` of `atlas__get_knowledge_context` | The same selection for an agent that has a question rather than a path: Markdown to read, then the structured selection. |

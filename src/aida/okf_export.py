@@ -2857,6 +2857,13 @@ def _validate_snapshot_shape(snapshot: OkfSnapshot) -> None:
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _RESERVED: Final = frozenset({"index.md", "log.md"})
 _LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_REFERENCE_LINK = re.compile(
+    r"^[ ]{0,3}\[(?!\^)[^\]\n]+\]:[ \t]*(?:\n[ \t]*)?(?:<([^>\n]+)>|(\S+))",
+    re.MULTILINE,
+)
+# Atlas exports portable text, not active HTML or autolinks whose destinations bypass
+# the Markdown link checks. This is a publish policy, not a general OKF restriction.
+_RAW_MARKUP = re.compile(r"<(?:/?[A-Za-z][^>]*|![^>]*|\?[^>]*)>", re.DOTALL)
 _CODE_FENCE = re.compile(r"^\s*(```|~~~)", re.MULTILINE)
 _LOG_DATE = re.compile(r"^## \d{4}-\d{2}-\d{2}$")
 
@@ -2964,11 +2971,16 @@ def validate_atlas_publish_policy(bundle: OkfBundle) -> OkfValidation:
         if path.startswith("/") or ".." in segments or "\\" in path:
             findings.append(f"UNSAFE_PATH:{path}")
         text = documents[path]
+        _frontmatter, body = _split_frontmatter(text)
+        if _RAW_MARKUP.search(body):
+            findings.append(f"FORBIDDEN_RAW_MARKUP:{path}")
         if _CODE_FENCE.search(text):
             # Defence in depth for INV-6. No snapshot field can hold a body today; this makes
             # a field that could be added tomorrow fail the gate instead of shipping.
             findings.append(f"FORBIDDEN_CODE_FENCE:{path}")
-        for target in _LINK.findall(text):
+        targets = _LINK.findall(text)
+        targets.extend(angle or plain for angle, plain in _REFERENCE_LINK.findall(body))
+        for target in targets:
             if target.startswith(("http://", "https://", "mailto:", "//")):
                 findings.append(f"EXTERNAL_LINK:{path}:{target}")
                 continue

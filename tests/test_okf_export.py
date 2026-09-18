@@ -822,6 +822,33 @@ def test_a_produced_bundle_passes_the_atlas_publish_policy() -> None:
     assert verdict.valid, verdict.findings
 
 
+@pytest.mark.parametrize(
+    ("text", "finding"),
+    [
+        ('<img src="https://outside.example/pixel">', "FORBIDDEN_RAW_MARKUP:"),
+        ("<https://outside.example/context>", "FORBIDDEN_RAW_MARKUP:"),
+        (
+            "Read [context][external].\n\n[external]: https://outside.example/context",
+            "EXTERNAL_LINK:",
+        ),
+        (
+            "Read [context][external].\n\n[external]: <https://outside.example/context>",
+            "EXTERNAL_LINK:",
+        ),
+    ],
+)
+def test_publish_policy_checks_raw_markup_and_reference_links(text: str, finding: str) -> None:
+    # Render through the real exporter so a digest mismatch cannot make this test pass.
+    snapshot = _snapshot()
+    obj = snapshot.objects[0]
+    poisoned = replace(obj, description=replace(obj.description, text=text))
+    bundle = export_okf_bundle(replace(snapshot, objects=(poisoned, *snapshot.objects[1:])))
+    assert validate_okf_conformance({doc.path: doc.text for doc in bundle.documents}).valid
+    verdict = validate_atlas_publish_policy(bundle)
+    assert not verdict.valid
+    assert any(item.startswith(finding) for item in verdict.findings), verdict.findings
+
+
 def test_an_oversized_document_is_an_explicit_failure_not_a_truncation() -> None:
     """"Produce an explicit size/coverage failure rather than a silently truncated complete
     bundle." A truncated bundle that still calls itself complete is the failure mode; a refusal

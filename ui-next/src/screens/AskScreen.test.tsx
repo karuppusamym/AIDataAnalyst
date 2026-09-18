@@ -414,6 +414,9 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     });
     // The retry's answer replaces the refusal rather than sitting beside it.
     expect(await screen.findByText(ANALYSIS_RESPONSE.explanation)).toBeInTheDocument();
+    const answer = screen.getByText(ANALYSIS_RESPONSE.explanation).closest("aside")!;
+    const history = screen.getByRole("heading", { name: "History" }).parentElement!.parentElement!;
+    expect(answer.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Focusing on the answer must not discard it or execute the question again.
     fireEvent.click(screen.getByRole("button", { name: "Hide history" }));
     expect(screen.getByRole("button", { name: "Show history" })).toHaveAttribute("aria-expanded", "false");

@@ -61,7 +61,7 @@
 @media (max-width:1100px){
   .askscreen{height:auto;min-height:100%}
   .askscreen__main{flex-direction:column;min-height:0}
-  .askscreen__history{flex:none;order:2}
+  .askscreen__history{flex:none}
   .askscreen__main .vlist{height:240px;flex:none}
   .askscreen__main>.evp{flex:none;width:auto;max-height:none}
 }
