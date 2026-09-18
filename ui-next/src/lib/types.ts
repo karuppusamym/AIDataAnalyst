@@ -2995,7 +2995,7 @@ export interface LineOfBusinessRead {
 }
 
 export interface LineageAgentRunRequest {
-  capabilities?: ("VIEW_LINEAGE" | "PROCEDURE_LINEAGE")[];
+  capabilities?: ("VIEW_LINEAGE" | "PROCEDURE_LINEAGE" | "TRIGGER_LINEAGE")[];
   limit?: number;
   datasource_id?: string | null;
   dry_run?: boolean;

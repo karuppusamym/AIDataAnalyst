@@ -36,18 +36,22 @@ router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 #: `procedure_lineage_api`).
 LINEAGE_AGENT_OPERATORS = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
 
-LineageCapability = Literal["VIEW_LINEAGE", "PROCEDURE_LINEAGE"]
+#: Every capability the agent's spec declares. R11-FP01 added TRIGGER_LINEAGE to the spec and
+#: to the Task Agents console's run request on 2026-09-17 but not here, so from then until
+#: 2026-09-18 every console run was refused with a 422. `tests/test_lineage_agent.py` now holds
+#: this literal to the spec, so the two cannot drift apart again.
+LineageCapability = Literal["VIEW_LINEAGE", "PROCEDURE_LINEAGE", "TRIGGER_LINEAGE"]
 
 
 def _every_capability() -> list[LineageCapability]:
-    return ["VIEW_LINEAGE", "PROCEDURE_LINEAGE"]
+    return ["VIEW_LINEAGE", "PROCEDURE_LINEAGE", "TRIGGER_LINEAGE"]
 
 
 class LineageAgentRunRequest(ApiModel):
     capabilities: list[LineageCapability] = Field(
-        default_factory=_every_capability, min_length=1, max_length=2
+        default_factory=_every_capability, min_length=1, max_length=3
     )
-    #: Views, and routines, proposed from per capability, clamped server-side
+    #: Views, routines and triggers proposed from per capability, clamped server-side
     #: to `lineage_agent_max_proposals_per_run`.
     limit: int = Field(default=10, ge=1, le=200)
     datasource_id: UUID | None = None

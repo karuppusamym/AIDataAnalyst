@@ -16,7 +16,7 @@ The runtime properties every task agent shares are exercised in
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from uuid import uuid4
 
 import pytest
@@ -39,6 +39,7 @@ from aida.lineage_agent import (
 )
 from aida.lineage_agent_api import (
     LineageAgentRunRequest,
+    LineageCapability,
     get_lineage_agent_state,
     start_lineage_agent_run,
 )
@@ -402,6 +403,22 @@ async def test_an_unregistered_lineage_agent_is_refused(session: AsyncSession) -
         )
 
     assert (excinfo.value.status_code, excinfo.value.detail) == (409, REASON_CONTRACT_MISSING)
+
+
+def test_the_run_request_accepts_every_capability_the_agent_declares() -> None:
+    """The console asks for every capability the spec declares; the API must accept them all.
+
+    TRIGGER_LINEAGE reached the spec and the console on 2026-09-17 but not this request's
+    literal, so every console run was refused with a 422 -- invisible to the console's own test,
+    which mocks the call. Held to the spec here, and to the console's exact request body.
+    """
+    declared = {capability.key for capability in LINEAGE_AGENT.capabilities}
+    assert set(get_args(LineageCapability)) == declared
+    assert set(LineageAgentRunRequest().capabilities) == declared
+    console = LineageAgentRunRequest.model_validate(
+        {"capabilities": ["VIEW_LINEAGE", "PROCEDURE_LINEAGE", "TRIGGER_LINEAGE"], "limit": 10}
+    )
+    assert console.capabilities == ["VIEW_LINEAGE", "PROCEDURE_LINEAGE", "TRIGGER_LINEAGE"]
 
 
 def test_the_agent_never_writes_an_active_edge() -> None:

@@ -17829,11 +17829,12 @@
             "items": {
               "enum": [
                 "VIEW_LINEAGE",
-                "PROCEDURE_LINEAGE"
+                "PROCEDURE_LINEAGE",
+                "TRIGGER_LINEAGE"
               ],
               "type": "string"
             },
-            "maxItems": 2,
+            "maxItems": 3,
             "minItems": 1,
             "title": "Capabilities",
             "type": "array"
