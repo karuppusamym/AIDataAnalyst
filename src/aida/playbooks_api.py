@@ -62,7 +62,11 @@ def _validate_action_parameters(action: str, parameters: dict[str, Any]) -> None
         if not isinstance(rationale, str) or len(rationale) < 10:
             raise ValueError("CERTIFY requires a 'rationale' of at least 10 characters")
         expires_after_days = parameters.get("expires_after_days")
-        if not isinstance(expires_after_days, int) or expires_after_days <= 0:
+        if (
+            isinstance(expires_after_days, bool)
+            or not isinstance(expires_after_days, int)
+            or expires_after_days <= 0
+        ):
             raise ValueError("CERTIFY requires a positive integer 'expires_after_days'")
 
 
@@ -93,6 +97,15 @@ class PlaybookUpdate(ApiModel):
     schedule_interval_minutes: int | None = Field(default=None, ge=5, le=10_080)
     auto_apply_max_items: int | None = Field(default=None, ge=0)
     enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self) -> PlaybookUpdate:
+        # Omission means unchanged; explicit null must not reach NOT NULL columns
+        # or the action-parameter validator, which expects a dictionary.
+        for field in self.model_fields_set - {"column_name_pattern"}:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null; omit it to leave it unchanged")
+        return self
 
 
 class PlaybookRead(ApiModel):
