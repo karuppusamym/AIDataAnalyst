@@ -1395,6 +1395,59 @@ def _refused_documents(
     ]
 
 
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        (
+            b'{"query":"query Q { __typename }","operationName":"Q","extensions":'
+            + b"[" * 2000
+            + b"0"
+            + b"]" * 2000
+            + b"}",
+            "REQUEST_INVALID",
+        ),
+        (
+            json.dumps(
+                {
+                    "query": "query Q { " + "a { " * 400 + "__typename" + " }" * 401,
+                    "operationName": "Q",
+                }
+            ).encode(),
+            "DOCUMENT_TOO_COMPLEX",
+        ),
+        (
+            b'{"query":"query Q { __typename }","operationName":"\\ud800"}',
+            "REQUEST_INVALID",
+        ),
+    ],
+    ids=["nested-json", "nested-graphql", "invalid-unicode-operation"],
+)
+async def test_parser_failures_are_refused_before_database_work(
+    http: httpx.AsyncClient, estate: Estate, body: bytes, code: str
+) -> None:
+    assert len(body) < DEFAULT_LIMITS.max_request_bytes
+    estate.statements.clear()
+    response = await http.post(
+        "/graphql",
+        content=body,
+        headers={**_headers(estate.org), "Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.json()["errors"][0]["extensions"]["code"] == code
+    assert not estate.statements
+
+
+def test_json_parser_stack_exhaustion_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Interpreter stack limits vary; exercise the decoder's failure deterministically.
+    def exhausted_decoder(body: bytes) -> None:
+        raise RecursionError
+
+    monkeypatch.setattr(graphql_api.json, "loads", exhausted_decoder)
+    with pytest.raises(graphql_api.DocumentRefused) as refused:
+        graphql_api._parse_request(b"{}")
+    assert refused.value.code == "REQUEST_INVALID"
+
+
 def _refused_ids() -> list[str]:
     return [
         "depth-7",

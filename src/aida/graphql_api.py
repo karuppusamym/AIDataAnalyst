@@ -125,7 +125,7 @@ async def _read_body(request: Request, limit: int) -> bytes:
 def _parse_request(body: bytes) -> _Request:
     try:
         payload = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         raise DocumentRefused("REQUEST_INVALID", "the request body is not JSON") from None
     if isinstance(payload, list):
         raise DocumentRefused(
@@ -143,6 +143,14 @@ def _parse_request(body: bytes) -> _Request:
         raise DocumentRefused("REQUEST_INVALID", "`query` must be a non-empty string")
     if operation_name is not None and not isinstance(operation_name, str):
         raise DocumentRefused("REQUEST_INVALID", "`operationName` must be a string")
+    if operation_name is not None:
+        try:
+            operation_name.encode("utf-8")
+        except UnicodeEncodeError:
+            # JSON can decode a lone surrogate; telemetry must not crash hashing it.
+            raise DocumentRefused(
+                "REQUEST_INVALID", "`operationName` must contain valid Unicode"
+            ) from None
     if variables is not None and not isinstance(variables, dict):
         raise DocumentRefused("REQUEST_INVALID", "`variables` must be an object")
     extensions = payload.get("extensions")

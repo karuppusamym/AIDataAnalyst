@@ -205,6 +205,12 @@ def admit_document(
         )
     try:
         document = parse(query, no_location=False, max_tokens=limits.max_tokens)
+    except RecursionError:
+        # A deeply nested document can exhaust the parser before the AST depth
+        # walk runs, even when its token count is below the ceiling.
+        raise DocumentRefused(
+            "DOCUMENT_TOO_COMPLEX", "the document exceeds parser nesting capacity"
+        ) from None
     except GraphQLSyntaxError as error:
         if "tokens" in error.message and "Parsing aborted" in error.message:
             raise DocumentRefused(
