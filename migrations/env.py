@@ -17,6 +17,7 @@ from aida import (  # noqa: F401
     envelope_models,
     graph_store,
     models,
+    okf_store_models,
     ontology_models,
     procedure_lineage_models,
     quality_rule_proposal_model,

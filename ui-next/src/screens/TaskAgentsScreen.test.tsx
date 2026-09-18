@@ -217,7 +217,11 @@ describe("the lineage agent's console (ADR-0029)", () => {
       expect(runTaskAgent).toHaveBeenCalledWith(
         ORG,
         "lineage",
-        expect.objectContaining({ capabilities: ["VIEW_LINEAGE", "PROCEDURE_LINEAGE"] }),
+        // R11-FP01: trigger lineage is decidable in the same queue since
+        // 2026-09-17, so the console runs it with the other two.
+        expect.objectContaining({
+          capabilities: ["VIEW_LINEAGE", "PROCEDURE_LINEAGE", "TRIGGER_LINEAGE"],
+        }),
       ),
     );
     const list = await screen.findByRole("list", { name: "What the run looked at" });

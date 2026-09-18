@@ -37,6 +37,9 @@ live here because both need the catalog:
   trigger's own organization and datasource, and reports a callee it could not
   reach in `routine_call_descent`'s own vocabulary so the footprint gap register
   already knows how to route it.
+
+`record_trigger_parse_coverage` is `record_routine_parse_coverage` for that axis,
+over one shared `_measure`, so "fully understood" means one thing on both.
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ from aida.procedure_lineage_models import (
     DeepProcedureLineageEdge,
     RoutineParseCoverage,
     TriggerLineageEdge,
+    TriggerParseCoverage,
 )
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
@@ -327,12 +331,6 @@ async def record_routine_parse_coverage(
     boundary, which is the rule that keeps a stored sentinel from ever standing
     in for a real value.
     """
-    codes = unparsed_reason_codes(result)
-    unparsed_count = sum(
-        1
-        for edge in result.edges
-        if edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
-    )
     existing = (
         await session.scalars(
             select(RoutineParseCoverage).where(
@@ -346,20 +344,42 @@ async def record_routine_parse_coverage(
         datasource_id=datasource.id,
         routine_id=routine.id,
     )
+    _measure(row, result, measured_by=measured_by)
+    if existing is None:
+        session.add(row)
+    return row
+
+
+def _measure(
+    row: RoutineParseCoverage | TriggerParseCoverage,
+    result: ProcedureParseResult,
+    *,
+    measured_by: str | None,
+) -> None:
+    """Write one parse's measurement onto a coverage row, routine or trigger.
+
+    One function for both axes because the two tables are one shape on purpose:
+    a trigger body is parsed by the same parser, so "fully understood" must mean
+    the same thing on both, down to which reason codes are kept and which are
+    dropped (`unparsed_reason_codes` -- prefixes only, INV-6)."""
+    unparsed_count = sum(
+        1
+        for edge in result.edges
+        if edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+    )
     row.parse_completed = result.is_fully_parsed
     row.is_read_only = result.is_read_only
     row.statement_count = result.statement_count
     row.unparsed_statement_count = unparsed_count
-    row.unparsed_reason_codes = ",".join(codes)[:_MAX_REASON_CODES_LENGTH]
+    row.unparsed_reason_codes = ",".join(unparsed_reason_codes(result))[
+        :_MAX_REASON_CODES_LENGTH
+    ]
     row.dialect = result.dialect
     row.confidence = result.confidence
     row.sql_hash = result.sql_hash
     row.source_mapping_granularity = SOURCE_MAPPING_GRANULARITY
     row.parsed_at = datetime.now(UTC)
     row.measured_by = measured_by
-    if existing is None:
-        session.add(row)
-    return row
 
 
 async def persist_routine_edges(
@@ -747,3 +767,43 @@ async def persist_trigger_edges(
         session.add(row)
         written.append(row)
     return written
+
+
+async def record_trigger_parse_coverage(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    trigger: MetadataTrigger,
+    result: ProcedureParseResult,
+    routine_id: UUID | None,
+    measured_by: str | None,
+) -> TriggerParseCoverage:
+    """Store how completely `trigger`'s body was understood by this parse.
+
+    `record_routine_parse_coverage` on the trigger axis, with the same one-row-
+    per-object, replaced-in-place rule. `routine_id` is the routine whose body was
+    actually read (`TriggerBody.routine_id`): the join a later change to that
+    routine's body uses to find this trigger again. Recorded for a body that could
+    not be reached too, from its marker result, so "not reachable" is a
+    measurement rather than an absence. Both lookups restate the organization
+    and the datasource (INV-5).
+    """
+    existing = (
+        await session.scalars(
+            select(TriggerParseCoverage).where(
+                TriggerParseCoverage.organization_id == datasource.organization_id,
+                TriggerParseCoverage.datasource_id == datasource.id,
+                TriggerParseCoverage.trigger_id == trigger.id,
+            )
+        )
+    ).first()
+    row = existing or TriggerParseCoverage(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        trigger_id=trigger.id,
+    )
+    row.routine_id = routine_id
+    _measure(row, result, measured_by=measured_by)
+    if existing is None:
+        session.add(row)
+    return row

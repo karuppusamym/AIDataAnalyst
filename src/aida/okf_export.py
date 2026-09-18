@@ -75,8 +75,9 @@ import io
 import json
 import re
 import zipfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Final
 
 import yaml
@@ -101,7 +102,9 @@ OKF_CONFORMANCE_STATUS: Final = "SELF_CHECKED_AGAINST_PINNED_SPEC_CLAUSES"
 #: The Atlas export profile. Bumped when the rendered bytes for unchanged content change, so a
 #: manifest records which renderer produced it.
 EXPORT_PROFILE: Final = "atlas-okf-export"
-EXPORT_PROFILE_VERSION: Final = "1"
+#: "2" since R11-OKF02: tool-version concept documents and the refresh `log.md` files changed
+#: the rendered tree for unchanged content, which is exactly what this number records.
+EXPORT_PROFILE_VERSION: Final = "2"
 #: The actor convention of spec §7: `process:<id>` for an automated process.
 EXPORTER_ACTOR: Final = "process:atlas-okf-export"
 MANIFEST_VERSION: Final = "1"
@@ -122,6 +125,11 @@ TYPE_MATERIALIZED_VIEW: Final = "Atlas Materialized View"
 TYPE_ROUTINE: Final = "Atlas Routine"
 TYPE_PACKAGE: Final = "Atlas Routine Package"
 TYPE_CONCEPT: Final = "Atlas Business Concept"
+#: R11-OKF02: one approved governed-tool version. Deliberately *not* upstream's
+#: `Attested Computation`: that type carries `computation`/`executor` fields, which are runnable
+#: embedded code, and the design forbids "runnable embedded code auto-executed by import". An
+#: Atlas tool is described -- its interface and how to invoke it through Atlas -- never shipped.
+TYPE_TOOL_VERSION: Final = "Atlas Tool Version"
 
 #: `MetadataTable` kinds, as `discovery_selection.table_kind` normalizes them.
 KIND_TABLE: Final = "TABLE"
@@ -148,6 +156,16 @@ MAX_DOCUMENT_BYTES: Final = 256 * 1024
 MAX_FRONTMATTER_BYTES: Final = 32 * 1024
 MAX_DOCUMENTS: Final = 20_000
 MAX_BUNDLE_BYTES: Final = 64 * 1024 * 1024
+#: R11-OKF02: how many refresh entries a `log.md` lists, and how many paths one entry names.
+#: Older entries and further paths are *counted* in the log, never silently dropped.
+MAX_LOG_ENTRIES: Final = 50
+MAX_LOG_PATHS: Final = 20
+MAX_LOG_STORED_PATHS: Final = 1000
+#: Publication triggers, as the refresh history records them.
+TRIGGER_INITIAL: Final = "INITIAL"
+TRIGGER_SOURCE_CHANGE: Final = "SOURCE_CHANGE"
+TRIGGER_REVALIDATION: Final = "REVALIDATION"
+TRIGGER_RENDERER_CHANGE: Final = "RENDERER_CHANGE"
 
 #: One safe path segment. Lower-case, digits and single hyphens only: no separator, no dot, no
 #: drive letter, no case-collision on a case-insensitive filesystem, nothing a shell expands.
@@ -215,6 +233,12 @@ def package_key(datasource_id: str, catalog: str, schema: str, package_name: str
 
 def concept_key(ontology_key: str, ontology_version: int, concept_name: str) -> str:
     return _key("concept", [ontology_key, str(ontology_version), concept_name])
+
+
+def tool_version_key(project_id: str, slug: str, version: int) -> str:
+    """One approved tool version. `GovernedTool` is unique on (project, slug), and a version
+    number is immutable once assigned, so the tuple names exactly one reviewed interface."""
+    return _key("tool-version", [project_id, slug, str(version)])
 
 
 # --- the frozen snapshot ----------------------------------------------------------------
@@ -451,6 +475,41 @@ class OkfSourceFreshness:
 
 
 @dataclass(frozen=True, slots=True)
+class OkfToolInput:
+    """One declared input of a tool version: its name, type and whether it is required.
+
+    Nothing else from the parameter schema. A declared default, an enum or an example is a
+    literal a steward or a generator wrote down, and a literal is where a source value hides
+    (INV-6), so none of them has a field here.
+    """
+
+    name: str
+    physical_type: str
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OkfToolFacts:
+    """R11-OKF02: one approved tool version the product makes eligible, as a reference.
+
+    What a consumer needs to *call* the tool through Atlas -- its interface and its invocation --
+    and what Atlas approved about it. Never its SQL, its executor or a credential: a data answer
+    goes through the query gateway, and an importer must find nothing to run.
+    """
+
+    key: str
+    tool_version_id: str
+    slug: str
+    name: str
+    version: int
+    lifecycle: str
+    source_key: str
+    fingerprint: str
+    inputs: tuple[OkfToolInput, ...] = ()
+    description: OkfDescription = field(default_factory=OkfDescription)
+
+
+@dataclass(frozen=True, slots=True)
 class OkfSnapshot:
     """The frozen content snapshot. The only input `export_okf_bundle` has.
 
@@ -468,6 +527,9 @@ class OkfSnapshot:
     packages: tuple[OkfPackageFacts, ...] = ()
     concepts: tuple[OkfConceptFacts, ...] = ()
     freshness: tuple[OkfSourceFreshness, ...] = ()
+    #: R11-OKF02. Admitted tool versions only: a tool reading a datasource the reader was not
+    #: admitted to is absent, not counted and not listed, exactly like the datasource itself.
+    tools: tuple[OkfToolFacts, ...] = ()
     okf_version: str = OKF_VERSION
     profile: str = EXPORT_PROFILE
     profile_version: str = EXPORT_PROFILE_VERSION
@@ -578,6 +640,8 @@ _VALUE_TYPES.update(
         "OkfPolicyPartition": OkfPolicyPartition,
         "OkfScope": OkfScope,
         "OkfSourceFreshness": OkfSourceFreshness,
+        "OkfToolFacts": OkfToolFacts,
+        "OkfToolInput": OkfToolInput,
     }
 )
 
@@ -632,6 +696,61 @@ class OkfBundle:
 class OkfValidation:
     valid: bool
     findings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OkfLogEntry:
+    """R11-OKF02: one publication in a bundle's refresh history, as `log.md` renders it.
+
+    An input, like the snapshot, so a bundle carrying a log is still a pure function of what it
+    was handed. Paths are the bundle's own opaque paths; no object name, no text and no value.
+    `date` is the publication's UTC day, the ISO `YYYY-MM-DD` spec section 9 requires.
+    """
+
+    date: str
+    sequence: int
+    trigger: str
+    #: For the first publication only: how many documents it published. Its paths are not
+    #: listed -- every path in the bundle would be -- so the log states the count instead.
+    documents: int = 0
+    added: tuple[str, ...] = ()
+    changed: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    unchanged: int = 0
+    #: True when a list above was cut at `MAX_LOG_STORED_PATHS`; the log then says so.
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class OkfPublicationStamp:
+    """R11-OKF02: the publication a rebuild is producing, so it can write its own log entry.
+
+    The entry depends on what the rebuild changed, and the log is part of the bundle, so the
+    renderer computes the entry after the content documents and before the logs.
+    """
+
+    date: str
+    sequence: int
+    trigger: str
+
+
+@dataclass(frozen=True, slots=True)
+class OkfRebuildReport:
+    """R11-OKF02: what an incremental rebuild did, against the bytes of the prior bundle.
+
+    `rendered` and `carried` say what the rebuild *did*: a carried path's stored bytes were
+    reused without its builder running. `added`/`changed`/`removed` say what *moved*, by
+    comparing bytes. `changed_subjects` are the identity keys whose frozen facts differ between
+    the two snapshots -- the dependency roots every rendered document traces back to.
+    """
+
+    rendered: tuple[str, ...]
+    carried: tuple[str, ...]
+    added: tuple[str, ...]
+    changed: tuple[str, ...]
+    removed: tuple[str, ...]
+    changed_subjects: tuple[str, ...]
+    full: bool
 
 
 # --- frontmatter and body rendering -----------------------------------------------------
@@ -889,9 +1008,10 @@ class _Paths:
     routines: dict[str, str] = field(default_factory=dict)
     packages: dict[str, str] = field(default_factory=dict)
     concepts: dict[str, str] = field(default_factory=dict)
+    tools: dict[str, str] = field(default_factory=dict)
 
     def any_path(self, key: str) -> str | None:
-        for table in (self.objects, self.routines, self.packages, self.concepts):
+        for table in (self.objects, self.routines, self.packages, self.concepts, self.tools):
             if key in table:
                 return table[key]
         return None
@@ -924,6 +1044,8 @@ def _resolve_paths(snapshot: OkfSnapshot) -> _Paths:
         paths.packages[package.key] = f"{base}/packages/package-{package.key}.md"
     for concept in snapshot.concepts:
         paths.concepts[concept.key] = f"concepts/concept-{concept.key}.md"
+    for tool in snapshot.tools:
+        paths.tools[tool.key] = f"tools/tool-version-{tool.key}.md"
     return paths
 
 
@@ -1432,11 +1554,12 @@ def _root_index(snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
             "Atlas tool through the query gateway, and its execution receipt.",
         ]
     )
-    if scope.eligible_tool_version_ids:
+    if snapshot.tools:
+        # R11-OKF02: counted from the admitted tool facts, not from the product's raw pin list,
+        # so a tool over a datasource the reader was refused is neither listed nor counted.
         overview.append(
-            f"* Approved tool versions this product makes eligible: "
-            f"{len(scope.eligible_tool_version_ids)}, by reference only "
-            f"({', '.join(sorted(scope.eligible_tool_version_ids))}). No runnable code or "
+            f"* Approved tool versions in scope: {len(snapshot.tools)}, each described by its "
+            "interface and how to invoke it through Atlas. No SQL, executor, runnable code or "
             "credential is exported."
         )
     source_entries = [
@@ -1458,6 +1581,19 @@ def _root_index(snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
             (
                 "Business meaning",
                 [_entry("Concepts", "concepts/", f"{len(snapshot.concepts)} approved concept(s)")],
+            )
+        )
+    if snapshot.tools:
+        sections.append(
+            (
+                "Tools",
+                [
+                    _entry(
+                        "Tool versions",
+                        "tools/",
+                        f"{len(snapshot.tools)} approved tool version(s)",
+                    )
+                ],
             )
         )
     return _index_document("index.md", sections, root=True)
@@ -1571,6 +1707,273 @@ def _concepts_index(snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
     return _index_document("concepts/index.md", [("Business concepts", entries)])
 
 
+# --- tool versions (R11-OKF02) ----------------------------------------------------------
+
+
+def _tool_resource(tool: OkfToolFacts) -> str:
+    return f"atlas://tool-version/{tool.tool_version_id}"
+
+
+def _tool_status(tool: OkfToolFacts) -> str:
+    """Spec section 5.4 `status` from the tool version's own lifecycle: a published version is
+    `stable`, a superseded or deprecated one `deprecated`, anything unreviewed `draft`."""
+    lifecycle = tool.lifecycle.upper()
+    if lifecycle == "PUBLISHED":
+        return "stable"
+    if lifecycle in {"SUPERSEDED", "DEPRECATED", "RETIRED", "SUPPORTED"}:
+        return "deprecated"
+    return "draft"
+
+
+def _tool_document(
+    tool: OkfToolFacts,
+    snapshot: OkfSnapshot,
+    paths: _Paths,
+    source_names: Mapping[str, str],
+    dialect: str,
+) -> OkfDocument:
+    """One approved tool version: what it is for, what it takes, and how to call it via Atlas.
+
+    Never the tool's SQL, and never an `executor` or `computation` field: those are what make
+    upstream's attested-computation type runnable on import, and the design is explicit that an
+    exported tool is "invocation through Atlas; never credentials or runnable embedded code
+    auto-executed by import". A reader learns the contract and is told where to execute it.
+    """
+    resource = _tool_resource(tool)
+    frontmatter: dict[str, Any] = {
+        "type": TYPE_TOOL_VERSION,
+        "title": f"{tool.name} (version {tool.version})",
+        "resource": resource,
+        "status": _tool_status(tool),
+        "tags": sorted({"atlas", "tool-version", dialect.lower()}),
+    }
+    if tool.description.state == DESCRIPTION_APPROVED and tool.description.text:
+        frontmatter["description"] = _first_sentence(tool.description.text)
+    generated: dict[str, str] = {"by": EXPORTER_ACTOR}
+    if tool.description.approval is not None:
+        generated["at"] = tool.description.approval.at
+    frontmatter["generated"] = generated
+    if tool.description.state == DESCRIPTION_APPROVED:
+        entry: dict[str, Any] = {
+            "id": "approved-tool-version",
+            "resource": resource,
+            "title": f"Approved Atlas tool version {tool.version}",
+        }
+        if tool.description.approval is not None:
+            entry["author"] = _actor(tool.description.approval)
+            entry["last_modified"] = tool.description.approval.at
+        frontmatter["sources"] = [entry]
+    approved = tool.description.state == DESCRIPTION_APPROVED
+    atlas: dict[str, Any] = {
+        "profile": f"{snapshot.profile}/{snapshot.profile_version}",
+        "tool": {
+            "key": tool.key,
+            "tool_version_id": tool.tool_version_id,
+            "slug": tool.slug,
+            "version": tool.version,
+            "lifecycle": tool.lifecycle,
+            "fingerprint": tool.fingerprint,
+            "invocation": {
+                "mcp_tool": f"atlas__{tool.slug}",
+                "rest": f"POST /v1/tool-versions/{tool.tool_version_id}/execute",
+            },
+        },
+        "description": {"state": tool.description.state, "version": tool.description.version},
+        "statements": {
+            "approved": ["interface", "purpose"] if approved else [],
+            "derived": ["source"] if approved else ["interface", "purpose", "source"],
+        },
+        "scope": _scope_extension(snapshot),
+    }
+    if tool.description.approval is not None:
+        atlas["description"]["approved_by"] = _actor(tool.description.approval)
+        atlas["description"]["approved_at"] = tool.description.approval.at
+    if tool.description.withheld_reason_codes:
+        atlas["description"]["withheld_reason_codes"] = list(
+            tool.description.withheld_reason_codes
+        )
+    frontmatter["atlas"] = atlas
+    body: list[str] = []
+    body.extend(_purpose_section(tool.description, "tool version"))
+    body.extend(["# Interface", ""])
+    if tool.inputs:
+        body.extend(["| Input | Type | Required |", "|---|---|---|"])
+        for item in sorted(tool.inputs, key=lambda entry: entry.name):
+            body.append(
+                f"| `{item.name}` | `{item.physical_type}` | {'yes' if item.required else 'no'} |"
+            )
+        body.append("")
+    else:
+        body.extend(["This tool version declares no inputs.", ""])
+    body.extend(
+        [
+            "# Invocation",
+            "",
+            f"* Through Atlas only: the MCP tool `atlas__{tool.slug}`, or "
+            f"`POST /v1/tool-versions/{tool.tool_version_id}/execute`.",
+            "* Every call goes through the Atlas query gateway, which applies the caller's "
+            "authorization, masking, row limits, cost gates and audit, and returns an execution "
+            "receipt to cite.",
+            "* This document contains no SQL, no executor and no credential. There is nothing "
+            "in it to run.",
+            "",
+        ]
+    )
+    source_path = paths.sources.get(tool.source_key)
+    if source_path is not None:
+        label = source_names.get(tool.source_key, tool.source_key)
+        body.extend(["# Source", "", f"* [{label}]({_absolute(source_path)}) - queries", ""])
+    if tool.description.state == DESCRIPTION_APPROVED:
+        approval = tool.description.approval
+        attribution = (
+            f", approved by {_actor(approval)} at {approval.at}" if approval is not None else ""
+        )
+        footnote = f"Approved Atlas tool version {tool.version}{attribution}."
+        body.extend([f"[^approved-description]: {footnote}", ""])
+    return OkfDocument(path=paths.tools[tool.key], text=_document_text(frontmatter, body))
+
+
+def _tools_index(snapshot: OkfSnapshot) -> OkfDocument:
+    entries = [
+        _entry(
+            f"{tool.name} (version {tool.version})",
+            f"tool-version-{tool.key}.md",
+            _first_sentence(tool.description.text, limit=160)
+            if tool.description.state == DESCRIPTION_APPROVED and tool.description.text
+            else f"{tool.lifecycle.lower()} tool version, no approved description",
+        )
+        for tool in sorted(snapshot.tools, key=lambda item: (item.name, item.version, item.key))
+    ]
+    return _index_document("tools/index.md", [("Tool versions", entries)])
+
+
+# --- refresh history (R11-OKF02) --------------------------------------------------------
+
+
+def _log_paths(label: str, paths: Sequence[str]) -> list[str]:
+    """Paths as code spans, never links: an older entry names documents a later publication may
+    have removed, and a link to one would be exactly the dead end the publish policy refuses."""
+    if not paths:
+        return []
+    shown = sorted(paths)[:MAX_LOG_PATHS]
+    lines = [f"  - {label}: " + ", ".join(f"`{path}`" for path in shown)]
+    if len(paths) > len(shown):
+        lines.append(f"  - {label}, not listed: {len(paths) - len(shown)} more")
+    return lines
+
+
+def _scoped_entry(entry: OkfLogEntry, prefix: str) -> OkfLogEntry | None:
+    """The part of one entry that moved a document under `prefix`, or None if nothing did."""
+    added = tuple(item for item in entry.added if item.startswith(prefix))
+    changed = tuple(item for item in entry.changed if item.startswith(prefix))
+    removed = tuple(item for item in entry.removed if item.startswith(prefix))
+    if entry.trigger != TRIGGER_INITIAL and not (added or changed or removed):
+        return None
+    return OkfLogEntry(
+        date=entry.date,
+        sequence=entry.sequence,
+        trigger=entry.trigger,
+        added=added,
+        changed=changed,
+        removed=removed,
+        truncated=entry.truncated,
+    )
+
+
+def _log_document(
+    path: str, title: str, entries: Sequence[OkfLogEntry], *, prefix: str | None
+) -> OkfDocument | None:
+    """A spec section 9 `log.md`: ISO date headings, newest first, one bullet per publication.
+
+    `prefix` scopes the log to one source directory: an entry appears there only if it moved a
+    document under that directory, so a source untouched by a change keeps the same log bytes --
+    and so the same hash -- across a publication that changed a different source.
+    """
+    scoped: list[OkfLogEntry] = []
+    for item in sorted(entries, key=lambda entry: entry.sequence, reverse=True):
+        kept = item if prefix is None else _scoped_entry(item, prefix)
+        if kept is not None:
+            scoped.append(kept)
+    if not scoped:
+        return None
+    listed = scoped[:MAX_LOG_ENTRIES]
+    lines = [f"# {title}", ""]
+    current_date: str | None = None
+    for entry in listed:
+        if entry.date != current_date:
+            if current_date is not None:
+                lines.append("")
+            lines.extend([f"## {entry.date}", ""])
+            current_date = entry.date
+        if entry.trigger == TRIGGER_INITIAL:
+            count = f" with {entry.documents} document(s)" if entry.documents else ""
+            lines.append(
+                f"- **Publication {entry.sequence}** (`{TRIGGER_INITIAL}`): first published"
+                f"{count}."
+            )
+            continue
+        lines.append(
+            f"- **Publication {entry.sequence}** (`{entry.trigger}`): "
+            f"{len(entry.changed)} changed, {len(entry.added)} added, "
+            f"{len(entry.removed)} removed."
+        )
+        lines.extend(_log_paths("changed", entry.changed))
+        lines.extend(_log_paths("added", entry.added))
+        lines.extend(_log_paths("removed", entry.removed))
+        if entry.truncated:
+            lines.append(
+                f"  - Path lists were cut at {MAX_LOG_STORED_PATHS} entries when stored; the "
+                "counts above cover only the listed paths."
+            )
+    if len(scoped) > len(listed):
+        lines.extend(["", f"{len(scoped) - len(listed)} earlier publication(s) not listed."])
+    return OkfDocument(path=path, text="\n".join(lines).rstrip() + "\n")
+
+
+def is_log_path(path: str) -> bool:
+    """A refresh history file: the bundle root's `log.md` or a source directory's."""
+    return path == "log.md" or path.endswith("/log.md")
+
+
+def log_entry(
+    stamp: OkfPublicationStamp,
+    *,
+    added: Sequence[str],
+    changed: Sequence[str],
+    removed: Sequence[str],
+    unchanged: int,
+    documents: int,
+) -> OkfLogEntry:
+    """The history entry for one publication. Logs themselves are never listed as changes --
+    every publication moves the root log, and listing it would say nothing."""
+
+    def bounded(paths: Sequence[str]) -> tuple[str, ...]:
+        return tuple(sorted(path for path in paths if not is_log_path(path))[:MAX_LOG_STORED_PATHS])
+
+    if stamp.trigger == TRIGGER_INITIAL:
+        return OkfLogEntry(
+            date=stamp.date,
+            sequence=stamp.sequence,
+            trigger=TRIGGER_INITIAL,
+            documents=documents,
+        )
+    lists = [bounded(added), bounded(changed), bounded(removed)]
+    truncated = any(
+        len([path for path in source if not is_log_path(path)]) > len(kept)
+        for source, kept in zip((added, changed, removed), lists, strict=True)
+    )
+    return OkfLogEntry(
+        date=stamp.date,
+        sequence=stamp.sequence,
+        trigger=stamp.trigger,
+        added=lists[0],
+        changed=lists[1],
+        removed=lists[2],
+        unchanged=unchanged,
+        truncated=truncated,
+    )
+
+
 # --- manifest ---------------------------------------------------------------------------
 
 
@@ -1600,6 +2003,7 @@ def _scope_digest(snapshot: OkfSnapshot) -> str:
                 "routines": sorted(routine.key for routine in snapshot.routines),
                 "packages": sorted(package.key for package in snapshot.packages),
                 "concepts": sorted(concept.key for concept in snapshot.concepts),
+                "tools": sorted(tool.key for tool in snapshot.tools),
             }
         )
     )
@@ -1691,6 +2095,7 @@ def _manifest(snapshot: OkfSnapshot, documents: Sequence[OkfDocument]) -> dict[s
             "routines": len(snapshot.routines),
             "packages": len(snapshot.packages),
             "concepts": len(snapshot.concepts),
+            "tools": len(snapshot.tools),
             "documents": len(documents),
         },
         "files": [
@@ -1718,6 +2123,7 @@ def _labels(snapshot: OkfSnapshot) -> dict[str, str]:
     )
     labels.update({package.key: package.qualified_name for package in snapshot.packages})
     labels.update({concept.key: concept.label or concept.name for concept in snapshot.concepts})
+    labels.update({tool.key: f"{tool.name} (version {tool.version})" for tool in snapshot.tools})
     return labels
 
 
@@ -1725,11 +2131,271 @@ def _dialects(snapshot: OkfSnapshot) -> dict[str, str]:
     return {source.key: source.dialect for source in snapshot.sources}
 
 
-def export_okf_bundle(snapshot: OkfSnapshot) -> OkfBundle:
+#: Plan kinds. A subject document and a schema index are rendered only when something they
+#: depend on moved; the bundle root, source and concept/tool indexes and the logs summarize
+#: counts across the whole scope, are few, and are always re-derived -- their bytes, and so
+#: their hashes, still only move when what they summarize moved.
+_PLAN_SUBJECT: Final = "subject"
+_PLAN_SCHEMA_INDEX: Final = "schema-index"
+_PLAN_ALWAYS: Final = "always"
+
+
+@dataclass(frozen=True, slots=True)
+class _Planned:
+    """One document the bundle will contain, and what its bytes depend on.
+
+    `owns` are identity keys whose *facts* feed the document; `links` are keys whose *label or
+    path* it prints. An incremental rebuild re-renders a document only when one of those moved.
+    """
+
+    path: str
+    subject: str | None
+    kind: str
+    owns: tuple[str, ...]
+    links: tuple[str, ...]
+    render: Callable[[], OkfDocument | None]
+
+
+def _plan(snapshot: OkfSnapshot) -> list[_Planned]:
+    """Every content document the snapshot renders to, unrendered. Logs are `_log_plan`."""
+    paths = _resolve_paths(snapshot)
+    labels = _labels(snapshot)
+    dialects = _dialects(snapshot)
+    source_names = {source.key: source.name for source in snapshot.sources}
+    plan: list[_Planned] = [
+        _Planned("index.md", None, _PLAN_ALWAYS, (), (), partial(_root_index, snapshot, paths))
+    ]
+    for source in snapshot.sources:
+        plan.append(
+            _Planned(
+                paths.sources[source.key],
+                None,
+                _PLAN_ALWAYS,
+                (),
+                (),
+                partial(_source_index, source, snapshot, paths),
+            )
+        )
+    for schema in snapshot.schemas:
+        children = tuple(
+            sorted(
+                [obj.key for obj in snapshot.objects if obj.schema_key == schema.key]
+                + [item.key for item in snapshot.routines if item.schema_key == schema.key]
+                + [item.key for item in snapshot.packages if item.schema_key == schema.key]
+            )
+        )
+        plan.append(
+            _Planned(
+                paths.schemas[schema.key],
+                None,
+                _PLAN_SCHEMA_INDEX,
+                (schema.key, *children),
+                (),
+                partial(_schema_index, schema, snapshot, paths),
+            )
+        )
+    for obj in snapshot.objects:
+        plan.append(
+            _Planned(
+                paths.objects[obj.key],
+                obj.key,
+                _PLAN_SUBJECT,
+                (obj.key, obj.source_key),
+                tuple(link.target_key for link in obj.links),
+                partial(_object_document, obj, snapshot, paths, labels, dialects[obj.source_key]),
+            )
+        )
+    for routine in snapshot.routines:
+        plan.append(
+            _Planned(
+                paths.routines[routine.key],
+                routine.key,
+                _PLAN_SUBJECT,
+                (routine.key, routine.source_key),
+                tuple(link.target_key for link in routine.links),
+                partial(
+                    _routine_document,
+                    routine,
+                    snapshot,
+                    paths,
+                    labels,
+                    dialects[routine.source_key],
+                ),
+            )
+        )
+    for package in snapshot.packages:
+        plan.append(
+            _Planned(
+                paths.packages[package.key],
+                package.key,
+                _PLAN_SUBJECT,
+                (package.key, package.source_key),
+                package.member_keys,
+                partial(
+                    _package_document,
+                    package,
+                    snapshot,
+                    paths,
+                    labels,
+                    dialects[package.source_key],
+                ),
+            )
+        )
+    if snapshot.concepts:
+        plan.append(
+            _Planned(
+                "concepts/index.md",
+                None,
+                _PLAN_ALWAYS,
+                (),
+                (),
+                partial(_concepts_index, snapshot, paths),
+            )
+        )
+        for concept in snapshot.concepts:
+            related = tuple(
+                relation.target_key
+                for relation in concept.relations
+                if relation.target_key is not None
+            )
+            plan.append(
+                _Planned(
+                    paths.concepts[concept.key],
+                    concept.key,
+                    _PLAN_SUBJECT,
+                    (concept.key,),
+                    (*concept.mapped_object_keys, *concept.mapped_routine_keys, *related),
+                    partial(_concept_document, concept, snapshot, paths, labels),
+                )
+            )
+    if snapshot.tools:
+        plan.append(
+            _Planned("tools/index.md", None, _PLAN_ALWAYS, (), (), partial(_tools_index, snapshot))
+        )
+        for tool in snapshot.tools:
+            plan.append(
+                _Planned(
+                    paths.tools[tool.key],
+                    tool.key,
+                    _PLAN_SUBJECT,
+                    (tool.key, tool.source_key),
+                    (),
+                    partial(
+                        _tool_document,
+                        tool,
+                        snapshot,
+                        paths,
+                        source_names,
+                        dialects[tool.source_key],
+                    ),
+                )
+            )
+    return plan
+
+
+def _log_plan(snapshot: OkfSnapshot, history: Sequence[OkfLogEntry]) -> list[_Planned]:
+    """The refresh-history documents: the bundle root's `log.md` and one per source.
+
+    Empty without history -- a bundle rendered straight from a snapshot, as R11-OKF01 did, has
+    no refresh history to report, and inventing a first entry would put a clock in it.
+    """
+    if not history:
+        return []
+    plan: list[_Planned] = []
+    plan.append(
+        _Planned(
+            "log.md",
+            None,
+            _PLAN_ALWAYS,
+            (),
+            (),
+            partial(_log_document, "log.md", "Refresh history", history, prefix=None),
+        )
+    )
+    for source in snapshot.sources:
+        prefix = f"{_source_dir(source.key)}/"
+        plan.append(
+            _Planned(
+                f"{prefix}log.md",
+                None,
+                _PLAN_ALWAYS,
+                (),
+                (),
+                partial(
+                    _log_document,
+                    f"{prefix}log.md",
+                    f"Refresh history: {source.name}",
+                    history,
+                    prefix=prefix,
+                ),
+            )
+        )
+    return plan
+
+
+def document_subjects(snapshot: OkfSnapshot) -> dict[str, str]:
+    """Path -> identity key for every document that is *about* one subject.
+
+    Indexes and logs are about a scope rather than a subject, and are absent. Used by the store
+    to find "the document about this table" without parsing any document.
+    """
+    paths = _resolve_paths(snapshot)
+    subjects: dict[str, str] = {}
+    for table in (paths.objects, paths.routines, paths.packages, paths.concepts, paths.tools):
+        subjects.update({path: key for key, path in table.items()})
+    return subjects
+
+
+def _fact_digests(snapshot: OkfSnapshot) -> dict[str, str]:
+    """Identity key -> digest of that subject's frozen facts, for every kind that has a key."""
+    digests: dict[str, str] = {}
+    for items in (
+        snapshot.sources,
+        snapshot.schemas,
+        snapshot.objects,
+        snapshot.routines,
+        snapshot.packages,
+        snapshot.concepts,
+        snapshot.tools,
+    ):
+        for item in items:
+            digests[item.key] = _digest_text(_canonical_json(_as_document(item)))
+    return digests
+
+
+def _identities(snapshot: OkfSnapshot) -> dict[str, tuple[str, str]]:
+    """Identity key -> (label, path): what another document prints when it links here."""
+    paths = _resolve_paths(snapshot)
+    labels = _labels(snapshot)
+    identities: dict[str, tuple[str, str]] = {}
+    for table in (paths.objects, paths.routines, paths.packages, paths.concepts, paths.tools):
+        for key, path in table.items():
+            identities[key] = (labels.get(key, key), path)
+    return identities
+
+
+def _renderer_frame(snapshot: OkfSnapshot) -> str:
+    """Everything every document carries regardless of its subject: the renderer pin and the
+    scope extension. A change here moves every document, so it forces a full render."""
+    return _canonical_json(
+        {
+            "okf_version": snapshot.okf_version,
+            "profile": snapshot.profile,
+            "profile_version": snapshot.profile_version,
+            "spec_revision": snapshot.spec_revision,
+            "scope": _scope_extension(snapshot),
+        }
+    )
+
+
+def export_okf_bundle(
+    snapshot: OkfSnapshot, *, history: Sequence[OkfLogEntry] = ()
+) -> OkfBundle:
     """Render one frozen snapshot as an OKF bundle plus an Atlas manifest.
 
-    Pure: no clock, no database, no network, no model. Given the same snapshot it returns the
-    same bytes, which is the whole point of the snapshot being a value.
+    Pure: no clock, no database, no network, no model. Given the same snapshot (and the same
+    refresh `history`, when a stored bundle carries one) it returns the same bytes, which is the
+    whole point of the snapshot being a value.
 
     Raises `OkfExportError` rather than returning a partial bundle -- a colliding identity, a
     dangling reference, an oversized document or a missing parent is a refused export. "Produce
@@ -1737,30 +2403,138 @@ def export_okf_bundle(snapshot: OkfSnapshot) -> OkfBundle:
     design's instruction, and the same reasoning covers the other three.
     """
     _validate_snapshot_shape(snapshot)
-    paths = _resolve_paths(snapshot)
-    labels = _labels(snapshot)
-    dialects = _dialects(snapshot)
-    documents: list[OkfDocument] = [_root_index(snapshot, paths)]
-    for source in snapshot.sources:
-        documents.append(_source_index(source, snapshot, paths))
-    for schema in snapshot.schemas:
-        documents.append(_schema_index(schema, snapshot, paths))
-    for obj in snapshot.objects:
-        documents.append(
-            _object_document(obj, snapshot, paths, labels, dialects[obj.source_key])
+    plan = [*_plan(snapshot), *_log_plan(snapshot, history)]
+    documents = [document for item in plan if (document := item.render()) is not None]
+    return _assemble_bundle(snapshot, documents)
+
+
+def export_okf_bundle_incremental(
+    snapshot: OkfSnapshot,
+    *,
+    prior_snapshot: OkfSnapshot | None,
+    prior_documents: Mapping[str, str],
+    prior_history: Sequence[OkfLogEntry] = (),
+    stamp: OkfPublicationStamp,
+) -> tuple[OkfBundle, OkfRebuildReport, tuple[OkfLogEntry, ...]]:
+    """R11-OKF02: rebuild a stored bundle, rendering only what a change can have moved.
+
+    Acceptance OKF-C: "a changed view regenerates only affected documents; no-op scans reproduce
+    hashes". The dependency roots are the subjects whose frozen facts differ between the prior
+    snapshot and this one. From them:
+
+    * a subject document is rendered when its own facts or its source's facts moved, or when a
+      document it links to changed label or path -- a link prints both;
+    * a schema index is rendered when the schema, or any object, routine or package it lists
+      (before or after), moved;
+    * the root, source, concept and tool indexes are re-derived every time -- a handful of
+      documents that summarize counts over the whole scope;
+    * everything else is **carried**: its stored bytes are reused and its builder never runs, so
+      its hash is the prior hash by construction rather than by re-rendering to the same bytes.
+
+    The logs come last: the new history entry is computed from what the content documents did,
+    then the root and per-source `log.md` are rendered from it. A renderer change (profile,
+    spec pin) or a scope change moves every document, so either one forces a full render.
+
+    Returns the bundle, the report and the history the bundle's logs were rendered from. The
+    bundle is byte-identical to `export_okf_bundle(snapshot, history=<that history>)`;
+    `tests/test_okf_store.py` asserts that across every kind of change, which is what makes
+    carrying a document safe rather than hopeful.
+    """
+    _validate_snapshot_shape(snapshot)
+    full = prior_snapshot is None or _renderer_frame(prior_snapshot) != _renderer_frame(
+        snapshot
+    )
+    moved_facts: set[str] = set()
+    moved_links: set[str] = set()
+    prior_plan: dict[str, _Planned] = {}
+    if prior_snapshot is not None and not full:
+        before, after = _fact_digests(prior_snapshot), _fact_digests(snapshot)
+        moved_facts = {
+            key for key in before.keys() | after.keys() if before.get(key) != after.get(key)
+        }
+        was, now = _identities(prior_snapshot), _identities(snapshot)
+        moved_links = {key for key in was.keys() | now.keys() if was.get(key) != now.get(key)}
+        # Dependency bookkeeping only: none of the prior plan's builders is ever called.
+        prior_plan = {item.path: item for item in _plan(prior_snapshot)}
+    documents: list[OkfDocument] = []
+    rendered: list[str] = []
+    carried: list[str] = []
+    for item in _plan(snapshot):
+        stored = prior_documents.get(item.path)
+        earlier = prior_plan.get(item.path)
+        must_render = (
+            full
+            or item.kind == _PLAN_ALWAYS
+            or stored is None
+            or earlier is None
+            or bool((set(item.owns) | set(earlier.owns)) & moved_facts)
+            or bool((set(item.links) | set(earlier.links)) & moved_links)
         )
-    for routine in snapshot.routines:
-        documents.append(
-            _routine_document(routine, snapshot, paths, labels, dialects[routine.source_key])
-        )
-    for package in snapshot.packages:
-        documents.append(
-            _package_document(package, snapshot, paths, labels, dialects[package.source_key])
-        )
-    if snapshot.concepts:
-        documents.append(_concepts_index(snapshot, paths))
-        for concept in snapshot.concepts:
-            documents.append(_concept_document(concept, snapshot, paths, labels))
+        if must_render:
+            document = item.render()
+            if document is None:
+                continue
+            rendered.append(item.path)
+        else:
+            assert stored is not None
+            document = OkfDocument(path=item.path, text=stored)
+            carried.append(item.path)
+        documents.append(document)
+
+    content = {document.path: document.text for document in documents}
+    prior_content = {
+        path: text for path, text in prior_documents.items() if not is_log_path(path)
+    }
+    added = sorted(path for path in content if path not in prior_content)
+    changed = sorted(
+        path
+        for path, text in content.items()
+        if path in prior_content and prior_content[path] != text
+    )
+    removed = sorted(path for path in prior_content if path not in content)
+    entry = log_entry(
+        stamp,
+        added=added,
+        changed=changed,
+        removed=removed,
+        unchanged=len(content) - len(added) - len(changed),
+        documents=len(content),
+    )
+    history = tuple(
+        sorted(
+            [entry, *(item for item in prior_history if item.sequence != stamp.sequence)],
+            key=lambda item: item.sequence,
+            reverse=True,
+        )[:MAX_LOG_ENTRIES]
+    )
+    for item in _log_plan(snapshot, history):
+        document = item.render()
+        if document is not None:
+            documents.append(document)
+            rendered.append(item.path)
+    bundle = _assemble_bundle(snapshot, documents)
+    final = {document.path: document.text for document in bundle.documents}
+    report = OkfRebuildReport(
+        rendered=tuple(sorted(rendered)),
+        carried=tuple(sorted(carried)),
+        added=tuple(sorted(path for path in final if path not in prior_documents)),
+        changed=tuple(
+            sorted(
+                path
+                for path, text in final.items()
+                if path in prior_documents and prior_documents[path] != text
+            )
+        ),
+        removed=tuple(sorted(path for path in prior_documents if path not in final)),
+        changed_subjects=tuple(sorted(moved_facts)),
+        full=full,
+    )
+    return bundle, report, history
+
+
+def _assemble_bundle(snapshot: OkfSnapshot, documents: Sequence[OkfDocument]) -> OkfBundle:
+    """Bound, order and seal the rendered documents. Shared by the full and incremental paths
+    so the size limits and the manifest cannot differ between them."""
     if len(documents) > MAX_DOCUMENTS:
         raise OkfExportError(
             f"{len(documents)} documents exceeds the {MAX_DOCUMENTS}-document bundle limit"
@@ -1799,6 +2573,7 @@ def _validate_snapshot_shape(snapshot: OkfSnapshot) -> None:
         ("routine", snapshot.routines),
         ("package", snapshot.packages),
         ("concept", snapshot.concepts),
+        ("tool", snapshot.tools),
     ):
         for item in items:
             key = item.key
@@ -1825,6 +2600,11 @@ def _validate_snapshot_shape(snapshot: OkfSnapshot) -> None:
     for package in snapshot.packages:
         if package.schema_key not in schema_keys or package.source_key not in source_keys:
             raise OkfExportError(f"package {package.key!r} names a parent not in the snapshot")
+    for tool in snapshot.tools:
+        if tool.source_key not in source_keys:
+            # The freeze admits a tool only when its datasource was admitted; a tool naming an
+            # absent source here would be a count of something the reader may not see.
+            raise OkfExportError(f"tool {tool.key!r} names a source not in the snapshot")
     for freshness in snapshot.freshness:
         if freshness.source_key not in source_keys:
             raise OkfExportError(

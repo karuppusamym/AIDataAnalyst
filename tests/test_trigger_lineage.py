@@ -889,3 +889,38 @@ async def test_an_unreachable_action_routine_is_routed_to_the_source_administrat
     assert totals.get("LINEAGE_UNRESOLVED_CALLEE") == 1
     assert totals.get("LINEAGE_UNPARSED_STATEMENTS") == 1
     assert totals.get("LINEAGE_AWAITING_REVIEW") is None
+
+
+# ---------------------------------------------------------------------------
+# An *aliased* firing-row reference must bind like an unaliased one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The shape the parser got wrong: a plain or INTO select through an alias.
+        "SELECT i.customer_id INTO #t FROM inserted i",
+        "SELECT i.customer_id INTO dbo.stage FROM inserted i",
+        "SELECT i.customer_id FROM inserted i",
+        # Through the temp table, so the transitive edge carries the right source.
+        "SELECT i.customer_id INTO #t FROM inserted i; "
+        "INSERT INTO dbo.audit (cid) SELECT customer_id FROM #t",
+        # MERGE accepted the firing-row binding and then dropped it.
+        "MERGE dbo.audit AS a USING inserted i ON a.cid = i.customer_id "
+        "WHEN NOT MATCHED THEN INSERT (cid) VALUES (i.customer_id);",
+    ],
+)
+def test_an_aliased_firing_row_resolves_to_the_firing_table(sql: str) -> None:
+    """R11-FP01, 2026-09-18. `_bind_subject` put `i -> dbo.orders` in the alias
+    map correctly, and then `sql_lineage_parser._extract_edges_from_select`
+    re-collected the statement's own tables and *overwrote* it with
+    `i -> inserted`, so the edge's source was a table literally named `inserted`.
+    The unaliased form and an aliased INSERT...SELECT happened to resolve by other
+    routes, which is why the defect survived. MERGE had the sibling bug: it
+    accepted the binding and never passed it on."""
+    result = parse_trigger_lineage(sql, dialect="tsql", firing_table="dbo.orders")
+
+    sources = {edge.source_table for edge in result.edges}
+    assert "dbo.orders" in sources
+    assert not {s for s in sources if s.lower() in {"inserted", "i"}}, sources

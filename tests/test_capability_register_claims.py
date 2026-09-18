@@ -81,7 +81,17 @@ _VERDICT = re.compile(r"^\**(Yes|No|Partial|n/a)\b", re.IGNORECASE)
 #: `aida_modules` deliberately excludes `src/atlas/...` because the reachability
 #: graph walks `src/aida` only, so it lands here too rather than being counted
 #: as unevidenced.
-MAX_UNCHECKABLE_REACHABLE_YES = 13
+#:
+#: Raised 13 -> 15 on 2026-09-18, for the same two reasons, once each:
+#:   - "The offline answer evaluation reaches no provider" cites
+#:     `scripts/answer_evaluation_benchmark.py`. The defect and the fix are in
+#:     the harness itself, which no app entry point reaches.
+#:   - "The catalog listing's total counts only tables the caller may read"
+#:     cites the module that makes it true, `src/atlas/modules/catalog/router.py`,
+#:     which is outside the `src/aida` reachability graph.
+#: The third new row that cites a script, the governed estate seed, also cites
+#: the `src/aida` API modules its decisions go through, so it is checked.
+MAX_UNCHECKABLE_REACHABLE_YES = 15
 
 
 @dataclass(frozen=True, slots=True)

@@ -126,7 +126,9 @@ const LAYER_DEFS: { key: LayerKey; label: string; tone: Tone; sources: UnifiedLi
   { key: "SUGGESTED", label: "Suggested", tone: "warn", sources: ["SUGGESTED_RELATIONSHIP"] },
   { key: "DBT", label: "dbt", tone: "accent", sources: ["DBT_DEPENDENCY"] },
   { key: "OL", label: "OpenLineage", tone: "ok", sources: ["OPENLINEAGE_ETL"] },
-  { key: "OTHER", label: "View / procedure", tone: "mute", sources: ["VIEW_DEFINITION", "PROCEDURE_DEFINITION"] },
+  /* R11-FP01: TRIGGER_DEFINITION is parsed code like the other two, so it
+     filters with them rather than getting a sixth chip. */
+  { key: "OTHER", label: "View / procedure / trigger", tone: "mute", sources: ["VIEW_DEFINITION", "PROCEDURE_DEFINITION", "TRIGGER_DEFINITION"] },
 ];
 
 function layerOf(source: UnifiedLineageEdgeRead["edge_source"]): LayerKey {

@@ -39,7 +39,7 @@ already produced by an organization-scoped read.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
@@ -74,6 +74,8 @@ from aida.models import (
     ContextProductVersion,
     DataSource,
     GovernanceReview,
+    GovernedTool,
+    GovernedToolVersion,
     MetadataCatalog,
     MetadataColumn,
     MetadataSchema,
@@ -105,11 +107,14 @@ from aida.okf_export import (
     OkfSnapshot,
     OkfSourceFacts,
     OkfSourceFreshness,
+    OkfToolFacts,
+    OkfToolInput,
     object_key,
     package_key,
     routine_key,
     schema_key,
     source_key,
+    tool_version_key,
 )
 from aida.security_types import SecurityContext
 
@@ -395,6 +400,111 @@ async def _ontology_approvals(
     return approvals
 
 
+#: R11-OKF02: tool-version statuses a reviewer's approval stands behind. Anything else -- a
+#: DRAFT, a version still in review, a REJECTED one -- is exported with no asserted purpose.
+_APPROVED_TOOL_STATUSES: Final = frozenset({"PUBLISHED", "SUPPORTED", "SUPERSEDED", "DEPRECATED"})
+
+
+def _uuids(values: Sequence[Any]) -> list[UUID]:
+    """The values that are UUIDs. A pin that is not one names no tool Atlas holds."""
+    return [UUID(str(value)) for value in values if _is_uuid(value)]
+
+
+async def _eligible_tools(
+    session: AsyncSession, organization_id: UUID, version: ContextProductVersion
+) -> list[tuple[GovernedToolVersion, GovernedTool]]:
+    """The tool versions the product pins, with their tool, in one organization-scoped read."""
+    ids = _uuids(list(version.eligible_tool_version_ids or []))
+    if not ids:
+        return []
+    rows = (
+        await session.execute(
+            select(GovernedToolVersion, GovernedTool)
+            .join(GovernedTool, GovernedTool.id == GovernedToolVersion.tool_id)
+            .where(
+                GovernedToolVersion.id.in_(ids),
+                GovernedToolVersion.organization_id == organization_id,
+                GovernedTool.organization_id == organization_id,
+            )
+        )
+    ).all()
+    return [(tool_version, tool) for tool_version, tool in rows]
+
+
+async def candidate_datasource_ids(
+    session: AsyncSession, version: ContextProductVersion
+) -> list[UUID]:
+    """R11-OKF02: every datasource the product version's own scope reaches, sorted.
+
+    Its tables, its routines and its eligible tools -- the same three sets `freeze_snapshot`
+    loads rows for. `aida.okf_store` admits exactly this set to compute the reader's authority
+    digest and hands the admitted result back to the freeze, so the bundle stored under a digest
+    is the bundle that digest's admission produced, not a second decision taken moments later.
+    """
+    organization_id = version.organization_id
+    table_ids = _uuids(list(version.table_ids or []))
+    routine_ids = _uuids(list(version.routine_ids or []))
+    candidates: set[UUID] = set()
+    if table_ids:
+        candidates.update(
+            (
+                await session.scalars(
+                    select(MetadataTable.datasource_id).where(
+                        MetadataTable.id.in_(table_ids),
+                        MetadataTable.organization_id == organization_id,
+                    )
+                )
+            ).all()
+        )
+    if routine_ids:
+        candidates.update(
+            (
+                await session.scalars(
+                    select(MetadataRoutine.datasource_id).where(
+                        MetadataRoutine.id.in_(routine_ids),
+                        MetadataRoutine.organization_id == organization_id,
+                    )
+                )
+            ).all()
+        )
+    candidates.update(
+        tool_version.datasource_id
+        for tool_version, _tool in await _eligible_tools(session, organization_id, version)
+    )
+    return sorted(candidates, key=str)
+
+
+async def admit_datasources(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    product: ContextProduct,
+    version: ContextProductVersion,
+) -> dict[UUID, DataSource]:
+    """R11-OKF02: the reader's per-datasource admission for one product version, on its own.
+
+    The same decision `freeze_snapshot` takes -- same seed domain, same cross-boundary grant
+    check, same gate -- over the same candidate set, exposed so the store can key a stored
+    bundle on it before deciding whether anything needs freezing at all.
+    """
+    organization_id = version.organization_id
+    seed_domain_id = await session.scalar(
+        select(Project.data_domain_id).where(
+            Project.id == product.project_id,
+            Project.organization_id == organization_id,
+        )
+    )
+    return await _admit_datasources(
+        session,
+        context,
+        settings,
+        organization_id=organization_id,
+        seed_domain_id=seed_domain_id,
+        datasource_ids=await candidate_datasource_ids(session, version),
+    )
+
+
 # --- assembly ---------------------------------------------------------------------------
 
 
@@ -410,8 +520,13 @@ async def freeze_snapshot(
     ontology: Sequence[ResolvedOntologyMeaning],
     freshness: Sequence[ResolvedSourceFreshness],
     captured_at: datetime,
+    admitted: Mapping[UUID, DataSource] | None = None,
 ) -> OkfSnapshot:
     """Freeze one context product version into the value the exporter renders.
+
+    `admitted` (R11-OKF02) is the reader's admission, already decided by `admit_datasources`
+    for the stored bundle's authority digest. Passed in so the freeze cannot take a second,
+    possibly different decision; when absent the freeze decides itself, as R11-OKF01 did.
 
     `routines`, `views`, `ontology` and `freshness` arrive already resolved by the context
     compiler's own scope resolver (`context_compiler_api._load_source`), which is what the
@@ -459,26 +574,31 @@ async def freeze_snapshot(
         else []
     )
 
-    seed_domain_id = await session.scalar(
-        select(Project.data_domain_id).where(
-            Project.id == product.project_id,
-            Project.organization_id == organization_id,
+    tool_rows = await _eligible_tools(session, organization_id, version)
+    if admitted is None:
+        seed_domain_id = await session.scalar(
+            select(Project.data_domain_id).where(
+                Project.id == product.project_id,
+                Project.organization_id == organization_id,
+            )
         )
-    )
-    candidates = {row[0].datasource_id for row in table_rows} | {
-        row[0].datasource_id for row in routine_rows
-    }
-    admitted = await _admit_datasources(
-        session,
-        context,
-        settings,
-        organization_id=organization_id,
-        seed_domain_id=seed_domain_id,
-        datasource_ids=sorted(candidates, key=str),
-    )
+        candidates = (
+            {row[0].datasource_id for row in table_rows}
+            | {row[0].datasource_id for row in routine_rows}
+            | {tool_version.datasource_id for tool_version, _tool in tool_rows}
+        )
+        admitted = await _admit_datasources(
+            session,
+            context,
+            settings,
+            organization_id=organization_id,
+            seed_domain_id=seed_domain_id,
+            datasource_ids=sorted(candidates, key=str),
+        )
 
     table_rows = [row for row in table_rows if row[0].datasource_id in admitted]
     routine_rows = [row for row in routine_rows if row[0].datasource_id in admitted]
+    tool_rows = [row for row in tool_rows if row[0].datasource_id in admitted]
     admitted_table_ids = [row[0].id for row in table_rows]
     admitted_routine_ids = [row[0].id for row in routine_rows]
 
@@ -558,7 +678,59 @@ async def freeze_snapshot(
         ontology=list(ontology),
         ontology_approvals=ontology_approvals,
         freshness=list(freshness),
+        tool_rows=tool_rows,
     )
+
+
+def _tool_facts(
+    tool_rows: Sequence[tuple[GovernedToolVersion, GovernedTool]],
+) -> tuple[OkfToolFacts, ...]:
+    """R11-OKF02: admitted tool versions as references. The SQL template is never read into a
+    field, and of the parameter schema only name, type and required-ness survive -- a declared
+    default, allowed value or bound is a literal, which INV-6 keeps out."""
+    facts: list[OkfToolFacts] = []
+    for tool_version, tool in tool_rows:
+        approved = (
+            tool_version.status.upper() in _APPROVED_TOOL_STATUSES
+            and bool(tool_version.approved_by)
+            and tool_version.approved_at is not None
+        )
+        inputs = []
+        for item in tool_version.parameter_schema or []:
+            if not isinstance(item, Mapping) or not item.get("name"):
+                continue
+            inputs.append(
+                OkfToolInput(
+                    name=str(item["name"]),
+                    physical_type=str(item.get("parameter_type") or item.get("type") or "unknown"),
+                    required=bool(item.get("required", True)),
+                )
+            )
+        facts.append(
+            OkfToolFacts(
+                key=tool_version_key(str(tool.project_id), tool.slug, tool_version.version),
+                tool_version_id=str(tool_version.id),
+                slug=tool.slug,
+                name=tool_version.name,
+                version=tool_version.version,
+                lifecycle=tool_version.status,
+                source_key=source_key(str(tool_version.datasource_id)),
+                fingerprint=tool_version.fingerprint,
+                inputs=tuple(sorted(inputs, key=lambda entry: entry.name)),
+                description=_describe(
+                    state=DESCRIPTION_APPROVED if approved else DESCRIPTION_NONE,
+                    text=tool_version.description if approved else None,
+                    version=tool_version.version,
+                    approval=(
+                        _approval(tool_version.approved_by, tool_version.approved_at)
+                        if approved
+                        else None
+                    ),
+                    origin="okf_export:tool_description",
+                ),
+            )
+        )
+    return tuple(sorted(facts, key=lambda item: (item.name, item.version, item.key)))
 
 
 def _policy_partition(version: ContextProductVersion) -> OkfPolicyPartition:
@@ -687,7 +859,7 @@ def _assemble(
     product: ContextProduct,
     version: ContextProductVersion,
     captured_at: datetime,
-    admitted: dict[UUID, DataSource],
+    admitted: Mapping[UUID, DataSource],
     table_rows: Sequence[tuple[MetadataTable, MetadataSchema, MetadataCatalog]],
     routine_rows: Sequence[tuple[MetadataRoutine, MetadataSchema, MetadataCatalog]],
     columns: Sequence[MetadataColumn],
@@ -702,6 +874,7 @@ def _assemble(
     ontology: Sequence[ResolvedOntologyMeaning],
     ontology_approvals: dict[str, OkfApproval],
     freshness: Sequence[ResolvedSourceFreshness],
+    tool_rows: Sequence[tuple[GovernedToolVersion, GovernedTool]] = (),
 ) -> OkfSnapshot:
     """Turn admitted rows into the frozen value. Pure from here down: no session, no clock.
 
@@ -1006,7 +1179,12 @@ def _assemble(
             product_fingerprint=version.fingerprint,
             product_name=version.name,
             product_purpose=version.purpose,
-            eligible_tool_version_ids=tuple(sorted(version.eligible_tool_version_ids or [])),
+            # R11-OKF02: only the pins that resolved to a tool over an admitted datasource. A
+            # pin to a tool the reader's authorization refused is not listed, exactly as the
+            # tool's own document is not rendered and not counted (OKF-D).
+            eligible_tool_version_ids=tuple(
+                sorted(str(tool_version.id) for tool_version, _tool in tool_rows)
+            ),
         ),
         sources=sources,
         schemas=tuple(sorted(schemas.values(), key=lambda item: item.qualified_name)),
@@ -1022,6 +1200,9 @@ def _assemble(
             )
             for row in sorted(freshness, key=lambda item: item.datasource_id)
             if source_key(row.datasource_id) in source_keys
+        ),
+        tools=_tool_facts(
+            [row for row in tool_rows if source_key(str(row[0].datasource_id)) in source_keys]
         ),
     )
 

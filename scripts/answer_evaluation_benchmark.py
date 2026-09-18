@@ -119,6 +119,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -1398,6 +1399,30 @@ COST_REFUSAL = (
 )
 
 
+def force_offline_provider() -> None:
+    """Make the offline mode's "no provider, no network" promise true.
+
+    It was an assumption, and on a configured machine it was false.
+    `observe_offline` builds a `GovernedRetriever` from `get_settings()`, which
+    reads `.env`; with an embedding provider set there, retrieval embeds each
+    candidate live. A run on 2026-09-17 made about five `gemini-embedding-001`
+    requests while printing `no provider, no network` and reporting 0 tokens --
+    a harness misreporting its own network use, on the one measurement whose
+    whole value is being believed. The gate tests never hit it because they
+    force the provider off (`tests/test_answer_evaluation_gate.py`); the CLI did
+    not, so the two disagreed about what "offline" meant.
+
+    An environment variable outranks `.env` in pydantic-settings' source order,
+    and `get_settings` is cached, so this sets the one and clears the other.
+    Only the offline branch calls it: `--live` is the path that is *meant* to
+    reach a provider, and it is gated behind its own explicit flag.
+    """
+    os.environ["AIDA_EMBEDDING_PROVIDER"] = "unset"
+    from aida.config import get_settings
+
+    get_settings.cache_clear()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -1467,6 +1492,7 @@ def main(argv: list[str] | None = None) -> int:
             estate=estate,
         )
     else:
+        force_offline_provider()
         observer, resolved, estate = asyncio.run(observe_offline(cases))
         print(f"Answer evaluation (no provider, no network) against {estate}")
         report = run_evaluation(

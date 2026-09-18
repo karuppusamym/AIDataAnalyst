@@ -199,6 +199,28 @@ async def list_catalog_rows(
         .where(*filters)
     )
 
+    # One gate() decision per distinct datasource, shared by the count below and
+    # the page filter further down, so neither pays for a datasource twice.
+    datasource_allowed: dict[UUID, bool] = {}
+
+    async def datasource_is_readable(datasource_id: UUID) -> bool:
+        if datasource_id not in datasource_allowed:
+            try:
+                await gate(
+                    session,
+                    context,
+                    settings=settings,
+                    action="READ_METADATA",
+                    resource_type="datasource",
+                    resource_id=str(datasource_id),
+                    datasource_id=datasource_id,
+                )
+            except AuthorizationDenied:
+                datasource_allowed[datasource_id] = False
+            else:
+                datasource_allowed[datasource_id] = True
+        return datasource_allowed[datasource_id]
+
     total: int | None = None
     if cursor is not None:
         try:
@@ -212,9 +234,34 @@ async def list_catalog_rows(
             base_query.order_by(*order_columns), order_columns, last_values
         ).limit(limit)
     else:
+        # Counted over the datasources the caller may read, and nothing else. The
+        # page below has always dropped a denied datasource's rows, but `total`
+        # was counted first over the whole organization, so a caller who could
+        # read one source of three was told how many tables the other two held
+        # -- the existence and size of estate they are not allowed to see, which
+        # is the leak "filter forbidden nodes before counts" exists to prevent.
+        # Found by R11-GQL01's REST/GraphQL parity test, since GraphQL counts
+        # after filtering. Page composition and cursors are deliberately left as
+        # they were; only the count changes.
+        candidate_datasources = (
+            await session.scalars(select(MetadataTable.datasource_id).where(*filters).distinct())
+        ).all()
+        readable = [
+            datasource_id
+            for datasource_id in candidate_datasources
+            if await datasource_is_readable(datasource_id)
+        ]
         total = (
-            await session.scalar(select(func.count()).select_from(MetadataTable).where(*filters))
-            or 0
+            (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(MetadataTable)
+                    .where(*filters, MetadataTable.datasource_id.in_(readable))
+                )
+                or 0
+            )
+            if readable
+            else 0
         )
         statement = base_query.order_by(*order_columns).limit(limit).offset(offset)
 
@@ -229,27 +276,10 @@ async def list_catalog_rows(
     )
 
     # One gate() call per distinct datasource on the page -- not per row --
-    # cached so a page dominated by one denied datasource still costs one
-    # call for it, not one per row from it.
-    datasource_allowed: dict[UUID, bool] = {}
+    # through the same cache the count used, so a page dominated by one denied
+    # datasource still costs one call for it, not one per row from it.
     for table, _, _ in page_rows:
-        datasource_id = table.datasource_id
-        if datasource_id in datasource_allowed:
-            continue
-        try:
-            await gate(
-                session,
-                context,
-                settings=settings,
-                action="READ_METADATA",
-                resource_type="datasource",
-                resource_id=str(datasource_id),
-                datasource_id=datasource_id,
-            )
-        except AuthorizationDenied:
-            datasource_allowed[datasource_id] = False
-        else:
-            datasource_allowed[datasource_id] = True
+        await datasource_is_readable(table.datasource_id)
     permitted_rows = [row for row in page_rows if datasource_allowed.get(row[0].datasource_id)]
 
     items: list[CatalogRowRead] = await compose_catalog_rows(session, permitted_rows)

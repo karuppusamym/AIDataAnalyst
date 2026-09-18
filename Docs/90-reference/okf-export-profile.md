@@ -7,8 +7,14 @@ section 14).
 
 Implementation: `src/aida/okf_export.py` (pure renderer and validators),
 `src/aida/okf_snapshot.py` (the frozen snapshot, loaded under the caller's authority) and
-`src/aida/okf_export_api.py` (the two read surfaces). Tests: `tests/test_okf_export.py`, with
+`src/aida/okf_export_api.py` (the read surfaces). Tests: `tests/test_okf_export.py`, with
 conformance fixtures under `tests/fixtures/okf_conformance/`.
+
+R11-OKF02 (design item 14B) made the bundle a stored, incrementally rebuilt thing every surface
+reads: `src/aida/okf_store.py` (the one read path, staleness, incremental rebuild and atomic
+publication), `src/aida/okf_store_models.py` (the three tables) and the MCP resource reader in
+`src/aida/mcp_server.py`. Tests: `tests/test_okf_store.py`. See
+[Stored publications](#stored-publications-r11-okf02) below.
 
 ## The pinned specification, and what is actually tested
 
@@ -73,7 +79,19 @@ bundle/concepts/concept-<key>.md
 The manifest sits outside `bundle/` so a reader pointed at the OKF bundle root never needs an
 Atlas extension to consume it.
 
+bundle/tools/index.md                    # R11-OKF02
+bundle/tools/tool-version-<key>.md       # R11-OKF02
+bundle/log.md                            # R11-OKF02, stored bundles only
+bundle/sources/source-<key>/log.md       # R11-OKF02, stored bundles only
 ### Stable identities
+
+A `log.md` records the refresh history of its scope (spec §9: it "MAY appear at any level of the
+hierarchy"): one at the bundle root and one per source directory, date headings in ISO
+`YYYY-MM-DD` form, newest first. A source's log lists only the publications that moved a
+document under that source, so a change elsewhere leaves its bytes, and its hash, alone. Paths are
+written as code spans rather than links, because an old entry may name a document a later
+publication removed. A bundle rendered directly from a snapshot, with no stored history, has no
+log.
 
 Every `<key>` is the first 128 bits of a SHA-256 over the JSON-encoded Atlas identity tuple, not
 over a row's UUID: a UUID changes when an object is dropped and rediscovered and differs between
@@ -93,13 +111,24 @@ there is none.
 standalone routine of the same name, and the leading kind token keeps a routine apart from a table
 of the same name. Object kind is deliberately *not* part of a table-like identity: tables and
 views share one namespace in every supported engine, so a rescan that reclassifies one must not
+| Tool version | `("tool-version", project_id, tool_slug, version)` |
 move its document. A collision refuses the export rather than overwriting a document.
 
 ## Concept types
 
 `type` values are producer-chosen (§4.1) and consumers must tolerate unknown ones (§11):
 `Atlas Data Source`, `Atlas Schema`, `Atlas Table`, `Atlas View`, `Atlas Materialized View`,
-`Atlas Routine`, `Atlas Routine Package`, `Atlas Business Concept`.
+`Atlas Routine`, `Atlas Routine Package`, `Atlas Business Concept`, and since R11-OKF02
+`Atlas Tool Version`.
+
+An `Atlas Tool Version` document describes one approved governed-tool version the product makes
+eligible: its purpose (the approved description), its inputs (name, type, required -- never a
+declared default, allowed value or bound, each of which is a literal), and how to invoke it
+through Atlas. It is deliberately **not** upstream's `Attested Computation` (spec §10), whose
+`computation` / `executor` fields are runnable embedded code: the design forbids "runnable
+embedded code auto-executed by import", so no SQL, executor or credential is exported and an
+importer finds nothing to run. A tool over a datasource the reader was refused is absent from the
+documents, the counts and the manifest's pin list.
 
 ## Standard frontmatter, as Atlas fills it
 
@@ -161,12 +190,13 @@ module, resolved as one by `tests/test_doc_claims.py`, and a frontmatter key is 
 | `withheld` | On a concept document only: `withheld.reason_codes` when screening refused released text. |
 
 ## The Atlas manifest
+| `tool` | On a tool-version document only: `tool.key`, `tool.tool_version_id`, `tool.slug`, `tool.version`, `tool.lifecycle`, `tool.fingerprint`, and `tool.invocation` (the MCP tool name and the REST execute route). No SQL and no executor. |
 
 `atlas-manifest.json` is an Atlas extension, not an OKF requirement. Keys: `manifest_version`,
 `atlas_extension`, `okf_version`, `bundle_root`, `specification` (repository, path, revision,
 sha256, conformance), `compiler`, `captured_at`, `scope`, `policy_partition` (with its digest),
-`scope_digest`, `content_snapshot_digest`, `bundle_content_digest`, `counts`, `files` (path,
-sha256, bytes), `source_objects` and `source_freshness`.
+`scope_digest`, `content_snapshot_digest`, `bundle_content_digest`, `counts` (including `tools`
+since R11-OKF02), `files` (path, sha256, bytes), `source_objects` and `source_freshness`.
 
 `captured_at` and `source_freshness` are the only clock readings anywhere in an export, and both
 live here rather than in a concept document. A scan that completes without changing anything
@@ -197,8 +227,52 @@ makes the freeze a property rather than a phrase.
 
 The snapshot is frozen in one read decision, which is the design's requirement that "OKF
 determinism requires a frozen content snapshot, not just a product version pointing to mutable
-current catalog rows". Durable server-side snapshot storage is not part of this row: incremental
-rebuild needs the stored prior bundle to diff against anyway, so it belongs with R11-OKF02.
+current catalog rows". R11-OKF02 stores that snapshot with the bundle rendered from it; see below.
+
+## Stored publications (R11-OKF02)
+
+Every surface -- the REST routes, the MCP resource reader and the Catalog / Context Products
+knowledge views -- reads a bundle through `aida.okf_store.read_published_bundle`, and nothing else
+in `src/` freezes or renders one for a consumer (`tests/test_okf_store.py` fails if that changes).
+So two surfaces cannot give one reader different knowledge for the same product version.
+
+**Lineage.** A stored bundle belongs to one product version under one *authority digest*: a digest
+of the version and of the exact set of datasources the reader's own authorization admitted,
+decided on every request by `aida.okf_snapshot.admit_datasources` before anything stored is looked
+up. Readers with the same authority share one publication; a reader whose cross-boundary grant,
+source binding or policy changed computes a different digest, so a bundle built under a revoked
+grant is not reachable from their request -- not as the current bundle and not by publication id.
+There is no stored entry keyed without the reader's authority.
+
+**Tables.** `okf_bundle_publication` holds one immutable publication: the frozen snapshot, the
+manifest, the digests, what changed and the refresh history. `okf_bundle_document` holds each
+file's exact bytes and `rendered_in_sequence`, the first publication that produced those bytes.
+`okf_bundle_head` points at the current publication of a lineage and records when it was last
+confirmed current.
+
+**Atomic publication.** The publication row, every document row and the head move in one
+savepoint; a reader sees the old complete bundle or the new complete bundle and never a mixture.
+Publications are immutable and the newest five of a lineage are retained, so a manifest's
+`publication_id` passed to the download returns exactly the inspected bytes after a newer publish.
+
+**Staleness.** A head records a digest of the *change marks* on the product's scope inside a
+six-hour window: FP15 change signals for its tables and routines, approved-description versions,
+reviewed view and procedure lineage, captured routine definition versions and the pinned tool
+versions. Every read recomputes it, and a new mark -- including one committed late with an earlier
+timestamp -- triggers a rebuild. A change that leaves no mark (a column reclassified in place) is
+caught by revalidation once a head is older than fifteen minutes.
+
+**Incremental rebuild (OKF-C).** A rebuild freezes once and renders only the documents whose
+subject, source or link targets moved, plus the schema index listing them; the root, source,
+concept and tool indexes and the logs are re-derived. Every other document's stored bytes are
+carried without being rendered. A rebuild whose snapshot differs from the stored one only in
+source read times publishes nothing, so a no-op scan moves no hash -- not even the log's.
+
+**Consistency and bounds.** The marks are read before any content and again after the freeze; if
+one moved in between, nothing is published and the read is refused with a retryable 409 rather
+than storing a mixed snapshot. A scope whose pins or column count exceed the bundle limits is
+refused before the freeze runs. A bundle whose documents contain a fenced code block is never
+stored.
 
 ## Value freedom
 
@@ -225,8 +299,12 @@ existence leak acceptance OKF-D exists to catch.
 
 | Method and path | Returns |
 |---|---|
-| `GET /v1/context-product-versions/{version_id}/okf-bundle` | The manifest, the file index and the publish-policy verdict. No document bodies. |
-| `GET /v1/context-product-versions/{version_id}/okf-bundle/download` | One deterministic ZIP. Refused unless the bundle satisfies the publish policy. |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle` | The stored manifest, the file index, the publish-policy verdict and the publication it describes. No document bodies. Optional `publication_id`. |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle/download` | One deterministic ZIP of the stored bundle. Refused unless it satisfies the publish policy. Optional `publication_id`. |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle/document?path=` | One stored document's exact bytes (R11-OKF02). |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle/publications` | The reader's own lineage of publications: trigger, counts, what changed (R11-OKF02). |
+| `GET /v1/metadata/tables/{table_id}/okf-knowledge` | One catalog object's document from each product bundle the reader may read (R11-OKF02). |
+| MCP `resources/read` of `atlas://context-products/{key}/versions/{n}/okf` | The same stored manifest and file index; append a bundle path to read one document (R11-OKF02). |
 
 These are new surfaces beside the single-file context compiler, which is untouched: no
 `ContextCompilerTarget` value was added and no compile response shape changed, so an existing

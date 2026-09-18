@@ -290,14 +290,16 @@ export interface AssetDescriptionDraftListResponse {
  *  `ParsedLineageEdgeDecisionRequest.edge_type`) but never names it, so a
  *  call site that wants to hold one in a variable needs this alias. Keep the
  *  members identical to what the generated file emits inline. `PROCEDURE` is
- *  pasted procedure SQL; `ROUTINE` is a captured routine's body (2026-09-11). */
+ *  pasted procedure SQL; `ROUTINE` is a captured routine's body (2026-09-11);
+ *  `TRIGGER` is a captured trigger's body (2026-09-17, R11-FP01). */
 export type ParsedLineageEdgeType =
   | "VIEW"
   | "PROCEDURE"
   | "ROUTINE"
   | "DBT"
   | "OPENLINEAGE_TABLE"
-  | "OPENLINEAGE_COLUMN";
+  | "OPENLINEAGE_COLUMN"
+  | "TRIGGER";
 
 /** Same reasoning as `ParsedLineageEdgeType`, for
  *  `ParsedLineageEdgeDecisionRequest.decision`. */

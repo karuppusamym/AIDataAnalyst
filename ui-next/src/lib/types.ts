@@ -2780,6 +2780,20 @@ export interface GraphNodeRead {
   outbound_edge_count?: number;
 }
 
+/** One error. `message` is the code; nothing object-specific is ever in it. */
+export interface GraphQLErrorRead {
+  message: string;
+  path?: (string | number)[] | null;
+  extensions?: Record<string, unknown>;
+}
+
+/** The response envelope. `data` is absent when the document was refused. */
+export interface GraphQLResponseRead {
+  data?: Record<string, unknown> | null;
+  errors?: GraphQLErrorRead[] | null;
+  extensions?: Record<string, unknown>;
+}
+
 export interface GraphSearchRead {
   datasource_id: string;
   query: string;
@@ -3486,6 +3500,69 @@ export interface OkfBundleRead {
   findings: string[];
   files: OkfBundleFileRead[];
   manifest: Record<string, unknown>;
+  publication: OkfPublicationRead;
+  validated_at: string;
+}
+
+/** What one stored publication changed against the publication before it (R11-OKF02). */
+export interface OkfChangeSummaryRead {
+  added: string[];
+  changed: string[];
+  removed: string[];
+  changed_subjects: number;
+  marked_subjects: number;
+  full_render: boolean;
+}
+
+/** One document of one stored OKF publication, with its exact bytes (R11-OKF02). */
+export interface OkfDocumentRead {
+  publication_id: string;
+  publication_sequence: number;
+  path: string;
+  sha256: string;
+  bytes: number;
+  rendered_in_sequence: number;
+  subject_key: string | null;
+  content: string;
+}
+
+/** One catalog object's document, as one context product's stored bundle holds it. */
+export interface OkfObjectKnowledgeItemRead {
+  context_product_version_id: string;
+  product_key: string;
+  product_version: number;
+  product_name: string;
+  publication: OkfPublicationRead;
+  document: OkfDocumentRead;
+  coverage: Record<string, unknown>;
+}
+
+/** Every authorized product bundle's document about one catalog object (R11-OKF02). */
+export interface OkfObjectKnowledgeRead {
+  table_id: string;
+  items: OkfObjectKnowledgeItemRead[];
+}
+
+/** The reader's own lineage of stored publications for one version, newest first. */
+export interface OkfPublicationHistoryRead {
+  context_product_version_id: string;
+  items: OkfPublicationRead[];
+}
+
+/** One stored, immutable OKF publication in the reader's own lineage (R11-OKF02). */
+export interface OkfPublicationRead {
+  publication_id: string;
+  sequence: number;
+  trigger: string;
+  captured_at: string;
+  is_current: boolean;
+  bundle_content_digest: string;
+  content_snapshot_digest: string;
+  document_count: number;
+  rendered_count: number;
+  carried_count: number;
+  valid: boolean;
+  changes: OkfChangeSummaryRead;
 }
 
 export interface OntologyCreate {
@@ -3724,7 +3801,7 @@ export interface Page {
 
 export interface ParsedLineageEdgeBulkDecisionItem {
   edge_id: string;
-  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN" | "TRIGGER";
 }
 
 export interface ParsedLineageEdgeBulkDecisionItemRead {
@@ -3759,7 +3836,7 @@ export interface ParsedLineageEdgeDecisionRead {
 
 /** Decision on one PROPOSED parsed-lineage edge. */
 export interface ParsedLineageEdgeDecisionRequest {
-  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN" | "TRIGGER";
   decision: "APPROVED" | "REJECTED";
   reason: string;
 }
@@ -3767,7 +3844,7 @@ export interface ParsedLineageEdgeDecisionRequest {
 /** One PROPOSED parsed-lineage edge as it appears in the review queue. */
 export interface ParsedLineageEdgeReviewQueueItemRead {
   edge_id: string;
-  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  edge_type: "VIEW" | "PROCEDURE" | "ROUTINE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN" | "TRIGGER";
   organization_id: string;
   created_at: string;
   created_by: string | null;
@@ -5423,7 +5500,7 @@ export interface UnattributedRunsRead {
 /** One typed edge merged from declared FKs, approved/candidate column */
 export interface UnifiedLineageEdgeRead {
   id: string;
-  edge_source: "FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE";
+  edge_source: "FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE" | "TRIGGER_DEFINITION";
   source_node_id: string;
   target_node_id: string;
   source_label: string;
@@ -5454,7 +5531,7 @@ export interface UnifiedLineageImpactNodeRead {
   label: string;
   qualified_name: string;
   depth: number;
-  contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE")[];
+  contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION" | "BI_LINEAGE" | "TRIGGER_DEFINITION")[];
   quality_state?: string;
 }
 

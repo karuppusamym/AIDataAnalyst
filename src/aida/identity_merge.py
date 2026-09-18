@@ -51,7 +51,7 @@ from aida.models import (
     UnownedAssetEscalation,
     ViewLineageEdge,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 
 # (model, column name) for every downstream reference to a table's stable ID that
 # should follow a merged rename. See the module docstring for what is deliberately
@@ -86,6 +86,10 @@ TABLE_IDENTITY_DOWNSTREAM_LINKS: tuple[tuple[type[Any], str], ...] = (
     # them on the tombstoned table, so the renamed table lost its lineage.
     (DeepProcedureLineageEdge, "source_table_id"),
     (DeepProcedureLineageEdge, "target_table_id"),
+    # R11-FP01: the trigger table, for the same reason and on the same day its
+    # approved edges began to fold into the unified graph (2026-09-17).
+    (TriggerLineageEdge, "source_table_id"),
+    (TriggerLineageEdge, "target_table_id"),
     (DbtResource, "matched_table_id"),
     (BiMetricColumnEdge, "matched_table_id"),
     (CrossSourceResolutionCandidate, "source_table_id"),

@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Select, and_, exists, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import AuthorizationDenied, gate
@@ -44,7 +44,11 @@ from aida.envelope_models import (
 )
 from aida.ingest_screening import CLEAN
 from aida.models import AnalysisRun, DataQualityIncident, DataSource, ViewLineageEdge
-from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
+from aida.procedure_lineage_models import (
+    DeepProcedureLineageEdge,
+    TriggerLineageEdge,
+    TriggerParseCoverage,
+)
 from aida.routine_call_descent import CALLEE_BODY_WITHHELD, CALLEE_NOT_CAPTURED
 from aida.schemas import ApiModel
 from aida.security import SecurityContext
@@ -205,6 +209,40 @@ async def readable_datasources(
     return readable
 
 
+def trigger_awaits_parse() -> ColumnElement[bool]:
+    """A (correlated) trigger the lineage agent has something to hand the parser
+    for, and has never measured.
+
+    "Never measured" is the coverage record's absence *and* no edge (a trigger
+    parsed before `trigger_parse_coverage` existed has only edges). Before the
+    coverage record, it was the edge's absence alone -- so a trigger whose body was
+    read in full and writes nothing (a PostgreSQL function that only `RETURN NEW`s)
+    stayed in the agent's backlog for ever, counted as work nobody had done. Shared
+    with `footprint_gap_detail` so the count and the list it expands cannot drift.
+    """
+    return and_(
+        or_(
+            and_(
+                MetadataTrigger.availability == AVAILABLE,
+                MetadataTrigger.redaction_status.in_(sorted(VALUE_FREE_REDACTION_STATUSES)),
+                MetadataTrigger.screening_status == CLEAN,
+            ),
+            and_(
+                MetadataTrigger.action_routine.is_not(None),
+                MetadataTrigger.action_routine != "",
+            ),
+        ),
+        ~exists().where(
+            TriggerLineageEdge.organization_id == MetadataTrigger.organization_id,
+            TriggerLineageEdge.trigger_id == MetadataTrigger.id,
+        ),
+        ~exists().where(
+            TriggerParseCoverage.organization_id == MetadataTrigger.organization_id,
+            TriggerParseCoverage.trigger_id == MetadataTrigger.id,
+        ),
+    )
+
+
 def _code_counts(
     organization_id: UUID, ids: Iterable[UUID], *condition: Any
 ) -> tuple[Select[Any], Select[Any]]:
@@ -306,20 +344,7 @@ async def footprint_gaps(
                 MetadataTrigger.organization_id == organization_id,
                 MetadataTrigger.datasource_id.in_(ids),
                 MetadataTrigger.status == "ACTIVE",
-                or_(
-                    and_(
-                        MetadataTrigger.availability == AVAILABLE,
-                        MetadataTrigger.redaction_status.in_(
-                            sorted(VALUE_FREE_REDACTION_STATUSES)
-                        ),
-                        MetadataTrigger.screening_status == CLEAN,
-                    ),
-                    and_(
-                        MetadataTrigger.action_routine.is_not(None),
-                        MetadataTrigger.action_routine != "",
-                    ),
-                ),
-                ~exists().where(TriggerLineageEdge.trigger_id == MetadataTrigger.id),
+                trigger_awaits_parse(),
             )
             .group_by(MetadataTrigger.datasource_id),
         )

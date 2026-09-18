@@ -51,10 +51,26 @@ All three:
   lineage describes a definition that no longer exists. A literal-only change does
   not count, because lineage does not depend on literals. A definition or body it
   could not turn into lineage is recorded once, so the same dead end is not
-  re-examined on every run until it changes. A trigger has no change signal to
-  read -- `metadata_change_signal.subject_kind` is a closed TABLE / VIEW / ROUTINE
-  / GRANT / ONTOLOGY vocabulary -- so its own `updated_at` stands in: an edge older
-  than the last rewrite of the trigger row may describe a definition that is gone.
+  re-examined on every run until it changes.
+
+**When a trigger's lineage is stale.** A trigger's own row carries no change
+signal, so its `updated_at` stands in for its own definition: a parse older than
+the last rewrite of the row may describe a trigger that is gone. That is the whole
+story on SQL Server and Oracle, whose triggers carry their own bodies. It is not on
+PostgreSQL, where the body is the *function* the trigger names: `CREATE OR REPLACE
+FUNCTION` rewrites the routine row and leaves the trigger row exactly as it was.
+The routine axis already records that change, once, as a `ROUTINE` change signal
+against the object that actually changed -- so staleness is derived from it rather
+than duplicated into a TRIGGER subject kind: a trigger whose parse read routine R
+(`trigger_parse_coverage.routine_id`, or an edge's `routine_id`) is re-examined when
+R has a structural redefinition or a return newer than that parse, under exactly the
+R11-FP16 rule the routine axis uses, literal-only changes excluded. A function the
+trigger names that could not be reached at all (not captured here, or ambiguous)
+has no id to join through, so a trigger in that state is re-examined when a routine
+of that name in the same source changes after its measurement -- which is what
+makes "rescan once the function is captured" actually close that gap. Every proposing
+examination records `trigger_parse_coverage` before any decline, so "parsed since the
+change" is also "examined since the change".
 
 Nothing here calls a model.
 """
@@ -63,6 +79,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from typing import Any, Final
 from uuid import UUID
@@ -90,13 +107,18 @@ from aida.procedure_lineage import (
     parse_procedure_lineage,
     parse_trigger_lineage,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
+from aida.procedure_lineage_models import (
+    DeepProcedureLineageEdge,
+    TriggerLineageEdge,
+    TriggerParseCoverage,
+)
 from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
     RoutineEdgeKey,
     persist_trigger_edges,
     persistable_table,
     record_routine_parse_coverage,
+    record_trigger_parse_coverage,
     require_eligible_routine_body,
     resolve_routine_table_ids,
     routine_edge_key,
@@ -688,6 +710,84 @@ async def _propose_procedure_lineage(
     )
 
 
+def _trigger_parsed_since(moment: Any) -> ColumnElement[bool]:
+    """The (correlated) trigger was parsed at or after `moment`: its coverage was
+    measured then, or -- for a trigger parsed before coverage existed -- an edge of
+    it was written then. Both restate the trigger's organization (INV-5)."""
+    return or_(
+        exists().where(
+            TriggerParseCoverage.organization_id == MetadataTrigger.organization_id,
+            TriggerParseCoverage.trigger_id == MetadataTrigger.id,
+            TriggerParseCoverage.parsed_at >= moment,
+        ),
+        exists().where(
+            TriggerLineageEdge.organization_id == MetadataTrigger.organization_id,
+            TriggerLineageEdge.trigger_id == MetadataTrigger.id,
+            TriggerLineageEdge.created_at >= moment,
+        ),
+    )
+
+
+def _trigger_body_redefined_since_parsed() -> ColumnElement[bool]:
+    """Gap 4 of R11-FP01: the routine a trigger's body was read from was redefined
+    structurally, or returned, after the trigger was last parsed.
+
+    The signal is the routine axis's own -- `subject_kind = 'ROUTINE'`, written by
+    ingestion when the function's text moved -- read through the join the parse
+    left behind: `trigger_parse_coverage.routine_id`, or an edge's `routine_id` for
+    a trigger parsed before coverage was recorded. `_reparse_signal` is the same
+    predicate the routine axis applies, so a literal-only change re-examines a
+    trigger exactly as often as it re-examines the routine: never.
+    """
+    read_this_routine = or_(
+        exists().where(
+            TriggerParseCoverage.organization_id == MetadataTrigger.organization_id,
+            TriggerParseCoverage.trigger_id == MetadataTrigger.id,
+            TriggerParseCoverage.routine_id == MetadataChangeSignal.subject_id,
+        ),
+        exists().where(
+            TriggerLineageEdge.organization_id == MetadataTrigger.organization_id,
+            TriggerLineageEdge.trigger_id == MetadataTrigger.id,
+            TriggerLineageEdge.routine_id == MetadataChangeSignal.subject_id,
+        ),
+    )
+    return exists().where(
+        MetadataChangeSignal.organization_id == MetadataTrigger.organization_id,
+        MetadataChangeSignal.datasource_id == MetadataTrigger.datasource_id,
+        MetadataChangeSignal.subject_kind == "ROUTINE",
+        _reparse_signal(),
+        read_this_routine,
+        ~_trigger_parsed_since(MetadataChangeSignal.detected_at),
+    )
+
+
+def _trigger_body_may_have_arrived() -> ColumnElement[bool]:
+    """A trigger whose last parse could not reach the function it names -- not
+    captured here, or ambiguous, so the measurement holds no `routine_id` to join a
+    signal through -- when a routine of that name in the same source was written
+    after that measurement.
+
+    A newly captured routine is not a change signal (nothing can depend on an
+    object that did not exist), so without this the marker saying "not captured"
+    would outlive the capture forever, and the gap register's advice for it --
+    widen the selection and rescan -- would not close it. The name test is a
+    containment match, so it may over-include a similarly named routine; that costs
+    one re-examination, which records a fresh measurement and stops. It can never
+    under-include a routine the join in `routine_lineage_edges.trigger_body` would
+    find.
+    """
+    return exists().where(
+        TriggerParseCoverage.organization_id == MetadataTrigger.organization_id,
+        TriggerParseCoverage.trigger_id == MetadataTrigger.id,
+        TriggerParseCoverage.routine_id.is_(None),
+        MetadataTrigger.availability != AVAILABLE,
+        exists().where(
+            MetadataRoutine.organization_id == MetadataTrigger.organization_id,
+            MetadataRoutine.datasource_id == MetadataTrigger.datasource_id,
+            MetadataRoutine.updated_at > TriggerParseCoverage.parsed_at,
+            func.lower(MetadataTrigger.action_routine).contains(func.lower(MetadataRoutine.name)),
+        ),
+    )
 
 
 async def _trigger_lineage(run: TaskAgentRun) -> None:
@@ -705,13 +805,11 @@ async def _trigger_lineage(run: TaskAgentRun) -> None:
         MetadataTrigger.action_routine.is_not(None),
         MetadataTrigger.action_routine != "",
     )
-    # No edge newer than the row's last rewrite -- which covers "no edge at all".
-    # See the module docstring for why `updated_at` stands in for a change signal.
-    unparsed_or_stale = ~exists().where(
-        TriggerLineageEdge.trigger_id == MetadataTrigger.id,
-        TriggerLineageEdge.created_at >= MetadataTrigger.updated_at,
-    )
-    # A trigger examined since it last changed -- proposed from, or declined.
+    # 1. The trigger row itself changed -- or was never parsed: no parse newer
+    # than the row's last rewrite. See the module docstring for why `updated_at`
+    # stands in for a change signal on this half.
+    row_unparsed_or_stale = ~_trigger_parsed_since(MetadataTrigger.updated_at)
+    # A trigger examined since its row last changed -- proposed from, or declined.
     already_examined = exists().where(
         AgentTask.organization_id == run.organization_id,
         AgentTask.agent_principal_id == run.principal_id,
@@ -723,8 +821,14 @@ async def _trigger_lineage(run: TaskAgentRun) -> None:
         MetadataTrigger.organization_id == run.organization_id,
         MetadataTrigger.status == "ACTIVE",
         or_(has_own_body, names_a_routine),
-        unparsed_or_stale,
-        ~already_examined,
+        or_(
+            and_(row_unparsed_or_stale, ~already_examined),
+            # 2. The body changed while the row did not (PostgreSQL).
+            _trigger_body_redefined_since_parsed(),
+            # 3. The body could not be reached, and a routine that may be it has
+            # changed since.
+            and_(names_a_routine, _trigger_body_may_have_arrived()),
+        ),
     ]
     if run.datasource_id is not None:
         filters.append(MetadataTrigger.datasource_id == run.datasource_id)
@@ -813,6 +917,21 @@ async def _propose_trigger_lineage(
         datasource_id=datasource_id,
         statements=max(1, result.statement_count),
     )
+    # The measurement, before any decline -- the routine axis's F06.4 rule, for
+    # the same reason: the triggers declined below (unsupported dialect, a body
+    # with nothing to propose, a function nobody captured) are exactly the ones
+    # whose coverage a reader needs. `routine_id` is the join a later change to
+    # that function uses to find this trigger again. Written only on a proposing
+    # run: a dry run reports and writes nothing.
+    if run.proposing:
+        await record_trigger_parse_coverage(
+            session,
+            datasource=datasource,
+            trigger=trigger,
+            result=result,
+            routine_id=body.routine_id,
+            measured_by=run.principal_id,
+        )
     if any(error.startswith("unsupported dialect") for error in result.errors):
         return await decline(SKIP_UNSUPPORTED_DIALECT)
 
@@ -832,11 +951,21 @@ async def _propose_trigger_lineage(
     # duplicated on a re-parse and the natural key cannot be violated.
     # `agent_proposal` makes every real edge PROPOSED whatever the organization's
     # review mode says; a marker stays ACTIVE because it is a gap, not an edge.
+    #
+    # What reaches the writer is what a person can decide plus the gaps, and
+    # nothing else -- the same table-to-table cut `_propose_procedure_lineage`
+    # proposes. A hop into or out of a temp table, a `<RESULT>` set and an edge
+    # whose source the parser could not resolve are the body's own plumbing: put
+    # in the per-edge queue they are rows a reviewer can only rubber-stamp or
+    # guess at, and approving one would change nothing the graph can use.
+    gaps = [
+        edge for edge in result.edges if edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+    ]
     written = await persist_trigger_edges(
         session,
         datasource=datasource,
         trigger=trigger,
-        result=result,
+        result=replace(result, edges=[*proposable, *gaps]),
         review_mode="require_review",
         threshold=1.0,
         created_by=run.principal_id,

@@ -37,6 +37,8 @@ import "./TaskAgentsScreen.css";
 const QUEUE_EDGE_TYPE: Record<string, string> = {
   VIEW_LINEAGE: "VIEW",
   PROCEDURE_LINEAGE: "ROUTINE",
+  // R11-FP01: decidable in that queue since 2026-09-17.
+  TRIGGER_LINEAGE: "TRIGGER",
 };
 
 /* The lineage agent's edges are decided one by one in the parsed-lineage
@@ -94,10 +96,11 @@ export const TASK_AGENTS: readonly TaskAgentDefinition[] = [
     label: "Lineage",
     title: "Lineage agent",
     description:
-      "Parses the view definitions and stored procedure bodies captured at ingestion and proposes the column lineage it finds. Every edge waits in the parsed-lineage review queue for a person; the agent activates nothing, and it calls no model.",
+      "Parses the view definitions, stored procedure bodies and trigger bodies captured at ingestion and proposes the column lineage it finds. Every edge waits in the parsed-lineage review queue for a person; the agent activates nothing, and it calls no model.",
     capabilityLabels: {
       VIEW_LINEAGE: "View lineage",
       PROCEDURE_LINEAGE: "Procedure lineage",
+      TRIGGER_LINEAGE: "Trigger lineage",
     },
     skipLabels: {
       unsupported_dialect: "the source's SQL dialect is not supported",
@@ -107,7 +110,7 @@ export const TASK_AGENTS: readonly TaskAgentDefinition[] = [
     },
     supervisorPersona: "STEWARD",
     emptyRunHint:
-      "Every eligible view and procedure already has lineage, or what was captured was examined and could not be used.",
+      "Every eligible view, procedure and trigger already has lineage, or what was captured was examined and could not be used.",
     reviewLink: parsedLineageQueue,
   },
   {

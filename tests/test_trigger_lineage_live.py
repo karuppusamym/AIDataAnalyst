@@ -22,6 +22,17 @@ the whole feature:
   a failure a green unit suite is entirely compatible with, and a real scan is
   what distinguishes them.
 
+The second test is the half after *that* (2026-09-17): the edge is only worth
+anything once a person can decide it and a decided one steers. **Real trigger ->
+scan -> the lineage agent proposes -> the edge is in the review queue and absent
+from the graph -> the agent is refused as its own reviewer -> a person approves it
+through the one decision endpoint -> it is ACTIVE, in the unified graph, and
+impact from the firing table reaches the table the trigger writes.** On
+PostgreSQL it goes one step further, into the defect a fake could never show:
+`CREATE OR REPLACE FUNCTION` on the real engine, rescan, and the trigger row is
+byte-for-byte unchanged -- only the routine's change signal moved -- yet the agent
+re-examines the trigger and proposes what the new body writes.
+
 Each engine's private source is the footprint journey's, reused by importing its
 fixtures, so this file creates no server of its own and skips with the journey when
 one is unreachable. Every object it creates is dropped in a `finally`, and the
@@ -34,16 +45,20 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import aida.envelope_models  # noqa: F401 -- registers the 1.1 tables on the metadata
 import aida.models  # noqa: F401 -- registers every 1.0 table on the metadata
-from aida.db import Base
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signals import CHANGE_STRUCTURAL, SIGNAL_DEFINITION_CHANGED
 from aida.discovery_receipt import FACET_SEQUENCES, FACET_TRIGGERS
 from aida.envelope_models import MetadataRoutine, MetadataTrigger
 from aida.ingestion import persist_envelope_extensions
+from aida.lineage_agent import CAPABILITY_TRIGGER_LINEAGE, run_lineage_agent
 from aida.models import (
     AnalysisRun,
     DataDomain,
@@ -53,9 +68,24 @@ from aida.models import (
     Organization,
     Project,
 )
+from aida.parsed_lineage_review_api import decide_parsed_lineage_edge
+from aida.parsed_lineage_review_service import list_parsed_lineage_review_queue
 from aida.procedure_lineage import UNPARSED_TRANSFORMATION_TYPE, parse_trigger_lineage
+from aida.procedure_lineage_models import TriggerLineageEdge, TriggerParseCoverage
 from aida.routine_lineage_edges import persist_trigger_edges, trigger_body
+from aida.schemas import ParsedLineageEdgeDecisionRequest
+from aida.task_agent import ACTION_PROPOSED, TaskAgentRunRequest
+from aida.unified_lineage_api import (
+    build_unified_lineage_graph_payload,
+    build_unified_lineage_impact_payload,
+)
 from aida.workflows.activities import persist_discovery_snapshot
+from tests.support.task_agents import (
+    agent_settings,
+    human,
+    register_agent,
+    task_agent_session,
+)
 from tests.test_footprint_journey import (  # noqa: F401 -- fixtures are used by name
     CONNECTORS,
     SCHEMA,
@@ -108,11 +138,32 @@ _CREATE = {
     """,  # noqa: S608 -- DDL for a private scratch database built by this test; the only interpolation is this module's own constants
 }
 
+#: A second table the redefined PostgreSQL function writes as well (second test).
+HISTORY = "trigger_lineage_probe_history"
+
+#: `CREATE OR REPLACE FUNCTION` on the real engine: the trigger is not touched, and
+#: on PostgreSQL that leaves `pg_trigger` -- and so the trigger's row -- as it was.
+_REDEFINE_FUNCTION = f"""
+    CREATE TABLE {SCHEMA}.{HISTORY} (
+        history_id bigserial PRIMARY KEY,
+        customer_id integer
+    );
+    CREATE OR REPLACE FUNCTION {SCHEMA}.{FUNCTION}() RETURNS trigger
+        LANGUAGE plpgsql AS $body$
+    BEGIN
+        INSERT INTO {SCHEMA}.{AUDIT} (customer_id) VALUES (NEW.customer_id);
+        INSERT INTO {SCHEMA}.{HISTORY} (customer_id) VALUES (NEW.customer_id);
+        RETURN NEW;
+    END;
+    $body$;
+"""  # noqa: S608 -- DDL for a private scratch database built by this test; the only interpolation is this module's own constants
+
 _TEARDOWN = {
     "postgres": (
         f"DROP TRIGGER IF EXISTS {TRIGGER} ON {SCHEMA}.orders;\n"
         f"DROP FUNCTION IF EXISTS {SCHEMA}.{FUNCTION}();\n"
-        f"DROP TABLE IF EXISTS {SCHEMA}.{AUDIT};"
+        f"DROP TABLE IF EXISTS {SCHEMA}.{AUDIT};\n"
+        f"DROP TABLE IF EXISTS {SCHEMA}.{HISTORY};"
     ),
     "sqlserver": (
         f"IF OBJECT_ID(N'{SCHEMA}.{TRIGGER}') IS NOT NULL DROP TRIGGER {SCHEMA}.{TRIGGER};\n"
@@ -125,14 +176,13 @@ _TEARDOWN = {
 async def platform() -> AsyncIterator[AsyncSession]:
     """The control plane the rows land in -- in-memory SQLite, as the 1.1 axis
     tests use. The source under test is a real server; the platform side of a
-    discovery run is engine-agnostic and needs no second one."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as active:
+    discovery run is engine-agnostic and needs no second one.
+
+    The task-agent harness's database, because the second test runs the real
+    lineage agent, whose per-item savepoints need SQLite to BEGIN the way
+    PostgreSQL does (`tests.support.task_agents.task_agent_maker`)."""
+    async with task_agent_session() as active:
         yield active
-    await engine.dispose()
 
 
 async def _datasource(session: AsyncSession, source: JourneySource) -> DataSource:  # noqa: F811 -- a local parameter, not the imported fixture
@@ -338,4 +388,144 @@ async def test_a_real_triggers_write_is_a_path_out_of_the_table_it_fires_on(
         # Roll back every object this test created, whatever happened above. The
         # journey fixture then drops the database itself, so a failure here cannot
         # leave the sample estate modified.
+        await source.execute(_TEARDOWN[source.connector_type])
+
+
+async def _run_agent(session: AsyncSession, datasource: DataSource) -> list[object]:
+    """One proposing run of the real lineage agent, trigger capability only."""
+    organization = await session.get(Organization, datasource.organization_id)
+    assert organization is not None
+    outcome = await run_lineage_agent(
+        session,
+        organization.id,
+        request=TaskAgentRunRequest(capabilities=(CAPABILITY_TRIGGER_LINEAGE,)),
+        settings=agent_settings(),
+        triggered_by=human(organization),
+    )
+    await session.commit()
+    return [(item.action, item.subject_id) for item in outcome.items]
+
+
+async def test_a_real_triggers_edge_is_decided_and_then_steers_the_graph(
+    platform: AsyncSession,
+    source: JourneySource,  # noqa: F811 -- the journey's fixture, used by name
+) -> None:
+    """PROPOSED -> one decision -> ACTIVE -> in the graph, per engine; and on
+    PostgreSQL, a redefined function re-examines a trigger whose row never moved."""
+    datasource = await _datasource(platform, source)
+    organization = await platform.get(Organization, datasource.organization_id)
+    assert organization is not None
+    try:
+        await source.execute(_CREATE[source.connector_type])
+        await _scan(platform, datasource, source)
+        await register_agent(platform, organization, principal=AGENT)
+        trigger = await platform.scalar(
+            select(MetadataTrigger).where(
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.name == TRIGGER,
+            )
+        )
+        assert trigger is not None
+        orders_id = await _table_id(platform, datasource, "orders")
+        audit_id = await _table_id(platform, datasource, AUDIT)
+
+        # --- PROPOSED: the agent's edge, in the queue and nowhere else --------
+        assert await _run_agent(platform, datasource) == [(ACTION_PROPOSED, trigger.id)]
+        [edge] = (
+            await platform.scalars(
+                select(TriggerLineageEdge).where(
+                    TriggerLineageEdge.trigger_id == trigger.id,
+                    TriggerLineageEdge.target_table_id == audit_id,
+                )
+            )
+        ).all()
+        assert (edge.review_status, edge.source_table_id) == ("PROPOSED", orders_id)
+        items, _total = await list_parsed_lineage_review_queue(
+            platform, datasource.organization_id, edge_type="TRIGGER"
+        )
+        assert [item.edge_id for item in items] == [edge.id]
+        assert items[0].source_sql_reference["firing_table"].lower().endswith(".orders")
+
+        graph = await build_unified_lineage_graph_payload(platform, datasource, settings=None)
+        assert [e for e in graph.edges if e.edge_source == "TRIGGER_DEFINITION"] == []
+
+        # --- the maker is refused -------------------------------------------
+        decision = ParsedLineageEdgeDecisionRequest(
+            edge_type="TRIGGER", decision="APPROVED", reason="the trigger writes audit"
+        )
+        with pytest.raises(HTTPException) as refused:
+            await decide_parsed_lineage_edge(
+                edge.id,
+                decision,
+                context=human(organization, principal_id=AGENT),
+                session=platform,
+            )
+        assert refused.value.status_code == 409
+
+        # --- ACTIVE: one decision, by a person, through the one endpoint -----
+        decided = await decide_parsed_lineage_edge(
+            edge.id, decision, context=human(organization), session=platform
+        )
+        assert decided.review_status == "ACTIVE"
+
+        # --- in the graph, and on the impact path ---------------------------
+        graph = await build_unified_lineage_graph_payload(platform, datasource, settings=None)
+        [folded] = [e for e in graph.edges if e.edge_source == "TRIGGER_DEFINITION"]
+        assert (folded.source_node_id, folded.target_node_id) == (str(audit_id), str(orders_id))
+        assert folded.status == "ACTIVE"
+        assert folded.evidence["trigger_ids"] == [str(trigger.id)]
+        impact = await build_unified_lineage_impact_payload(
+            platform, datasource, str(orders_id)
+        )
+        assert str(audit_id) in {node.node_id for node in impact.downstream}
+
+        # --- the measurement ------------------------------------------------
+        coverage = await platform.scalar(
+            select(TriggerParseCoverage).where(TriggerParseCoverage.trigger_id == trigger.id)
+        )
+        assert coverage is not None
+        assert coverage.parse_completed is True
+        assert coverage.unparsed_statement_count == 0
+        if source.connector_type != "postgres":
+            assert coverage.routine_id is None
+            return
+
+        # --- PostgreSQL: the function changes, the trigger row does not ------
+        assert coverage.routine_id is not None
+        function_id = coverage.routine_id
+        trigger_fingerprint, trigger_updated = trigger.fingerprint, trigger.updated_at
+        await source.execute(_REDEFINE_FUNCTION)
+        await _scan(platform, datasource, source)
+        await platform.refresh(trigger)
+        assert trigger.fingerprint == trigger_fingerprint
+        assert trigger.updated_at.replace(tzinfo=None) == trigger_updated.replace(tzinfo=None), (
+            "the real engine rewrote nothing about the trigger itself"
+        )
+        signal = await platform.scalar(
+            select(MetadataChangeSignal).where(
+                MetadataChangeSignal.organization_id == datasource.organization_id,
+                MetadataChangeSignal.subject_kind == "ROUTINE",
+                MetadataChangeSignal.subject_id == function_id,
+            )
+        )
+        assert signal is not None, "the rescan recorded no change to the function"
+        assert (signal.signal_type, signal.change_class) == (
+            SIGNAL_DEFINITION_CHANGED,
+            CHANGE_STRUCTURAL,
+        )
+
+        assert await _run_agent(platform, datasource) == [(ACTION_PROPOSED, trigger.id)]
+        history_id = await _table_id(platform, datasource, HISTORY)
+        rows = (
+            await platform.scalars(
+                select(TriggerLineageEdge).where(TriggerLineageEdge.trigger_id == trigger.id)
+            )
+        ).all()
+        by_target = {row.target_table_id: row.review_status for row in rows}
+        # The decided edge stands; what the new body also writes waits for a person.
+        assert by_target == {audit_id: "ACTIVE", history_id: "PROPOSED"}
+        # And having read the new body, the agent leaves the trigger alone.
+        assert await _run_agent(platform, datasource) == []
+    finally:
         await source.execute(_TEARDOWN[source.connector_type])

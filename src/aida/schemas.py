@@ -1182,6 +1182,11 @@ UnifiedLineageEdgeSource = Literal[
     # (`scripts/openapi_diff.py` classifies it as informational), and it is the
     # precedent LN-7 set when VIEW_DEFINITION/PROCEDURE_DEFINITION landed.
     "BI_LINEAGE",
+    # R11-FP01: a path a trigger creates -- the firing table feeding what the
+    # trigger writes. Its own member, not folded into PROCEDURE_DEFINITION,
+    # because it fires on every write to a table rather than when someone calls
+    # it, and an impact reader has to be able to tell the two apart.
+    "TRIGGER_DEFINITION",
 ]
 
 
@@ -4113,9 +4118,11 @@ class StudioContextProductMaterializationRead(ApiModel):
 
 
 #: `ROUTINE` is the routine-aware procedure table (`DeepProcedureLineageEdge`),
-#: under review since 2026-09-11; `PROCEDURE` is the raw-SQL one.
+#: under review since 2026-09-11; `PROCEDURE` is the raw-SQL one. `TRIGGER` is
+#: `TriggerLineageEdge` (R11-FP01), decidable since 2026-09-17. Mirrors
+#: `parsed_lineage_review_service.EDGE_TYPES` exactly.
 ParsedLineageEdgeType = Literal[
-    "VIEW", "PROCEDURE", "ROUTINE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
+    "VIEW", "PROCEDURE", "ROUTINE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN", "TRIGGER"
 ]
 PARSED_LINEAGE_BULK_DECISION_MAX_ITEMS = 100
 
@@ -4321,6 +4328,45 @@ class OkfBundleFileRead(ApiModel):
     bytes: int
 
 
+class OkfChangeSummaryRead(ApiModel):
+    """What one stored publication changed against the publication before it (R11-OKF02).
+
+    Paths are the bundle's own opaque paths, never object names. `changed_subjects` counts the
+    identity keys whose frozen facts moved; `marked_subjects` counts the catalog subjects whose
+    change marks (FP15 signals, approvals, reviewed lineage) triggered the rebuild.
+    """
+
+    added: list[str]
+    changed: list[str]
+    removed: list[str]
+    changed_subjects: int
+    marked_subjects: int
+    full_render: bool
+
+
+class OkfPublicationRead(ApiModel):
+    """One stored, immutable OKF publication in the reader's own lineage (R11-OKF02).
+
+    `publication_id` is the snapshot identity a caller pins: the manifest it inspected and the
+    archive it later downloads are the same bytes when both name it. `rendered_count` documents
+    were rendered by this publication; `carried_count` kept the prior publication's stored bytes
+    without being rendered at all.
+    """
+
+    publication_id: UUID
+    sequence: int
+    trigger: str
+    captured_at: datetime
+    is_current: bool
+    bundle_content_digest: str
+    content_snapshot_digest: str
+    document_count: int
+    rendered_count: int
+    carried_count: int
+    valid: bool
+    changes: OkfChangeSummaryRead
+
+
 class OkfBundleRead(ApiModel):
     """An OKF bundle's Atlas manifest plus its file index -- never the documents themselves.
 
@@ -4349,3 +4395,54 @@ class OkfBundleRead(ApiModel):
     findings: list[str]
     files: list[OkfBundleFileRead]
     manifest: dict[str, Any]
+    #: R11-OKF02: the stored publication this manifest describes, and when the reader's lineage
+    #: was last confirmed current -- which may be later than the publication, because a no-op
+    #: revalidation confirms without publishing.
+    publication: OkfPublicationRead
+    validated_at: datetime
+
+
+class OkfDocumentRead(ApiModel):
+    """One document of one stored OKF publication, with its exact bytes (R11-OKF02).
+
+    `content` is the Markdown a reader of the downloaded archive would find at `path`; the
+    `sha256` is of those bytes. `rendered_in_sequence` names the publication that first rendered
+    them -- earlier than `publication_sequence` when a rebuild carried the document unchanged.
+    """
+
+    publication_id: UUID
+    publication_sequence: int
+    path: str
+    sha256: str
+    bytes: int
+    rendered_in_sequence: int
+    subject_key: str | None
+    content: str
+
+
+class OkfPublicationHistoryRead(ApiModel):
+    """The reader's own lineage of stored publications for one version, newest first."""
+
+    context_product_version_id: UUID
+    items: list[OkfPublicationRead]
+
+
+class OkfObjectKnowledgeItemRead(ApiModel):
+    """One catalog object's document, as one context product's stored bundle holds it."""
+
+    context_product_version_id: UUID
+    product_key: str
+    product_version: int
+    product_name: str
+    publication: OkfPublicationRead
+    document: OkfDocumentRead
+    #: The manifest's value-free `source_objects` entry for this object: definition digest and
+    #: capture version, description state and version.
+    coverage: dict[str, Any]
+
+
+class OkfObjectKnowledgeRead(ApiModel):
+    """Every authorized product bundle's document about one catalog object (R11-OKF02)."""
+
+    table_id: UUID
+    items: list[OkfObjectKnowledgeItemRead]

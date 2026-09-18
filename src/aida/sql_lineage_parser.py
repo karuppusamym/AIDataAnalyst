@@ -445,15 +445,24 @@ def _extract_edges_from_select(
     merged_aliases = {**table_aliases}
     merged_aliases.update(cte_aliases)
 
-    # Also collect aliases from subqueries and CTEs in this select
+    # Also collect aliases from subqueries and CTEs in this select -- *filling in*
+    # what the caller's map lacks, never overwriting what it already resolved.
+    # Every caller builds `table_aliases` from the same `find_all(exp.Table)` walk,
+    # so for them this is identical to assignment. The difference is a caller that
+    # deliberately *bound* a name: a trigger body's `inserted`/`NEW` is resolved to
+    # the firing table (`procedure_lineage._bind_subject`). Assignment re-collected
+    # `FROM inserted i` as `i -> inserted` and clobbered that binding, so an aliased
+    # `SELECT i.x INTO #t FROM inserted i` recorded its source as a table literally
+    # named `inserted` -- while the unaliased form, and an aliased INSERT...SELECT,
+    # happened to resolve correctly by other routes (R11-FP01, 2026-09-18).
     for table in select_stmt.find_all(exp.Table):
         fqn = _resolve_table_name(table)
         if fqn:
             if table.alias:
-                merged_aliases[table.alias] = fqn
-            merged_aliases[fqn] = fqn
+                merged_aliases.setdefault(table.alias, fqn)
+            merged_aliases.setdefault(fqn, fqn)
             if table.name:
-                merged_aliases[table.name] = fqn
+                merged_aliases.setdefault(table.name, fqn)
 
     # Handle UNION queries -- each branch resolves its own WHERE/aggregation
     # independently; nothing is inherited from the union as a whole.

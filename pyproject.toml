@@ -31,6 +31,10 @@ dependencies = [
   "sqlalchemy[asyncio]==2.0.52",
   "sqlglot==30.17.0",
   "snowflake-connector-python==4.7.1",
+  # R11-GQL01: the metadata GraphQL facade (`aida.graphql_api`). Chosen over
+  # ariadne by a spike against this app's auth/session stack; see the GQL01
+  # evidence. Pinned exactly: the library is pre-1.0 and releases often.
+  "strawberry-graphql==0.327.7",
   "structlog==25.4.0",
   "temporalio==1.32.0",
   "uvicorn[standard]==0.35.0",

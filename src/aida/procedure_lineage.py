@@ -865,7 +865,10 @@ def _extract_edges_from_merge(
     a subquery); it does not map WHEN-branch columns at all. This does, in
     addition -- both are additive, not a replacement of what that gives.
     """
-    aliases, _temp = _collect_table_aliases_with_temp(statement)
+    # `subject` was accepted and then dropped here, so a T-SQL `MERGE ... USING
+    # inserted i` in a trigger resolved its source to a table named `inserted`
+    # rather than to the firing table. Every sibling extractor threads it through.
+    aliases, _temp = _collect_table_aliases_with_temp(statement, subject)
     target_table = (
         _resolve_table_name(statement.this) if isinstance(statement.this, exp.Table) else ""
     )

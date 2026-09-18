@@ -47,6 +47,9 @@ to parse in its own right, so filing them under its id would make the routine
 look done. A dedicated table with a real `trigger_id` keeps both facts straight,
 and `via_routine` (already there for R11-FP07) says which routine's body a
 PostgreSQL trigger's edge was read from.
+
+**Its coverage record, 2026-09-17: `TriggerParseCoverage`**, `RoutineParseCoverage`
+mirrored onto the trigger axis for the same reason the edge table is separate.
 """
 
 from datetime import datetime
@@ -352,4 +355,72 @@ class RoutineParseCoverage(Base, TimestampMixin):
     )
     parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     #: The principal or agent whose parse produced this measurement.
+    measured_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class TriggerParseCoverage(Base, TimestampMixin):
+    """How completely one trigger's body was understood, per trigger.
+
+    `RoutineParseCoverage`, column for column, with the identity swapped the way
+    `TriggerLineageEdge` swaps it -- and for the same reason that table exists:
+    before this, "was this trigger fully understood?" could only be re-derived
+    from `trigger_lineage_edge`, and a trigger whose body writes nothing (a
+    PostgreSQL function that only `RETURN NEW`s) left no row there at all, so a
+    fully read trigger and one nobody had looked at read alike. The gap register
+    counted every such trigger as waiting on the lineage agent forever.
+
+    **`trigger_id` is the identity; `routine_id` is nullable**, exactly as on the
+    edge table: NULL for an engine whose trigger carries its own body, and on
+    PostgreSQL the function `action_routine` named, whose body was what was
+    actually read. It is also what makes a trigger's lineage re-examinable when
+    that function changes and the trigger row does not: the routine axis records
+    the change as a `ROUTINE` change signal, and this column is the join from that
+    signal to every trigger whose measurement it makes stale (see
+    `lineage_agent._trigger_lineage`). NULL on PostgreSQL as well when the
+    function could not be reached (not captured, or ambiguous) -- the edge table's
+    marker says which -- so a later capture of it is also noticed.
+
+    Same value-freedom as the routine row: reason *codes* only, and no column that
+    could hold a statement (INV-6).
+    """
+
+    __tablename__ = "trigger_parse_coverage"
+    __table_args__ = (
+        UniqueConstraint(
+            "datasource_id", "trigger_id", name="uq_trigger_parse_coverage_trigger"
+        ),
+        Index("ix_trigger_parse_coverage_org_completed", "organization_id", "parse_completed"),
+        Index("ix_trigger_parse_coverage_datasource", "datasource_id", "parse_completed"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    trigger_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_trigger.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The routine whose body was read -- PostgreSQL's `action_routine`. NULL when
+    #: the trigger carries its own body, or when that routine could not be reached.
+    routine_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="SET NULL"), index=True
+    )
+    parse_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    statement_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unparsed_statement_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unparsed_reason_codes: Mapped[str] = mapped_column(
+        String(400), nullable=False, default="", server_default=""
+    )
+    dialect: Mapped[str] = mapped_column(String(50), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(30), nullable=False)
+    sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_mapping_granularity: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="STATEMENT_ORDINAL",
+        server_default="STATEMENT_ORDINAL",
+    )
+    parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     measured_by: Mapped[str | None] = mapped_column(String(255))

@@ -60,6 +60,8 @@ ALL_EDGE_SOURCES = {
     # "no BI edges" from "BI not merged", so a new source has to appear here
     # even on a datasource with no BI connection at all.
     "BI_LINEAGE",
+    # R11-FP01: paths triggers create, under the same rule.
+    "TRIGGER_DEFINITION",
 }
 
 

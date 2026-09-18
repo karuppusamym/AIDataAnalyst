@@ -26,3 +26,7 @@
 .lgtable__node{font:inherit;font-family:var(--mono);font-size:11.5px;background:none;border:0;padding:0;color:var(--accent);cursor:pointer;text-decoration:underline}
 .lgtable__node.is-focus{font-weight:700;text-decoration:none;background:var(--accent-soft);border-radius:3px;padding:0 4px}
 .lgtable__isolated{margin:0;font-size:12px;color:var(--ink-3)}
+/* R11-FP01: trigger-created paths (TRIGGER_DEFINITION), beside the procedure colour. */
+.lgraph__legend [data-edge="TRIGGER_DEFINITION"] i{background:#c0713a}
+.lgraph__edge--TRIGGER_DEFINITION{stroke:#c0713a}
+.lgraph__arrow--TRIGGER_DEFINITION{fill:#c0713a}

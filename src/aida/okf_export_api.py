@@ -1,59 +1,70 @@
-"""R11-OKF01: the two doors onto an OKF bundle -- inspect its manifest, or download it.
+"""R11-OKF01/OKF02: the REST doors onto a stored OKF bundle.
 
-Two routes, both reading one context product version, both gated the same way, and neither
-touching the existing single-file compiler contracts. The design's instruction on delivery is
-explicit: "Add an OKF bundle target beside existing context compiler targets. Keep single-file
-compile responses compatible: use a separate bundle job/download contract if necessary rather
-than putting a ZIP into a text-content field." So `ContextCompilerTarget` is not extended,
-`ContextCompilationRead` is not touched, and an archive is returned by its own route with its
-own media type.
+Inspect its manifest, download it, read one document, list its publications, and -- from the
+catalog -- read the document about one object. All read one context product version, all gated
+the same way, and none touches the existing single-file compiler contracts. The design's
+instruction on delivery is explicit: "Add an OKF bundle target beside existing context compiler
+targets. Keep single-file compile responses compatible: use a separate bundle job/download
+contract if necessary rather than putting a ZIP into a text-content field." So
+`ContextCompilerTarget` is not extended, `ContextCompilationRead` is not touched, and an archive
+is returned by its own route with its own media type.
 
-**Scope resolution is the compiler's, not a second copy.** Both handlers call
-`context_compiler_api._load_source`, which is where the capability envelope, the published/
-consumer-role check, the purpose gate, the quality gate and the resolved routine/view/ontology/
-freshness references already live. The design requires exactly this -- "Source/object preview
-and product export must reuse the compiler's scope resolver" -- and a second resolver would be
-a second place for a governance check to go missing. `aida.okf_snapshot.freeze_snapshot` then
-adds the per-datasource admission decision and the catalog reads the compiler does not make.
+**Scope resolution is the compiler's, not a second copy.** Every handler reaches
+`context_compiler_api._load_source` (through the store), which is where the capability
+envelope, the published/consumer-role check, the purpose gate, the quality gate and the resolved
+routine/view/ontology/freshness references already live. The design requires exactly this --
+"Source/object preview and product export must reuse the compiler's scope resolver" -- and a
+second resolver would be a second place for a governance check to go missing.
+`aida.okf_snapshot.admit_datasources` then adds the per-datasource admission decision.
 
-**What each route records.** A bundle read is a consumption of governed context, so both
-routes audit and, for a PUBLISHED version, write a `ContextProductConsumptionEdge` with its own
+**What each route records.** A bundle read is a consumption of governed context, so every
+route audits and, for a PUBLISHED version, writes a `ContextProductConsumptionEdge` with its own
 channel -- the same evidence the compiler's read and download already leave, on the same
 version, so a reviewer sees one timeline rather than two.
 
-**Publication is atomic by construction.** The design requires bundle contents and manifest to
-be published atomically. Here they are computed together from one frozen snapshot and returned
-in one response: the manifest a caller inspects and the archive it downloads describe the same
-bytes, and the manifest carries the digest that proves it. There is no window in which half a
-bundle is visible, because there is no stored half.
+**R11-OKF02: every route reads the stored bundle.** Up to OKF01 each route froze and rendered
+its own bundle, so the manifest a caller inspected and the archive it downloaded next were two
+captures that could disagree. Now every handler here -- and the MCP resource reader, and the
+catalog object view -- obtains its bundle from `aida.okf_store.read_published_bundle`, which
+resolves scope and authority on the request and then serves (or incrementally rebuilds and
+atomically publishes) the one stored publication for the caller's lineage. A manifest names its
+`publication_id`; a download or document read given that id returns exactly those stored bytes,
+even after a newer publication, for as long as it is retained.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import UTC, datetime
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
-from aida.context import get_correlation_id
-from aida.context_compiler_api import _load_source
 from aida.db import get_session
-from aida.events import record_audit, record_outbox
-from aida.models import ContextProduct, ContextProductConsumptionEdge, ContextProductVersion
-from aida.okf_export import (
-    OKF_CONFORMANCE_STATUS,
-    OkfBundle,
-    OkfExportError,
-    bundle_archive_bytes,
-    bundle_index,
-    export_okf_bundle,
-    validate_atlas_publish_policy,
+from aida.okf_export import OKF_CONFORMANCE_STATUS, bundle_archive_bytes
+from aida.okf_store import (
+    BUNDLE_ROLE_CHANNELS,
+    OkfPublishedBundle,
+    as_bundle,
+    list_publications,
+    load_document,
+    load_documents,
+    read_object_knowledge,
+    read_published_bundle,
+    record_okf_read,
 )
-from aida.okf_snapshot import freeze_snapshot
-from aida.schemas import OkfBundleFileRead, OkfBundleRead
+from aida.okf_store_models import OkfBundleDocument, OkfBundlePublication
+from aida.schemas import (
+    OkfBundleFileRead,
+    OkfBundleRead,
+    OkfChangeSummaryRead,
+    OkfDocumentRead,
+    OkfObjectKnowledgeItemRead,
+    OkfObjectKnowledgeRead,
+    OkfPublicationHistoryRead,
+    OkfPublicationRead,
+)
 from aida.security import SecurityContext, require_roles
 
 router = APIRouter(prefix="/v1", tags=["okf-export"])
@@ -70,105 +81,82 @@ OKF_ROLES = (
     "Analyst",
 )
 
+_PINNED_READ = (
+    "Read this stored publication of the caller's own lineage instead of the current one. "
+    "Refused as not found once it is no longer retained."
+)
+_PINNED_DOWNLOAD = (
+    "Download this stored publication -- the one a manifest named -- rather than the current "
+    "one, so an inspected manifest and its archive are the same bytes."
+)
 
-async def _build(
-    session: AsyncSession,
-    version_id: UUID,
-    context: SecurityContext,
-    settings: Settings,
-) -> tuple[OkfBundle, ContextProduct, ContextProductVersion, dict[str, object]]:
-    """Freeze, render and validate one bundle, or refuse.
 
-    The clock is read exactly once, here, and handed to the freeze as data. Nothing downstream
-    reads it again, which is what lets two renders of one snapshot be byte-identical.
-    """
-    (
-        product,
-        version,
-        _tables,
-        _negative_knowledge,
-        _exemplars,
-        routines,
-        views,
-        ontology,
-        freshness,
-        quality_snapshot,
-    ) = await _load_source(session, version_id, context)
-    snapshot = await freeze_snapshot(
-        session,
-        context,
-        settings,
-        product=product,
-        version=version,
-        routines=routines,
-        views=views,
-        ontology=ontology,
-        freshness=freshness,
-        captured_at=datetime.now(UTC),
+def publication_read(
+    publication: OkfBundlePublication, *, is_current: bool
+) -> OkfPublicationRead:
+    """One stored publication as the API describes it. Shared with the MCP reader."""
+    summary: dict[str, Any] = dict(publication.change_summary or {})
+    verdict: dict[str, Any] = dict(summary.get("validation") or {})
+    return OkfPublicationRead(
+        publication_id=publication.id,
+        sequence=publication.sequence,
+        trigger=publication.trigger,
+        captured_at=publication.captured_at,
+        is_current=is_current,
+        bundle_content_digest=publication.bundle_content_digest,
+        content_snapshot_digest=publication.content_snapshot_digest,
+        document_count=publication.document_count,
+        rendered_count=publication.rendered_count,
+        carried_count=publication.carried_count,
+        valid=bool(verdict.get("valid", False)),
+        changes=OkfChangeSummaryRead(
+            added=[str(item) for item in summary.get("added") or []],
+            changed=[str(item) for item in summary.get("changed") or []],
+            removed=[str(item) for item in summary.get("removed") or []],
+            changed_subjects=len(summary.get("changed_subjects") or []),
+            marked_subjects=len(summary.get("marked_subjects") or []),
+            full_render=bool(summary.get("full_render", False)),
+        ),
     )
-    try:
-        bundle = export_okf_bundle(snapshot)
-    except OkfExportError as error:
-        # 409 with the reason and no object detail: an identity collision, a dangling reference
-        # or an over-limit document is a state the caller can act on, and the message must not
-        # become a channel for a name the caller may not see.
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    return bundle, product, version, quality_snapshot
 
 
-def _record(
-    session: AsyncSession,
-    context: SecurityContext,
-    version: ContextProductVersion,
-    bundle: OkfBundle,
-    *,
-    action: str,
-    channel: str,
-    quality_snapshot: dict[str, object],
-) -> None:
-    version_id = version.id
-    organization_id = version.organization_id
-    correlation_id = get_correlation_id()
-    record_audit(
-        session,
-        replace(context, organization_id=organization_id),
-        action=action,
-        resource_type="context_product_version",
-        resource_id=str(version_id),
-        outcome="SUCCESS",
-        correlation_id=correlation_id,
-        details={
-            "bundle_content_digest": bundle.content_digest,
-            "content_snapshot_digest": bundle.manifest["content_snapshot_digest"],
-            "documents": len(bundle.documents),
-        },
+def document_read(
+    publication: OkfBundlePublication, document: OkfBundleDocument
+) -> OkfDocumentRead:
+    return OkfDocumentRead(
+        publication_id=publication.id,
+        publication_sequence=publication.sequence,
+        path=document.path,
+        sha256=document.sha256,
+        bytes=document.byte_length,
+        rendered_in_sequence=document.rendered_in_sequence,
+        subject_key=document.subject_key,
+        content=document.content,
     )
-    record_outbox(
-        session,
-        organization_id=organization_id,
-        aggregate_type="context_product_version",
-        aggregate_id=str(version_id),
-        event_type="context.okf_bundle_exported.v1",
-        payload={
-            "bundle_content_digest": bundle.content_digest,
-            "documents": len(bundle.documents),
-            "channel": channel,
-        },
+
+
+def bundle_read(stored: OkfPublishedBundle) -> OkfBundleRead:
+    """The manifest view of a stored publication. Built from stored columns only -- no document
+    body is loaded to answer it."""
+    publication = stored.publication
+    manifest: dict[str, Any] = dict(publication.manifest)
+    validation = stored.validation
+    return OkfBundleRead(
+        okf_version=str(manifest["okf_version"]),
+        spec_revision=str(manifest["specification"]["revision"]),
+        spec_conformance=OKF_CONFORMANCE_STATUS,
+        profile=f"{manifest['compiler']['profile']}/{manifest['compiler']['profile_version']}",
+        content_snapshot_digest=publication.content_snapshot_digest,
+        bundle_content_digest=publication.bundle_content_digest,
+        scope_digest=publication.scope_digest,
+        document_count=publication.document_count,
+        valid=validation.valid,
+        findings=list(validation.findings),
+        files=[OkfBundleFileRead(**entry) for entry in manifest.get("files") or []],
+        manifest=manifest,
+        publication=publication_read(publication, is_current=stored.is_current),
+        validated_at=stored.head.validated_at,
     )
-    if version.status == "PUBLISHED":
-        session.add(
-            ContextProductConsumptionEdge(
-                organization_id=organization_id,
-                context_product_version_id=version_id,
-                principal_id=context.principal_id,
-                principal_type=context.principal_type,
-                channel=channel,
-                correlation_id=correlation_id,
-                product_fingerprint=version.fingerprint,
-                policy_decision="ALLOW",
-                quality_snapshot=quality_snapshot,
-            )
-        )
 
 
 @router.get(
@@ -180,43 +168,30 @@ async def inspect_okf_bundle(
     context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
+    publication_id: Annotated[UUID | None, Query(description=_PINNED_READ)] = None,
 ) -> OkfBundleRead:
-    """The bundle's manifest and file index, without moving the documents.
+    """The stored bundle's manifest and file index, without moving the documents.
 
     Returns the validation verdict alongside it rather than refusing an invalid bundle: the
     findings are how a caller learns *why* an export would not publish, and
     `validate_atlas_publish_policy` is strictly stronger than OKF conformance, so a `valid:
     false` here is an Atlas policy answer and not a statement that the bundle is unreadable.
+    The `publication.publication_id` returned is what a caller passes to the download to get
+    exactly these bytes.
     """
-    bundle, _product, version, quality_snapshot = await _build(
-        session, version_id, context, settings
+    stored = await read_published_bundle(
+        session, version_id, context, settings, publication_id=publication_id
     )
-    validation = validate_atlas_publish_policy(bundle)
-    _record(
+    record_okf_read(
         session,
         context,
-        version,
-        bundle,
+        stored,
         action="context_product.okf_bundle_inspect",
-        channel="OKF_MANIFEST",
-        quality_snapshot=quality_snapshot,
+        channel=BUNDLE_ROLE_CHANNELS["manifest"],
     )
+    read = bundle_read(stored)
     await session.commit()
-    return OkfBundleRead(
-        okf_version=str(bundle.manifest["okf_version"]),
-        spec_revision=str(bundle.manifest["specification"]["revision"]),
-        spec_conformance=OKF_CONFORMANCE_STATUS,
-        profile=f"{bundle.manifest['compiler']['profile']}"
-        f"/{bundle.manifest['compiler']['profile_version']}",
-        content_snapshot_digest=str(bundle.manifest["content_snapshot_digest"]),
-        bundle_content_digest=bundle.content_digest,
-        scope_digest=str(bundle.manifest["scope_digest"]),
-        document_count=len(bundle.documents),
-        valid=validation.valid,
-        findings=list(validation.findings),
-        files=[OkfBundleFileRead(**entry) for entry in bundle_index(bundle)],
-        manifest=bundle.manifest,
-    )
+    return read
 
 
 @router.get("/context-product-versions/{version_id}/okf-bundle/download")
@@ -225,33 +200,34 @@ async def download_okf_bundle(
     context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
+    publication_id: Annotated[UUID | None, Query(description=_PINNED_DOWNLOAD)] = None,
 ) -> Response:
-    """The bundle as a deterministic archive, refused unless it satisfies the publish policy.
+    """The stored bundle as a deterministic archive, refused unless it satisfies the policy.
 
     Stricter than the manifest route on purpose. Inspecting findings is how a caller diagnoses
     an export; handing out a file is publication, and a file cannot be recalled -- "a downloaded
     file cannot be remotely revoked". So the download refuses what the manifest is willing to
-    describe.
+    describe. The archive is built from the stored document rows, never re-rendered.
     """
-    bundle, product, version, quality_snapshot = await _build(
-        session, version_id, context, settings
+    stored = await read_published_bundle(
+        session, version_id, context, settings, publication_id=publication_id
     )
-    validation = validate_atlas_publish_policy(bundle)
+    validation = stored.validation
     if not validation.valid:
         raise HTTPException(status_code=409, detail={"findings": list(validation.findings)})
+    publication = stored.publication
+    bundle = as_bundle(publication, await load_documents(session, publication))
     archive = bundle_archive_bytes(bundle)
-    _record(
+    record_okf_read(
         session,
         context,
-        version,
-        bundle,
+        stored,
         action="context_product.okf_bundle_download",
-        channel="OKF_DOWNLOAD",
-        quality_snapshot=quality_snapshot,
+        channel=BUNDLE_ROLE_CHANNELS["download"],
     )
+    product_key = stored.product.product_key
+    product_version = stored.version.version
     await session.commit()
-    product_key = product.product_key
-    product_version = version.version
     return Response(
         content=archive,
         media_type="application/zip",
@@ -259,10 +235,131 @@ async def download_okf_bundle(
             "Content-Disposition": (
                 f'attachment; filename="{product_key}-{product_version}-okf-bundle.zip"'
             ),
-            "X-Atlas-Bundle-Content-SHA256": bundle.content_digest,
-            "X-Atlas-Content-Snapshot-SHA256": str(
-                bundle.manifest["content_snapshot_digest"]
-            ),
+            "X-Atlas-Bundle-Content-SHA256": publication.bundle_content_digest,
+            "X-Atlas-Content-Snapshot-SHA256": publication.content_snapshot_digest,
             "X-Atlas-OKF-Spec-Revision": str(bundle.manifest["specification"]["revision"]),
+            "X-Atlas-OKF-Publication-Id": str(publication.id),
+            "X-Atlas-OKF-Publication-Sequence": str(publication.sequence),
         },
     )
+
+
+@router.get(
+    "/context-product-versions/{version_id}/okf-bundle/document",
+    response_model=OkfDocumentRead,
+)
+async def read_okf_document(
+    version_id: UUID,
+    path: Annotated[
+        str, Query(min_length=1, max_length=512, description="Bundle-relative document path")
+    ],
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    publication_id: Annotated[UUID | None, Query(description=_PINNED_READ)] = None,
+) -> OkfDocumentRead:
+    """One stored document -- the wiki view of a bundle, page by page.
+
+    The path is looked up among the stored document rows of the caller's own publication, so a
+    path that is not in the bundle, or is in a bundle of another lineage, reads as not found.
+    """
+    stored = await read_published_bundle(
+        session, version_id, context, settings, publication_id=publication_id
+    )
+    document = await load_document(session, stored.publication, path.lstrip("/"))
+    if document is None:
+        raise HTTPException(status_code=404, detail="document not found in this bundle")
+    record_okf_read(
+        session,
+        context,
+        stored,
+        action="context_product.okf_document_read",
+        channel=BUNDLE_ROLE_CHANNELS["document"],
+        path=document.path,
+    )
+    read = document_read(stored.publication, document)
+    await session.commit()
+    return read
+
+
+@router.get(
+    "/context-product-versions/{version_id}/okf-bundle/publications",
+    response_model=OkfPublicationHistoryRead,
+)
+async def list_okf_publications(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> OkfPublicationHistoryRead:
+    """The caller's lineage of stored publications -- what changed, when, and why.
+
+    Only the caller's own lineage: a publication built under another authority (a wider grant,
+    a different admitted source set) is neither listed nor counted.
+    """
+    stored = await read_published_bundle(session, version_id, context, settings)
+    items = [
+        publication_read(item, is_current=item.id == stored.head.publication_id)
+        for item in await list_publications(session, stored)
+    ]
+    record_okf_read(
+        session,
+        context,
+        stored,
+        action="context_product.okf_publications_read",
+        channel=BUNDLE_ROLE_CHANNELS["history"],
+    )
+    await session.commit()
+    return OkfPublicationHistoryRead(context_product_version_id=version_id, items=items)
+
+
+@router.get(
+    "/metadata/tables/{table_id}/okf-knowledge",
+    response_model=OkfObjectKnowledgeRead,
+)
+async def read_object_okf_knowledge(
+    table_id: UUID,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> OkfObjectKnowledgeRead:
+    """The Catalog door: this object's document from each product bundle the caller may read.
+
+    Each bundle is read through the same store, scope resolver and admission as the product
+    routes; a product the caller may not consume, or whose bundle does not admit this object's
+    datasource for them, contributes nothing -- not an empty entry, not a count.
+    """
+    found = await read_object_knowledge(session, table_id, context, settings)
+    items: list[OkfObjectKnowledgeItemRead] = []
+    for entry in found:
+        stored = entry.stored
+        manifest: dict[str, Any] = dict(stored.publication.manifest)
+        coverage = next(
+            (
+                dict(row)
+                for row in manifest.get("source_objects") or []
+                if row.get("key") == entry.document.subject_key
+            ),
+            {},
+        )
+        items.append(
+            OkfObjectKnowledgeItemRead(
+                context_product_version_id=stored.version.id,
+                product_key=stored.product.product_key,
+                product_version=stored.version.version,
+                product_name=stored.version.name,
+                publication=publication_read(stored.publication, is_current=stored.is_current),
+                document=document_read(stored.publication, entry.document),
+                coverage=coverage,
+            )
+        )
+        record_okf_read(
+            session,
+            context,
+            stored,
+            action="context_product.okf_object_read",
+            channel=BUNDLE_ROLE_CHANNELS["object"],
+            path=entry.document.path,
+        )
+    await session.commit()
+    return OkfObjectKnowledgeRead(table_id=table_id, items=items)

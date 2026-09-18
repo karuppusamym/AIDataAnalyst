@@ -47,6 +47,10 @@ const EDGE_TYPES: ParsedLineageEdgeType[] = [
   "DBT",
   "OPENLINEAGE_TABLE",
   "OPENLINEAGE_COLUMN",
+  /* R11-FP01: a trigger's edge. Its source is the table the trigger fires on,
+     which the body never names; `source_sql_reference` carries the trigger and
+     that firing table by name, and the evidence list below renders both. */
+  "TRIGGER",
 ];
 
 const CONFIDENCE_STRING_TO_FLOAT: Record<string, number> = {
@@ -213,9 +217,9 @@ export function ParsedLineageReviewScreen() {
         <h1 id="parsed-lineage-review-title">Parsed lineage review</h1>
         <p style={{ maxWidth: "60ch" }}>
           PROPOSED lineage edges from the non-governed parsers — view,
-          procedure SQL, captured routine, dbt, OpenLineage table, OpenLineage
-          column. Approve to fold into the shared graph; reject to keep out and
-          record why.
+          procedure SQL, captured routine, captured trigger, dbt, OpenLineage
+          table, OpenLineage column. Approve to fold into the shared graph;
+          reject to keep out and record why.
           Maker-checker enforced: you cannot decide an edge you created.
         </p>
       </header>

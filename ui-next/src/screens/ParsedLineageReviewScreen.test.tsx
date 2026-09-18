@@ -219,3 +219,74 @@ describe("ParsedLineageReviewScreen edge-type filter", () => {
     expect(new URLSearchParams(location.search).get("type")).toBeNull();
   });
 });
+
+describe("ParsedLineageReviewScreen trigger edges", () => {
+  /* R11-FP01: a trigger's edge became decidable on 2026-09-17. Its source is the
+     table the trigger fires on -- a name the body never contains -- so what the
+     reviewer needs beside it is which trigger claims the path, on which table,
+     and (PostgreSQL) which function's body was read. */
+  const TRIGGER_EDGE: ParsedLineageEdgeReviewQueueItemRead = {
+    edge_id: "edge_t",
+    edge_type: "TRIGGER",
+    organization_id: "org1",
+    created_at: "2026-09-17T00:00:00Z",
+    created_by: "agent:lineage",
+    confidence: "FULL",
+    source_label: "public.orders.customer_id",
+    target_label: "public.audit.customer_id",
+    transformation_type: "DIRECT",
+    source_sql_reference: {
+      kind: "TRIGGER_BODY",
+      datasource_id: "ds1",
+      trigger_id: "trg1",
+      trigger: "public.note_order",
+      firing_table: "public.orders",
+      routine_id: "fn1",
+      via_routine: "public.note_order_fn",
+      statement_ordinal: "0",
+      sql_hash: "abc",
+      dialect: "postgres",
+    },
+  };
+
+  it("filters to trigger edges, names the trigger, and decides one as TRIGGER", async () => {
+    history.replaceState(null, "", "/?type=TRIGGER#/parsed-lineage-review");
+    listParsedLineageReviewQueue.mockResolvedValue({ items: [TRIGGER_EDGE], total: 1 });
+    const ParsedLineageReviewScreen = await loadScreen();
+    render(<ParsedLineageReviewScreen />);
+
+    await waitFor(() =>
+      expect(listParsedLineageReviewQueue).toHaveBeenCalledWith(
+        expect.objectContaining({ edgeType: "TRIGGER" }),
+        expect.anything(),
+      ),
+    );
+    expect((screen.getByLabelText("Edge type") as HTMLSelectElement).value).toBe("TRIGGER");
+    await waitFor(() =>
+      expect(screen.getByText("public.orders.customer_id")).toBeInTheDocument(),
+    );
+
+    screen.getByRole("button", { name: /public\.orders\.customer_id/ }).click();
+    const pane = await screen.findByLabelText("Parsed lineage edge detail");
+    const evidence = within(pane).getByLabelText("Evidence");
+    expect(within(evidence).getByText("TRIGGER_BODY")).toBeInTheDocument();
+    expect(within(evidence).getByText("public.note_order")).toBeInTheDocument();
+    expect(within(evidence).getByText("public.orders")).toBeInTheDocument();
+    expect(within(evidence).getByText("public.note_order_fn")).toBeInTheDocument();
+
+    within(pane).getByRole("button", { name: "Approve edge" }).click();
+    const dialog = await screen.findByRole("dialog", { name: "Approve this review" });
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "The trigger writes audit on every insert." },
+    });
+    within(dialog).getByRole("button", { name: "Approve" }).click();
+
+    await waitFor(() =>
+      expect(decideParsedLineageEdge).toHaveBeenCalledWith("edge_t", {
+        edge_type: "TRIGGER",
+        decision: "APPROVED",
+        reason: "The trigger writes audit on every insert.",
+      }),
+    );
+  });
+});

@@ -21,7 +21,7 @@ truncation reason directly.
 queries and offers nodes and links to the shared `BoundedGraph`; none of them
 can exceed the budget, because admission is the accumulator's decision, not
 theirs. They run in a fixed order (foreign keys, view/procedure definitions,
-suggested relationships, dbt, OpenLineage, BI) because that order is the
+suggested relationships, dbt, OpenLineage, BI, triggers) because that order is the
 response's edge order and callers render it. A new provider is appended rather
 than inserted, so existing edge order is never disturbed.
 
@@ -75,14 +75,14 @@ from aida.models import (
     RelationshipCandidate,
     ViewLineageEdge,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.relationship_validation import public_relationship_evidence
 from aida.unified_lineage import UnifiedLink
 
 SuggestionStatus = Literal["ALL", "PENDING", "APPROVED", "REJECTED"]
 
 #: Every edge source the merged graph can carry. `counts_by_source` always
-#: reports all seven, so a caller can tell "no dbt edges" from "dbt not merged".
+#: reports every one, so a caller can tell "no dbt edges" from "dbt not merged".
 #: Mirrors `schemas.UnifiedLineageEdgeSource`, which is what the API validates
 #: against; the two are kept in step by `tests/test_unified_lineage.py`.
 EDGE_SOURCES: tuple[str, ...] = (
@@ -93,6 +93,8 @@ EDGE_SOURCES: tuple[str, ...] = (
     "VIEW_DEFINITION",
     "PROCEDURE_DEFINITION",
     "BI_LINEAGE",
+    # R11-FP01: `collect_trigger_lineage`. Appended, like its provider.
+    "TRIGGER_DEFINITION",
 )
 
 DBT_NODE_KIND_BY_RESOURCE_TYPE = {
@@ -294,14 +296,28 @@ async def collect_foreign_keys(
 
 
 #: A row `_register_definition_edges` folds: a view's parsed edge, or a
-#: procedure's -- from pasted SQL, or from a captured routine's body.
-DefinitionEdgeRow = ViewLineageEdge | ProcedureLineageEdge | DeepProcedureLineageEdge
+#: procedure's -- from pasted SQL, or from a captured routine's body -- or a
+#: trigger's (R11-FP01).
+DefinitionEdgeRow = (
+    ViewLineageEdge | ProcedureLineageEdge | DeepProcedureLineageEdge | TriggerLineageEdge
+)
+#: The two tables whose rows name the captured routine whose body they came from.
+RoutineBackedEdgeRow = DeepProcedureLineageEdge | TriggerLineageEdge
+
+
+def _body_routine_id(edge: DefinitionEdgeRow) -> UUID | None:
+    """The captured routine an edge's body was read from, where the row knows it:
+    always for the routine table, and for a trigger's edge on PostgreSQL, where the
+    body is the function `action_routine` names."""
+    if isinstance(edge, DeepProcedureLineageEdge | TriggerLineageEdge):
+        return edge.routine_id
+    return None
 
 
 def _register_definition_edges(
     graph: BoundedGraph,
     rows: Sequence[DefinitionEdgeRow],
-    edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION"],
+    edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION", "TRIGGER_DEFINITION"],
     view_definitions_by_table_id: dict[UUID, tuple[str, str]] | None = None,
     routine_references_by_id: dict[UUID, tuple[str, str]] | None = None,
 ) -> None:
@@ -353,15 +369,26 @@ def _register_definition_edges(
         # establish names those routines, and when exactly one routine -- still
         # captured -- establishes it, the edge carries the same resolvable
         # reference a VIEW_DEFINITION edge does, to that routine's own body.
+        #
+        # R11-FP01: a TRIGGER_DEFINITION edge names the triggers that establish it,
+        # and, on PostgreSQL, the function whose body each one's code lives in --
+        # so the same single-routine rule gives it the same resolvable reference
+        # to that body. A SQL Server or Oracle trigger's own body is not a routine,
+        # so no reference is fabricated for it.
         routine_ids = sorted(
             {
-                str(edge.routine_id)
+                str(routine_id)
                 for edge in edges
-                if isinstance(edge, DeepProcedureLineageEdge)
+                if (routine_id := _body_routine_id(edge)) is not None
             }
         )
         if routine_ids:
             evidence["routine_ids"] = routine_ids
+        trigger_ids = sorted(
+            {str(edge.trigger_id) for edge in edges if isinstance(edge, TriggerLineageEdge)}
+        )
+        if trigger_ids:
+            evidence["trigger_ids"] = trigger_ids
         if len(routine_ids) == 1 and routine_references_by_id is not None:
             found_routine = routine_references_by_id.get(UUID(routine_ids[0]))
             if found_routine is not None:
@@ -384,13 +411,25 @@ def _register_definition_edges(
                 }
                 evidence["redaction_status"] = redaction_status
                 evidence["availability"] = availability
+        # A pair no ACTIVE row establishes is rendered as what it is. It reaches
+        # here at all only for a caller that opted into pending edges
+        # (`include_pending_edges`), and that caller still must not be told a
+        # proposal is fact: one ACTIVE row makes the path ACTIVE, otherwise it is
+        # PROPOSED (or, for a provider whose opt-in admits decided rows too, the
+        # state they were decided into). The default graph admits ACTIVE rows
+        # only, so what it reports is unchanged.
+        statuses = {edge.review_status for edge in edges}
+        status = next(
+            (state for state in ("ACTIVE", "PROPOSED") if state in statuses),
+            min(statuses),
+        )
         graph.register_link(
             UnifiedLink(
                 edge_id=f"{edge_source.lower()}:{edges[0].id}",
                 source_id=str(target_table_id),
                 target_id=str(source_table_id),
                 edge_source=edge_source,
-                status="ACTIVE",
+                status=status,
                 confidence=min(
                     DEFINITION_LINEAGE_CONFIDENCE.get(edge.confidence, 0.3) for edge in edges
                 ),
@@ -434,11 +473,11 @@ async def _load_view_definition_references(
 async def _load_routine_references(
     session: AsyncSession,
     datasource: DataSource,
-    routine_rows: Sequence[DeepProcedureLineageEdge],
+    routine_rows: Sequence[RoutineBackedEdgeRow],
 ) -> dict[UUID, tuple[str, str]]:
     """The routine-aware counterpart of `_load_view_definition_references`:
     the two narrow columns a routine's reference carries, never its body."""
-    routine_ids = {row.routine_id for row in routine_rows}
+    routine_ids = {row.routine_id for row in routine_rows if row.routine_id is not None}
     if not routine_ids:
         return {}
     rows = (
@@ -1110,6 +1149,62 @@ async def collect_bi_lineage(
         await _collect_one_bi_import(session, graph, table_ids, connection, latest_import)
 
 
+async def collect_trigger_lineage(
+    session: AsyncSession,
+    datasource: DataSource,
+    graph: BoundedGraph,
+    table_ids: set[UUID],
+    *,
+    include_pending_edges: bool,
+) -> None:
+    """The data paths triggers create (R11-FP01): firing table -> what it writes.
+
+    `trigger_lineage_edge` rows, folded exactly as a routine's are -- one
+    table-level edge per catalog-resolved table pair, dependent first, a hop
+    through a temp table left out as the body's own plumbing -- under their own
+    `TRIGGER_DEFINITION` source. That is a real distinction and not a relabelling:
+    a procedure's path exists when something calls it, a trigger's exists on
+    every write to the table it fires on, which is the fact an impact reader
+    asking "what else changes when `orders` does?" most needs and is least likely
+    to find anywhere else.
+
+    **Only ACTIVE edges, by default.** Every edge the lineage agent writes is
+    PROPOSED until a person decides it in the parsed-lineage queue, and an
+    undecided proposal must not reach an impact answer as fact; a caller that
+    opts into pending edges sees it with status PROPOSED. An UNPARSED marker
+    carries no resolved table on either end, so it cannot fold in at all.
+
+    Appended after every other provider, so the edge order callers already
+    render is undisturbed. INV-5 is stated on the row itself -- organization and
+    datasource -- as `collect_bi_lineage` states it, not inferred from the frame.
+    """
+    if not table_ids:
+        return
+    stmt = (
+        select(TriggerLineageEdge)
+        .where(
+            TriggerLineageEdge.organization_id == datasource.organization_id,
+            TriggerLineageEdge.datasource_id == datasource.id,
+            TriggerLineageEdge.source_table_id.in_(table_ids),
+            TriggerLineageEdge.target_table_id.in_(table_ids),
+            TriggerLineageEdge.is_intermediate.is_(False),
+            TriggerLineageEdge.review_status.in_(
+                ("ACTIVE", "PROPOSED") if include_pending_edges else ("ACTIVE",)
+            ),
+        )
+        .order_by(TriggerLineageEdge.id)
+        .limit(graph.edge_limit)
+    )
+    rows = (await session.scalars(stmt)).all()
+    graph.note_scan_bound(rows, graph.edge_limit, "EDGE_LIMIT")
+    _register_definition_edges(
+        graph,
+        rows,
+        "TRIGGER_DEFINITION",
+        routine_references_by_id=await _load_routine_references(session, datasource, rows),
+    )
+
+
 async def build_unified_graph(
     session: AsyncSession,
     datasource: DataSource,
@@ -1141,4 +1236,7 @@ async def build_unified_graph(
         session, datasource, graph, table_ids, include_pending_edges=include_pending_edges
     )
     await collect_bi_lineage(session, datasource, graph, table_ids)
+    await collect_trigger_lineage(
+        session, datasource, graph, table_ids, include_pending_edges=include_pending_edges
+    )
     return graph.snapshot()

@@ -30,8 +30,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE
-from aida.envelope_models import AVAILABLE, UNAVAILABLE, MetadataRoutine, MetadataViewDefinition
-from aida.footprint_gaps import GAP_DEFINITIONS
+from aida.envelope_models import (
+    AVAILABLE,
+    UNAVAILABLE,
+    MetadataRoutine,
+    MetadataTrigger,
+    MetadataViewDefinition,
+)
+from aida.footprint_gaps import GAP_DEFINITIONS, trigger_awaits_parse
 from aida.ingest_screening import CLEAN
 from aida.models import (
     DataQualityIncident,
@@ -40,7 +46,7 @@ from aida.models import (
     MetadataTable,
     ViewLineageEdge,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.routine_call_descent import CALLEE_BODY_WITHHELD, CALLEE_NOT_CAPTURED
 from aida.schemas import ApiModel
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
@@ -243,6 +249,49 @@ async def _code_objects(
     return views + routines
 
 
+def _trigger_objects(organization_id: UUID, datasource_id: UUID, *condition: Any) -> Select[Any]:
+    """Triggers of this source matching `condition`, named by schema, name and the
+    table they fire on -- a trigger name is scoped to its table on PostgreSQL, so
+    two tables in one schema may each own an `audit_trg`."""
+    return (
+        select(
+            MetadataTrigger.id,
+            MetadataCatalog.name,
+            MetadataSchema.name,
+            MetadataTrigger.name,
+            MetadataTrigger.table_name,
+        )
+        .select_from(MetadataTrigger)
+        .join(MetadataSchema, MetadataSchema.id == MetadataTrigger.schema_id)
+        .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+        .where(
+            MetadataTrigger.organization_id == organization_id,
+            MetadataTrigger.datasource_id == datasource_id,
+            MetadataTrigger.status == "ACTIVE",
+            *condition,
+        )
+    )
+
+
+async def _named_triggers(
+    session: AsyncSession, statement: Select[Any], details: dict[UUID, str | None] | None = None
+) -> list[FootprintGapObjectRead]:
+    """R11-FP01: the trigger half of a gap. `footprint_gaps` has counted triggers in
+    the lineage kinds since trigger lineage landed, and this list did not name them
+    -- so a source whose only gap was a trigger showed a count whose list read
+    "nothing left to show", the false-clean reading this module exists to prevent."""
+    rows = (await session.execute(statement.limit(MAX_OBJECTS + 1))).all()
+    return [
+        FootprintGapObjectRead(
+            object_type="TRIGGER",
+            object_id=trigger_id,
+            qualified_name=f"{catalog_name}.{schema_name}.{name} on {table_name}",
+            detail=(details or {}).get(trigger_id),
+        )
+        for trigger_id, catalog_name, schema_name, name, table_name in rows
+    ]
+
+
 async def _awaiting_parse(
     session: AsyncSession, organization_id: UUID, datasource_id: UUID
 ) -> list[FootprintGapObjectRead]:
@@ -272,7 +321,10 @@ async def _awaiting_parse(
         ),
         "ROUTINE",
     )
-    return views + routines
+    triggers = await _named_triggers(
+        session, _trigger_objects(organization_id, datasource_id, trigger_awaits_parse())
+    )
+    return views + routines + triggers
 
 
 async def _unparsed_routines(
@@ -317,6 +369,48 @@ async def _unparsed_routines(
     ]
 
 
+async def _unparsed_triggers(
+    session: AsyncSession, organization_id: UUID, datasource_id: UUID, *, callees_only: bool
+) -> list[FootprintGapObjectRead]:
+    """Triggers carrying UNPARSED markers -- all of them, or only an action routine
+    that could not be reached -- read with exactly the predicate `footprint_gaps`
+    counts them by."""
+    filters: list[Any] = [
+        TriggerLineageEdge.organization_id == organization_id,
+        TriggerLineageEdge.datasource_id == datasource_id,
+        TriggerLineageEdge.review_status == "ACTIVE",
+        TriggerLineageEdge.transformation_type == "UNPARSED",
+    ]
+    if callees_only:
+        filters.append(
+            or_(
+                TriggerLineageEdge.unparsed_reason.like(f"%({CALLEE_NOT_CAPTURED})"),
+                TriggerLineageEdge.unparsed_reason.like(f"%({CALLEE_BODY_WITHHELD})"),
+            )
+        )
+    rows = (
+        await session.execute(
+            select(TriggerLineageEdge.trigger_id, TriggerLineageEdge.unparsed_reason)
+            .where(*filters)
+            .order_by(TriggerLineageEdge.trigger_id)
+        )
+    ).all()
+    reasons: dict[UUID, str | None] = {}
+    for trigger_id, reason in rows:
+        reasons.setdefault(trigger_id, _reason_code(reason))
+    if not reasons:
+        return []
+    return await _named_triggers(
+        session,
+        _trigger_objects(
+            organization_id,
+            datasource_id,
+            MetadataTrigger.id.in_(list(reasons)[: MAX_OBJECTS + 1]),
+        ),
+        reasons,
+    )
+
+
 def _reason_code(reason: str | None) -> str | None:
     """The stable code inside an UNPARSED marker's reason, never the statement text with it.
 
@@ -331,7 +425,8 @@ def _reason_code(reason: str | None) -> str | None:
 async def _awaiting_review(
     session: AsyncSession, organization_id: UUID, datasource_id: UUID
 ) -> list[FootprintGapObjectRead]:
-    """Proposed lineage nobody has decided: the views and routines it was proposed for."""
+    """Proposed lineage nobody has decided: the views, routines and triggers it was
+    proposed for."""
     view_rows = list(
         await session.scalars(
             select(ViewLineageEdge.target_table_id)
@@ -356,11 +451,32 @@ async def _awaiting_review(
             .limit(MAX_OBJECTS + 1)
         )
     )
+    trigger_ids = list(
+        await session.scalars(
+            select(TriggerLineageEdge.trigger_id)
+            .where(
+                TriggerLineageEdge.organization_id == organization_id,
+                TriggerLineageEdge.datasource_id == datasource_id,
+                TriggerLineageEdge.review_status == "PROPOSED",
+            )
+            .distinct()
+            .limit(MAX_OBJECTS + 1)
+        )
+    )
     tables = await _table_names(session, organization_id, [row for row in view_rows if row])
     routines = await _routine_names(
         session, organization_id, [row for row in routine_rows if row]
     )
-    return [
+    triggers = (
+        await _named_triggers(
+            session,
+            _trigger_objects(organization_id, datasource_id, MetadataTrigger.id.in_(trigger_ids)),
+            dict.fromkeys(trigger_ids, "PROPOSED"),
+        )
+        if trigger_ids
+        else []
+    )
+    return triggers + [
         FootprintGapObjectRead(
             object_type="VIEW", object_id=table_id, qualified_name=name, detail="PROPOSED"
         )
@@ -460,13 +576,12 @@ async def footprint_gap_objects(
         objects = await _code_objects(session, organization_id, datasource_id, kind=kind)
     elif kind == "LINEAGE_AWAITING_PARSE":
         objects = await _awaiting_parse(session, organization_id, datasource_id)
-    elif kind == "LINEAGE_UNPARSED_STATEMENTS":
+    elif kind in ("LINEAGE_UNPARSED_STATEMENTS", "LINEAGE_UNRESOLVED_CALLEE"):
+        callees_only = kind == "LINEAGE_UNRESOLVED_CALLEE"
         objects = await _unparsed_routines(
-            session, organization_id, datasource_id, callees_only=False
-        )
-    elif kind == "LINEAGE_UNRESOLVED_CALLEE":
-        objects = await _unparsed_routines(
-            session, organization_id, datasource_id, callees_only=True
+            session, organization_id, datasource_id, callees_only=callees_only
+        ) + await _unparsed_triggers(
+            session, organization_id, datasource_id, callees_only=callees_only
         )
     elif kind == "LINEAGE_AWAITING_REVIEW":
         objects = await _awaiting_review(session, organization_id, datasource_id)

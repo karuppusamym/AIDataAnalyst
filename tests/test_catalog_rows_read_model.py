@@ -903,7 +903,12 @@ async def test_rows_from_a_datasource_the_gate_denies_are_filtered_out(
     )
 
     assert [item.name for item in page.items] == ["t_allowed"]
-    # One gate() call per distinct datasource on the page, not one per row.
+    # The count must not see the denied datasource either. This test checked the
+    # page and never `total`, which is how the count leak survived: `total` came
+    # back 2 -- telling the caller a table exists in a source it cannot read.
+    assert page.total == 1
+    # One gate() call per distinct datasource, not one per row -- and the count
+    # and the page share those decisions rather than paying for them twice.
     assert sorted(set(calls)) == sorted({datasource_a.id, datasource_b.id})
     assert len(calls) == 2
     assert real_gate is not fake_gate  # sanity: the patch actually replaced something real

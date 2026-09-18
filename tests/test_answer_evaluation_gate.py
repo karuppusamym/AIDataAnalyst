@@ -595,6 +595,43 @@ def test_no_dollar_figure_is_derived_anywhere() -> None:
     assert "no dollar" in harness.TOKEN_BASIS.casefold()
 
 
+def test_the_cli_offline_mode_really_reaches_no_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The offline mode says "no provider, no network". Make the CLI keep it.
+
+    Every other test here forces the embedding provider off before it runs, so
+    none of them exercised the path a person actually types -- and on a machine
+    whose `.env` configures a provider, that path embedded live: about five
+    `gemini-embedding-001` requests on 2026-09-17, on a run that printed "no
+    provider, no network" and reported 0 tokens. This drives `main()` with a
+    provider deliberately configured and records what the observation saw the
+    moment it started.
+    """
+    import scripts.answer_evaluation_benchmark as harness
+    from aida.config import get_settings
+
+    monkeypatch.setenv("AIDA_EMBEDDING_PROVIDER", "gemini")
+    get_settings.cache_clear()
+    assert get_settings().embedding_provider == "gemini"  # the hazard, reproduced
+
+    seen: dict[str, str] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def _observe(cases: Any) -> Any:
+        seen["provider"] = get_settings().embedding_provider
+        raise _Stop
+
+    monkeypatch.setattr(harness, "observe_offline", _observe)
+    try:
+        with pytest.raises(_Stop):
+            harness.main(["--no-report"])
+    finally:
+        get_settings.cache_clear()
+
+    assert seen["provider"] == "unset"
+
+
 # ---------------------------------------------------------------------------
 # The real harness, no provider, against the actual committed corpus
 # ---------------------------------------------------------------------------

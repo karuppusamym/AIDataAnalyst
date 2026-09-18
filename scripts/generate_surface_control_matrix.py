@@ -90,6 +90,7 @@ MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # the first pattern that matches wins, so `/exports/.../bulk` is an export.
 SURFACE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("MCP", ("/mcp",)),
+    ("GRAPHQL", ("/graphql",)),
     ("EXPORT", ("/export", "/exports", "/download")),
     ("BULK", ("/bulk", "/batch", "/batches")),
     # A "job" surface is one that starts, inspects, resumes or stops a
@@ -309,6 +310,72 @@ def _mcp_rows() -> list[SurfaceRow]:
     return rows
 
 
+def _graphql_rows() -> list[SurfaceRow]:
+    """One row per GraphQL field that has a resolver (R11-GQL01).
+
+    `POST /graphql`'s handler hands the document to the GraphQL executor, which
+    dispatches resolvers by field name -- dynamic dispatch the call-graph walk
+    cannot follow, so the route's own row shows no workspace check. The resolvers
+    are where each field's decision is made, so each one gets a row, analysed
+    exactly like a REST handler. Fields are read out of `aida.graphql_schema`'s
+    source (every method decorated with `@strawberry.field` or its typed wrapper
+    `@field_resolver`), so a field added to the schema appears here without this
+    script being touched.
+
+    Roles are derived too: a resolver requires every role set it reaches in
+    `aida.graphql_reads`, so its effective set is their intersection.
+    """
+    import ast
+
+    from aida import graphql_reads
+
+    role_sets = {
+        "DATASOURCE_READ_ROLES": set(graphql_reads.DATASOURCE_READ_ROLES),
+        "CATALOG_READ_ROLES": set(graphql_reads.CATALOG_READ_ROLES),
+    }
+    module = "aida.graphql_schema"
+    source_path = REPO_ROOT / "src" / "aida" / "graphql_schema.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    rows: list[SurfaceRow] = []
+    for owner in (node for node in tree.body if isinstance(node, ast.ClassDef)):
+        for method in owner.body:
+            if not isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            decorated = any(
+                marker in ast.unparse(decorator)
+                for decorator in method.decorator_list
+                for marker in ("strawberry.field", "field_resolver")
+            )
+            if not decorated:
+                continue
+            handler = f"{owner.name}.{method.name}"
+            required: set[str] | None = None
+            for name, roles in role_sets.items():
+                if reaches_reference(module, handler, frozenset({name})):
+                    required = roles if required is None else required & roles
+            head, *rest = method.name.split("_")
+            field_name = head + "".join(part.title() for part in rest)
+            writes = reaches_session_write(module, handler)
+            rows.append(
+                SurfaceRow(
+                    surface=f"`GRAPHQL {owner.name}.{field_name}`",
+                    family="GRAPHQL",
+                    handler=f"{module}.{handler}",
+                    roles=", ".join(sorted(required)) if required else UNKNOWN,
+                    tenant_check=_yes_no(reaches_reference(module, handler, TENANT_REFERENCES)),
+                    workspace_check=_yes_no(reaches_call(module, handler, WORKSPACE_CALLS)),
+                    side_effects="writes" if writes else "read",
+                    writes_audit=_yes_no(reaches_call(module, handler, AUDIT_CALLS)),
+                    cancellation=(
+                        "cooperative"
+                        if reaches_call(module, handler, CANCELLATION_CALLS)
+                        else "not cancellable"
+                    ),
+                )
+            )
+    return rows
+
+
 def _sdk_rows(rest_rows: list[SurfaceRow]) -> list[SurfaceRow]:
     """The public Tool SDK's network surface.
 
@@ -356,7 +423,7 @@ def _sdk_rows(rest_rows: list[SurfaceRow]) -> list[SurfaceRow]:
 
 def collect_rows() -> list[SurfaceRow]:
     rest = _rest_rows()
-    rows = rest + _mcp_rows() + _sdk_rows(rest)
+    rows = rest + _mcp_rows() + _graphql_rows() + _sdk_rows(rest)
     return sorted(rows, key=lambda row: (row.family, row.surface))
 
 

@@ -27,6 +27,10 @@ const EDGE_LABELS: Record<string, string> = {
   OPENLINEAGE_ETL: "OpenLineage job",
   VIEW_DEFINITION: "View definition",
   PROCEDURE_DEFINITION: "Procedure",
+  /* R11-FP01: a path a trigger creates, firing table -> what it writes. Listed
+     here so its edges get an arrowhead marker and a legend entry, not a bare
+     line with an enum for a label. */
+  TRIGGER_DEFINITION: "Trigger",
 };
 
 interface PlacedNode extends UnifiedLineageNodeRead {

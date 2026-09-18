@@ -8,6 +8,12 @@ outbox/audit trail, same per-item SAVEPOINT-guarded bulk endpoint. What
 this module does NOT do is share storage with those endpoints -- see
 ADR-0026 for why the five edge tables keep their own columns instead of
 being folded under a `LineageEdge` supertype.
+
+Every table in `parsed_lineage_review_service.EDGE_TYPE_TO_MODEL` is decided
+here and nowhere else: the routine table joined on 2026-09-11 and the trigger
+table (`edge_type="TRIGGER"`, R11-FP01) on 2026-09-17 without a line of this
+module changing, because `_load_edge` dispatches on that map. There is no
+second approval path for any edge type, and none should be added for one.
 """
 
 from __future__ import annotations

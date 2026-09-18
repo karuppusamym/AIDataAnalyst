@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **492**
-- By family: BULK 11, EXPORT 7, JOB 26, MCP 9, REST 438, SDK 1
+- Surfaces covered: **507**
+- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 26, MCP 9, REST 441, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -77,6 +77,18 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export` | EXPORT | `aida.lineage_evidence_export_api.export_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/evidence/export` | EXPORT | `aida.asset_evidence_api.export_asset_evidence` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/audit-events/export.jsonl` | EXPORT | `aida.audit_export_api.export_audit_events` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL Column.businessDescription` | GRAPHQL | `aida.graphql_schema.Column.business_description` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Constraint.referencedTable` | GRAPHQL | `aida.graphql_schema.Constraint.referenced_table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL DataSource.tables` | GRAPHQL | `aida.graphql_schema.DataSource.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Query.datasource` | GRAPHQL | `aida.graphql_schema.Query.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GRAPHQL Query.datasources` | GRAPHQL | `aida.graphql_schema.Query.datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GRAPHQL Query.table` | GRAPHQL | `aida.graphql_schema.Query.table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Query.tables` | GRAPHQL | `aida.graphql_schema.Query.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Table.columns` | GRAPHQL | `aida.graphql_schema.Table.columns` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Table.constraints` | GRAPHQL | `aida.graphql_schema.Table.constraints` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Table.datasource` | GRAPHQL | `aida.graphql_schema.Table.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GRAPHQL Table.description` | GRAPHQL | `aida.graphql_schema.Table.description` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `POST /graphql` | GRAPHQL | `aida.graphql_api.graphql_query` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | mutating verb, no write found | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}/grounding-receipts` | JOB | `aida.api.get_agent_run_grounding_receipts` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}` | JOB | `aida.api.get_agent_run` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/ai/runtime-status` | JOB | `aida.api.ai_runtime_status` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
@@ -147,6 +159,8 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/composite-relationship-candidates/{group_id}/validation` | REST | `aida.relationship_validation_api.get_composite_relationship_candidate_validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/connectors/capability-matrix` | REST | `atlas.modules.ingestion.router.connector_capability_matrix` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/compile` | REST | `aida.context_compiler_api.compile_context_product_version` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle/document` | REST | `aida.okf_export_api.read_okf_document` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GET /v1/context-product-versions/{version_id}/okf-bundle/publications` | REST | `aida.okf_export_api.list_okf_publications` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/okf-bundle` | REST | `aida.okf_export_api.inspect_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/scope` | REST | `aida.context_product_api.get_context_product_version_scope` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}` | REST | `aida.context_product_api.get_context_product_version` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
@@ -226,6 +240,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/metadata/tables/{table_id}/evidence` | REST | `aida.asset_evidence_api.get_asset_evidence` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/glossary-links` | REST | `aida.glossary_api.list_asset_term_links` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/impact` | REST | `aida.intelligence_api.table_impact_analysis` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/metadata/tables/{table_id}/okf-knowledge` | REST | `aida.okf_export_api.read_object_okf_knowledge` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/model-imports/{batch_id}/changes` | REST | `aida.model_import_api.list_model_import_changes` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/negative-knowledge/search` | REST | `aida.negative_knowledge_api.search_negative_assertions` | DataEngineer, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/negative-knowledge/{subject_id}` | REST | `aida.negative_knowledge_api.get_subject_assertions` | DataEngineer, DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

@@ -20,7 +20,11 @@ time, and routes each through machinery that already exists rather than a second
   were approved against, and blocking every dependant of every edit would stop the platform
   serving without making an answer more correct.
 * **A view or routine redefined, retired or returning** is left to the lineage agent, which
-  re-examines any definition changed structurally since its newest edge (`lineage_agent`).
+  re-examines any definition changed structurally since its newest edge (`lineage_agent`) --
+  and, since R11-FP01, every PostgreSQL trigger whose body is that routine. A trigger function
+  changes without its trigger row changing, so there is deliberately no TRIGGER subject kind:
+  the ROUTINE signal is the one record of the change, and the agent reads it through
+  `trigger_parse_coverage.routine_id` rather than having it copied once per trigger here.
 * Permission and meaning signals are recorded as seen. A newly published ontology reaches the
   context products pinning an earlier version through `context_rebuild`, which re-pins from
   the pins themselves. A source grant authorizes nothing in Atlas (INV-5), so a permission

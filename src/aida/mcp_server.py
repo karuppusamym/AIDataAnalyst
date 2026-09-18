@@ -130,6 +130,13 @@ from aida.models import (
     MetadataTable,
     TableProfile,
 )
+from aida.okf_export_api import publication_read
+from aida.okf_store import (
+    BUNDLE_ROLE_CHANNELS,
+    load_document,
+    read_published_bundle,
+    record_okf_read,
+)
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
 from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
@@ -2198,6 +2205,20 @@ async def _handle_resources_list(
                 "mimeType": "application/json",
             }
         )
+        # R11-OKF02: the same product's stored OKF knowledge bundle. Its manifest is this URI;
+        # one document is this URI plus `/<bundle path>`. Both read the stored publication REST
+        # reads (`aida.okf_store.read_published_bundle`), never a second render.
+        resources.append(
+            {
+                "uri": _okf_uri(product.product_key, version.version),
+                "name": f"{version.name} v{version.version} knowledge bundle",
+                "description": (
+                    "Stored OKF knowledge bundle for this context product version: manifest "
+                    "and file index. Append a bundle path to read one document."
+                ),
+                "mimeType": "application/json",
+            }
+        )
 
     return {"resources": resources}
 
@@ -2207,6 +2228,7 @@ async def _handle_resources_read(
     session: AsyncSession,
     context: SecurityContext,
     correlation_id: str,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
     """
     Return value-free metadata for a specific atlas:// resource URI.
@@ -2216,6 +2238,8 @@ async def _handle_resources_read(
     No raw source values are ever returned.
     """
     uri: str = params.get("uri", "")
+    if _parse_okf_uri(uri) is not None:
+        return await _read_okf_resource(uri, session, context, settings or get_settings())
     if uri.startswith("atlas://context-products/"):
         return await _read_context_product_resource(uri, session, context, correlation_id)
     if not uri.startswith("atlas://catalog/"):
@@ -2356,6 +2380,139 @@ async def _handle_resources_read(
                 "uri": uri,
                 "mimeType": "application/json",
                 "text": json.dumps(metadata_payload, indent=2, default=str),
+            }
+        ]
+    }
+
+
+_OKF_SEGMENT = "okf"
+
+
+def _okf_uri(product_key: str, version_number: int, path: str | None = None) -> str:
+    base = f"atlas://context-products/{product_key}/versions/{version_number}/{_OKF_SEGMENT}"
+    return f"{base}/{path}" if path else base
+
+
+def _parse_okf_uri(uri: str) -> tuple[str, int, str | None] | None:
+    """`atlas://context-products/{key}/versions/{n}/okf[/<bundle path>]`, or None.
+
+    The path is the bundle's own opaque path. It is only ever looked up among the stored
+    document rows of the caller's own publication, never joined onto a filesystem.
+    """
+    prefix = "atlas://context-products/"
+    if not uri.startswith(prefix):
+        return None
+    parts = uri.removeprefix(prefix).split("/", 4)
+    if len(parts) < 4 or parts[1] != "versions" or parts[3] != _OKF_SEGMENT or not parts[0]:
+        return None
+    try:
+        version_number = int(parts[2])
+    except ValueError:
+        return None
+    if version_number < 1:
+        return None
+    path = parts[4] if len(parts) == 5 and parts[4] else None
+    return parts[0], version_number, path
+
+
+async def _read_okf_resource(
+    uri: str,
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+) -> dict[str, Any]:
+    """R11-OKF02: the MCP door onto the *same stored* OKF bundle the REST routes read.
+
+    Resolves the product key and version number inside the caller's organization, then hands
+    the version id to `aida.okf_store.read_published_bundle` -- the one function every OKF
+    surface reads through, which applies the compiler's scope resolver (capability envelope,
+    consumer roles, purpose, quality), the per-datasource admission and the caller's lineage
+    key. So an agent and a REST client with the same authority are served one publication, and
+    an agent cannot be handed knowledge a REST client with its authority would be refused.
+    Every refusal reads as "not found or not accessible", as the other context-product
+    resources do.
+    """
+    inaccessible = {"contents": [{"uri": uri, "text": "Resource not found or not accessible."}]}
+    parsed = _parse_okf_uri(uri)
+    if parsed is None:
+        return inaccessible
+    product_key, version_number, path = parsed
+    version_id = await session.scalar(
+        select(ContextProductVersion.id)
+        .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+        .where(
+            ContextProductVersion.organization_id == context.organization_id,
+            ContextProduct.organization_id == context.organization_id,
+            ContextProduct.product_key == product_key,
+            ContextProduct.lifecycle_status == "ACTIVE",
+            ContextProductVersion.version == version_number,
+        )
+    )
+    if version_id is None:
+        return inaccessible
+    try:
+        stored = await read_published_bundle(session, version_id, context, settings)
+    except HTTPException:
+        return inaccessible
+    if path is None:
+        record_okf_read(
+            session,
+            context,
+            stored,
+            action="mcp.context_product.okf_bundle_read",
+            channel=BUNDLE_ROLE_CHANNELS["mcp"],
+        )
+        payload = {
+            "product_key": product_key,
+            "version": version_number,
+            "publication": publication_read(
+                stored.publication, is_current=stored.is_current
+            ).model_dump(mode="json"),
+            "files": list(stored.publication.manifest.get("files") or []),
+            "_governance": {
+                "note": (
+                    "A stored OKF knowledge bundle, read through the same authorization and the "
+                    "same stored publication as the REST routes. Read a document by appending "
+                    "its path to this URI. Source values are not in the bundle; a current figure "
+                    "needs an approved Atlas tool through the query gateway."
+                ),
+            },
+        }
+        await session.commit()
+        return {
+            "contents": [
+                {
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": json.dumps(payload, indent=2, default=str),
+                }
+            ]
+        }
+    document = await load_document(session, stored.publication, path)
+    if document is None:
+        await session.commit()
+        return inaccessible
+    record_okf_read(
+        session,
+        context,
+        stored,
+        action="mcp.context_product.okf_document_read",
+        channel=BUNDLE_ROLE_CHANNELS["mcp"],
+        path=document.path,
+    )
+    await session.commit()
+    return {
+        "contents": [
+            {
+                "uri": uri,
+                "mimeType": "text/markdown",
+                "text": document.content,
+                "_meta": {
+                    "publication_id": str(stored.publication.id),
+                    "publication_sequence": stored.publication.sequence,
+                    "sha256": document.sha256,
+                    "rendered_in_sequence": document.rendered_in_sequence,
+                },
             }
         ]
     }
@@ -3056,7 +3213,9 @@ async def mcp_endpoint(
             result = await _handle_resources_list(session, context)
 
         elif method == "resources/read":
-            result = await _handle_resources_read(params, session, context, correlation_id)
+            result = await _handle_resources_read(
+                params, session, context, correlation_id, settings
+            )
 
         elif method == "prompts/list":
             result = await _handle_prompts_list(session, context)

@@ -280,10 +280,52 @@ def run_discovery(datasource_id: str, org_id: str, *, timeout_seconds: int = 180
         time.sleep(1)
 
 
+#: The refusal `POST /v1/relationship-candidates/{id}/decision` answers (409)
+#: when a join rests on nothing but matching column names and types
+#: (`aida.relationship_validation.NAME_MATCH_ONLY_CODE`, R11-FP06). Spelled out
+#: rather than imported because this script is stdlib-only -- compose.yaml runs
+#: it in a container with no `aida` package -- and pinned to the platform's
+#: constant by `tests/test_seed_governed_enrichment.py`.
+RELATIONSHIP_NAME_MATCH_ONLY = "RELATIONSHIP_NAME_MATCH_ONLY"
+
+
+def _approve_relationship_candidate(candidate_id: str, org_id: str, *, reason: str) -> bool:
+    """Ask the checker to approve one candidate. True if it was approved.
+
+    False when the platform refuses the approval because the join is a name
+    match with no evidence behind it. That refusal is a governance decision,
+    not a seed failure: the candidate stays PENDING for a person, which is
+    exactly where a join nobody can evidence belongs. The `warehouse` schema
+    (R11-FP13) is what first put such candidates in this estate -- on the live
+    stack, `fact_fraud_alerts.account_id` and `fact_loan_applications.account_id`
+    -> `customer.account.account_id` and `balance_load_audit.balance_fact_id` ->
+    `fact_account_balances.balance_fact_id` were refused this way -- and before
+    this the seed died on the first one, leaving every step after discovery
+    unrun. Any other refusal still stops the seed.
+    """
+    status, payload = _request(
+        "POST",
+        f"/v1/relationship-candidates/{candidate_id}/decision",
+        {"decision": "APPROVE", "reason": reason},
+        org_id=org_id,
+        headers=CHECKER_HEADERS,
+        expect=(200, 201, 202, 409),
+    )
+    if status != 409:
+        return True
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, dict) and detail.get("code") == RELATIONSHIP_NAME_MATCH_ONLY:
+        return False
+    raise SeedError(
+        f"POST /v1/relationship-candidates/{candidate_id}/decision -> HTTP 409: {payload}"
+    )
+
+
 def discover_and_approve_same_source_relationships(datasource_id: str, org_id: str) -> None:
     """Discover FK-based relationship candidates within one datasource and
     approve them. Discovery and decision use different principals -- the API
-    refuses a maker deciding their own candidate."""
+    refuses a maker deciding their own candidate. A candidate the platform
+    refuses to approve as a bare name match is left PENDING, and counted."""
     list_path = f"/v1/datasources/{datasource_id}/relationship-candidates?limit=500"
     _request(
         "POST",
@@ -294,15 +336,16 @@ def discover_and_approve_same_source_relationships(datasource_id: str, org_id: s
     _, existing = _request("GET", list_path, org_id=org_id)
     candidates = _items(existing)
     pending = [c for c in candidates if c.get("status") == "PENDING"]
+    approved = 0
     for candidate in pending:
-        _request(
-            "POST",
-            f"/v1/relationship-candidates/{candidate['id']}/decision",
-            {"decision": "APPROVE", "reason": "Seeded sample estate: declared foreign key."},
-            org_id=org_id,
-            headers=CHECKER_HEADERS,
-        )
-    print(f"  same-source relationship candidates: {len(pending)} approved")
+        if _approve_relationship_candidate(
+            candidate["id"], org_id, reason="Seeded sample estate: declared foreign key."
+        ):
+            approved += 1
+    print(
+        f"  same-source relationship candidates: {approved} approved, "
+        f"{len(pending) - approved} left PENDING (name match only)"
+    )
 
 
 def _find_pending_review(object_type: str, object_id: str, org_id: str) -> dict[str, Any] | None:
@@ -392,6 +435,7 @@ def discover_and_approve_cross_source(domain_id: str, target_domain_id: str, org
         # Candidates land per-datasource, not per-domain -- list every
         # datasource in this domain and collect what discovery just proposed.
         approved = 0
+        left_pending = 0
         _, domain_datasources = _request(
             "GET", f"/v1/organizations/{org_id}/datasources?limit=200", org_id=org_id
         )
@@ -412,15 +456,30 @@ def discover_and_approve_cross_source(domain_id: str, target_domain_id: str, org
                     continue
                 if candidate.get("datasource_id") == candidate.get("target_datasource_id"):
                     continue
-                _request(
-                    "POST",
-                    f"{decision_path}/{candidate['id']}/decision",
-                    {"decision": "APPROVE", "reason": "Seeded sample estate: cross-source match."},
-                    org_id=org_id,
-                    headers=CHECKER_HEADERS,
-                )
+                if kind == "relationship":
+                    # The same decision endpoint as a same-source candidate,
+                    # so the same evidence refusal can come back from it.
+                    if not _approve_relationship_candidate(
+                        candidate["id"], org_id, reason="Seeded sample estate: cross-source match."
+                    ):
+                        left_pending += 1
+                        continue
+                else:
+                    _request(
+                        "POST",
+                        f"{decision_path}/{candidate['id']}/decision",
+                        {
+                            "decision": "APPROVE",
+                            "reason": "Seeded sample estate: cross-source match.",
+                        },
+                        org_id=org_id,
+                        headers=CHECKER_HEADERS,
+                    )
                 approved += 1
-        print(f"  cross-source {kind} candidates: {approved} approved")
+        print(
+            f"  cross-source {kind} candidates: {approved} approved"
+            + (f", {left_pending} left PENDING (name match only)" if left_pending else "")
+        )
 
 
 # ---------------------------------------------------------------------------

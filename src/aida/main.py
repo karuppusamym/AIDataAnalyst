@@ -47,6 +47,7 @@ from aida.document_ingestion_api import router as document_ingestion_router
 from aida.engine_capability_api import router as engine_capability_router
 from aida.footprint_gaps_api import router as footprint_gaps_router
 from aida.glossary_api import router as glossary_router
+from aida.graphql_api import router as graphql_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.lineage_agent_api import router as lineage_agent_router
@@ -496,6 +497,9 @@ app.include_router(procedure_tool_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents
+# R11-GQL01: POST /graphql -- typed metadata reads over the same authorization the
+# REST catalog reads make. Read-only; governed execution is R11-GQL02.
+app.include_router(graphql_router)
 
 
 @app.middleware("http")

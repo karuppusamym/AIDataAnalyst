@@ -58,6 +58,7 @@ const EDGE_SOURCE_LABEL: Record<string, string> = {
   OPENLINEAGE_ETL: "an OpenLineage ETL run",
   VIEW_DEFINITION: "a view definition",
   PROCEDURE_DEFINITION: "a procedure definition",
+  TRIGGER_DEFINITION: "a trigger on the upstream table",
 };
 
 function humanizeSources(sources: readonly string[]): string {

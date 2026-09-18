@@ -22,6 +22,7 @@ import {
   useVersionLifecycle,
 } from "../components/screenState";
 import { CompilerPanel, useCompiler } from "./ContextProductCompiler";
+import { KnowledgeView } from "../components/KnowledgeView";
 import { NO_ROLLOUT, RolloutPanel, useRollout } from "./ContextProductRollout";
 import { CreateDraftPanel } from "./ContextProductDraft";
 import "./ContextProductsScreen.css";
@@ -73,6 +74,8 @@ function ProductRow({
   onDeprecate,
   onCompile,
   onRollout,
+  onKnowledge,
+  knowledgeOpen,
   onAsk,
 }: {
   product: ContextProductRead;
@@ -82,6 +85,9 @@ function ProductRow({
   onDeprecate: () => void;
   onCompile: () => void;
   onRollout: () => void;
+  /** R11-OKF02: open this version's stored knowledge bundle below the registry. */
+  onKnowledge: () => void;
+  knowledgeOpen: boolean;
   /** R11-FP12 (F08): open Ask on this product, or `null` when there is nothing
    *  to ask it against -- see `askDatasourceId` below. */
   onAsk: (() => void) | null;
@@ -119,6 +125,12 @@ function ProductRow({
       <div className="cprow__actions">
         <Button onClick={onRollout} title="Pin named consumers to a specific version">
           {selected ? "Rollout ✓" : "Rollout"}
+        </Button>
+        <Button
+          onClick={onKnowledge}
+          title="Read the stored knowledge bundle agents receive for this version"
+        >
+          {knowledgeOpen ? "Knowledge ✓" : "Knowledge"}
         </Button>
         {/* R11-FP12 (F08): the consumer's own door. A published product was
             something you could roll out, deprecate and compile from here, with
@@ -201,6 +213,10 @@ export function ContextProductsScreen() {
   const [rolloutProduct, setRolloutProduct] = useState<ContextProductRead | null>(null);
   const rollout = useRollout(rolloutProduct, channel);
   const { versions, bindings } = rollout.resource.data ?? NO_ROLLOUT;
+  /* R11-OKF02: the stored knowledge bundle of one row's latest version. A panel
+     in this screen, never a route of its own -- the design's knowledge view
+     lives inside Context Products and Catalog object details. */
+  const [knowledgeProduct, setKnowledgeProduct] = useState<ContextProductRead | null>(null);
 
   /* Compiling blocks the row that started it, the same way a lifecycle
      request does, but it does not change the version's status -- so it is
@@ -297,6 +313,10 @@ export function ContextProductsScreen() {
                     }
                     onCompile={() => void compiler.compile(p.latest_version.id)}
                     onRollout={() => setRolloutProduct((current) => (current?.id === p.id ? null : p))}
+                    onKnowledge={() =>
+                      setKnowledgeProduct((current) => (current?.id === p.id ? null : p))
+                    }
+                    knowledgeOpen={knowledgeProduct?.id === p.id}
                     onAsk={
                       askDatasourceId
                         ? () =>
@@ -324,6 +344,15 @@ export function ContextProductsScreen() {
               onUnbind={rollout.unbind}
               onReload={rollout.resource.reload}
               onClose={() => setRolloutProduct(null)}
+            />
+          ) : null}
+
+          {knowledgeProduct ? (
+            <KnowledgeView
+              key={knowledgeProduct.latest_version.id}
+              versionId={knowledgeProduct.latest_version.id}
+              title={`${knowledgeProduct.latest_version.name} · v${knowledgeProduct.latest_version.version}`}
+              onClose={() => setKnowledgeProduct(null)}
             />
           ) : null}
 
