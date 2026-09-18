@@ -64,6 +64,7 @@ from aida.models import (
     MetadataTable,
     Organization,
     Project,
+    QueryExecution,
     ViewLineageEdge,
 )
 from aida.parsed_lineage_review_api import decide_parsed_lineage_edge
@@ -77,6 +78,12 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext
 from aida.semantic_api import decide_governance_review
+from aida.sql_workspace_api import (
+    SqlDraftRequest,
+    SqlDraftRunRequest,
+    create_sql_draft,
+    run_sql_draft,
+)
 from aida.task_agent import TaskAgentRunRequest
 from aida.tool_api import (
     ViewToolBlueprintRequest,
@@ -513,6 +520,47 @@ async def test_the_footprint_journey(
 
         # 5. Answer a question through Ask: customer 1's orders are 100 - 10 and 60 - 0.
         assert await _ask(session, datasource, analyst, settings) == (str(first_tool.id), 150.0)
+
+        # The reviewed SQL path must also work on both real dialects: validation
+        # creates no execution, Run reads the source once, and a retry cannot rerun it.
+        sql = (
+            "SELECT net_revenue FROM footprint_context_sample.customer_revenue "
+            "WHERE customer_id = 1"
+        )
+        executions_before = set(await session.scalars(select(QueryExecution.id)))
+        draft = await create_sql_draft(
+            datasource.id,
+            SqlDraftRequest(sql=sql, context_product_key="customer-revenue"),
+            context=analyst,
+            session=session,
+            settings=settings,
+        )
+        assert draft.validation is not None and draft.validation.valid
+        assert draft.receipt is not None
+        assert set(await session.scalars(select(QueryExecution.id))) == executions_before
+        run_body = SqlDraftRunRequest(sql=sql, context_product_key="customer-revenue")
+        result = await run_sql_draft(
+            draft.receipt.id,
+            run_body,
+            context=analyst,
+            session=session,
+            settings=settings,
+        )
+        assert result.execution.row_count == 1
+        assert float(result.execution.rows[0]["net_revenue"]) == 150.0
+        with pytest.raises(HTTPException) as retry:
+            await run_sql_draft(
+                draft.receipt.id,
+                run_body,
+                context=analyst,
+                session=session,
+                settings=settings,
+            )
+        assert retry.value.status_code == 409
+        assert retry.value.detail["execution_id"] == str(result.execution.execution_id)
+        assert set(await session.scalars(select(QueryExecution.id))) == (
+            executions_before | {result.execution.execution_id}
+        )
 
         # 6. Change the source's logic, and read the source again.
         await source.execute(source.redefine_view)

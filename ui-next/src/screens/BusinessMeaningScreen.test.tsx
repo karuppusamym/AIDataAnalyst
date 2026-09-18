@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { DataSourceRead, MetadataBusinessAnnotationRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
@@ -135,6 +135,27 @@ afterEach(() => {
 });
 
 describe("BusinessMeaningScreen against the real UX-16 endpoints", () => {
+  it.each(["first", "next"])("ignores a late %s page after the datasource is cleared", async (pageKind) => {
+    let resolvePage!: (page: PageOf<MetadataBusinessAnnotationRead>) => void;
+    fetchBusinessAnnotations.mockImplementation((query) => {
+      if (pageKind === "next" && (query as { offset: number }).offset === 0) {
+        return Promise.resolve({ items: [ANNOTATION], limit: 100, offset: 0, total: 2 });
+      }
+      return new Promise((resolve) => { resolvePage = resolve; });
+    });
+    const BusinessMeaningScreen = await loadScreen();
+    render(<BusinessMeaningScreen />);
+    await screen.findByText("snowflake_prod");
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_1" } });
+    await waitFor(() => expect(resolvePage).toBeDefined());
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "" } });
+    await act(async () => {
+      resolvePage({ items: [ANNOTATION], limit: 100, offset: 0, total: 1 });
+    });
+    expect(screen.getByText("Pick a datasource to see its business annotations")).toBeInTheDocument();
+    expect(screen.queryByText(/annotated table/)).toBeNull();
+  });
+
   it("does not fetch business annotations before a datasource is selected", async () => {
     const BusinessMeaningScreen = await loadScreen();
     render(<BusinessMeaningScreen />);

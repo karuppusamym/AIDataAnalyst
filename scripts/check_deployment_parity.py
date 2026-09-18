@@ -172,6 +172,10 @@ def http_get_json(base_url: str, path: str, *, timeout: int = 30) -> tuple[int, 
         return error.code, error.read().decode("utf-8", errors="replace")[:400]
     except urllib.error.URLError as error:
         return 0, str(error.reason)
+    except OSError as error:
+        # Socket timeouts and a peer closing during restart may escape urlopen
+        # directly, without the URLError wrapper. They establish no parity.
+        return 0, str(error)
     except json.JSONDecodeError as error:
         return 0, f"response was not JSON: {error}"
 

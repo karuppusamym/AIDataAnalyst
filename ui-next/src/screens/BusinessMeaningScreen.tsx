@@ -572,17 +572,18 @@ export function BusinessMeaningScreen() {
   // return an org-wide answer nobody asked for.
   const loadFirstPage = useCallback(async () => {
     inflight.current?.abort();
+    const seq = ++reqSeq.current;
+    setLoadingMore(false);
+    setItems([]);
+    setOffset(0);
+    setTotal(null);
     if (!dsId) {
-      setItems([]);
-      setOffset(0);
-      setTotal(null);
       setError(null);
       setLoading(false);
       return;
     }
     const ac = new AbortController();
     inflight.current = ac;
-    const seq = ++reqSeq.current;
 
     setLoading(true);
     setError(null);
@@ -591,16 +592,16 @@ export function BusinessMeaningScreen() {
         { datasourceId: dsId, limit: PAGE_LIMIT, offset: 0 },
         ac.signal,
       );
-      if (seq !== reqSeq.current) return;
+      if (ac.signal.aborted || seq !== reqSeq.current) return;
       setItems(page.items);
       setOffset(page.items.length);
       setTotal(page.total);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
-      if (seq !== reqSeq.current) return;
+      if (ac.signal.aborted || seq !== reqSeq.current) return;
       setError(e instanceof ApiError ? e.detail : (e as Error).message);
     } finally {
-      if (seq === reqSeq.current) setLoading(false);
+      if (!ac.signal.aborted && seq === reqSeq.current) setLoading(false);
     }
   }, [dsId]);
 
@@ -612,16 +613,22 @@ export function BusinessMeaningScreen() {
   const loadMore = useCallback(async () => {
     if (!dsId || loadingMore || loading) return;
     if (total !== null && offset >= total) return;
+    const ac = new AbortController();
+    inflight.current = ac;
+    const seq = reqSeq.current;
     setLoadingMore(true);
     try {
-      const page = await fetchBusinessAnnotations({ datasourceId: dsId, limit: PAGE_LIMIT, offset });
+      const page = await fetchBusinessAnnotations(
+        { datasourceId: dsId, limit: PAGE_LIMIT, offset }, ac.signal,
+      );
+      if (ac.signal.aborted || seq !== reqSeq.current) return;
       setItems((prev) => [...prev, ...page.items]);
       setOffset((prev) => prev + page.items.length);
       setTotal(page.total);
     } catch {
       /* a failed next page leaves what is already loaded intact */
     } finally {
-      setLoadingMore(false);
+      if (!ac.signal.aborted && seq === reqSeq.current) setLoadingMore(false);
     }
   }, [dsId, offset, total, loading, loadingMore]);
 
