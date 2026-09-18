@@ -130,10 +130,12 @@ from aida.models import (
     MetadataTable,
     TableProfile,
 )
-from aida.okf_export_api import publication_read
+from aida.okf_context import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, MAX_QUESTION_CHARS
+from aida.okf_export_api import OKF_ROLES, context_read, publication_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     load_document,
+    read_okf_context,
     read_published_bundle,
     record_okf_read,
 )
@@ -410,13 +412,58 @@ NATIVE_VALIDATION_TOOL_SLUGS = frozenset(
     item["slug"] for item in NATIVE_VALIDATION_TOOL_DEFINITIONS
 )
 
+# R11-OKF02 consumption: an agent with a *question* about a context product, rather than a
+# resource URI, asks for the few sections of the product's stored OKF bundle it needs. The same
+# store function as `resources/read` and the REST routes (`aida.okf_store.read_okf_context`), so
+# scope, the capability envelope's `context_product_ids`, admission and the lineage key are
+# exactly theirs. Read-only and value-free: it returns knowledge, never rows.
+
+NATIVE_KNOWLEDGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "slug": "get_knowledge_context",
+        "description": (
+            "Select the sections of a context product's approved OKF knowledge bundle that a "
+            "question needs -- meaning, columns, mappings, dependencies and matching tools -- "
+            "with each section's document path, heading anchor and sha256 for citation. "
+            "Returns NO_MATCH when the bundle holds nothing on the question. Holds no source "
+            "values: for a current figure, call an approved tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "product_key": {"type": "string", "description": "Context product key"},
+                "version": {"type": "integer", "description": "Context product version number"},
+                "question": {
+                    "type": "string",
+                    "description": f"The question, 1-{MAX_QUESTION_CHARS} characters",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": (
+                        f"Characters of section text to return, 1000-{MAX_CHARS_LIMIT}; "
+                        f"default {DEFAULT_MAX_CHARS}"
+                    ),
+                },
+            },
+            "required": ["product_key", "version", "question"],
+            "additionalProperties": False,
+        },
+    }
+]
+NATIVE_KNOWLEDGE_TOOL_SLUGS = frozenset(
+    item["slug"] for item in NATIVE_KNOWLEDGE_TOOL_DEFINITIONS
+)
+
 #: Every tool `tools/call` serves without a `GovernedToolVersion` behind it.
 #: R11-C6: the three families were dispatched by three near-identical
 #: branches, and a control added to one of them was a control the other two
 #: silently did not get -- which is how the contract came to be enforced on
 #: the governed-tool path below and on none of these. One set, one gate.
 NATIVE_ALL_TOOL_SLUGS = (
-    NATIVE_LINEAGE_TOOL_SLUGS | NATIVE_MARKETPLACE_TOOL_SLUGS | NATIVE_VALIDATION_TOOL_SLUGS
+    NATIVE_LINEAGE_TOOL_SLUGS
+    | NATIVE_MARKETPLACE_TOOL_SLUGS
+    | NATIVE_VALIDATION_TOOL_SLUGS
+    | NATIVE_KNOWLEDGE_TOOL_SLUGS
 )
 
 
@@ -795,6 +842,21 @@ async def _handle_tools_list(
                 }
             )
 
+    if eligible_version_ids is None and _tool_role_eligible(context.roles, OKF_ROLES):
+        for native in NATIVE_KNOWLEDGE_TOOL_DEFINITIONS:
+            tools.append(
+                {
+                    "name": f"atlas__{native['slug']}",
+                    "description": native["description"],
+                    "inputSchema": native["inputSchema"],
+                    "_atlas_meta": {
+                        "kind": "NATIVE_PLATFORM_TOOL",
+                        "executes": False,
+                        "returnsRows": False,
+                    },
+                }
+            )
+
     if eligible_version_ids is None and context.roles & set(MARKETPLACE_USERS):
         for native in NATIVE_MARKETPLACE_TOOL_DEFINITIONS:
             tools.append(
@@ -810,6 +872,92 @@ async def _handle_tools_list(
             )
 
     return {"tools": tools}
+
+
+async def _handle_native_knowledge_tool_call(
+    slug: str,
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+) -> dict[str, Any]:
+    """`get_knowledge_context`: question-specific sections of a product's stored OKF bundle.
+
+    Resolves the product key and version inside the caller's organization exactly as the OKF
+    resource reader does, then reads through `read_okf_context` -- and so through
+    `read_published_bundle`, whose scope resolver applies the capability envelope's
+    `context_product_ids` to this argument-named product. Every refusal reads as "not found or
+    not accessible", as the other context-product doors do. The first content item is the
+    Markdown an LLM reads; the second is the structured selection with its receipts.
+    """
+    if slug not in NATIVE_KNOWLEDGE_TOOL_SLUGS or not _tool_role_eligible(
+        context.roles, OKF_ROLES
+    ):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
+
+    def refuse(text: str) -> dict[str, Any]:
+        return {"isError": True, "content": [{"type": "text", "text": text}]}
+
+    product_key = arguments.get("product_key")
+    version_number = arguments.get("version")
+    question = arguments.get("question")
+    max_chars = arguments.get("max_chars", DEFAULT_MAX_CHARS)
+    if not isinstance(product_key, str) or not 1 <= len(product_key) <= 200:
+        return refuse("product_key must be a non-empty string.")
+    if (
+        isinstance(version_number, bool)
+        or not isinstance(version_number, int)
+        or version_number < 1
+    ):
+        return refuse("version must be a positive integer.")
+    if not isinstance(question, str) or not 1 <= len(question.strip()) <= MAX_QUESTION_CHARS:
+        return refuse(f"question must contain 1-{MAX_QUESTION_CHARS} characters.")
+    if (
+        isinstance(max_chars, bool)
+        or not isinstance(max_chars, int)
+        or not 1_000 <= max_chars <= MAX_CHARS_LIMIT
+    ):
+        return refuse(f"max_chars must be an integer between 1000 and {MAX_CHARS_LIMIT}.")
+    inaccessible = refuse("Context product not found or not accessible.")
+    version_id = await session.scalar(
+        select(ContextProductVersion.id)
+        .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+        .where(
+            ContextProductVersion.organization_id == context.organization_id,
+            ContextProduct.organization_id == context.organization_id,
+            ContextProduct.product_key == product_key,
+            ContextProduct.lifecycle_status == "ACTIVE",
+            ContextProductVersion.version == version_number,
+        )
+    )
+    if version_id is None:
+        return inaccessible
+    try:
+        found = await read_okf_context(
+            session, version_id, context, settings, question, max_chars=max_chars
+        )
+    except HTTPException:
+        return inaccessible
+    record_okf_read(
+        session,
+        context,
+        found.stored,
+        action="mcp.context_product.okf_context_read",
+        channel=BUNDLE_ROLE_CHANNELS["mcp_context"],
+        sections=found.context.receipts(),
+    )
+    read = context_read(found)
+    await session.commit()
+    structured = read.model_dump(mode="json", exclude={"markdown"})
+    return {
+        "content": [
+            {"type": "text", "text": read.markdown},
+            {"type": "text", "text": "```json\n" + json.dumps(structured, indent=2) + "\n```"},
+        ]
+    }
 
 
 async def _handle_native_marketplace_tool_call(
@@ -1723,8 +1871,9 @@ async def _native_tool_contract_denial(
 ) -> dict[str, Any] | None:
     """R11-C6: the contract's kill switch, on the native-tool door.
 
-    The seven native platform tools (`NATIVE_LINEAGE_TOOL_SLUGS`,
-    `NATIVE_MARKETPLACE_TOOL_SLUGS`, `NATIVE_VALIDATION_TOOL_SLUGS`) are
+    The native platform tools (`NATIVE_LINEAGE_TOOL_SLUGS`,
+    `NATIVE_MARKETPLACE_TOOL_SLUGS`, `NATIVE_VALIDATION_TOOL_SLUGS` and, since
+    R11-OKF02, `NATIVE_KNOWLEDGE_TOOL_SLUGS`) are
     dispatched from `_handle_tools_call` *before* it resolves the caller's
     contract for the governed-tool path, so they ran with no contract at all:
     a contracted agent whose kill switch an operator had just engaged kept
@@ -1766,8 +1915,11 @@ async def _native_tool_contract_denial(
       checked below after the kill switch; absent or empty allows none, as
       every allowlist here does.
     - `context_product_ids` already applies: a native call that arrives with
-      a `contextProductUri` is refused outright by the branches below, so
-      there is no product-scoped native path for an envelope to bound.
+      a `contextProductUri` is refused outright by the branches below. The one
+      native tool that names a product in its *arguments*,
+      `get_knowledge_context`, reads through `read_published_bundle`, whose
+      scope resolver applies `context_product_ids` itself -- so the envelope
+      bounds it there rather than here.
 
     Returns the MCP error result to hand back, or `None` to proceed. A human
     principal holds no contract and is unaffected.
@@ -1912,6 +2064,10 @@ async def _handle_tools_call(
             )
         if slug in NATIVE_MARKETPLACE_TOOL_SLUGS:
             return await _handle_native_marketplace_tool_call(slug, arguments, session, context)
+        if slug in NATIVE_KNOWLEDGE_TOOL_SLUGS:
+            return await _handle_native_knowledge_tool_call(
+                slug, arguments, session, context, settings
+            )
         return await _handle_native_validation_tool_call(
             slug, arguments, session, context, settings, correlation_id
         )

@@ -30,6 +30,10 @@ resolves scope and authority on the request and then serves (or incrementally re
 atomically publishes) the one stored publication for the caller's lineage. A manifest names its
 `publication_id`; a download or document read given that id returns exactly those stored bytes,
 even after a newer publication, for as long as it is retained.
+
+**Question-specific context.** `POST .../okf-bundle/context` is how a reader that has a
+question -- rather than a path -- takes the few sections of the bundle it needs, with exact
+receipts (`aida.okf_context`). It reads through the same store function as every other door.
 """
 
 from __future__ import annotations
@@ -42,15 +46,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
 from aida.db import get_session
+from aida.okf_context import citation_ids, render_markdown
 from aida.okf_export import OKF_CONFORMANCE_STATUS, bundle_archive_bytes
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     OkfPublishedBundle,
+    OkfStoredContext,
     as_bundle,
     list_publications,
     load_document,
     load_documents,
     read_object_knowledge,
+    read_okf_context,
     read_published_bundle,
     record_okf_read,
 )
@@ -59,6 +66,11 @@ from aida.schemas import (
     OkfBundleFileRead,
     OkfBundleRead,
     OkfChangeSummaryRead,
+    OkfContextDocumentRead,
+    OkfContextOmissionRead,
+    OkfContextRead,
+    OkfContextRequest,
+    OkfContextSectionRead,
     OkfDocumentRead,
     OkfObjectKnowledgeItemRead,
     OkfObjectKnowledgeRead,
@@ -157,6 +169,101 @@ def bundle_read(stored: OkfPublishedBundle) -> OkfBundleRead:
         publication=publication_read(publication, is_current=stored.is_current),
         validated_at=stored.head.validated_at,
     )
+
+
+def context_read(found: OkfStoredContext) -> OkfContextRead:
+    """Question-specific context as the API describes it. Shared with the MCP knowledge tool."""
+    stored, selected = found.stored, found.context
+    ids = citation_ids(selected)
+    return OkfContextRead(
+        context_product_version_id=stored.version.id,
+        product_key=stored.product.product_key,
+        product_version=stored.version.version,
+        publication=publication_read(stored.publication, is_current=stored.is_current),
+        status=selected.status,
+        question_terms=list(selected.question_terms),
+        documents=[
+            OkfContextDocumentRead(
+                citation=ids[document.path],
+                path=document.path,
+                sha256=document.sha256,
+                type=document.type,
+                title=document.title,
+                status=document.status,
+                description=document.description,
+                hop=document.hop,
+                score=document.score,
+                matched_terms=list(document.matched_terms),
+                linked_from=document.linked_from,
+                approved_statements=list(document.approved),
+                derived_statements=list(document.derived),
+                sections=[
+                    OkfContextSectionRead(
+                        anchor=section.anchor,
+                        heading=section.heading,
+                        text=section.text,
+                        rows_shown=section.rows_shown,
+                        rows_total=section.rows_total,
+                    )
+                    for section in document.sections
+                ],
+            )
+            for document in selected.documents
+        ],
+        omitted=[
+            OkfContextOmissionRead(
+                path=item.path, anchor=item.anchor, reason=item.reason, chars=item.chars
+            )
+            for item in selected.omitted
+        ],
+        omitted_count=selected.omitted_count,
+        ambiguous=list(selected.ambiguous),
+        max_chars=selected.max_chars,
+        used_chars=selected.used_chars,
+        guidance=selected.guidance,
+        markdown=render_markdown(
+            selected, product=f"{stored.product.product_key} v{stored.version.version}"
+        ),
+    )
+
+
+@router.post(
+    "/context-product-versions/{version_id}/okf-bundle/context",
+    response_model=OkfContextRead,
+)
+async def select_okf_context(
+    version_id: UUID,
+    payload: OkfContextRequest,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> OkfContextRead:
+    """The sections of the stored bundle a question needs, with exact receipts (OKF-E).
+
+    A read, sent as POST so the question travels in a body rather than a URL. `NO_MATCH` is a
+    successful answer -- the bundle holds nothing on this question -- not an error. The audit
+    record names each section handed out by path and anchor; it never carries the question.
+    """
+    found = await read_okf_context(
+        session,
+        version_id,
+        context,
+        settings,
+        payload.question,
+        max_chars=payload.max_chars,
+        publication_id=payload.publication_id,
+    )
+    record_okf_read(
+        session,
+        context,
+        found.stored,
+        action="context_product.okf_context_read",
+        channel=BUNDLE_ROLE_CHANNELS["context"],
+        sections=found.context.receipts(),
+    )
+    read = context_read(found)
+    await session.commit()
+    return read
 
 
 @router.get(

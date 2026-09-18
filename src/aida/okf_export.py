@@ -104,7 +104,10 @@ OKF_CONFORMANCE_STATUS: Final = "SELF_CHECKED_AGAINST_PINNED_SPEC_CLAUSES"
 EXPORT_PROFILE: Final = "atlas-okf-export"
 #: "2" since R11-OKF02: tool-version concept documents and the refresh `log.md` files changed
 #: the rendered tree for unchanged content, which is exactly what this number records.
-EXPORT_PROFILE_VERSION: Final = "2"
+#: "3": an object wider than `MAX_COLUMNS_PER_DOCUMENT` is split into column-set documents.
+#: Narrower objects render as they did under "2"; the bump is for the wide ones, whose stored
+#: single document must be re-rendered rather than served as current.
+EXPORT_PROFILE_VERSION: Final = "3"
 #: The actor convention of spec §7: `process:<id>` for an automated process.
 EXPORTER_ACTOR: Final = "process:atlas-okf-export"
 MANIFEST_VERSION: Final = "1"
@@ -130,6 +133,8 @@ TYPE_CONCEPT: Final = "Atlas Business Concept"
 #: embedded code, and the design forbids "runnable embedded code auto-executed by import". An
 #: Atlas tool is described -- its interface and how to invoke it through Atlas -- never shipped.
 TYPE_TOOL_VERSION: Final = "Atlas Tool Version"
+#: One ordinal range of a wide object's columns (`MAX_COLUMNS_PER_DOCUMENT`).
+TYPE_COLUMN_SET: Final = "Atlas Column Set"
 
 #: `MetadataTable` kinds, as `discovery_selection.table_kind` normalizes them.
 KIND_TABLE: Final = "TABLE"
@@ -152,6 +157,13 @@ DEFINITION_ABSENT: Final = "DEFINITION_NOT_CAPTURED"
 
 #: Explicit size/coverage failures, so a bundle is never silently truncated and called
 #: complete (design section 14, "Publish").
+#: R11-OKF02 consumption: the most columns one document carries. An object with more is
+#: published as its own document -- purpose, dependencies, coverage and a names-only column
+#: list -- plus column-set documents holding the full rows, so a reader (an agent above all)
+#: can open the part a question needs instead of one document it cannot hold. Design §14:
+#: "split unusually large definitions by stable structural section only when retrieval limits
+#: require it" -- an object at or under the limit renders exactly as before.
+MAX_COLUMNS_PER_DOCUMENT: Final = 100
 MAX_DOCUMENT_BYTES: Final = 256 * 1024
 MAX_FRONTMATTER_BYTES: Final = 32 * 1024
 MAX_DOCUMENTS: Final = 20_000
@@ -433,6 +445,10 @@ class OkfConceptFacts:
     relations: tuple[OkfConceptRelation, ...] = ()
     approval: OkfApproval | None = None
     withheld_reason_codes: tuple[str, ...] = ()
+    #: The approved version's own aliases, screened like its definition. The words people
+    #: actually use -- "closing position" for `end_of_day_position` -- which is how a reader,
+    #: or Atlas's own context retrieval, gets from a question to the concept at all.
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -998,6 +1014,58 @@ def _limitations_section(limitations: Sequence[str]) -> list[str]:
 # --- document builders ------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _ColumnSet:
+    """One column-set document of a wide object: an ordinal range and the columns in it."""
+
+    path: str
+    label: str
+    first_ordinal: int
+    last_ordinal: int
+    columns: tuple[OkfColumnFacts, ...]
+
+
+def _column_sets(obj: OkfObjectFacts, document_path: str) -> tuple[_ColumnSet, ...]:
+    """Split a wide object's columns into documents of at most `MAX_COLUMNS_PER_DOCUMENT`.
+
+    Grouped by *ordinal range*, not by position in the list: set `n` holds ordinals
+    `(n-1)*limit+1 .. n*limit`. A column appended at the source lands in the last set and a
+    dropped one leaves a gap, so neither renames or rewrites the sets before it -- the stable
+    structural split the design asks for, and what keeps an incremental rebuild small. A range
+    that is over the limit anyway (ordinals the source did not report, or reported twice) is
+    split again by position, as `columns-<n>-<m>`, so no document ever exceeds the limit.
+    """
+    if len(obj.columns) <= MAX_COLUMNS_PER_DOCUMENT:
+        return ()
+    ordered = sorted(obj.columns, key=lambda column: (column.ordinal, column.name))
+    ranges: dict[int, list[OkfColumnFacts]] = {}
+    for column in ordered:
+        ranges.setdefault(max(column.ordinal - 1, 0) // MAX_COLUMNS_PER_DOCUMENT, []).append(
+            column
+        )
+    stem = document_path.removesuffix(".md")
+    sets: list[_ColumnSet] = []
+    for index in sorted(ranges):
+        members = ranges[index]
+        chunks = [
+            members[start : start + MAX_COLUMNS_PER_DOCUMENT]
+            for start in range(0, len(members), MAX_COLUMNS_PER_DOCUMENT)
+        ]
+        for position, chunk in enumerate(chunks, start=1):
+            suffix = f"{index + 1}" if len(chunks) == 1 else f"{index + 1}-{position}"
+            first, last = chunk[0].ordinal, chunk[-1].ordinal
+            sets.append(
+                _ColumnSet(
+                    path=f"{stem}-columns-{suffix}.md",
+                    label=f"Columns {first}-{last}",
+                    first_ordinal=first,
+                    last_ordinal=last,
+                    columns=tuple(chunk),
+                )
+            )
+    return tuple(sets)
+
+
 @dataclass(slots=True)
 class _Paths:
     """Every document path in the bundle, computed once so links and indexes agree."""
@@ -1009,6 +1077,8 @@ class _Paths:
     packages: dict[str, str] = field(default_factory=dict)
     concepts: dict[str, str] = field(default_factory=dict)
     tools: dict[str, str] = field(default_factory=dict)
+    #: Object key -> its column sets, empty for an object that fits in one document.
+    column_sets: dict[str, tuple[_ColumnSet, ...]] = field(default_factory=dict)
 
     def any_path(self, key: str) -> str | None:
         for table in (self.objects, self.routines, self.packages, self.concepts, self.tools):
@@ -1036,6 +1106,7 @@ def _resolve_paths(snapshot: OkfSnapshot) -> _Paths:
         prefix = "table" if obj.kind == KIND_TABLE else "view"
         base = _schema_dir(obj.source_key, obj.schema_key)
         paths.objects[obj.key] = f"{base}/{folder}/{prefix}-{obj.key}.md"
+        paths.column_sets[obj.key] = _column_sets(obj, paths.objects[obj.key])
     for routine in snapshot.routines:
         base = _schema_dir(routine.source_key, routine.schema_key)
         paths.routines[routine.key] = f"{base}/routines/routine-{routine.key}.md"
@@ -1134,12 +1205,30 @@ def _object_document(
         approved_statements=("purpose",) if obj.description.state == DESCRIPTION_APPROVED else (),
         derived_statements=("columns", "dependencies", "coverage"),
     )
+    column_sets = paths.column_sets.get(obj.key, ())
+    if column_sets:
+        frontmatter["atlas"]["column_sets"] = [
+            {
+                "path": item.path,
+                "first_ordinal": item.first_ordinal,
+                "last_ordinal": item.last_ordinal,
+                "columns": len(item.columns),
+            }
+            for item in column_sets
+        ]
     body: list[str] = []
     body.extend(_purpose_section(obj.description, "object"))
-    body.extend(_schema_section(obj))
+    body.extend(
+        _column_set_index(obj, column_sets) if column_sets else _schema_section(obj)
+    )
     body.extend(_link_lines(obj.links, paths, labels, "# Dependencies"))
     body.extend(["# Coverage", ""])
     body.append(f"* Columns captured: {len(obj.columns)}.")
+    if column_sets:
+        body.append(
+            f"* Published as {len(column_sets)} column sets of at most "
+            f"{MAX_COLUMNS_PER_DOCUMENT} columns each."
+        )
     body.extend(_definition_lines(obj.definition, defines_itself=obj.kind != KIND_TABLE))
     body.extend(
         [
@@ -1162,13 +1251,40 @@ def _schema_section(obj: OkfObjectFacts) -> list[str]:
     """
     if not obj.columns:
         return ["# Schema", "", "No columns are captured for this object.", ""]
+    return ["# Schema", "", *_column_rows(obj.columns), ""]
+
+
+def _column_set_index(obj: OkfObjectFacts, column_sets: Sequence[_ColumnSet]) -> list[str]:
+    """A wide object's `# Schema`: every column *name*, grouped by the set that describes it.
+
+    Names only, so the object's own document stays readable at any width, and every name, so a
+    reader browsing files -- rather than asking Atlas for context -- can still tell which set to
+    open for the column it needs. Types, classifications and approved meanings are in the sets.
+    """
     lines = [
         "# Schema",
         "",
+        f"This {obj.kind.lower().replace('_', ' ')} has {len(obj.columns)} columns, published "
+        f"in {len(column_sets)} column sets so each can be read on its own. Open the set that "
+        "names a column for its type, classification and approved description.",
+        "",
+    ]
+    for item in column_sets:
+        names = ", ".join(f"`{column.name}`" for column in item.columns)
+        lines.append(
+            f"* [{item.label}]({_absolute(item.path)}) - {len(item.columns)} columns: {names}"
+        )
+    lines.append("")
+    return lines
+
+
+def _column_rows(columns: Sequence[OkfColumnFacts]) -> list[str]:
+    """Spec §4.2's schema table rows, shared by an object's own document and its column sets."""
+    lines = [
         "| Column | Type | Nullable | Classification | Description |",
         "|---|---|---|---|---|",
     ]
-    for column in sorted(obj.columns, key=lambda item: (item.ordinal, item.name)):
+    for column in sorted(columns, key=lambda item: (item.ordinal, item.name)):
         if column.description.state == DESCRIPTION_APPROVED and column.description.text:
             meaning = " ".join(column.description.text.split())
         elif column.description.state == DESCRIPTION_WITHHELD:
@@ -1181,8 +1297,86 @@ def _schema_section(obj: OkfObjectFacts) -> list[str]:
             f"{'yes' if column.nullable else 'no'} | {column.classification} | "
             f"{meaning.replace('|', '\\|')} |"
         )
-    lines.append("")
     return lines
+
+
+def _column_set_document(
+    obj: OkfObjectFacts,
+    column_set: _ColumnSet,
+    snapshot: OkfSnapshot,
+    paths: _Paths,
+    dialect: str,
+) -> OkfDocument:
+    """One column set of a wide object: its rows in full, and the way back to the object.
+
+    Self-contained on purpose. An agent handed this one document -- by Atlas's own context
+    retrieval, or by opening the file -- learns which object, which part of how many, and which
+    ordinal range it is reading, and can reach the object's purpose and the neighbouring sets
+    by link, without having read the object's document first.
+    """
+    sets = paths.column_sets[obj.key]
+    number = sets.index(column_set) + 1
+    frontmatter: dict[str, Any] = {
+        "type": TYPE_COLUMN_SET,
+        "title": f"{obj.qualified_name}: {column_set.label.lower()}",
+        # The set's own count only, never the object's total: a column appended elsewhere must
+        # not rewrite this document (the stable split `_column_sets` promises).
+        "description": (
+            f"{column_set.label} of {obj.qualified_name}: {len(column_set.columns)} columns."
+        ),
+        "status": _okf_status(obj.lifecycle, obj.description),
+        "tags": sorted(
+            {"atlas", "column-set", obj.kind.lower().replace("_", "-"), dialect.lower()}
+        ),
+    }
+    moment = _content_moment(
+        *(
+            column.description.approval.at
+            for column in column_set.columns
+            if column.description.approval is not None
+        )
+    )
+    generated: dict[str, str] = {"by": EXPORTER_ACTOR}
+    if moment is not None:
+        generated["at"] = moment
+    frontmatter["generated"] = generated
+    frontmatter["atlas"] = {
+        "profile": f"{snapshot.profile}/{snapshot.profile_version}",
+        "part_of": {
+            "key": obj.key,
+            "path": paths.objects[obj.key],
+            "qualified_name": obj.qualified_name,
+            "set": number,
+            "sets": len(sets),
+            "first_ordinal": column_set.first_ordinal,
+            "last_ordinal": column_set.last_ordinal,
+        },
+        "statements": {"approved": [], "derived": ["columns"]},
+        "scope": _scope_extension(snapshot),
+    }
+    kind = obj.kind.lower().replace("_", " ")
+    body = [
+        f"Column set {number} of {len(sets)} of the {kind} "
+        f"[{obj.qualified_name}]({_absolute(paths.objects[obj.key])}), which carries its "
+        "purpose, dependencies and coverage.",
+        "",
+        "# Schema",
+        "",
+        *_column_rows(column_set.columns),
+        "",
+    ]
+    # Neighbours by set number, not by their ordinal ranges: a column appended to the next set
+    # changes its range, and must not rewrite this document.
+    neighbours: list[str] = []
+    if number > 1:
+        before = sets[number - 2]
+        neighbours.append(f"* Previous: [Column set {number - 1}]({_absolute(before.path)})")
+    if number < len(sets):
+        after = sets[number]
+        neighbours.append(f"* Next: [Column set {number + 1}]({_absolute(after.path)})")
+    if neighbours:
+        body.extend(["# Other column sets", "", *neighbours, ""])
+    return OkfDocument(path=column_set.path, text=_document_text(frontmatter, body))
 
 
 def _routine_document(
@@ -1356,8 +1550,13 @@ def _concept_document(
     covers the whole document. A catalog object's document never qualifies, because its columns
     and lineage are captured rather than reviewed.
     """
+    # `lifecycle` is the ontology definition's own -- ACTIVE or DEPRECATED (`ontology_api`) --
+    # while the version is APPROVED by construction: `load_ontology_meaning` reads no other, and
+    # `approval` is its recorded governance decision. Until 2026-09-18 this demanded
+    # lifecycle == "APPROVED", a value a definition never holds, so every concept a real product
+    # exported read as draft and unverified however it had been approved.
     fully_approved = (
-        concept.approval is not None and concept.lifecycle.upper() == "APPROVED"
+        concept.approval is not None and concept.lifecycle.upper() != "DEPRECATED"
     )
     frontmatter: dict[str, Any] = {
         "type": TYPE_CONCEPT,
@@ -1380,6 +1579,7 @@ def _concept_document(
         verified = _verification(concept.approval)
         if verified:
             frontmatter["verified"] = verified
+    statements = ["definition", "mappings", "relations", *(["aliases"] if concept.aliases else [])]
     atlas: dict[str, Any] = {
         "profile": f"{snapshot.profile}/{snapshot.profile_version}",
         "concept": {
@@ -1390,8 +1590,8 @@ def _concept_document(
             "lifecycle": concept.lifecycle,
         },
         "statements": {
-            "approved": ["definition", "mappings", "relations"] if fully_approved else [],
-            "derived": [] if fully_approved else ["definition", "mappings", "relations"],
+            "approved": sorted(statements) if fully_approved else [],
+            "derived": [] if fully_approved else sorted(statements),
         },
         "scope": _scope_extension(snapshot),
     }
@@ -1407,6 +1607,10 @@ def _concept_document(
     else:
         body.extend(["Not established. The approved ontology version carries no "
                      "definition for this concept.", ""])
+    if concept.aliases:
+        body.extend(["# Also called", ""])
+        body.extend(f"* {' '.join(alias.split())}" for alias in concept.aliases)
+        body.append("")
     mapped = tuple(
         OkfLink(target_key=key, relation="mapped object")
         for key in (*concept.mapped_object_keys, *concept.mapped_routine_keys)
@@ -2205,6 +2409,27 @@ def _plan(snapshot: OkfSnapshot) -> list[_Planned]:
                 partial(_object_document, obj, snapshot, paths, labels, dialects[obj.source_key]),
             )
         )
+        # A column set prints only its own object's facts and path, so it moves exactly when
+        # the object's document does. It is not a subject document of its own: the object's
+        # document stays the one `document_subjects` names.
+        for column_set in paths.column_sets.get(obj.key, ()):
+            plan.append(
+                _Planned(
+                    column_set.path,
+                    None,
+                    _PLAN_SUBJECT,
+                    (obj.key, obj.source_key),
+                    (),
+                    partial(
+                        _column_set_document,
+                        obj,
+                        column_set,
+                        snapshot,
+                        paths,
+                        dialects[obj.source_key],
+                    ),
+                )
+            )
     for routine in snapshot.routines:
         plan.append(
             _Planned(
@@ -2344,6 +2569,21 @@ def document_subjects(snapshot: OkfSnapshot) -> dict[str, str]:
     for table in (paths.objects, paths.routines, paths.packages, paths.concepts, paths.tools):
         subjects.update({path: key for key, path in table.items()})
     return subjects
+
+
+def column_set_members(snapshot: OkfSnapshot) -> dict[str, tuple[tuple[str, tuple[str, ...]], ...]]:
+    """Object key -> (column-set path, column names) for every object split into column sets.
+
+    Objects that fit in one document are absent. Lets a reader of the bundle -- Atlas's own
+    context retrieval -- go from a column name to the one set that describes it without
+    opening the object's document or guessing the path scheme.
+    """
+    paths = _resolve_paths(snapshot)
+    return {
+        key: tuple((item.path, tuple(column.name for column in item.columns)) for item in sets)
+        for key, sets in paths.column_sets.items()
+        if sets
+    }
 
 
 def _fact_digests(snapshot: OkfSnapshot) -> dict[str, str]:

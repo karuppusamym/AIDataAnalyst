@@ -21150,6 +21150,324 @@
         "title": "OkfChangeSummaryRead",
         "type": "object"
       },
+      "OkfContextDocumentRead": {
+        "additionalProperties": false,
+        "description": "A document the question matched (`hop` 0) or one linked from such a document (`hop` 1).",
+        "properties": {
+          "approved_statements": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Approved Statements",
+            "type": "array"
+          },
+          "citation": {
+            "title": "Citation",
+            "type": "string"
+          },
+          "derived_statements": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Derived Statements",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "hop": {
+            "title": "Hop",
+            "type": "integer"
+          },
+          "linked_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Linked From"
+          },
+          "matched_terms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched Terms",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/OkfContextSectionRead"
+            },
+            "title": "Sections",
+            "type": "array"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "citation",
+          "path",
+          "sha256",
+          "type",
+          "title",
+          "status",
+          "description",
+          "hop",
+          "score",
+          "matched_terms",
+          "linked_from",
+          "approved_statements",
+          "derived_statements",
+          "sections"
+        ],
+        "title": "OkfContextDocumentRead",
+        "type": "object"
+      },
+      "OkfContextOmissionRead": {
+        "additionalProperties": false,
+        "description": "A section the budget or the row filter left out, so nothing is dropped silently.",
+        "properties": {
+          "anchor": {
+            "title": "Anchor",
+            "type": "string"
+          },
+          "chars": {
+            "title": "Chars",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "anchor",
+          "reason",
+          "chars"
+        ],
+        "title": "OkfContextOmissionRead",
+        "type": "object"
+      },
+      "OkfContextRead": {
+        "additionalProperties": false,
+        "description": "Question-specific context from a stored OKF publication, with exact receipts (OKF-E).\n\n`status` is `MATCHED` or `NO_MATCH`. `ambiguous` names documents the question matched\nequally, for a caller to ask which was meant. `markdown` is the same selection as one text,\ncitation ids inline, for handing straight to a model.",
+        "properties": {
+          "ambiguous": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ambiguous",
+            "type": "array"
+          },
+          "context_product_version_id": {
+            "format": "uuid",
+            "title": "Context Product Version Id",
+            "type": "string"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/OkfContextDocumentRead"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "guidance": {
+            "title": "Guidance",
+            "type": "string"
+          },
+          "markdown": {
+            "title": "Markdown",
+            "type": "string"
+          },
+          "max_chars": {
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "omitted": {
+            "items": {
+              "$ref": "#/components/schemas/OkfContextOmissionRead"
+            },
+            "title": "Omitted",
+            "type": "array"
+          },
+          "omitted_count": {
+            "title": "Omitted Count",
+            "type": "integer"
+          },
+          "product_key": {
+            "title": "Product Key",
+            "type": "string"
+          },
+          "product_version": {
+            "title": "Product Version",
+            "type": "integer"
+          },
+          "publication": {
+            "$ref": "#/components/schemas/OkfPublicationRead"
+          },
+          "question_terms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Question Terms",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "used_chars": {
+            "title": "Used Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "context_product_version_id",
+          "product_key",
+          "product_version",
+          "publication",
+          "status",
+          "question_terms",
+          "documents",
+          "omitted",
+          "omitted_count",
+          "ambiguous",
+          "max_chars",
+          "used_chars",
+          "guidance",
+          "markdown"
+        ],
+        "title": "OkfContextRead",
+        "type": "object"
+      },
+      "OkfContextRequest": {
+        "additionalProperties": false,
+        "description": "A question to select knowledge for, from one product version's stored OKF bundle.\n\nA body rather than a query string: a question is free text a person typed, and a URL is\nwhat access logs and browser history keep.",
+        "properties": {
+          "max_chars": {
+            "default": 16000,
+            "maximum": 48000.0,
+            "minimum": 1000.0,
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "publication_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Id"
+          },
+          "question": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "OkfContextRequest",
+        "type": "object"
+      },
+      "OkfContextSectionRead": {
+        "additionalProperties": false,
+        "description": "One section of one document, cut at a top-level heading (`anchor` is its slug).",
+        "properties": {
+          "anchor": {
+            "title": "Anchor",
+            "type": "string"
+          },
+          "heading": {
+            "title": "Heading",
+            "type": "string"
+          },
+          "rows_shown": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rows Shown"
+          },
+          "rows_total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rows Total"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "anchor",
+          "heading",
+          "text"
+        ],
+        "title": "OkfContextSectionRead",
+        "type": "object"
+      },
       "OkfDocumentRead": {
         "additionalProperties": false,
         "description": "One document of one stored OKF publication, with its exact bytes (R11-OKF02).\n\n`content` is the Markdown a reader of the downloaded archive would find at `path`; the\n`sha256` is of those bytes. `rendered_in_sequence` names the publication that first rendered\nthem -- earlier than `publication_sequence` when a rebuild carried the document unchanged.",
@@ -42860,6 +43178,145 @@
           }
         },
         "summary": "Inspect Okf Bundle",
+        "tags": [
+          "okf-export"
+        ]
+      }
+    },
+    "/v1/context-product-versions/{version_id}/okf-bundle/context": {
+      "post": {
+        "description": "The sections of the stored bundle a question needs, with exact receipts (OKF-E).\n\nA read, sent as POST so the question travels in a body rather than a URL. `NO_MATCH` is a\nsuccessful answer -- the bundle holds nothing on this question -- not an error. The audit\nrecord names each section handed out by path and anchor; it never carries the question.",
+        "operationId": "select_okf_context_v1_context_product_versions__version_id__okf_bundle_context_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OkfContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfContextRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Select Okf Context",
         "tags": [
           "okf-export"
         ]

@@ -93,6 +93,13 @@ from aida.models import (
     MetadataTable,
     ViewLineageEdge,
 )
+from aida.okf_context import (
+    DEFAULT_MAX_CHARS,
+    OkfContext,
+    assemble_context,
+    hop_targets,
+    plan_context,
+)
 from aida.okf_export import (
     EXPORT_PROFILE,
     EXPORT_PROFILE_VERSION,
@@ -141,6 +148,8 @@ MAX_SCOPE_SUBJECTS: Final = MAX_DOCUMENTS - 1_000
 MAX_SCOPE_COLUMNS: Final = 250_000
 #: How many rendered paths a publication's change summary lists; the count is always exact.
 MAX_SUMMARY_PATHS: Final = 1_000
+#: How many section receipts one context read's audit record lists; the count is always exact.
+MAX_AUDITED_SECTIONS: Final = 100
 
 BUNDLE_ROLE_CHANNELS: Final = {
     "manifest": "OKF_MANIFEST",
@@ -149,6 +158,10 @@ BUNDLE_ROLE_CHANNELS: Final = {
     "history": "OKF_HISTORY",
     "object": "OKF_OBJECT",
     "mcp": "MCP_OKF",
+    # Question-specific context: the REST route, the MCP knowledge tool and Ask generation.
+    "context": "OKF_CONTEXT",
+    "mcp_context": "MCP_OKF_CONTEXT",
+    "ask": "ASK_OKF_CONTEXT",
 }
 
 #: Findings that mean a document may carry code text. Never stored, whatever else is true.
@@ -526,6 +539,72 @@ async def load_document(
         )
     )
     return document
+
+
+async def load_documents_by_path(
+    session: AsyncSession, publication: OkfBundlePublication, paths: Sequence[str]
+) -> dict[str, tuple[str, str]]:
+    """Path -> (content, sha256) for the named documents of one publication, and no others.
+
+    What lets question-specific context load a handful of documents rather than the bundle.
+    A path the publication does not hold is simply absent from the result.
+    """
+    wanted = sorted(set(paths))
+    if not wanted:
+        return {}
+    rows = (
+        await session.scalars(
+            select(OkfBundleDocument).where(
+                OkfBundleDocument.organization_id == publication.organization_id,
+                OkfBundleDocument.publication_id == publication.id,
+                OkfBundleDocument.path.in_(wanted),
+            )
+        )
+    ).all()
+    return {row.path: (row.content, row.sha256) for row in rows}
+
+
+@dataclass(frozen=True, slots=True)
+class OkfStoredContext:
+    """Question-specific context, and the stored publication it was selected from."""
+
+    stored: OkfPublishedBundle
+    context: OkfContext
+
+
+async def read_okf_context(
+    session: AsyncSession,
+    version_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    question: str,
+    *,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    publication_id: UUID | None = None,
+    now: datetime | None = None,
+) -> OkfStoredContext:
+    """The sections of the caller's stored publication a question needs (design §14 step 5).
+
+    Through `read_published_bundle` first, so scope, admission and the lineage key are exactly
+    every other door's -- a question cannot reach knowledge a manifest read would be refused.
+    Then `aida.okf_context` ranks from the publication's own frozen snapshot, and only the
+    ranked documents and one hop of their links are loaded.
+    """
+    stored = await read_published_bundle(
+        session, version_id, context, settings, publication_id=publication_id, now=now
+    )
+    snapshot = snapshot_from_document(stored.publication.snapshot)
+    plan = plan_context(snapshot, question)
+    loaded = await load_documents_by_path(session, stored.publication, plan.paths)
+    targets = hop_targets(plan, loaded)
+    fetched = await load_documents_by_path(session, stored.publication, targets)
+    # In the ranking's order, not the database's: citation ids follow document order, so the
+    # same question over the same publication must number its sources the same way anywhere.
+    hops = {path: fetched[path] for path in targets if path in fetched}
+    return OkfStoredContext(
+        stored=stored,
+        context=assemble_context(plan, loaded, hops, max_chars=max_chars),
+    )
 
 
 def as_bundle(
@@ -1075,12 +1154,15 @@ def record_okf_read(
     action: str,
     channel: str,
     path: str | None = None,
+    sections: Sequence[str] = (),
 ) -> None:
     """One read of a stored bundle, recorded the same way whichever door it came through.
 
     Audit, outbox and -- for a PUBLISHED version -- a consumption edge on that version, the
     evidence R11-OKF01's routes already left, now naming the publication read so a reviewer can
-    tell which stored bytes a consumer saw. Ids, digests and counts only.
+    tell which stored bytes a consumer saw. Ids, digests and counts only. A context read also
+    names the `path#anchor` of each section it handed out -- opaque bundle paths and heading
+    slugs, never the question and never the text.
     """
     version = stored.version
     publication = stored.publication
@@ -1095,6 +1177,9 @@ def record_okf_read(
     }
     if path is not None:
         details["path"] = path
+    if sections:
+        details["section_count"] = len(sections)
+        details["sections"] = list(sections)[:MAX_AUDITED_SECTIONS]
     record_audit(
         session,
         replace(context, organization_id=version.organization_id),

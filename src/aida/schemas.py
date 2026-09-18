@@ -4446,3 +4446,80 @@ class OkfObjectKnowledgeRead(ApiModel):
 
     table_id: UUID
     items: list[OkfObjectKnowledgeItemRead]
+
+
+class OkfContextRequest(ApiModel):
+    """A question to select knowledge for, from one product version's stored OKF bundle.
+
+    A body rather than a query string: a question is free text a person typed, and a URL is
+    what access logs and browser history keep.
+    """
+
+    question: str = Field(min_length=1, max_length=2000)
+    #: Characters of section text to return. The default is about 4k tokens; the cap about 12k.
+    max_chars: int = Field(default=16_000, ge=1_000, le=48_000)
+    #: Select from this stored publication of the caller's own lineage instead of the current.
+    publication_id: UUID | None = None
+
+
+class OkfContextSectionRead(ApiModel):
+    """One section of one document, cut at a top-level heading (`anchor` is its slug)."""
+
+    anchor: str
+    heading: str
+    text: str
+    #: Set when a long schema table was cut to the rows the question names.
+    rows_shown: int | None = None
+    rows_total: int | None = None
+
+
+class OkfContextDocumentRead(ApiModel):
+    """A document the question matched (`hop` 0) or one linked from such a document (`hop` 1)."""
+
+    citation: str
+    path: str
+    sha256: str
+    type: str
+    title: str
+    status: str | None
+    description: str | None
+    hop: int
+    score: float
+    matched_terms: list[str]
+    linked_from: str | None
+    approved_statements: list[str]
+    derived_statements: list[str]
+    sections: list[OkfContextSectionRead]
+
+
+class OkfContextOmissionRead(ApiModel):
+    """A section the budget or the row filter left out, so nothing is dropped silently."""
+
+    path: str
+    anchor: str
+    reason: str
+    chars: int
+
+
+class OkfContextRead(ApiModel):
+    """Question-specific context from a stored OKF publication, with exact receipts (OKF-E).
+
+    `status` is `MATCHED` or `NO_MATCH`. `ambiguous` names documents the question matched
+    equally, for a caller to ask which was meant. `markdown` is the same selection as one text,
+    citation ids inline, for handing straight to a model.
+    """
+
+    context_product_version_id: UUID
+    product_key: str
+    product_version: int
+    publication: OkfPublicationRead
+    status: str
+    question_terms: list[str]
+    documents: list[OkfContextDocumentRead]
+    omitted: list[OkfContextOmissionRead]
+    omitted_count: int
+    ambiguous: list[str]
+    max_chars: int
+    used_chars: int
+    guidance: str
+    markdown: str

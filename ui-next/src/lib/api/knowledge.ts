@@ -20,10 +20,12 @@
    that would be read as governed meaning.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get } from "./transport";
+import { demoOr, get, postJson } from "./transport";
 import { ApiError, requestBlob } from "../http";
 import type {
   OkfBundleRead,
+  OkfContextRead,
+  OkfContextRequest,
   OkfDocumentRead,
   OkfObjectKnowledgeRead,
   OkfPublicationHistoryRead,
@@ -70,6 +72,20 @@ export function fetchOkfPublications(
   return demoOr(
     () => demoUnavailable<OkfPublicationHistoryRead>(),
     () => get<OkfPublicationHistoryRead>(`${versionPath(versionId)}/publications`, signal),
+  );
+}
+
+/** `POST .../okf-bundle/context` -- the sections of the stored bundle a question
+ *  needs, with receipts: exactly what an agent asking through MCP or Ask is
+ *  handed. A POST so the question travels in the body, never in a URL. */
+export function selectOkfContext(
+  versionId: string,
+  body: OkfContextRequest,
+  signal?: AbortSignal,
+): Promise<OkfContextRead> {
+  return demoOr(
+    () => demoUnavailable<OkfContextRead>(),
+    () => postJson<OkfContextRead>(`${versionPath(versionId)}/context`, body, signal),
   );
 }
 

@@ -1165,7 +1165,10 @@ def _assemble(
             )
         )
 
-    concepts = _concepts(ontology, ontology_approvals, keys_by_table, keys_by_routine)
+    table_of_column = {column.id: column.table_id for column in columns}
+    concepts = _concepts(
+        ontology, ontology_approvals, keys_by_table, keys_by_routine, table_of_column
+    )
     source_keys = {source.key: source for source in sources}
     return OkfSnapshot(
         captured_at=captured_at.isoformat(),
@@ -1212,12 +1215,19 @@ def _concepts(
     approvals: dict[str, OkfApproval],
     keys_by_table: dict[UUID, str],
     keys_by_routine: dict[UUID, str],
+    table_of_column: dict[UUID, UUID],
 ) -> tuple[OkfConceptFacts, ...]:
     """Business concepts from the pinned approved ontology versions.
 
     Mappings are cut to objects that entered the snapshot, so a concept mapped to a table the
     caller was not admitted to shows fewer mapped objects rather than revealing one. A concept
     whose definition `load_ontology_meaning` already withheld carries the reason and no text.
+
+    Mappings arrive as `load_ontology_meaning` delivers them: a `mappings` list of
+    `{subject_type, subject_id}`, already cut to the product's scope. Until 2026-09-18 this read
+    `table_ids` and `routine_ids`, keys the loader never produces, so no concept in any stored
+    bundle carried the tables it maps to -- and the link from a business word to its table, the
+    one an agent most needs, was missing. A COLUMN mapping names its column's table.
     """
     facts: list[OkfConceptFacts] = []
     for meaning in sorted(ontology, key=lambda item: (item.ontology_key, item.version)):
@@ -1232,18 +1242,37 @@ def _concepts(
             name = str(concept.get("name") or concept.get("key") or "")
             if not name:
                 continue
+            mappings = [
+                mapping for mapping in concept.get("mappings") or [] if isinstance(mapping, dict)
+            ]
+
+            def subjects(*kinds: str, _mappings: list[dict[str, Any]] = mappings) -> list[UUID]:
+                return [
+                    UUID(str(mapping.get("subject_id")))
+                    for mapping in _mappings
+                    if mapping.get("subject_type") in kinds and _is_uuid(mapping.get("subject_id"))
+                ]
+
+            table_subjects = [
+                *subjects("TABLE", "VIEW"),
+                *(
+                    table_of_column[column]
+                    for column in subjects("COLUMN")
+                    if column in table_of_column
+                ),
+            ]
             mapped_tables = tuple(
                 sorted(
-                    keys_by_table[UUID(str(value))]
-                    for value in concept.get("table_ids", []) or []
-                    if _is_uuid(value) and UUID(str(value)) in keys_by_table
+                    {keys_by_table[value] for value in table_subjects if value in keys_by_table}
                 )
             )
             mapped_routines = tuple(
                 sorted(
-                    keys_by_routine[UUID(str(value))]
-                    for value in concept.get("routine_ids", []) or []
-                    if _is_uuid(value) and UUID(str(value)) in keys_by_routine
+                    {
+                        keys_by_routine[value]
+                        for value in subjects("ROUTINE")
+                        if value in keys_by_routine
+                    }
                 )
             )
             definition = concept.get("definition") or concept.get("description")
@@ -1271,6 +1300,11 @@ def _concepts(
                     relations=_relations(meaning, name, names),
                     approval=approval,
                     withheld_reason_codes=tuple(sorted({*withheld, *reasons})),
+                    # Already screened one by one by `load_ontology_meaning`, which drops a
+                    # withheld alias rather than blanking it.
+                    aliases=tuple(
+                        sorted({str(alias) for alias in concept.get("aliases") or [] if alias})
+                    ),
                 )
             )
     return tuple(facts)

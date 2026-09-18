@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from sqlalchemy.orm.attributes import flag_modified
+
 from aida.agent_runtime import RuntimeStage, RuntimeState
 
 if TYPE_CHECKING:
@@ -130,8 +132,17 @@ class RunLedger:
         Called after every mutation of `plan_evidence` rather than at the end:
         a run that refuses partway through must persist the evidence that
         explains the refusal, not an empty dict.
+
+        Flagged modified explicitly. `plan_evidence` is a plain JSON column and
+        this dict is mutated in place, so reassigning the *same* object compared
+        equal to itself and was never written: until 2026-09-18 every key added
+        after the plan stage -- `model_call_evidence`, `budget_evidence`,
+        `lineage`, `withheld_context_fragments`, `okf_context` -- lived only on
+        the in-memory run and was missing from the stored row that run history
+        reads back.
         """
         self.agent_run.plan_evidence = self.plan_evidence
+        flag_modified(self.agent_run, "plan_evidence")
 
 
 @dataclass(frozen=True, slots=True)

@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **507**
-- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 26, MCP 9, REST 441, SDK 1
+- Surfaces covered: **508**
+- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 26, MCP 9, REST 442, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -386,6 +386,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/context-compiler/validate` | REST | `aida.context_compiler_api.validate_context_compilation` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | no | no | mutating verb, no write found | no | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/compile/drift` | REST | `aida.context_compiler_api.inspect_context_compilation_drift` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/deprecate` | REST | `aida.context_product_api.request_context_product_deprecation` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/context-product-versions/{version_id}/okf-bundle/context` | REST | `aida.okf_export_api.select_okf_context` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/submit` | REST | `aida.context_product_api.submit_context_product_version` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/context-products/{product_id}/versions` | REST | `aida.context_product_api.create_context_product_version` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/cross-source-object-resolution-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_cross_source_object_resolution_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |

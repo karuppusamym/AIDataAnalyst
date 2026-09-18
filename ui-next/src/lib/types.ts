@@ -3514,6 +3514,66 @@ export interface OkfChangeSummaryRead {
   full_render: boolean;
 }
 
+/** A document the question matched (`hop` 0) or one linked from such a document (`hop` 1). */
+export interface OkfContextDocumentRead {
+  citation: string;
+  path: string;
+  sha256: string;
+  type: string;
+  title: string;
+  status: string | null;
+  description: string | null;
+  hop: number;
+  score: number;
+  matched_terms: string[];
+  linked_from: string | null;
+  approved_statements: string[];
+  derived_statements: string[];
+  sections: OkfContextSectionRead[];
+}
+
+/** A section the budget or the row filter left out, so nothing is dropped silently. */
+export interface OkfContextOmissionRead {
+  path: string;
+  anchor: string;
+  reason: string;
+  chars: number;
+}
+
+/** Question-specific context from a stored OKF publication, with exact receipts (OKF-E). */
+export interface OkfContextRead {
+  context_product_version_id: string;
+  product_key: string;
+  product_version: number;
+  publication: OkfPublicationRead;
+  status: string;
+  question_terms: string[];
+  documents: OkfContextDocumentRead[];
+  omitted: OkfContextOmissionRead[];
+  omitted_count: number;
+  ambiguous: string[];
+  max_chars: number;
+  used_chars: number;
+  guidance: string;
+  markdown: string;
+}
+
+/** A question to select knowledge for, from one product version's stored OKF bundle. */
+export interface OkfContextRequest {
+  question: string;
+  max_chars?: number;
+  publication_id?: string | null;
+}
+
+/** One section of one document, cut at a top-level heading (`anchor` is its slug). */
+export interface OkfContextSectionRead {
+  anchor: string;
+  heading: string;
+  text: string;
+  rows_shown?: number | null;
+  rows_total?: number | null;
+}
+
 /** One document of one stored OKF publication, with its exact bytes (R11-OKF02). */
 export interface OkfDocumentRead {
   publication_id: string;

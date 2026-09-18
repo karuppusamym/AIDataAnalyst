@@ -3,6 +3,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type {
   OkfBundleRead,
+  OkfContextRead,
+  OkfContextRequest,
   OkfDocumentRead,
   OkfObjectKnowledgeRead,
   OkfPublicationHistoryRead,
@@ -37,6 +39,8 @@ const fetchOkfPublications =
 const fetchObjectKnowledge =
   vi.fn<(tableId: string, signal?: AbortSignal) => Promise<OkfObjectKnowledgeRead>>();
 const downloadOkfBundle = vi.fn<(versionId: string, publicationId: string) => Promise<void>>();
+const selectOkfContext =
+  vi.fn<(versionId: string, body: OkfContextRequest, signal?: AbortSignal) => Promise<OkfContextRead>>();
 
 vi.mock("../lib/api/knowledge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/knowledge")>();
@@ -48,6 +52,8 @@ vi.mock("../lib/api/knowledge", async (importOriginal) => {
     fetchOkfPublications: (versionId: string, signal?: AbortSignal) => fetchOkfPublications(versionId, signal),
     fetchObjectKnowledge: (tableId: string, signal?: AbortSignal) => fetchObjectKnowledge(tableId, signal),
     downloadOkfBundle: (versionId: string, publicationId: string) => downloadOkfBundle(versionId, publicationId),
+    selectOkfContext: (versionId: string, body: OkfContextRequest, signal?: AbortSignal) =>
+      selectOkfContext(versionId, body, signal),
   };
 });
 
@@ -150,6 +156,108 @@ beforeEach(() => {
   );
   fetchObjectKnowledge.mockReset();
   downloadOkfBundle.mockReset().mockResolvedValue(undefined);
+  selectOkfContext.mockReset();
+});
+
+function context(overrides: Partial<OkfContextRead> = {}): OkfContextRead {
+  return {
+    context_product_version_id: "ver-1",
+    product_key: "revenue_context",
+    product_version: 2,
+    publication: publication(),
+    status: "MATCHED",
+    question_terms: ["order", "identifier"],
+    documents: [
+      {
+        citation: "K1",
+        path: TABLE,
+        sha256: "3".repeat(64),
+        type: "Atlas Table",
+        title: "bank.sales.orders",
+        status: "stable",
+        description: null,
+        hop: 0,
+        score: 4.2,
+        matched_terms: ["order"],
+        linked_from: null,
+        approved_statements: ["purpose"],
+        derived_statements: ["columns"],
+        sections: [
+          { anchor: "purpose", heading: "Purpose", text: "One row per order." },
+          { anchor: "schema", heading: "Schema", text: "| x |", rows_shown: 1, rows_total: 40 },
+        ],
+      },
+      {
+        citation: "K2",
+        path: VIEW,
+        sha256: "4".repeat(64),
+        type: "Atlas View",
+        title: "bank.sales.orders_v",
+        status: "draft",
+        description: null,
+        hop: 1,
+        score: 0,
+        matched_terms: [],
+        linked_from: TABLE,
+        approved_statements: [],
+        derived_statements: ["columns"],
+        sections: [{ anchor: "purpose", heading: "Purpose", text: "Not established." }],
+      },
+    ],
+    omitted: [],
+    omitted_count: 2,
+    ambiguous: [],
+    max_chars: 16000,
+    used_chars: 812,
+    guidance: "",
+    markdown: "",
+    ...overrides,
+  };
+}
+
+describe("What an agent reads", () => {
+  it("previews the selection from the publication on screen, with citations and receipts", async () => {
+    const user = userEvent.setup();
+    selectOkfContext.mockResolvedValue(context());
+    render(<KnowledgeView versionId="ver-1" title="Revenue context · v2" onClose={() => {}} />);
+    const preview = await screen.findByRole("region", { name: "What an agent reads" });
+    await user.type(within(preview).getByLabelText("Question"), "order identifier");
+    await user.click(within(preview).getByRole("button", { name: "Preview" }));
+    // Pinned to the manifest's publication, like every other read in the view.
+    expect(selectOkfContext).toHaveBeenCalledWith(
+      "ver-1",
+      { question: "order identifier", publication_id: "pub-2" },
+      undefined,
+    );
+    expect(await within(preview).findByText("[K1]")).toBeInTheDocument();
+    expect(within(preview).getByText("linked from K1")).toBeInTheDocument();
+    expect(within(preview).getByText(/Schema \(1 of 40 rows\)/)).toBeInTheDocument();
+    expect(within(preview).getByText(/812 of 16,000 characters; 2 section\(s\) left out/)).toBeInTheDocument();
+    // A cited document opens in the reader, pinned the same way.
+    await user.click(within(preview).getByRole("button", { name: "bank.sales.orders_v" }));
+    await waitFor(() => expect(fetchOkfDocument).toHaveBeenLastCalledWith("ver-1", VIEW, "pub-2", expect.anything()));
+  });
+
+  it("says plainly when the bundle holds nothing on the question", async () => {
+    const user = userEvent.setup();
+    selectOkfContext.mockResolvedValue(context({ status: "NO_MATCH", documents: [], used_chars: 0 }));
+    render(<KnowledgeView versionId="ver-1" title="Revenue context · v2" onClose={() => {}} />);
+    const preview = await screen.findByRole("region", { name: "What an agent reads" });
+    await user.type(within(preview).getByLabelText("Question"), "weather in Paris");
+    await user.click(within(preview).getByRole("button", { name: "Preview" }));
+    expect(await within(preview).findByText(/Nothing in this bundle matches the question/)).toBeInTheDocument();
+    expect(within(preview).queryByText("[K1]")).toBeNull();
+  });
+
+  it("shows a refusal as a sentence, not a stack", async () => {
+    const user = userEvent.setup();
+    selectOkfContext.mockRejectedValue(new Error("Not permitted"));
+    render(<KnowledgeView versionId="ver-1" title="Revenue context · v2" onClose={() => {}} />);
+    const preview = await screen.findByRole("region", { name: "What an agent reads" });
+    await user.type(within(preview).getByLabelText("Question"), "orders");
+    await user.click(within(preview).getByRole("button", { name: "Preview" }));
+    expect(await within(preview).findByRole("alert")).toHaveTextContent("Not permitted");
+  });
 });
 
 describe("KnowledgeView", () => {

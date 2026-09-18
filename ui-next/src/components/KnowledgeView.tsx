@@ -1,11 +1,19 @@
 import { useCallback, useMemo, useState } from "react";
-import type { OkfBundleRead, OkfDocumentRead, OkfPublicationHistoryRead, OkfPublicationRead } from "../lib/types";
+import type { FormEvent } from "react";
+import type {
+  OkfBundleRead,
+  OkfContextRead,
+  OkfDocumentRead,
+  OkfPublicationHistoryRead,
+  OkfPublicationRead,
+} from "../lib/types";
 import {
   describeKnowledgeError,
   downloadOkfBundle,
   fetchOkfBundle,
   fetchOkfDocument,
   fetchOkfPublications,
+  selectOkfContext,
 } from "../lib/api/knowledge";
 import { Button, Empty, Pill } from "./primitives";
 import { LoadingPanel, useAsyncResource } from "./screenState";
@@ -153,6 +161,119 @@ function PublicationEntry({
         </ul>
       ) : null}
     </li>
+  );
+}
+
+/** What an agent is handed for a question: the same selection the MCP knowledge
+ *  tool and Ask generation receive, from the publication on screen. A steward
+ *  uses it to see whether the bundle answers a question before an agent does --
+ *  and when it does not, which is `NO_MATCH`, not an error. */
+export function AgentContextPreview({
+  versionId,
+  publicationId,
+  names,
+  onOpen,
+}: {
+  versionId: string;
+  publicationId: string | null;
+  names: ReadonlyMap<string, string>;
+  onOpen: (path: string) => void;
+}) {
+  const [question, setQuestion] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<OkfContextRead | null>(null);
+
+  const submit = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      const asked = question.trim();
+      if (!asked) return;
+      setLoading(true);
+      setError(null);
+      try {
+        setResult(await selectOkfContext(versionId, { question: asked, publication_id: publicationId }));
+      } catch (reason) {
+        setResult(null);
+        setError(describeKnowledgeError(reason));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [question, versionId, publicationId],
+  );
+
+  const citations = new Map((result?.documents ?? []).map((item) => [item.path, item.citation]));
+  return (
+    <section aria-label="What an agent reads">
+      <p className="kview__sub">What an agent reads</p>
+      <form className="kview__ask" onSubmit={(event) => void submit(event)}>
+        <label htmlFor={`kview-ask-${versionId}`}>Question</label>
+        <input
+          id={`kview-ask-${versionId}`}
+          value={question}
+          maxLength={2000}
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="e.g. which column holds the customer's email address?"
+        />
+        <Button type="submit" disabled={loading || !question.trim()}>
+          {loading ? "Selecting…" : "Preview"}
+        </Button>
+      </form>
+      {error ? (
+        <p className="kview__error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {result ? (
+        result.status === "NO_MATCH" ? (
+          <p className="kview__note" role="status">
+            Nothing in this bundle matches the question, so an agent is handed nothing and told so.
+          </p>
+        ) : (
+          <div role="status">
+            {result.ambiguous.length > 0 ? (
+              <p className="kview__note">
+                Ambiguous: {result.ambiguous.map((path) => citations.get(path) ?? path).join(" and ")} match
+                equally; an agent is told to ask which is meant.
+              </p>
+            ) : null}
+            <ol className="kview__context">
+              {result.documents.map((item) => (
+                <li key={item.path}>
+                  <div className="kview__pubhead">
+                    <strong>[{item.citation}]</strong>
+                    <button type="button" onClick={() => onOpen(item.path)} title={item.path}>
+                      {item.title || pathLabel(item.path, names)}
+                    </button>
+                    <Pill tone={item.hop === 0 ? "info" : "mute"}>
+                      {item.hop === 0
+                        ? "matched"
+                        : `linked from ${citations.get(item.linked_from ?? "") ?? "a match"}`}
+                    </Pill>
+                    <span>sha256 {item.sha256.slice(0, 12)}</span>
+                  </div>
+                  <div className="kview__note">
+                    {item.sections
+                      .map((section) =>
+                        section.rows_shown != null
+                          ? `${section.heading || "lead"} (${section.rows_shown} of ${section.rows_total} rows)`
+                          : section.heading || "lead",
+                      )
+                      .join(" · ")}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <p className="kview__note">
+              {result.used_chars.toLocaleString()} of {result.max_chars.toLocaleString()} characters
+              {result.omitted_count > 0 ? `; ${result.omitted_count} section(s) left out` : ""}. Holds no
+              source values: a figure comes from an approved tool.
+            </p>
+          </div>
+        )
+      ) : null}
+    </section>
   );
 }
 
@@ -338,6 +459,13 @@ export function KnowledgeView({
               )}
             </section>
           </div>
+
+          <AgentContextPreview
+            versionId={versionId}
+            publicationId={publicationId}
+            names={names}
+            onOpen={open}
+          />
 
           <section aria-label="Version changes">
             <p className="kview__sub">Version changes</p>

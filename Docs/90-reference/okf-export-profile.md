@@ -74,16 +74,12 @@ bundle/sources/source-<key>/schemas/schema-<key>/routines/routine-<key>.md
 bundle/sources/source-<key>/schemas/schema-<key>/packages/package-<key>.md
 bundle/concepts/index.md
 bundle/concepts/concept-<key>.md
-```
-
-The manifest sits outside `bundle/` so a reader pointed at the OKF bundle root never needs an
-Atlas extension to consume it.
-
+bundle/sources/source-<key>/schemas/schema-<key>/tables/table-<key>-columns-<n>.md  # wide objects
 bundle/tools/index.md                    # R11-OKF02
 bundle/tools/tool-version-<key>.md       # R11-OKF02
 bundle/log.md                            # R11-OKF02, stored bundles only
 bundle/sources/source-<key>/log.md       # R11-OKF02, stored bundles only
-### Stable identities
+```
 
 A `log.md` records the refresh history of its scope (spec §9: it "MAY appear at any level of the
 hierarchy"): one at the bundle root and one per source directory, date headings in ISO
@@ -97,6 +93,23 @@ Every `<key>` is the first 128 bits of a SHA-256 over the JSON-encoded Atlas ide
 over a row's UUID: a UUID changes when an object is dropped and rediscovered and differs between
 environments holding the same catalog, so a UUID-keyed bundle would report a content change where
 there is none.
+
+The manifest sits outside `bundle/` so a reader pointed at the OKF bundle root never needs an
+Atlas extension to consume it.
+
+**Wide objects are split into column sets** (profile `3`). A table or view with more than
+`MAX_COLUMNS_PER_DOCUMENT` (100) columns keeps its own document -- purpose, dependencies,
+coverage, and a `# Schema` that lists every column *name* grouped by set -- and its full column
+rows move into `Atlas Column Set` documents of at most 100 rows each, beside it. The design asks
+for exactly this: "split unusually large definitions by stable structural section only when
+retrieval limits require it". Set `n` holds ordinals `(n-1)*100+1 .. n*100`, so a column
+appended at the source lands in the last set and a dropped one leaves a gap: neither rewrites
+the sets before it. A range the source reported no usable ordinals for is split again by
+position (`-columns-<n>-<m>`), so no set exceeds the limit. Each set says which object and which
+part it is, and links back to the object and to its neighbours, so a reader handed one set
+alone can place it. An object at or under the limit renders as it did under profile `2`.
+
+### Stable identities
 
 | Kind | Identity tuple |
 |---|---|
@@ -119,7 +132,15 @@ move its document. A collision refuses the export rather than overwriting a docu
 `type` values are producer-chosen (§4.1) and consumers must tolerate unknown ones (§11):
 `Atlas Data Source`, `Atlas Schema`, `Atlas Table`, `Atlas View`, `Atlas Materialized View`,
 `Atlas Routine`, `Atlas Routine Package`, `Atlas Business Concept`, and since R11-OKF02
-`Atlas Tool Version`.
+`Atlas Tool Version` and `Atlas Column Set` (one ordinal range of a wide object's columns).
+
+An `Atlas Business Concept` document prints the approved version's aliases under
+`# Also called` -- the words people actually use for the concept, which is how a reader gets
+from a question to the concept at all. They are screened one by one like the definition, and a
+withheld alias is left out rather than blanked. Its `# Mapped objects` lists the tables,
+views and routines the approved version maps it to inside the product's scope -- a column
+mapping names its column's table -- and it is `stable` and `verified` when the version's
+governance approval is recorded and the concept is not `DEPRECATED`.
 
 An `Atlas Tool Version` document describes one approved governed-tool version the product makes
 eligible: its purpose (the approved description), its inputs (name, type, required -- never a
@@ -193,6 +214,8 @@ module, resolved as one by `tests/test_doc_claims.py`, and a frontmatter key is 
 | `tool` | On a tool-version document only: `tool.key`, `tool.tool_version_id`, `tool.slug`, `tool.version`, `tool.lifecycle`, `tool.fingerprint`, and `tool.invocation` (the MCP tool name and the REST execute route). No SQL and no executor. |
 
 `atlas-manifest.json` is an Atlas extension, not an OKF requirement. Keys: `manifest_version`,
+| `column_sets` | On a wide object's own document only: one entry per column set, with its `path`, `first_ordinal`, `last_ordinal` and `columns` count. |
+| `part_of` | On a column-set document only: the object it belongs to and where it sits -- `part_of.key`, `part_of.path`, `part_of.qualified_name`, `part_of.set`, `part_of.sets`, `part_of.first_ordinal`, `part_of.last_ordinal`. |
 `atlas_extension`, `okf_version`, `bundle_root`, `specification` (repository, path, revision,
 sha256, conformance), `compiler`, `captured_at`, `scope`, `policy_partition` (with its digest),
 `scope_digest`, `content_snapshot_digest`, `bundle_content_digest`, `counts` (including `tools`
@@ -279,6 +302,38 @@ stored.
 No exported document contains a routine body, a view definition, a column or parameter default
 expression, a source comment, a sample row or a profile statistic. This is structural: no field on
 any snapshot value type can hold one, and a column's `default_expression` is never selected. A
+## Question-specific context
+
+A bundle is many small documents so that a reader can take the few a question needs.
+`aida.okf_context` is how Atlas takes them, for the REST context route, the MCP knowledge tool
+and Ask's SQL generation alike, all reading through `aida.okf_store.read_okf_context` and so
+through the same `read_published_bundle` as every other surface:
+
+1. **Rank from the frozen snapshot**, before any body is loaded: names, approved descriptions,
+   column names and approved column meanings, concept names, labels and aliases, tool names and
+   inputs. A term's weight is its rarity across this publication's subjects (BM25's smoothed
+   idf) times the strongest field it appears in; a multi-word name or alias the question
+   contains whole counts again. Only approved prose ranks. Deterministic, with no model and no
+   embedding.
+2. **Load only what ranked**, from the stored rows: at most six subjects, the column sets of a
+   wide object whose columns the question names, and at most four documents one link away
+   (a concept to its mapped table, a table to what it depends on).
+3. **Hand out sections, not files.** Documents are cut at their top-level headings; a schema
+   table longer than 30 rows keeps only the rows the question names and says how many it kept.
+   Sections are taken meaning first, within a character budget (16,000 by default, 48,000 at
+   most, 8,000 inside Ask), and everything the budget cut is listed.
+4. **Receipts.** Each document carries its path and SHA-256 and each section its heading
+   anchor, beside the publication id and digests. The audit record names `path#anchor` for
+   every section handed out and never the question.
+
+A question nothing matches is `NO_MATCH`, not a handful of unrelated documents. Two subjects of
+one kind the question cannot tell apart are returned together and flagged `ambiguous`. The
+bundle holds no source values, so the selection says so: a current figure needs an approved
+tool through the query gateway, and a matching `Atlas Tool Version` document is returned like
+any other. Inside Ask, the sections join the SQL-generation payload as grounding for which
+tables and columns answer the question; every identifier the SQL uses must still come from the
+metadata context, and the product boundary is enforced on the statement afterwards.
+
 definition is represented by a SHA-256 of the **stored value-free** text plus availability,
 truncation and parse state. A connector's free-text `unavailable_reason` is reduced to a bounded
 reason code rather than exported verbatim. Approved Atlas description text is screened at export
@@ -310,3 +365,5 @@ These are new surfaces beside the single-file context compiler, which is untouch
 `ContextCompilerTarget` value was added and no compile response shape changed, so an existing
 consumer sees no difference. A downloaded file cannot be remotely revoked; export permissions,
 classification and expiry notices govern distribution, and no offline revocation is promised.
+| `POST /v1/context-product-versions/{version_id}/okf-bundle/context` | The sections of the stored bundle a question needs, with receipts: see [Question-specific context](#question-specific-context). The question travels in the body, never the URL. |
+| MCP `tools/call` of `atlas__get_knowledge_context` | The same selection for an agent that has a question rather than a path: Markdown to read, then the structured selection. |

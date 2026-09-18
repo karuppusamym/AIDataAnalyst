@@ -56,3 +56,9 @@
 .kdoc__table{border-collapse:collapse;font-size:11.5px;min-width:100%}
 .kdoc__table th,.kdoc__table td{border:1px solid var(--line-soft);padding:3px 6px;text-align:left;vertical-align:top}
 .kdoc__table th{background:var(--sunk);font-weight:600}
+.kview__ask{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
+.kview__ask label{font-size:12px;color:var(--ink-2)}
+.kview__ask input{flex:1 1 260px;min-width:0;font:inherit;font-size:12.5px;padding:5px 8px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink)}
+.kview__context{list-style:none;margin:0 0 8px;padding:0;display:flex;flex-direction:column;gap:6px}
+.kview__context li{border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:6px 8px}
+.kview__context button{background:none;border:0;padding:0;color:var(--accent);cursor:pointer;font:inherit;text-decoration:underline;text-underline-offset:2px}
