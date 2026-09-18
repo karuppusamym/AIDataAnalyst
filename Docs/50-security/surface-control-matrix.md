@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **508**
-- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 26, MCP 9, REST 442, SDK 1
+- Surfaces covered: **509**
+- By family: BULK 11, EXPORT 7, GRAPHQL 12, JOB 26, MCP 9, REST 443, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -208,6 +208,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/scan-policy` | REST | `atlas.modules.connectivity.router.get_scan_policy` | DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/table-family-candidates` | REST | `aida.table_family_api.list_table_family_candidates_for_datasource` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/tables` | REST | `aida.api.list_tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/triggers/{trigger_id}/parse-coverage` | REST | `aida.procedure_lineage_api.get_trigger_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/graph` | REST | `aida.unified_lineage_api.get_unified_lineage_graph` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}` | REST | `aida.unified_lineage_api.get_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}` | REST | `aida.operational_api.get_datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |

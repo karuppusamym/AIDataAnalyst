@@ -4316,6 +4316,28 @@ class RoutineParseCoverageRead(ApiModel):
     parsed_at: datetime
 
 
+class TriggerParseCoverageRead(ApiModel):
+    """R11-FP01: how completely one trigger's body was understood, as last measured.
+
+    The trigger axis of `RoutineParseCoverageRead`. `routine_id` is the routine the body was
+    actually read from -- a PostgreSQL trigger's function; null on an engine whose trigger
+    carries its own body -- so "which text was parsed" is part of the answer.
+    """
+
+    trigger_id: UUID
+    routine_id: UUID | None
+    state: str
+    parse_completed: bool
+    is_read_only: bool
+    statement_count: int
+    unparsed_statement_count: int
+    unparsed_reason_codes: list[str]
+    dialect: str
+    confidence: str
+    source_mapping_granularity: str
+    parsed_at: datetime
+
+
 class OkfBundleFileRead(ApiModel):
     """One document in an OKF bundle: where it sits, its digest and its size.
 
@@ -4456,8 +4478,9 @@ class OkfContextRequest(ApiModel):
     """
 
     question: str = Field(min_length=1, max_length=2000)
-    #: Characters of section text to return. The default is about 4k tokens; the cap about 12k.
-    max_chars: int = Field(default=16_000, ge=1_000, le=48_000)
+    #: Characters of section text to return, at most 48,000 (about 12k tokens). Omitted, the
+    #: deployment's `okf_context_default_max_chars` applies (16,000 unless configured).
+    max_chars: int | None = Field(default=None, ge=1_000, le=48_000)
     #: Select from this stored publication of the caller's own lineage instead of the current.
     publication_id: UUID | None = None
 

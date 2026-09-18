@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 import tests.test_f01_context_product_execution_boundary as f01
+from aida.agent_orchestrator import AMBIGUOUS_KNOWLEDGE, AgentClarificationRequired
 from aida.config import Settings
 from aida.db import Base
 from aida.mcp_server import _handle_tools_call, _handle_tools_list
@@ -594,6 +595,28 @@ def test_equal_matches_of_one_kind_are_flagged_ambiguous() -> None:
     assert "Ambiguous:" in render_markdown(selected)
 
 
+def test_a_name_the_question_gives_whole_outranks_one_it_only_half_gives() -> None:
+    """`payments` names `fact_payments`' own words whole and `fact_payments_archive`'s only in
+    part. Without the whole-name credit the two tied and read as ambiguous."""
+    base = _bank()
+    archive = replace(
+        base.objects[2],
+        key=object_key(DS, "bank", "warehouse", "fact_payments_archive"),
+        name="fact_payments_archive",
+        qualified_name="bank.warehouse.fact_payments_archive",
+        description=OkfDescription(),
+        columns=(),
+    )
+    live = replace(base.objects[2], description=OkfDescription(), columns=())
+    snapshot = _bank(
+        objects=(base.objects[0], base.objects[1], live, archive),
+        routines=(replace(base.routines[0], links=()),),
+    )
+    selected = select_context(snapshot, _documents(snapshot), "fact payments")
+    assert selected.ambiguous == ()
+    assert selected.documents[0].path == _path(snapshot, live.key)
+
+
 def test_selection_is_deterministic_and_hands_out_only_stored_lines() -> None:
     snapshot = _bank()
     documents = _documents(snapshot)
@@ -877,10 +900,14 @@ async def test_knowledge_that_matched_but_did_not_fit_is_not_grounding(
 ) -> None:
     """Every section over the budget: the model is not handed an empty `okf_context` and an
     instruction about it, and the run records that the match was not used."""
-    monkeypatch.setattr("aida.agent_orchestrator.ASK_MAX_CHARS", 1)
     await scenario.product(table_ids=[scenario.orders.id])
     orchestrator, model = f01._orchestrator(
         monkeypatch, model_sql="SELECT o.order_id FROM retail.orders AS o"
+    )
+    # Below the setting's own floor on purpose: `model_copy` does not validate, and a budget
+    # nothing fits is the case under test.
+    orchestrator.settings = orchestrator.settings.model_copy(
+        update={"okf_context_ask_max_chars": 1}
     )
     await _ask_quietly(orchestrator, scenario)
     assert model is not None and model.calls
@@ -960,3 +987,25 @@ async def test_a_stored_concept_links_its_mapped_table_and_carries_its_approval(
     assert reached.title.endswith("orders")
     rows = {row.path: row for row in await load_documents(session, found.stored.publication)}
     assert "verified:" in rows[concept.path].content
+
+
+async def test_knowledge_naming_two_tables_equally_asks_which_one_before_generating(
+    scenario: Any,  # noqa: F811 -- the F01 fixture, imported above
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design §14 step 6: ambiguity produces clarification. The product holds `retail.orders`
+    and `staging.orders`, and "orders" names both identically: Ask asks which one, before any
+    model is called, instead of letting the model choose silently."""
+    await scenario.product(table_ids=[scenario.orders.id, scenario.staging_orders.id])
+    orchestrator, model = f01._orchestrator(
+        monkeypatch, model_sql="SELECT o.order_id FROM retail.orders AS o"
+    )
+    with pytest.raises(AgentClarificationRequired) as asked:
+        await f01._ask(orchestrator, scenario)
+    assert asked.value.code == AMBIGUOUS_KNOWLEDGE
+    assert sorted(asked.value.candidates) == ["warehouse.retail.orders", "warehouse.staging.orders"]
+    assert model is not None and model.calls == []
+    run = await f01._latest_run(scenario)
+    assert run.failure_reason == AMBIGUOUS_KNOWLEDGE
+    stored = await scenario.db.scalar(select(AgentRun.plan_evidence).where(AgentRun.id == run.id))
+    assert len((stored or {})["okf_context"]["ambiguous"]) == 2

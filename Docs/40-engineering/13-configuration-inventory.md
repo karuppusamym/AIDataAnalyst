@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**270 settings.** 0 are read nowhere. 61 more ship switched off, empty or zero.
+**272 settings.** 0 are read nowhere. 61 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -321,6 +321,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `dq_itsm_webhook_timeout_seconds` | `int` | `10` | 1 |
 | `agent_retrieval_limit` | `int` | `25` | 6 |
 | `agent_retrieval_scan_limit` | `int` | `5000` | 9 |
+| `okf_context_default_max_chars` | `int` | `16000` | 2 |
+| `okf_context_ask_max_chars` | `int` | `8000` | 1 |
 | `agent_tool_match_threshold` | `float` | `0.55` | 1 |
 | `agent_query_memory_enabled` | `bool` | `False` | 1 |
 | `agent_query_memory_min_similarity` | `float` | `0.6` | 2 |

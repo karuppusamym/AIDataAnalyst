@@ -349,6 +349,65 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.getByText(/demoted in ranking — open quality incident \(factor 0\.30\)/)).toBeInTheDocument();
   });
 
+  it("lists the product knowledge the SQL was generated with, as the run recorded it (R11-OKF02)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_okf_1",
+      plan_evidence: {
+        strategy: "FREEFORM_SQL",
+        okf_context: {
+          used: true,
+          status: "MATCHED",
+          documents: [
+            {
+              citation: "K1",
+              path: "concepts/concept-517dc9fa59f0c2ca8ab62fa03360fcbb.md",
+              title: "End of day position",
+              sha256: "10e702b6a2fe49eaa2156571dc3dc3a7aec234cf5b79631304e3a49417244ed5",
+              hop: 0,
+              sections: ["definition", "also-called", "mapped-objects"],
+            },
+            {
+              citation: "K2",
+              path: "sources/source-a/schemas/schema-b/tables/table-c.md",
+              title: "bank_demo.warehouse.fact_account_balances",
+              sha256: "dbbd07fec9570000000000000000000000000000000000000000000000000000",
+              hop: 1,
+              sections: ["purpose", "schema"],
+            },
+          ],
+        },
+      },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_okf_1", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "closing position yesterday" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    expect(await screen.findByText("Product knowledge (OKF)")).toBeInTheDocument();
+    expect(screen.getByText("[K1] matched the question")).toBeInTheDocument();
+    expect(screen.getByText("[K2] linked from a match")).toBeInTheDocument();
+    expect(screen.getByText("bank_demo.warehouse.fact_account_balances")).toBeInTheDocument();
+    expect(screen.getByText(/definition · also-called · mapped-objects · sha256 10e702b6a2fe/)).toBeInTheDocument();
+  });
+
+  it("says why no product knowledge was used when the bundle held nothing on the question (R11-OKF02)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_okf_2",
+      plan_evidence: { strategy: "FREEFORM_SQL", okf_context: { used: false, status: "NO_MATCH", documents: [] } },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_okf_2", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "weather in Paris" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(await screen.findByText("The product's knowledge holds nothing on this question.")).toBeInTheDocument();
+  });
+
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {
     runAgentAnalysis.mockRejectedValue(
       new (await import("../lib/api")).ApiError(409, AMBIGUITY_DETAIL),

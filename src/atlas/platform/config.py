@@ -907,6 +907,12 @@ class Settings(BaseSettings):
     dq_itsm_webhook_timeout_seconds: int = Field(default=10, ge=1, le=60)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
+    # R11-OKF02: characters of OKF knowledge one question is handed (`aida.okf_context`). The
+    # first is the REST context route's and the MCP knowledge tool's budget when the caller names
+    # none; the second is Ask's own, smaller because the SQL-generation payload already carries
+    # the schema metadata the knowledge explains. 48,000 is the selection's hard ceiling.
+    okf_context_default_max_chars: int = Field(default=16_000, ge=1_000, le=48_000)
+    okf_context_ask_max_chars: int = Field(default=8_000, ge=1_000, le=48_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     # AG-7: query-memory similarity/adaptation. Off by default so a tenant that has
     # not reviewed the feature keeps today's MODEL_GATEWAY-only behaviour; flipping

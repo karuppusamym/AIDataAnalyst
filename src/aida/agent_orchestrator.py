@@ -102,7 +102,6 @@ from aida.models import (
     ToolExecution,
 )
 from aida.okf_context import (
-    ASK_MAX_CHARS,
     STATUS_MATCHED,
     OkfContext,
     citation_ids,
@@ -180,10 +179,17 @@ class AgentClarificationRequired(RuntimeError):
         *,
         required_parameters: Sequence[str] = (),
         tool_version_id: str | None = None,
+        code: str = "MISSING_TOOL_PARAMETERS",
+        candidates: Sequence[str] = (),
     ) -> None:
         super().__init__(message)
         self.required_parameters: tuple[str, ...] = tuple(required_parameters)
         self.tool_version_id = tool_version_id
+        #: What kind of clarification. Defaults to the one this class was built for, so every
+        #: existing raise keeps its wire code; `AMBIGUOUS_KNOWLEDGE` names its own.
+        self.code = code
+        #: The things the caller must choose between, for a clarification that is a choice.
+        self.candidates: tuple[str, ...] = tuple(candidates)
 
 
 class AgentPolicyRejected(RuntimeError):
@@ -398,6 +404,8 @@ def run_token_charge(evidence: ModelCallEvidence, attempt_count: int) -> RunToke
 
 CONTEXT_PRODUCT_UNAVAILABLE: Final = "CONTEXT_PRODUCT_NOT_AVAILABLE"
 CONTEXT_PRODUCT_FORBIDDEN: Final = "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"
+#: R11-OKF02: the product's knowledge names two subjects of one kind equally for this question.
+AMBIGUOUS_KNOWLEDGE: Final = "AMBIGUOUS_KNOWLEDGE"
 # F01: the boundary codes now belong to `aida.context_product_execution_scope`,
 # which is where the gateway reads them from too -- one vocabulary for a refusal
 # that two layers can make. Re-exported under the names this module has always
@@ -916,7 +924,7 @@ class GovernedAgentOrchestrator:
                 request.context,
                 self.settings,
                 request.question,
-                max_chars=ASK_MAX_CHARS,
+                max_chars=self.settings.okf_context_ask_max_chars,
             )
         except (HTTPException, OkfExportError) as error:
             status = error.status_code if isinstance(error, HTTPException) else 409
@@ -959,6 +967,9 @@ class GovernedAgentOrchestrator:
                 {
                     "citation": ids[document.path],
                     "path": document.path,
+                    # The object's or concept's own name, so a reopened run can say what it
+                    # cited; an identifier the catalog already shows, never section text.
+                    "title": document.title,
                     "sha256": document.sha256,
                     "hop": document.hop,
                     "sections": [section.anchor for section in document.sections],
@@ -973,6 +984,21 @@ class GovernedAgentOrchestrator:
             "screening_version": SCREENING_VERSION,
         }
         ledger.publish_plan_evidence()
+        if used and len(selected.ambiguous) >= 2:
+            # Design §14 step 6: "ambiguity ... produces clarification". Two subjects of one kind
+            # the question names identically -- `retail.orders` and `staging.orders` for "orders"
+            # -- are a choice the person has to make; handing both to the model would let it
+            # make it silently. A name the question gives whole already outranks one it only
+            # half gives, so this is a real tie, not `orders` against `orders_archive`.
+            titles = {document.path: document.title for document in selected.documents}
+            names = [titles.get(path, path) for path in selected.ambiguous]
+            await self._persist_rejection(session, request, ledger, AMBIGUOUS_KNOWLEDGE)
+            raise AgentClarificationRequired(
+                f"the question matches {' and '.join(repr(name) for name in names)} equally in "
+                "this context product's knowledge; say which one you mean",
+                code=AMBIGUOUS_KNOWLEDGE,
+                candidates=names,
+            )
         return selected if used else None
 
     @staticmethod

@@ -3561,7 +3561,7 @@ export interface OkfContextRead {
 /** A question to select knowledge for, from one product version's stored OKF bundle. */
 export interface OkfContextRequest {
   question: string;
-  max_chars?: number;
+  max_chars?: number | null;
   publication_id?: string | null;
 }
 
@@ -5548,6 +5548,22 @@ export interface ToolPlanStepRead {
   completed_at: string | null;
   evidence: Record<string, unknown>;
   error_message: string | null;
+}
+
+/** R11-FP01: how completely one trigger's body was understood, as last measured. */
+export interface TriggerParseCoverageRead {
+  trigger_id: string;
+  routine_id: string | null;
+  state: string;
+  parse_completed: boolean;
+  is_read_only: boolean;
+  statement_count: number;
+  unparsed_statement_count: number;
+  unparsed_reason_codes: string[];
+  dialect: string;
+  confidence: string;
+  source_mapping_granularity: string;
+  parsed_at: string;
 }
 
 /** Governed runs in this organization that no registered agent owns. */

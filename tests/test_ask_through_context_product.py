@@ -502,3 +502,28 @@ async def test_the_route_without_a_product_records_none(
     run = await _latest_run(scenario)
     resolved = [step for step in run.step_trace if step.get("stage") == "RESOLVED"]
     assert resolved and "context_product_version" not in resolved[-1]["details"]
+
+
+async def test_an_ambiguous_knowledge_clarification_keeps_its_own_code_and_candidates(
+    http: httpx.AsyncClient, scenario: _Scenario, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R11-OKF02: the 409 carries the clarification's own code and what to choose between.
+
+    Every clarification used to go out as `MISSING_TOOL_PARAMETERS`, which is right for the
+    one this route was built for (the test above) and wrong for a choice between two tables.
+    """
+
+    async def ambiguous(*_args: Any, **_kwargs: Any) -> Any:
+        raise AgentClarificationRequired(
+            "the question matches 'retail.orders' and 'staging.orders' equally",
+            code="AMBIGUOUS_KNOWLEDGE",
+            candidates=["retail.orders", "staging.orders"],
+        )
+
+    monkeypatch.setattr(GovernedAgentOrchestrator, "run", ambiguous)
+    response = await _post_ask(http, scenario, product_key=None)
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "AMBIGUOUS_KNOWLEDGE"
+    assert detail["candidates"] == ["retail.orders", "staging.orders"]
+    assert detail["required_parameters"] == []

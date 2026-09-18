@@ -300,6 +300,53 @@ function record(v: unknown, key: string): unknown {
   return v && typeof v === "object" ? (v as Record<string, unknown>)[key] : undefined;
 }
 
+interface OkfCitedDocument {
+  citation: string;
+  path: string;
+  title: string | null;
+  sha256: string;
+  hop: number;
+  sections: string[];
+}
+
+/** R11-OKF02: `plan_evidence.okf_context`, read defensively -- a run from before the field
+ *  existed has none, and then nothing is shown. When knowledge was consulted but not used, the
+ *  run says why, and so does this. */
+function okfKnowledgeUsed(
+  planEvidence: unknown,
+): { documents: OkfCitedDocument[]; note: string } | null {
+  const okf = record(planEvidence, "okf_context");
+  if (!okf || typeof okf !== "object") return null;
+  const raw = record(okf, "documents");
+  const documents: OkfCitedDocument[] = (Array.isArray(raw) ? raw : []).flatMap((item) => {
+    const path = record(item, "path");
+    const citation = record(item, "citation");
+    const sha = record(item, "sha256");
+    if (typeof path !== "string" || typeof citation !== "string" || typeof sha !== "string") return [];
+    const title = record(item, "title");
+    const hop = record(item, "hop");
+    const sections = record(item, "sections");
+    return [
+      {
+        path,
+        citation,
+        sha256: sha,
+        title: typeof title === "string" ? title : null,
+        hop: typeof hop === "number" ? hop : 0,
+        sections: Array.isArray(sections) ? sections.filter((s): s is string => typeof s === "string") : [],
+      },
+    ];
+  });
+  const status = record(okf, "status");
+  const note =
+    record(okf, "reason") === "OKF_CONTEXT_UNAVAILABLE"
+      ? "The product's knowledge bundle could not be read for this run, so the SQL was generated without it."
+      : status === "NO_MATCH"
+        ? "The product's knowledge holds nothing on this question."
+        : "Knowledge matched, but none of it fit the budget or passed screening, so none was used.";
+  return { documents: record(okf, "used") === true ? documents : [], note };
+}
+
 /** The open answer/evidence panel -- either the response this session just
  *  received from `runAgentAnalysis` (`isFresh`, has `explanation`), or a
  *  history item / permalink reopened from `GET /agent-runs/{id}` +
@@ -392,6 +439,7 @@ function AnswerPanel({
   // prose, so this reads the same `{asset_id, message, severity,
   // incident_ids}` shape directly rather than parsing it out of the
   // explanation text below.
+  const okfKnowledge = okfKnowledgeUsed(planEvidence);
   const trust = record(planEvidence, "trust");
   const trustWarningsRaw = trust ? record(trust, "warnings") : null;
   const trustWarnings = Array.isArray(trustWarningsRaw) ? trustWarningsRaw : [];
@@ -634,6 +682,34 @@ function AnswerPanel({
                 <p className="evp__load">No grounding fragments recorded for this run.</p>
               )}
             </div>
+
+            {okfKnowledge ? (
+              <div className="evp__terms">
+                {/* R11-OKF02: the sections of the product's approved knowledge the SQL was
+                    generated with, as the run recorded them -- citation, document, sections and
+                    the document's digest. Receipts only: the run keeps no section text. */}
+                <div className="evp__sub">Product knowledge (OKF)</div>
+                {okfKnowledge.documents.length > 0 ? (
+                  <ol className="evl">
+                    {okfKnowledge.documents.map((doc) => (
+                      <li key={doc.path} className="evi evi--info">
+                        <div className="evi__label">
+                          [{doc.citation}] {doc.hop === 0 ? "matched the question" : "linked from a match"}
+                        </div>
+                        <div className="evi__value" title={doc.path}>
+                          {doc.title ?? doc.path}
+                        </div>
+                        <div className="evi__source">
+                          {doc.sections.join(" · ") || "no sections"} · sha256 {doc.sha256.slice(0, 12)}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="evp__load">{okfKnowledge.note}</p>
+                )}
+              </div>
+            ) : null}
           </>
         )}
       </div>

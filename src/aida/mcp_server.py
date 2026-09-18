@@ -130,7 +130,7 @@ from aida.models import (
     MetadataTable,
     TableProfile,
 )
-from aida.okf_context import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, MAX_QUESTION_CHARS
+from aida.okf_context import MAX_CHARS_LIMIT, MAX_QUESTION_CHARS
 from aida.okf_export_api import OKF_ROLES, context_read, publication_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
@@ -441,7 +441,7 @@ NATIVE_KNOWLEDGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": (
                         f"Characters of section text to return, 1000-{MAX_CHARS_LIMIT}; "
-                        f"default {DEFAULT_MAX_CHARS}"
+                        "default: the deployment's configured budget"
                     ),
                 },
             },
@@ -904,7 +904,7 @@ async def _handle_native_knowledge_tool_call(
     product_key = arguments.get("product_key")
     version_number = arguments.get("version")
     question = arguments.get("question")
-    max_chars = arguments.get("max_chars", DEFAULT_MAX_CHARS)
+    max_chars = arguments.get("max_chars", settings.okf_context_default_max_chars)
     if not isinstance(product_key, str) or not 1 <= len(product_key) <= 200:
         return refuse("product_key must be a non-empty string.")
     if (

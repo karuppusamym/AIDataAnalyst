@@ -52,12 +52,11 @@ from aida.okf_export import (
 
 #: Characters of section text one answer may be handed by default, and at most. About 4k and
 #: 12k tokens: room for a handful of objects' meaning and the rows a question names, well inside
-#: any model's window with the rest of an Ask payload beside it.
+#: any model's window with the rest of an Ask payload beside it. Deployments set the budgets a
+#: surface actually uses (`okf_context_default_max_chars`, and `okf_context_ask_max_chars` for
+#: Ask, whose payload already carries schema metadata); the ceiling is fixed here.
 DEFAULT_MAX_CHARS: Final = 16_000
 MAX_CHARS_LIMIT: Final = 48_000
-#: The Ask pipeline's own budget: the generation payload already carries schema metadata and
-#: retrieval evidence, so the knowledge that explains them is kept smaller.
-ASK_MAX_CHARS: Final = 8_000
 #: Subjects taken directly from the ranking, column sets per wide object, and documents reached
 #: by following a link. Bounds on what is *loaded*, not only on what is returned.
 MAX_SUBJECTS: Final = 6
@@ -197,10 +196,16 @@ def _field(weight: float, *texts: str | None) -> _Field:
 
 
 def _phrases(*names: str | None) -> tuple[frozenset[str], ...]:
-    found = []
+    """A subject's names and aliases as term sets, each at most once.
+
+    Single-word names count too: a question that names `orders` whole should prefer the table
+    called that over `orders_archive`, which it only half names -- without this the two tied,
+    and a tie is reported as ambiguous.
+    """
+    found: list[frozenset[str]] = []
     for name in names:
         words = frozenset(terms(name))
-        if len(words) >= 2:
+        if words and words not in found:
             found.append(words)
     return tuple(found)
 
@@ -363,9 +368,10 @@ def plan_context(snapshot: OkfSnapshot, question: str) -> OkfContextPlan:
     """Rank the snapshot's subjects for `question`. Pure; reads no document body.
 
     Score = sum, over the question's distinct terms, of the term's rarity across subjects (idf)
-    times the heaviest field it appears in, plus the same again for a multi-word name or alias
-    the question contains whole. The idf is what keeps a word every table shares from ranking
-    anything, and it is computed from this publication alone, so it needs no corpus statistics.
+    times the heaviest field it appears in, plus the same again for the best name or alias the
+    question contains whole (credited once). The idf is what keeps a word every table shares
+    from ranking anything, and it is computed from this publication alone, so it needs no corpus
+    statistics.
     """
     wanted = tuple(dict.fromkeys(terms(question[:MAX_QUESTION_CHARS])))
     subjects = _subjects(snapshot)
@@ -387,9 +393,10 @@ def plan_context(snapshot: OkfSnapshot, question: str) -> OkfContextPlan:
             if weight:
                 score += idf[term] * weight
                 matched.append(term)
-        for phrase in subject.phrases:
-            if phrase <= asked:
-                score += sum(idf[term] for term in phrase) * _W_NAME
+        # The best name or alias the question contains whole, credited once.
+        whole = [sum(idf[term] for term in phrase) for phrase in subject.phrases if phrase <= asked]
+        if whole:
+            score += max(whole) * _W_NAME
         if score <= 0.0:
             continue
         # A set is as relevant as its best column: a question about the customer's email

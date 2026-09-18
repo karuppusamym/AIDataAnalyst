@@ -320,8 +320,10 @@ through the same `read_published_bundle` as every other surface:
    (a concept to its mapped table, a table to what it depends on).
 3. **Hand out sections, not files.** Documents are cut at their top-level headings; a schema
    table longer than 30 rows keeps only the rows the question names and says how many it kept.
-   Sections are taken meaning first, within a character budget (16,000 by default, 48,000 at
-   most, 8,000 inside Ask), and everything the budget cut is listed.
+   Sections are taken meaning first, within a character budget, and everything the budget cut
+   is listed. The budgets are settings -- `okf_context_default_max_chars` (16,000) for REST and
+   MCP when the caller names none, `okf_context_ask_max_chars` (8,000) inside Ask -- under a
+   fixed ceiling of 48,000.
 4. **Receipts.** Each document carries its path and SHA-256 and each section its heading
    anchor, beside the publication id and digests. The audit record names `path#anchor` for
    every section handed out and never the question.

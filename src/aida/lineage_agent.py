@@ -84,7 +84,7 @@ from functools import partial
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, exists, func, or_, select
+from sqlalchemy import ColumnElement, and_, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.change_signal_models import MetadataChangeSignal
@@ -114,9 +114,12 @@ from aida.procedure_lineage_models import (
 )
 from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
+    SUPERSEDED,
+    DecidedEdgeReconciliation,
     RoutineEdgeKey,
     persist_trigger_edges,
     persistable_table,
+    reconcile_decided_edges,
     record_routine_parse_coverage,
     record_trigger_parse_coverage,
     require_eligible_routine_body,
@@ -659,8 +662,48 @@ async def _propose_procedure_lineage(
     if any(error.startswith("unsupported dialect") for error in result.errors):
         return await decline(SKIP_UNSUPPORTED_DIALECT)
     proposable = proposable_procedure_edges(result)
+    reconciliation = DecidedEdgeReconciliation()
+    fresh = proposable
+    if run.proposing:
+        # R11-FP16: a re-examination replaces this routine's undecided proposals and keeps what
+        # a person decided. It used to insert every edge afresh, and an edge the redefined body
+        # still wrote collided with its decided row on the unique natural key -- the item
+        # failed with an IntegrityError, in exactly the case re-examination exists for.
+        await session.execute(
+            delete(DeepProcedureLineageEdge).where(
+                DeepProcedureLineageEdge.organization_id == run.organization_id,
+                DeepProcedureLineageEdge.datasource_id == datasource_id,
+                DeepProcedureLineageEdge.routine_id == routine_id,
+                DeepProcedureLineageEdge.review_status == "PROPOSED",
+            )
+        )
+        reconciliation = await reconcile_decided_edges(
+            session,
+            model=DeepProcedureLineageEdge,
+            datasource=datasource,
+            owner_id=routine_id,
+            result=result,
+            produced=proposable,
+        )
+        decided = {
+            routine_edge_key(row)
+            for row in (
+                await session.scalars(
+                    select(DeepProcedureLineageEdge).where(
+                        DeepProcedureLineageEdge.organization_id == run.organization_id,
+                        DeepProcedureLineageEdge.datasource_id == datasource_id,
+                        DeepProcedureLineageEdge.routine_id == routine_id,
+                    )
+                )
+            ).all()
+        }
+        fresh = [edge for edge in proposable if routine_edge_key(edge) not in decided]
     if not proposable:
         return await decline(SKIP_UNPARSEABLE if result.errors else SKIP_NO_LINEAGE)
+    if not fresh and not reconciliation.revived:
+        # Everything the body writes is already decided. Any edge it stopped writing was
+        # superseded above; the item is declined, not failed.
+        return await decline(SKIP_LINEAGE_KNOWN)
 
     confidence = edge_confidence_as_float(result.confidence)
     if not run.proposing:
@@ -671,7 +714,7 @@ async def _propose_procedure_lineage(
             subject_name=routine_name,
             confidence=confidence,
         )
-    table_ids = await resolve_routine_table_ids(session, datasource_id, proposable)
+    table_ids = await resolve_routine_table_ids(session, datasource_id, fresh)
     rows = [
         routine_edge_row(
             edge,
@@ -685,10 +728,11 @@ async def _propose_procedure_lineage(
             review_status="PROPOSED",
             created_by=run.principal_id,
         )
-        for edge in proposable
+        for edge in fresh
     ]
     session.add_all(rows)
     await session.flush()
+    queued = [*rows, *reconciliation.revived]
     return await run.proposed_in_queue(
         capability,
         proposal_ref_type=_ROUTINE_REF_TYPE,
@@ -696,12 +740,15 @@ async def _propose_procedure_lineage(
         subject_id=routine_id,
         subject_name=routine_name,
         inputs=inputs,
-        pending_added=len(rows),
+        pending_added=len(queued),
         evidence={
-            "edge_ids": [str(row.id) for row in rows],
-            "edge_count": len(rows),
+            "edge_ids": [str(row.id) for row in queued],
+            "edge_count": len(queued),
             # Markers, plumbing, result sets and unresolved sources.
-            "withheld_edges": len(result.edges) - len(rows),
+            "withheld_edges": len(result.edges) - len(proposable),
+            # R11-FP16: what this re-examination did to lineage a person had decided.
+            "superseded_edge_ids": [str(row.id) for row in reconciliation.superseded],
+            "revived_edge_ids": [str(row.id) for row in reconciliation.revived],
             "statement_count": result.statement_count,
             "is_fully_parsed": result.is_fully_parsed,
             "sql_hash": result.sql_hash,
@@ -977,8 +1024,12 @@ async def _propose_trigger_lineage(
     markers = [
         row for row in written if row.transformation_type == UNPARSED_TRANSFORMATION_TYPE
     ]
+    superseded = [row for row in written if row.review_status == SUPERSEDED]
     if not edges:
-        # The gap is still recorded above; only the *proposal* is declined.
+        # The gap is still recorded above; only the *proposal* is declined. A body whose
+        # every edge is already decided is known lineage, not unresolvable lineage.
+        if proposable:
+            return await decline(SKIP_LINEAGE_KNOWN)
         return await decline(SKIP_UNPARSEABLE if result.errors else SKIP_NO_LINEAGE)
     return await run.proposed_in_queue(
         capability,
@@ -994,6 +1045,8 @@ async def _propose_trigger_lineage(
             # Markers, plumbing, result sets and unresolved sources.
             "withheld_edges": len(result.edges) - len(edges),
             "unparsed_statements": len(markers),
+            # R11-FP01: approved lineage this complete re-parse no longer found.
+            "superseded_edge_ids": [str(row.id) for row in superseded],
             "statement_count": result.statement_count,
             "is_fully_parsed": result.is_fully_parsed,
             "body_reached": body.sql is not None,

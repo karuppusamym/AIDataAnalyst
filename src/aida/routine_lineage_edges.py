@@ -44,9 +44,10 @@ over one shared `_measure`, so "fully understood" means one thing on both.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, or_, select
@@ -228,6 +229,104 @@ def routine_edge_key(
         edge.transformation_type,
         edge.via_temp_table,
     )
+
+
+#: Review state of a decided edge a complete re-parse no longer produces. Already one of
+#: `parsed_lineage_review_service.REVIEW_STATUSES`, so the review queue can filter on it.
+SUPERSEDED = "SUPERSEDED"
+
+
+def _natural_key(edge: Any) -> tuple[Any, ...]:
+    """`routine_edge_key` and `trigger_edge_key` are one tuple over the same attributes; this is
+    that tuple for a parsed record or a row of either table."""
+    return (
+        edge.statement_ordinal,
+        edge.source_table,
+        edge.source_column,
+        edge.target_table,
+        edge.target_column,
+        edge.transformation_type,
+        edge.via_temp_table,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DecidedEdgeReconciliation:
+    """What one re-parse did to edges a person had already decided."""
+
+    #: ACTIVE edges the complete new parse no longer produces, now SUPERSEDED.
+    superseded: tuple[Any, ...] = ()
+    #: SUPERSEDED edges the new parse produces again, back to PROPOSED for a person to decide.
+    revived: tuple[Any, ...] = ()
+
+
+async def reconcile_decided_edges(
+    session: AsyncSession,
+    *,
+    model: type[DeepProcedureLineageEdge] | type[TriggerLineageEdge],
+    datasource: DataSource,
+    owner_id: UUID,
+    result: ProcedureParseResult,
+    produced: Iterable[ProcedureLineageEdgeRecord],
+) -> DecidedEdgeReconciliation:
+    """Bring one routine's or trigger's decided edges in line with its new parse.
+
+    Before this, a re-parse under `require_review` kept every decided edge as it was, so an edge
+    a person approved went on steering impact analysis after the body stopped writing it -- the
+    R11-FP01 remainder "no routine-backed axis marks such an edge SUPERSEDED".
+
+    * An ACTIVE edge the new parse does not produce becomes SUPERSEDED -- **only after a
+      complete parse**. If any statement went unparsed, or the body could not be read, an edge
+      missing from the result may be the parser's gap rather than the body's change, and
+      retiring approved lineage on that evidence would be wrong; it stays ACTIVE until a parse
+      that understood the whole body says otherwise.
+    * A SUPERSEDED edge the new parse produces again goes back to PROPOSED. The body writes it
+      once more, but what was approved was an earlier body, so a person decides again rather
+      than the old approval silently returning.
+
+    Gap markers and REJECTED edges are never touched: a rejection stays a rejection. Every
+    statement restates the organization and the datasource (INV-5).
+    """
+    decided: Sequence[Any]
+    if model is DeepProcedureLineageEdge:
+        decided = (
+            await session.scalars(
+                select(DeepProcedureLineageEdge).where(
+                    DeepProcedureLineageEdge.organization_id == datasource.organization_id,
+                    DeepProcedureLineageEdge.datasource_id == datasource.id,
+                    DeepProcedureLineageEdge.routine_id == owner_id,
+                    DeepProcedureLineageEdge.review_status.in_(("ACTIVE", SUPERSEDED)),
+                    DeepProcedureLineageEdge.transformation_type != UNPARSED_TRANSFORMATION_TYPE,
+                )
+            )
+        ).all()
+    else:
+        decided = (
+            await session.scalars(
+                select(TriggerLineageEdge).where(
+                    TriggerLineageEdge.organization_id == datasource.organization_id,
+                    TriggerLineageEdge.datasource_id == datasource.id,
+                    TriggerLineageEdge.trigger_id == owner_id,
+                    TriggerLineageEdge.review_status.in_(("ACTIVE", SUPERSEDED)),
+                    TriggerLineageEdge.transformation_type != UNPARSED_TRANSFORMATION_TYPE,
+                )
+            )
+        ).all()
+    keys = {_natural_key(edge) for edge in produced}
+    superseded = (
+        [row for row in decided if row.review_status == "ACTIVE" and _natural_key(row) not in keys]
+        if result.is_fully_parsed
+        else []
+    )
+    revived = [
+        row for row in decided
+        if row.review_status == SUPERSEDED and _natural_key(row) in keys
+    ]
+    for row in superseded:
+        row.review_status = SUPERSEDED
+    for row in revived:
+        row.review_status = "PROPOSED"
+    return DecidedEdgeReconciliation(superseded=tuple(superseded), revived=tuple(revived))
 
 
 async def resolve_routine_table_ids(
@@ -420,6 +519,17 @@ async def persist_routine_edges(
             )
         )
     await session.execute(clear)
+    if review_mode == "require_review":
+        # Decided edges follow the body: approved lineage it no longer writes is superseded
+        # after a complete parse, and superseded lineage it writes again is proposed again.
+        await reconcile_decided_edges(
+            session,
+            model=DeepProcedureLineageEdge,
+            datasource=datasource,
+            owner_id=routine.id,
+            result=result,
+            produced=result.edges,
+        )
     if not result.edges:
         return 0
 
@@ -704,6 +814,10 @@ async def persist_trigger_edges(
     the auto-activation threshold say (ADR-0029): those settings govern what a
     *person's* parse may activate, and an agent's output is decided by a person in
     the per-edge queue. The markers stay ACTIVE, because a gap is not a proposal.
+
+    Under `require_review` the returned rows also include decided edges this parse
+    reconciled (`reconcile_decided_edges`): SUPERSEDED ones and ones revived to
+    PROPOSED, so a caller can report both without re-reading the table.
     """
     clear = delete(TriggerLineageEdge).where(
         TriggerLineageEdge.organization_id == datasource.organization_id,
@@ -718,8 +832,20 @@ async def persist_trigger_edges(
             )
         )
     await session.execute(clear)
+    reconciliation = DecidedEdgeReconciliation()
+    if review_mode == "require_review":
+        # As `persist_routine_edges`: decided edges follow the body (R11-FP01).
+        reconciliation = await reconcile_decided_edges(
+            session,
+            model=TriggerLineageEdge,
+            datasource=datasource,
+            owner_id=trigger.id,
+            result=result,
+            produced=result.edges,
+        )
+    changed = [*reconciliation.superseded, *reconciliation.revived]
     if not result.edges:
-        return []
+        return changed
 
     kept: set[TriggerEdgeKey] = set()
     if review_mode == "require_review":
@@ -766,7 +892,7 @@ async def persist_trigger_edges(
         )
         session.add(row)
         written.append(row)
-    return written
+    return [*written, *changed]
 
 
 async def record_trigger_parse_coverage(

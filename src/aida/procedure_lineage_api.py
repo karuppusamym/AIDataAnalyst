@@ -25,12 +25,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.capability_states import parse_coverage_state
 from aida.context import get_correlation_id
 from aida.db import get_session
-from aida.envelope_models import MetadataRoutine
+from aida.envelope_models import MetadataRoutine, MetadataTrigger
 from aida.events import record_audit
 from aida.models import DataSource
 from aida.procedure_capability_matrix import build_capability_matrix
 from aida.procedure_lineage import ProcedureLineageEdgeRecord, parse_procedure_lineage
-from aida.procedure_lineage_models import DeepProcedureLineageEdge, RoutineParseCoverage
+from aida.procedure_lineage_models import (
+    DeepProcedureLineageEdge,
+    RoutineParseCoverage,
+    TriggerParseCoverage,
+)
 from aida.resource_scope import load_datasource_in_scope
 from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
@@ -45,6 +49,7 @@ from aida.schemas import (
     ProcedureCapabilityConstructRead,
     ProcedureCapabilityMatrixRead,
     RoutineParseCoverageRead,
+    TriggerParseCoverageRead,
 )
 from aida.security import SecurityContext, require_roles
 from atlas.platform.config import get_settings
@@ -257,6 +262,68 @@ async def get_routine_parse_coverage(
             status_code=404, detail="no parse has measured this routine's coverage yet"
         )
     return RoutineParseCoverageRead(
+        routine_id=coverage.routine_id,
+        state=parse_coverage_state(
+            parse_completed=coverage.parse_completed,
+            statement_count=coverage.statement_count,
+        ).value,
+        parse_completed=coverage.parse_completed,
+        is_read_only=coverage.is_read_only,
+        statement_count=coverage.statement_count,
+        unparsed_statement_count=coverage.unparsed_statement_count,
+        unparsed_reason_codes=(
+            coverage.unparsed_reason_codes.split(",")
+            if coverage.unparsed_reason_codes
+            else []
+        ),
+        dialect=coverage.dialect,
+        confidence=coverage.confidence,
+        source_mapping_granularity=coverage.source_mapping_granularity,
+        parsed_at=coverage.parsed_at,
+    )
+
+
+@router.get(
+    "/datasources/{datasource_id}/triggers/{trigger_id}/parse-coverage",
+    response_model=TriggerParseCoverageRead,
+)
+async def get_trigger_parse_coverage(
+    datasource_id: UUID,
+    trigger_id: UUID,
+    context: SecurityContext = Depends(require_roles(*_LINEAGE_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> TriggerParseCoverageRead:
+    """How completely this trigger's body was understood, as last measured (R11-FP01).
+
+    The trigger axis of `get_routine_parse_coverage`, with the same contract: the datasource is
+    resolved in the caller's scope first, a trigger of another datasource or organization is not
+    found, and 404 means no parse has measured it yet -- "not measured" is a different answer
+    from "fully understood". The coverage row restates the organization and the datasource
+    (INV-5).
+    """
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    trigger = await session.get(MetadataTrigger, trigger_id)
+    if (
+        trigger is None
+        or trigger.datasource_id != datasource.id
+        or trigger.organization_id != datasource.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="trigger not found for this datasource")
+    coverage = (
+        await session.scalars(
+            select(TriggerParseCoverage).where(
+                TriggerParseCoverage.organization_id == datasource.organization_id,
+                TriggerParseCoverage.datasource_id == datasource.id,
+                TriggerParseCoverage.trigger_id == trigger_id,
+            )
+        )
+    ).first()
+    if coverage is None:
+        raise HTTPException(
+            status_code=404, detail="no parse has measured this trigger's coverage yet"
+        )
+    return TriggerParseCoverageRead(
+        trigger_id=coverage.trigger_id,
         routine_id=coverage.routine_id,
         state=parse_coverage_state(
             parse_completed=coverage.parse_completed,

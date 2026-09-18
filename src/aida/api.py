@@ -1765,15 +1765,18 @@ async def run_agent_analysis(
         # inputs to collect and the tool version they belong to, so a client can
         # render a form and ask again instead of parsing the sentence. The
         # message is unchanged for anything that only displays it.
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "MISSING_TOOL_PARAMETERS",
-                "message": str(exc),
-                "required_parameters": list(exc.required_parameters),
-                "tool_version_id": exc.tool_version_id,
-            },
-        ) from exc
+        # `code` is the exception's own: MISSING_TOOL_PARAMETERS for the case above, and
+        # AMBIGUOUS_KNOWLEDGE (R11-OKF02) when the product's knowledge names two subjects
+        # equally, with the `candidates` to choose between.
+        detail: dict[str, Any] = {
+            "code": exc.code,
+            "message": str(exc),
+            "required_parameters": list(exc.required_parameters),
+            "tool_version_id": exc.tool_version_id,
+        }
+        if exc.candidates:
+            detail["candidates"] = list(exc.candidates)
+        raise HTTPException(status_code=409, detail=detail) from exc
     except AgentPolicyRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ModelRouteUnavailable as exc:

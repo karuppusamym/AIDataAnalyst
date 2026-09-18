@@ -250,7 +250,7 @@ async def select_okf_context(
         context,
         settings,
         payload.question,
-        max_chars=payload.max_chars,
+        max_chars=payload.max_chars or settings.okf_context_default_max_chars,
         publication_id=payload.publication_id,
     )
     record_okf_read(

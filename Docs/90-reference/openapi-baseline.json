@@ -21390,11 +21390,17 @@
         "description": "A question to select knowledge for, from one product version's stored OKF bundle.\n\nA body rather than a query string: a question is free text a person typed, and a URL is\nwhat access logs and browser history keep.",
         "properties": {
           "max_chars": {
-            "default": 16000,
-            "maximum": 48000.0,
-            "minimum": 1000.0,
-            "title": "Max Chars",
-            "type": "integer"
+            "anyOf": [
+              {
+                "maximum": 48000.0,
+                "minimum": 1000.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Chars"
           },
           "publication_id": {
             "anyOf": [
@@ -32887,6 +32893,89 @@
           "error_message"
         ],
         "title": "ToolPlanStepRead",
+        "type": "object"
+      },
+      "TriggerParseCoverageRead": {
+        "additionalProperties": false,
+        "description": "R11-FP01: how completely one trigger's body was understood, as last measured.\n\nThe trigger axis of `RoutineParseCoverageRead`. `routine_id` is the routine the body was\nactually read from -- a PostgreSQL trigger's function; null on an engine whose trigger\ncarries its own body -- so \"which text was parsed\" is part of the answer.",
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "is_read_only": {
+            "title": "Is Read Only",
+            "type": "boolean"
+          },
+          "parse_completed": {
+            "title": "Parse Completed",
+            "type": "boolean"
+          },
+          "parsed_at": {
+            "format": "date-time",
+            "title": "Parsed At",
+            "type": "string"
+          },
+          "routine_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routine Id"
+          },
+          "source_mapping_granularity": {
+            "title": "Source Mapping Granularity",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "statement_count": {
+            "title": "Statement Count",
+            "type": "integer"
+          },
+          "trigger_id": {
+            "format": "uuid",
+            "title": "Trigger Id",
+            "type": "string"
+          },
+          "unparsed_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unparsed Reason Codes",
+            "type": "array"
+          },
+          "unparsed_statement_count": {
+            "title": "Unparsed Statement Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "trigger_id",
+          "routine_id",
+          "state",
+          "parse_completed",
+          "is_read_only",
+          "statement_count",
+          "unparsed_statement_count",
+          "unparsed_reason_codes",
+          "dialect",
+          "confidence",
+          "source_mapping_granularity",
+          "parsed_at"
+        ],
+        "title": "TriggerParseCoverageRead",
         "type": "object"
       },
       "UnattributedRunsRead": {
@@ -57074,6 +57163,145 @@
           }
         },
         "summary": "Test Datasource"
+      }
+    },
+    "/v1/datasources/{datasource_id}/triggers/{trigger_id}/parse-coverage": {
+      "get": {
+        "description": "How completely this trigger's body was understood, as last measured (R11-FP01).\n\nThe trigger axis of `get_routine_parse_coverage`, with the same contract: the datasource is\nresolved in the caller's scope first, a trigger of another datasource or organization is not\nfound, and 404 means no parse has measured it yet -- \"not measured\" is a different answer\nfrom \"fully understood\". The coverage row restates the organization and the datasource\n(INV-5).",
+        "operationId": "get_trigger_parse_coverage_v1_datasources__datasource_id__triggers__trigger_id__parse_coverage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "trigger_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Trigger Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerParseCoverageRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Trigger Parse Coverage",
+        "tags": [
+          "procedure-lineage"
+        ]
       }
     },
     "/v1/datasources/{datasource_id}/unified-lineage/graph": {
