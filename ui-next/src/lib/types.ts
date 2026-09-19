@@ -2077,6 +2077,8 @@ export interface DeepProcedureLineageEdgeRead {
   statement_range?: StatementRangeRead | null;
   statement_range_status?: string | null;
   statement_text_digest?: string | null;
+  source_token_range?: TokenRangeRead | null;
+  target_token_range?: TokenRangeRead | null;
   package_member?: string | null;
   member_attribution?: string | null;
   member_routine_id?: string | null;
@@ -5395,6 +5397,13 @@ export interface TermSemanticBindingRead {
   governance_review_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** R11-FP07 token grain: where, inside its statement, one end of an edge is */
+export interface TokenRangeRead {
+  kind: string;
+  start_offset: number;
+  end_offset: number;
 }
 
 export interface TokenRevocationRead {

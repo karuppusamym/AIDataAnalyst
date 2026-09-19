@@ -12547,6 +12547,16 @@
             "title": "Source Table",
             "type": "string"
           },
+          "source_token_range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TokenRangeRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "statement_ordinal": {
             "title": "Statement Ordinal",
             "type": "integer"
@@ -12590,6 +12600,16 @@
           "target_table": {
             "title": "Target Table",
             "type": "string"
+          },
+          "target_token_range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TokenRangeRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "transformation_type": {
             "title": "Transformation Type",
@@ -32161,6 +32181,31 @@
           "updated_at"
         ],
         "title": "TermSemanticBindingRead",
+        "type": "object"
+      },
+      "TokenRangeRead": {
+        "additionalProperties": false,
+        "description": "R11-FP07 token grain: where, inside its statement, one end of an edge is\nnamed -- `COLUMN` (a column reference, or the name a target column is given)\nor `TABLE` (a table reference, without its alias). Half-open code-point\noffsets into the same stored body as the statement range. Positions only.",
+        "properties": {
+          "end_offset": {
+            "title": "End Offset",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "start_offset": {
+            "title": "Start Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "start_offset",
+          "end_offset"
+        ],
+        "title": "TokenRangeRead",
         "type": "object"
       },
       "TokenRevocationRead": {
