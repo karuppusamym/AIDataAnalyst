@@ -18,6 +18,7 @@ import {
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, ConfirmDialog, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./RelationshipsScreen.css";
@@ -383,6 +384,15 @@ export function RelationshipsScreen() {
   );
 
   const selectedDatasourceName = datasourceName(datasources, ds);
+  /* R11-S13 (items 15/17): the way across to the OTHER queue, on its terms.
+     The review's M2 merge was declined -- this queue is scoped by datasource
+     read authorization and owns bulk decision, Cross-source is scoped by
+     ADR-0017 domain grants and owns cross-domain discovery -- so a candidate
+     pairing this source with another is decided there, not here. The link
+     carries the selected source's own domain so that queue opens where this
+     one is. It is a request, not a grant: Cross-source authorizes the domain
+     itself, and a source with no domain gets the unscoped link. */
+  const selectedDomainId = datasources.find((d) => d.id === ds)?.data_domain_id ?? null;
   const totalPending = data?.total_pending_count ?? 0;
   const approvalRate =
     calibration && calibration.total_decided > 0
@@ -401,6 +411,21 @@ export function RelationshipsScreen() {
           </p>
         </div>
       </header>
+
+      <CrossLinks
+        label="Related queue"
+        links={[
+          {
+            screen: "cross-source",
+            label: selectedDomainId
+              ? "Cross-source candidates in this source's domain"
+              : "Cross-source candidates",
+            params: selectedDomainId ? { dom: selectedDomainId } : {},
+            title:
+              "Candidates that pair a source with another one are reviewed by data domain on Cross-source, under that domain's grants.",
+          },
+        ]}
+      />
 
       <div className="rel__filters">
         <Field label="Datasource">

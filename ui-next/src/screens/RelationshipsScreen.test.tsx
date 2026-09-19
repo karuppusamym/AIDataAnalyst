@@ -516,3 +516,45 @@ describe("RelationshipsScreen", () => {
     await waitFor(() => expect(screen.getByText("boom")).toBeInTheDocument());
   });
 });
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (items 15/17) — a contextual link to the OTHER queue, not a merge.
+
+   The review's M2 merge of this queue with Cross-source was declined: the two
+   are scoped by different authorizations (datasource read vs ADR-0017 domain
+   grants) and own different writes (bulk decision here, cross-domain
+   discovery there). What the steward was missing was the way across. These
+   pin that the way across exists and that it carries the scope the target
+   reads -- the selected source's domain -- rather than this queue's own.
+--------------------------------------------------------------------------- */
+describe("the way across to the cross-source queue", () => {
+  it("opens Cross-source on the selected source's own domain", async () => {
+    const RelationshipsScreen = await loadScreen();
+    render(<RelationshipsScreen />);
+    await pickDatasource();
+
+    const related = within(await screen.findByRole("navigation", { name: "Related queue" }));
+    fireEvent.click(
+      await related.findByRole("button", { name: "Cross-source candidates in this source's domain" }),
+    );
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/cross-source"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("dom")).toBe("dom1");
+    // Cross-source is scoped by domain and does not read `ds`; carrying it
+    // would put a field in the URL that the target silently ignores.
+    expect(params.get("ds")).toBeNull();
+  });
+
+  it("offers the unscoped link before a source is chosen", async () => {
+    const RelationshipsScreen = await loadScreen();
+    render(<RelationshipsScreen />);
+    await waitFor(() => expect(screen.getByText("Pick a datasource")).toBeInTheDocument());
+
+    const related = within(screen.getByRole("navigation", { name: "Related queue" }));
+    fireEvent.click(related.getByRole("button", { name: "Cross-source candidates" }));
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/cross-source"));
+    expect(new URLSearchParams(location.search).get("dom")).toBeNull();
+  });
+});

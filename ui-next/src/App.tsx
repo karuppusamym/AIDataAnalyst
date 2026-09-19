@@ -70,7 +70,10 @@ const AdministrationScreen = lazy(() => import("./screens/AdministrationScreen")
 const ToolRegistryScreen = lazy(() => import("./screens/ToolRegistryScreen").then((module) => ({ default: module.ToolRegistryScreen })));
 const AiGovernanceScreen = lazy(() => import("./screens/AiGovernanceScreen").then((module) => ({ default: module.AiGovernanceScreen })));
 const TransformationsScreen = lazy(() => import("./screens/TransformationsScreen").then((module) => ({ default: module.TransformationsScreen })));
-const StewardshipScreen = lazy(() => import("./screens/StewardshipScreen").then((module) => ({ default: module.StewardshipScreen })));
+/* R11-S13 (items 15/17): one stewardship workspace -- Work queue, Bulk actions
+   and Automation. Playbooks is its Automation view now, lazily loaded from the
+   workspace rather than named here; `#/playbooks` is a retired alias. */
+const StewardshipWorkspace = lazy(() => import("./screens/StewardshipWorkspace").then((module) => ({ default: module.StewardshipWorkspace })));
 const WorkspaceAccessScreen = lazy(() => import("./screens/WorkspaceAccessScreen").then((module) => ({ default: module.WorkspaceAccessScreen })));
 const AccessPolicyScreen = lazy(() => import("./screens/AccessPolicyScreen").then((module) => ({ default: module.AccessPolicyScreen })));
 const ReliabilityScreen = lazy(() => import("./screens/ReliabilityScreen").then((module) => ({ default: module.ReliabilityScreen })));
@@ -78,7 +81,6 @@ const ComplianceScreen = lazy(() => import("./screens/ComplianceScreen").then((m
 const ToolPlansScreen = lazy(() => import("./screens/ToolPlansScreen").then((module) => ({ default: module.ToolPlansScreen })));
 const AgentRosterScreen = lazy(() => import("./screens/AgentRosterScreen").then((module) => ({ default: module.AgentRosterScreen })));
 const ReviewerAgentScreen = lazy(() => import("./screens/ReviewerAgentScreen").then((module) => ({ default: module.ReviewerAgentScreen })));
-const PlaybooksScreen = lazy(() => import("./screens/PlaybooksScreen").then((module) => ({ default: module.PlaybooksScreen })));
 const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
 const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
@@ -149,7 +151,11 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: "context", label: "Context products", icon: "◫", keywords: "context compile mcp rest yaml osi odcs snowflake databricks bindings rollout" },
   { id: "developer", label: "Agent gateway", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
   // --- Steward: make the estate mean something ----------------------------
-  { id: "stewardship", label: "Stewardship", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
+  /* R11-S13 (items 15/17): one stewardship workspace with Work queue, Bulk
+     actions and Automation views. The keywords of the Playbooks entry it
+     absorbed are merged in, so a steward searching "playbook" or "scheduled"
+     in the palette is still offered the page that now holds them. */
+  { id: "stewardship", label: "Stewardship", icon: "⚑", keywords: "work queue bulk actions tag classify own certify unowned backlog route escalation ownership expiry reaffirm automation playbook playbooks scheduled at-1" },
   /* R11-S13 (M3): one destination for documenting the estate. The keywords of
      the two entries it absorbed are merged in, so a steward searching "csv
      import" or "description draft" in the palette is still offered the page
@@ -159,7 +165,6 @@ const NAV_ENTRIES: NavEntry[] = [
      routes it replaces are merged, so searching "quality agent" or "lineage
      agent" in the palette still finds the page that now answers for them. */
   { id: "task-agents", label: "Task agents", icon: "✧", keywords: "steward agent lineage agent quality agent adr-0029 draft propose descriptions glossary links worklist view definitions parse edges rules row count floor null rate ceiling profiles autonomy tier kill switch acceptance t2" },
-  { id: "playbooks", label: "Playbooks", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
   { id: "negative-knowledge", label: "Negative knowledge", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", icon: "Aa", keywords: "glossary terms annotations" },
   { id: "relationships", label: "Relationships", icon: "⌁", keywords: "keys graph links" },
@@ -255,10 +260,9 @@ function Screen({
     case "transformations": return <TransformationsScreen />;
     case "agents": return <AiGovernanceScreen />;
     case "administration": return <AdministrationScreen />;
-    case "stewardship": return <StewardshipScreen />;
+    case "stewardship": return <StewardshipWorkspace />;
     case "worklist": return <DocumentationWorkspace />;
     case "task-agents": return <TaskAgentsScreen />;
-    case "playbooks": return <PlaybooksScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
     case "access-policies": return <AccessPolicyScreen />;
     case "compliance": return <ComplianceScreen />;

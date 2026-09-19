@@ -73,7 +73,12 @@ const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["portfolio-analytics", "Portfolio analytics"],
   ["context", "Context products"],
   ["developer", "Agent gateway"],
+  /* R11-S13 (items 15/17): Work queue, Bulk actions and Automation are three
+     views of one workspace. Playbooks was its own route and is the Automation
+     view now, so it is still swept -- as a row here rather than a route. */
   ["stewardship", "Stewardship"],
+  ["stewardship", "Stewardship", "?view=bulk"],
+  ["stewardship", "Stewardship", "?view=automation"],
   /* R11-S13 (M3): the worklist, the description drafts and the dictionary
      imports are three tabs of one workspace. They were three routes; they are
      three rows here, and are swept exactly as before -- which is the property
@@ -84,7 +89,6 @@ const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["task-agents", "Task agents"],
   ["task-agents", "Task agents", "?agent=lineage"],
   ["task-agents", "Task agents", "?agent=quality"],
-  ["playbooks", "Playbooks"],
   ["negative-knowledge", "Negative knowledge"],
   ["meaning", "Business meaning"],
   ["relationships", "Relationships"],

@@ -92,9 +92,17 @@ function bulkRun(overrides: Partial<CatalogBulkActionRunRead> = {}): CatalogBulk
   };
 }
 
-async function loadScreen() {
-  const { StewardshipScreen } = await import("./StewardshipScreen");
-  return StewardshipScreen;
+/* R11-S13 (items 15/17): the old page's two panels are two views of the
+   stewardship workspace now. Each case renders the view whose behaviour it
+   asserts; the tab axis itself is `StewardshipWorkspace.test.tsx`'s. */
+async function loadWorkQueue() {
+  const { StewardshipWorkQueue } = await import("./StewardshipScreen");
+  return StewardshipWorkQueue;
+}
+
+async function loadBulkActions() {
+  const { StewardshipBulkActions } = await import("./StewardshipScreen");
+  return StewardshipBulkActions;
 }
 
 beforeEach(() => {
@@ -120,8 +128,8 @@ afterEach(() => {
 
 describe("StewardshipScreen against the real catalog bulk-action + stewardship endpoints", () => {
   it("loads the datasource picker and the unowned backlog on mount", async () => {
-    const StewardshipScreen = await loadScreen();
-    render(<StewardshipScreen />);
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
 
     await waitFor(() => expect(fetchUnownedAssetBacklog).toHaveBeenCalledWith(
       "00000000-0000-0000-0000-000000000001",
@@ -133,8 +141,8 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
   });
 
   it("submitting the default tag action posts the right filter body and renders the results panel", async () => {
-    const StewardshipScreen = await loadScreen();
-    render(<StewardshipScreen />);
+    const StewardshipBulkActions = await loadBulkActions();
+    render(<StewardshipBulkActions />);
     await waitFor(() => expect(screen.getAllByText("snowflake_prod").length).toBeGreaterThan(0));
 
     fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_1" } });
@@ -160,8 +168,8 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
   });
 
   it("switching the action to certify swaps in the rationale/expiry fields and keeps submit disabled until both are valid", async () => {
-    const StewardshipScreen = await loadScreen();
-    render(<StewardshipScreen />);
+    const StewardshipBulkActions = await loadBulkActions();
+    render(<StewardshipBulkActions />);
     await waitFor(() => expect(screen.getAllByText("snowflake_prod").length).toBeGreaterThan(0));
 
     fireEvent.change(screen.getByLabelText("Action"), { target: { value: "certify" } });
@@ -197,8 +205,8 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
       resolved_count: 0,
     });
 
-    const StewardshipScreen = await loadScreen();
-    render(<StewardshipScreen />);
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
     await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
     expect(fetchUnownedAssetBacklog).toHaveBeenCalledTimes(1);
 
@@ -218,8 +226,8 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
   });
 
   it("scoping the route to a datasource sends that datasource_id, and the status filter re-fetches with the right query", async () => {
-    const StewardshipScreen = await loadScreen();
-    render(<StewardshipScreen />);
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
     await waitFor(() => expect(screen.getAllByText("snowflake_prod").length).toBeGreaterThan(0));
 
     fireEvent.change(screen.getByLabelText("Route scope (optional)"), { target: { value: "ds_1" } });
@@ -243,5 +251,63 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
         expect.anything(),
       ),
     );
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (items 15/17) — an unrun bulk action is unsaved work.
+
+   On the old page nothing could unmount the bulk form: it shared the screen
+   with the backlog, and leaving the screen was the only way to lose it. As a
+   workspace view it can be unmounted by a tab switch, which is a `patchQuery`
+   and so bypasses the shell's own navigation guard. The workspace's tab bar
+   asks `lib/unsavedChanges` -- and that only protects anything if the form
+   reports into it. These cases pin the reporting; the tab bar's side is in
+   `StewardshipWorkspace.test.tsx`.
+
+   The registry is imported AFTER `vi.resetModules()` (in `beforeEach`), in
+   the same test as the component, so both talk to one module instance.
+--------------------------------------------------------------------------- */
+describe("the bulk form reports unsaved work", () => {
+  async function loadRegistry() {
+    return import("../lib/unsavedChanges");
+  }
+
+  it("reports an edited action field, and stops once that action has run", async () => {
+    const { pendingUnsavedWarning } = await loadRegistry();
+    const { StewardshipBulkActions, BULK_UNSAVED_MESSAGE } = await import("./StewardshipScreen");
+    render(<StewardshipBulkActions />);
+    await waitFor(() => expect(screen.getAllByText("snowflake_prod").length).toBeGreaterThan(0));
+
+    expect(pendingUnsavedWarning()).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_1" } });
+    fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "raw_%" } });
+    // The filter is in the URL, which a tab switch keeps -- so it is not
+    // unsaved work, and a prompt about it would be a false alarm.
+    expect(pendingUnsavedWarning()).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Tag key"), { target: { value: "pii-reviewed" } });
+    await waitFor(() => expect(pendingUnsavedWarning()).toBe(BULK_UNSAVED_MESSAGE));
+
+    fireEvent.click(screen.getByRole("button", { name: "Run tag tables" }));
+    await waitFor(() => expect(bulkTagCatalogTables).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(pendingUnsavedWarning()).toBeNull());
+  });
+
+  it("keeps reporting when the run fails, because the values are still unfinished work", async () => {
+    bulkTagCatalogTables.mockRejectedValue(new Error("403: one of these roles is required"));
+    const { pendingUnsavedWarning } = await loadRegistry();
+    const { StewardshipBulkActions, BULK_UNSAVED_MESSAGE } = await import("./StewardshipScreen");
+    render(<StewardshipBulkActions />);
+    await waitFor(() => expect(screen.getAllByText("snowflake_prod").length).toBeGreaterThan(0));
+
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: "ds_1" } });
+    fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "raw_%" } });
+    fireEvent.change(screen.getByLabelText("Tag key"), { target: { value: "pii-reviewed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run tag tables" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("one of these roles is required");
+    expect(pendingUnsavedWarning()).toBe(BULK_UNSAVED_MESSAGE);
   });
 });

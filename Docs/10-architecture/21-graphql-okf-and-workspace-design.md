@@ -195,6 +195,8 @@ Stewardship navigation should lead with **Work queue / Bulk actions / Automation
 
 Before removing any screen/module, inventory its actions, APIs, role visibility, URL parameters and tests. Merge the entry point only after each action has a reachable replacement, old links have aliases and equivalent permission/unsaved-edit behavior is verified. Shared components should replace actual duplicate controllers; keep distinct domain services where rules differ.
 
+**Inventory, 2026-09-19:** the [stewardship action-to-destination map](23-stewardship-action-map.md) lists every action on Stewardship, Playbooks, Task agents, Negative knowledge, Relationships and Cross-source. For each action it gives the API roles, the UI gate, the deep link and the design home. It also records the first workspace slice: Work queue, Bulk actions and Automation on `?view=`, with `#/playbooks` aliased. Tracker row R11-S13 holds status.
+
 ## Delivery sequence and acceptance ownership
 
 **Pickup reconciled 2026-09-17:** these slices now have canonical rows in [tracker section P](../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11): 13A → R11-GQL01, 13B → R11-GQL02, 14A → R11-OKF01, 14B → R11-OKF02, 14C → R11-OKF03, 16A/16B → R11-UX16. Items 15/17 extend R11-S13. Read those rows for current state; the table below describes dependencies and scope, not a second queue.

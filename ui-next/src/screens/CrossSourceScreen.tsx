@@ -13,6 +13,8 @@ import {
   type RelationshipCandidateRead,
 } from "../lib/_cross_source_api";
 import { CrossBoundaryGrants } from "../components/CrossBoundaryGrants";
+import { CrossLinks } from "../components/CrossLinks";
+import type { CrossLink } from "../components/CrossLinks";
 import type { DataDomainRead, DataSourceRead } from "../lib/types";
 import { useUrlState } from "../lib/useUrlState";
 import { useOrgId } from "../lib/org";
@@ -69,6 +71,45 @@ function confidenceTone(confidence: number): Tone {
   if (confidence >= 0.8) return "ok";
   if (confidence >= 0.6) return "warn";
   return "mute";
+}
+
+/** How many per-source links the same-source row offers before it points at
+ *  the Relationships picker instead. A domain is usually a handful of
+ *  sources; one with dozens should not bury the queue under a wall of links. */
+const SAME_SOURCE_LINK_LIMIT = 6;
+
+/**
+ * R11-S13 (items 15/17): the way back to the per-source queue, on its terms.
+ *
+ * The review's M2 merge was declined: Relationships is scoped by datasource
+ * read authorization and owns bulk decision; this screen is scoped by ADR-0017
+ * domain grants and owns cross-domain discovery. So a same-source candidate
+ * is decided there, one source at a time, and this offers each source in the
+ * domain as its own link -- the scope that queue reads -- rather than a merged
+ * view of all of them. A link is a request; Relationships authorizes the
+ * source itself.
+ */
+export function sameSourceReviewLinks(
+  datasources: readonly DataSourceRead[],
+  domainId: string | null,
+): CrossLink[] {
+  if (!domainId) return [];
+  const inDomain = datasources.filter((d) => d.data_domain_id === domainId);
+  const links: CrossLink[] = inDomain.slice(0, SAME_SOURCE_LINK_LIMIT).map((d) => ({
+    screen: "relationships",
+    label: `${d.name} queue`,
+    params: { ds: d.id },
+    title: `Candidates inside ${d.name} are reviewed on Relationships, one source at a time.`,
+  }));
+  const rest = inDomain.length - SAME_SOURCE_LINK_LIMIT;
+  if (rest > 0) {
+    links.push({
+      screen: "relationships",
+      label: `${rest} more — choose on Relationships`,
+      title: "Relationships reviews one source at a time; pick the source there.",
+    });
+  }
+  return links;
 }
 
 function sourceName(datasources: readonly DataSourceRead[], id: string): string {
@@ -459,6 +500,8 @@ export function CrossSourceScreen() {
         Pairing sources inside one domain is free. Pairing across into another domain needs an
         active cross-boundary grant — scanning without one is refused, not silently narrowed.
       </p>
+
+      <CrossLinks label="Same-source review" links={sameSourceReviewLinks(datasources, dom)} />
 
       {notice ? (
         <div className="xs__notice" role="status">

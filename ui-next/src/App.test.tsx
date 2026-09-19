@@ -417,6 +417,66 @@ describe("old routes still work", () => {
     );
   });
 
+  /* -------------------------------------------------------------------------
+     R11-S13 (items 15/17) — Playbooks is the Automation view of the one
+     stewardship workspace. The screen AND the view are asserted, for the same
+     reason as the documentation routes above.
+  ------------------------------------------------------------------------- */
+  it("opens a saved playbooks link on the Automation view of Stewardship", async () => {
+    history.replaceState(null, "", "/#/steward/playbooks");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/stewardship"));
+    expect(new URLSearchParams(location.search).get("view")).toBe("automation");
+    expect(await screen.findByRole("region", { name: "Stewardship" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Automation" })).toHaveAttribute("aria-selected", "true"),
+    );
+    // The playbooks screen itself, not an empty view with the right tab lit.
+    expect(await screen.findByRole("heading", { name: "Playbooks" })).toBeInTheDocument();
+  });
+
+  it("opens a pre-workspace bulk link on Bulk actions, keeping its filter", async () => {
+    // The flat form, so `normalizeLocation` rewrites it -- which is where an
+    // undeclared field would be dropped. `action`/`field`/`pattern` are all
+    // declared by `stewardship`, so the filter survives the rewrite.
+    history.replaceState(null, "", "/?action=certify&field=SCHEMA_NAME&pattern=raw_%25#/stewardship");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    await waitFor(() => expect(location.hash).toBe("#/steward/stewardship"));
+    const params = new URLSearchParams(location.search);
+    expect(params.get("action")).toBe("certify");
+    expect(params.get("field")).toBe("SCHEMA_NAME");
+    expect(params.get("pattern")).toBe("raw_%");
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Bulk actions" })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
+  it("no longer lists Playbooks as a sidebar item, and still finds it from the palette", async () => {
+    history.replaceState(null, "", "/#/steward/stewardship");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    expect(nav.getByRole("button", { name: /Stewardship/ })).toBeInTheDocument();
+    expect(nav.queryByRole("button", { name: /Playbooks/ })).not.toBeInTheDocument();
+    // Task agents is NOT absorbed: bounded agent execution stays its own page.
+    expect(nav.getByRole("button", { name: /Task agents/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search pages" }), {
+      target: { value: "playbook" },
+    });
+    const dialog = within(screen.getByRole("dialog", { name: "Quick navigation" }));
+    expect(dialog.getByRole("button", { name: /Stewardship/ })).toBeInTheDocument();
+  });
+
   it("opens the legacy ?view=narrated spelling on Explain", async () => {
     history.replaceState(null, "", "/?view=narrated#/analyst/lineage");
     fetchMe.mockReturnValue(new Promise(() => {}));

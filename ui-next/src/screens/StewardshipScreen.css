@@ -3,8 +3,11 @@
 .stew__h1{margin:0;font-size:22px;letter-spacing:-.015em}
 .stew__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:70ch}
 
-.stew__grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
-@media (max-width:980px){.stew__grid{grid-template-columns:1fr}}
+/* R11-S13 (items 15/17): one panel per workspace view, so the two-column
+   grid the combined page needed is gone. The width cap keeps a form and a
+   backlog list at a readable measure on a wide monitor instead of stretching
+   a four-field row across it. */
+.stew__body{display:flex;flex-direction:column;gap:16px;max-width:1080px}
 
 .stew__panel{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:12px}
 .stew__panelhead{display:flex;align-items:center;justify-content:space-between;gap:10px}

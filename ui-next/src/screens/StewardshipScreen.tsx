@@ -20,6 +20,7 @@ import {
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
+import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { OwnershipExpiryBannerScreen } from "./OwnershipExpiryBannerScreen";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
@@ -27,6 +28,15 @@ import type { Tone } from "../components/primitives";
 import "./StewardshipScreen.css";
 
 /* ---------------------------------------------------------------------------
+   R11-S13 (items 15/17): this file is two VIEWS of the stewardship workspace
+   now, not one screen. `StewardshipWorkQueue` is the unowned backlog plus the
+   ownership-expiry banner; `StewardshipBulkActions` is the bulk form. They
+   were two side-by-side panels of one page, and `StewardshipWorkspace.tsx`
+   puts each behind its own `?view=` tab, next to Automation (Playbooks).
+   The split moved code; it changed no endpoint, no request body and no
+   control's enablement -- see the action map in
+   `Docs/10-architecture/23-stewardship-action-map.md`.
+
    Stewardship — catalog bulk actions (tag/classify/own/certify) and the
    unowned-asset stewardship backlog, ported from the legacy portal's single
    `#catalog-bulk-form` (one filter, four actions keyed off one
@@ -188,7 +198,20 @@ function BacklogRow({ row }: { row: UnownedAssetEscalationRead }) {
   );
 }
 
-export function StewardshipScreen() {
+/** What the bulk form asks before its typed values are discarded. */
+export const BULK_UNSAVED_MESSAGE = "Discard the bulk action you have not run?";
+
+/**
+ * Stewardship → Bulk actions. One filter, four actions, applied on submit.
+ *
+ * The filter (`action`/`ds`/`field`/`pattern`) lives in the URL and survives a
+ * tab switch; the action's own fields (tag key, owner, rationale…) are local
+ * state and do not. Before the workspace, both panels shared one page, so
+ * nothing on it could unmount the form. A tab switch now can, so the form
+ * reports an edited, un-run action to `lib/unsavedChanges` -- the registry the
+ * workspace's tab bar and the shell's navigation both ask.
+ */
+export function StewardshipBulkActions() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
@@ -212,6 +235,17 @@ export function StewardshipScreen() {
   const [ownerPrincipal, setOwnerPrincipal] = useState("");
   const [rationale, setRationale] = useState("");
   const [expiresAt, setExpiresAt] = useState(defaultCertExpiry);
+
+  /* True from the first change to an action field until that action runs.
+     The filter is deliberately not counted: it is in the URL, and neither a
+     tab switch nor a reload loses it. A failed run leaves this set -- the
+     values are still the user's unfinished work. */
+  const [edited, setEdited] = useState(false);
+  useUnsavedChanges(edited, BULK_UNSAVED_MESSAGE);
+  const edit = useCallback(<T,>(set: (value: T) => void, value: T) => {
+    set(value);
+    setEdited(true);
+  }, []);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -258,6 +292,7 @@ export function StewardshipScreen() {
         result = await bulkCertifyCatalogTables(ORG, body);
       }
       setRun(result);
+      setEdited(false);
     } catch (e) {
       setSubmitError(e instanceof ApiError ? e.detail : (e as Error).message);
     } finally {
@@ -268,83 +303,19 @@ export function StewardshipScreen() {
     tagKey, tagValue, columnNamePattern, classification, ownerType, ownerPrincipal, rationale, expiresAt,
   ]);
 
-  // --- Unowned asset backlog -------------------------------------------------
-  const [statusFilter, setStatusFilter] = useState("ALL");
-  const [backlog, setBacklog] = useState<UnownedAssetEscalationRead[]>([]);
-  const [backlogTotal, setBacklogTotal] = useState<number | null>(null);
-  const [backlogLoading, setBacklogLoading] = useState(true);
-  const [backlogError, setBacklogError] = useState<string | null>(null);
-  const backlogInflight = useRef<AbortController | null>(null);
-
-  const loadBacklog = useCallback(async () => {
-    backlogInflight.current?.abort();
-    const ac = new AbortController();
-    backlogInflight.current = ac;
-    setBacklogLoading(true);
-    setBacklogError(null);
-    try {
-      const page = await fetchUnownedAssetBacklog(
-        ORG,
-        { status: statusFilter === "ALL" ? null : statusFilter, limit: 100 },
-        ac.signal,
-      );
-      setBacklog(page.items);
-      setBacklogTotal(page.total);
-    } catch (e) {
-      if ((e as Error)?.name === "AbortError") return;
-      setBacklogError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setBacklogLoading(false);
-    }
-  }, [ORG, statusFilter]);
-
-  useEffect(() => {
-    void loadBacklog();
-    return () => backlogInflight.current?.abort();
-  }, [loadBacklog]);
-
-  const [routeScopeDatasourceId, setRouteScopeDatasourceId] = useState("");
-  const [routing, setRouting] = useState(false);
-  const [routeError, setRouteError] = useState<string | null>(null);
-  const [routeResult, setRouteResult] = useState<UnownedAssetBacklogRouteResult | null>(null);
-
-  const routeBacklog = useCallback(async () => {
-    setRouting(true);
-    setRouteError(null);
-    setRouteResult(null);
-    try {
-      const result = await routeUnownedAssetBacklog(ORG, { datasource_id: routeScopeDatasourceId || null });
-      setRouteResult(result);
-      await loadBacklog();
-    } catch (e) {
-      setRouteError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setRouting(false);
-    }
-  }, [ORG, routeScopeDatasourceId, loadBacklog]);
-
-  const dsLabel = datasourceName(datasources, datasourceId || null);
-
   return (
     <div className="stew">
       <header className="stew__head">
         <div>
-          <h1 className="stew__h1">Stewardship</h1>
+          <h1 className="stew__h1">Bulk actions</h1>
           <p className="stew__lede">
-            Apply a catalog change to every table one filter matches, and route the backlog of
-            tables the platform has detected have no assigned owner through escalation.
+            Apply one catalog change to every table one filter matches. A run applies as soon as
+            it is submitted: none of these endpoints has a preview mode.
           </p>
         </div>
       </header>
 
-      {/* P2-07's banner. It was built as a standalone component for a shell to
-          embed and then never embedded anywhere, so an owner was never warned
-          before an ownership lapsed. Stewardship is where ownership is worked
-          on, so it belongs at the top of this screen; it renders nothing at
-          all when the current principal has nothing expiring. */}
-      <OwnershipExpiryBannerScreen />
-
-      <div className="stew__grid">
+      <div className="stew__body">
         <section className="stew__panel" aria-label="Catalog bulk action">
           <div className="stew__panelhead">
             <p className="stew__eyebrow">CATALOG BULK ACTION</p>
@@ -401,14 +372,14 @@ export function StewardshipScreen() {
                 <Field label="Tag key">
                   <input
                     value={tagKey}
-                    onChange={(e) => setTagKey(e.target.value)}
+                    onChange={(e) => edit(setTagKey, e.target.value)}
                     pattern="[a-z][a-z0-9_\-]{1,99}"
                     required
                     placeholder="pii-reviewed"
                   />
                 </Field>
                 <Field label="Tag value (optional)">
-                  <input value={tagValue} onChange={(e) => setTagValue(e.target.value)} placeholder="true" />
+                  <input value={tagValue} onChange={(e) => edit(setTagValue, e.target.value)} placeholder="true" />
                 </Field>
               </div>
             ) : null}
@@ -418,12 +389,12 @@ export function StewardshipScreen() {
                 <Field label="Column name pattern">
                   <input
                     value={columnNamePattern}
-                    onChange={(e) => setColumnNamePattern(e.target.value)}
+                    onChange={(e) => edit(setColumnNamePattern, e.target.value)}
                     placeholder="*"
                   />
                 </Field>
                 <Field label="Classification">
-                  <select value={classification} onChange={(e) => setClassification(e.target.value as Classification)}>
+                  <select value={classification} onChange={(e) => edit(setClassification, e.target.value as Classification)}>
                     {CLASSIFICATION_VALUES.map((c) => (
                       <option key={c} value={c}>{c}</option>
                     ))}
@@ -435,7 +406,7 @@ export function StewardshipScreen() {
             {action === "own" ? (
               <div className="stew__actionfields">
                 <Field label="Owner type">
-                  <select value={ownerType} onChange={(e) => setOwnerType(e.target.value as "INDIVIDUAL" | "GROUP")}>
+                  <select value={ownerType} onChange={(e) => edit(setOwnerType, e.target.value as "INDIVIDUAL" | "GROUP")}>
                     <option value="INDIVIDUAL">Individual</option>
                     <option value="GROUP">Group</option>
                   </select>
@@ -443,7 +414,7 @@ export function StewardshipScreen() {
                 <Field label="Owner principal">
                   <input
                     value={ownerPrincipal}
-                    onChange={(e) => setOwnerPrincipal(e.target.value)}
+                    onChange={(e) => edit(setOwnerPrincipal, e.target.value)}
                     required
                     placeholder="risk-data-stewards@tenant.example"
                   />
@@ -456,7 +427,7 @@ export function StewardshipScreen() {
                 <Field label="Rationale">
                   <input
                     value={rationale}
-                    onChange={(e) => setRationale(e.target.value)}
+                    onChange={(e) => edit(setRationale, e.target.value)}
                     minLength={10}
                     required
                     placeholder="Quarterly certification review completed."
@@ -466,7 +437,7 @@ export function StewardshipScreen() {
                   <input
                     type="datetime-local"
                     value={expiresAt}
-                    onChange={(e) => setExpiresAt(e.target.value)}
+                    onChange={(e) => edit(setExpiresAt, e.target.value)}
                     required
                   />
                 </Field>
@@ -483,7 +454,99 @@ export function StewardshipScreen() {
 
           {run ? <BulkRunResult run={run} /> : null}
         </section>
+      </div>
+    </div>
+  );
+}
 
+/**
+ * Stewardship → Work queue. The unowned-asset backlog and its routing run,
+ * with the principal's own expiring ownerships above it.
+ */
+export function StewardshipWorkQueue() {
+  const ORG = useOrgId();
+  const [params] = useUrlState();
+  const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
+
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [backlog, setBacklog] = useState<UnownedAssetEscalationRead[]>([]);
+  const [backlogTotal, setBacklogTotal] = useState<number | null>(null);
+  const [backlogLoading, setBacklogLoading] = useState(true);
+  const [backlogError, setBacklogError] = useState<string | null>(null);
+  const backlogInflight = useRef<AbortController | null>(null);
+
+  const loadBacklog = useCallback(async () => {
+    backlogInflight.current?.abort();
+    const ac = new AbortController();
+    backlogInflight.current = ac;
+    setBacklogLoading(true);
+    setBacklogError(null);
+    try {
+      const page = await fetchUnownedAssetBacklog(
+        ORG,
+        { status: statusFilter === "ALL" ? null : statusFilter, limit: 100 },
+        ac.signal,
+      );
+      setBacklog(page.items);
+      setBacklogTotal(page.total);
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") return;
+      setBacklogError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setBacklogLoading(false);
+    }
+  }, [ORG, statusFilter]);
+
+  useEffect(() => {
+    void loadBacklog();
+    return () => backlogInflight.current?.abort();
+  }, [loadBacklog]);
+
+  const [routeScopeDatasourceId, setRouteScopeDatasourceId] = useState("");
+  const [routing, setRouting] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [routeResult, setRouteResult] = useState<UnownedAssetBacklogRouteResult | null>(null);
+
+  const routeBacklog = useCallback(async () => {
+    setRouting(true);
+    setRouteError(null);
+    setRouteResult(null);
+    try {
+      const result = await routeUnownedAssetBacklog(ORG, { datasource_id: routeScopeDatasourceId || null });
+      setRouteResult(result);
+      await loadBacklog();
+    } catch (e) {
+      setRouteError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setRouting(false);
+    }
+  }, [ORG, routeScopeDatasourceId, loadBacklog]);
+
+  /* The empty-state hint read the bulk form's datasource when both panels
+     shared a page. `ds` is still what that form reads, so the hint says the
+     same thing it said before the split. */
+  const dsLabel = datasourceName(datasources, params.get("ds") ?? preferredDatasourceId ?? null);
+
+  return (
+    <div className="stew">
+      <header className="stew__head">
+        <div>
+          <h1 className="stew__h1">Work queue</h1>
+          <p className="stew__lede">
+            Tables the platform has detected have no assigned owner, routed through escalation —
+            and any ownership of yours that is about to lapse.
+          </p>
+        </div>
+      </header>
+
+      {/* P2-07's banner. It was built as a standalone component for a shell to
+          embed and then never embedded anywhere, so an owner was never warned
+          before an ownership lapsed. Ownership is worked on in this queue, so
+          it belongs at the top of it; it renders nothing at all when the
+          current principal has nothing expiring. */}
+      <OwnershipExpiryBannerScreen />
+
+      <div className="stew__body">
         <section className="stew__panel" aria-label="Unowned asset backlog">
           <div className="stew__panelhead">
             <div>

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { CrossSourceResolutionCandidateRead } from "../lib/_cross_source_api";
 
@@ -33,7 +33,7 @@ vi.mock("../lib/api", async () => {
 
 vi.mock("../lib/org", () => ({ useOrgId: () => "org-1", getCurrentOrgId: () => "org-1" }));
 
-import { CrossSourceScreen } from "./CrossSourceScreen";
+import { CrossSourceScreen, sameSourceReviewLinks } from "./CrossSourceScreen";
 
 const DOMAINS = [
   { id: "dom_fin", name: "Finance", organization_id: "o1", line_of_business_id: "l1", parent_domain_id: null, code: "FIN", is_default: false, status: "ACTIVE", created_at: "", updated_at: "" },
@@ -303,4 +303,57 @@ it("points same-source candidates at the screen that owns them", async () => {
   expect(
     screen.getByText(/Same-source candidates are reviewed on the Relationships screen/),
   ).toBeInTheDocument();
+});
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (items 15/17) — a contextual link back to the per-source queue.
+
+   M2's merge was declined, so same-source candidates are decided on
+   Relationships, one datasource at a time -- the scope that queue reads. The
+   way back is therefore one link per source in the chosen domain, each
+   carrying that source, and never a merged view of them.
+--------------------------------------------------------------------------- */
+it("links each source in the domain to its own Relationships queue", async () => {
+  render(<CrossSourceScreen />);
+  await selectDomain();
+
+  const nav = within(await screen.findByRole("navigation", { name: "Same-source review" }));
+  // bigquery_mi is in another domain, so it is not offered here.
+  expect(nav.getAllByRole("button").map((b) => b.textContent)).toEqual([
+    "snowflake_prod queue →",
+    "oracle_core queue →",
+  ]);
+  fireEvent.click(nav.getByRole("button", { name: "oracle_core queue" }));
+
+  await waitFor(() => expect(location.hash).toBe("#/steward/relationships"));
+  const params = new URLSearchParams(location.search);
+  expect(params.get("ds")).toBe("ds_b");
+  // Relationships does not read `dom`; it is not carried.
+  expect(params.get("dom")).toBeNull();
+});
+
+it("offers no same-source links before a domain is chosen", async () => {
+  render(<CrossSourceScreen />);
+  await waitFor(() => expect(screen.getByText("Select a data domain")).toBeInTheDocument());
+
+  expect(screen.queryByRole("navigation", { name: "Same-source review" })).toBeNull();
+});
+
+it("caps the per-source links and points the rest at the Relationships picker", () => {
+  const many = Array.from({ length: 8 }, (_, i) => ({
+    ...DATASOURCES[0]!,
+    id: `ds_${i}`,
+    name: `source_${i}`,
+  }));
+  const links = sameSourceReviewLinks(many as never, "dom_fin");
+
+  expect(links).toHaveLength(7);
+  expect(links.slice(0, 6).map((l) => l.params)).toEqual(
+    many.slice(0, 6).map((d) => ({ ds: d.id })),
+  );
+  // The overflow link names no source: Relationships reviews one at a time,
+  // and choosing which is that screen's picker's job.
+  expect(links[6]).toMatchObject({ screen: "relationships", label: "2 more — choose on Relationships" });
+  expect(links[6]!.params).toBeUndefined();
+  expect(sameSourceReviewLinks(many as never, null)).toEqual([]);
 });

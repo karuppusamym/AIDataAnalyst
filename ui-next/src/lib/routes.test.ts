@@ -192,6 +192,9 @@ describe("journey-grouped routes keep every old route working", () => {
       ["data-dictionaries", "worklist", { view: "imports" }],
       // R11-S13 (M1): two routes over one lineage question, one destination.
       ["unified-lineage", "lineage", { view: "graph" }],
+      // R11-S13 (items 15/17): scheduled bulk actions are the Automation view
+      // of the one stewardship workspace.
+      ["playbooks", "stewardship", { view: "automation" }],
     ];
 
     for (const [old, screen, params] of retired) {
@@ -204,6 +207,28 @@ describe("journey-grouped routes keep every old route working", () => {
         expect(resolved.params).toEqual(params);
         expect(resolved.canonical).toBe(false);
       }
+    }
+  });
+
+  /* R11-S13 (items 15/17): what the stewardship consolidation deliberately
+     did NOT merge. Task agents (bounded agent execution), Documentation and
+     Business Meaning (workspaces of their own), the review queue (maker-checker
+     separation), and Relationships and Cross-source as TWO queues -- the M2
+     decision: different scope axes, read models and write contracts. Each is
+     linked to from where it is relevant; none is an alias of anything. */
+  it("keeps the destinations the stewardship workspace links to as destinations", () => {
+    for (const id of [
+      "task-agents",
+      "worklist",
+      "meaning",
+      "governance",
+      "negative-knowledge",
+      "relationships",
+      "cross-source",
+    ]) {
+      expect(isScreenId(id), id).toBe(true);
+      expect(RETIRED_SCREEN_ALIASES[id], id).toBeUndefined();
+      expect(resolveHash(`#/${id}`).screen).toBe(id);
     }
   });
 

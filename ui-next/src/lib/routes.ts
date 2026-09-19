@@ -46,7 +46,6 @@ export const SCREEN_IDS = [
   "stewardship",
   "worklist",
   "task-agents",
-  "playbooks",
   "negative-knowledge",
   "meaning",
   "relationships",
@@ -134,7 +133,6 @@ export const SCREEN_JOURNEY: Record<ScreenId, Journey> = {
   stewardship: "steward",
   worklist: "steward",
   "task-agents": "steward",
-  playbooks: "steward",
   "negative-knowledge": "steward",
   meaning: "steward",
   relationships: "steward",
@@ -214,6 +212,17 @@ export const RETIRED_SCREEN_ALIASES: Readonly<Record<string, ScreenAlias>> = {
      not a path, and `#/lineage` is not retired. `lineageViewFrom` in
      `screens/LineageWorkspace.tsx` maps them, and is the only reader. */
   "unified-lineage": { screen: "lineage", params: { view: "graph" } },
+  /* R11-S13 (items 15/17): one stewardship workspace -- Work queue, Bulk
+     actions, Automation. Playbooks are scheduled bulk actions, so a steward
+     looking for "the rule that tags staging tables every hour" and one
+     running that tag by hand once were sent to two sidebar items for one
+     kind of change. `#/playbooks` opens the Automation view, which renders
+     the same `PlaybooksScreen` it always did.
+
+     Task agents are deliberately NOT aliased here: bounded agent execution is
+     a different contract from human-authored playbook configuration (design
+     21 §17), so `task-agents` stays a destination and Automation links to it. */
+  playbooks: { screen: "stewardship", params: { view: "automation" } },
 };
 
 /**
@@ -293,7 +302,13 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   context: ["project"],
   developer: ["project", "tab"],
   "portfolio-analytics": ["window"],
-  stewardship: ["action", "ds", "field", "pattern"],
+  /* R11-S13 (items 15/17): `view` chooses Work queue, Bulk actions or
+     Automation. `action`/`field`/`pattern` are the Bulk actions filter, and
+     `ds` is its datasource. Every link written before the workspace existed
+     carried those without a `view`, so `stewardshipViewFrom` reads their
+     presence as "this was a bulk link" -- see `StewardshipWorkspace.tsx`.
+     Playbooks declared no fields, so absorbing it adds none. */
+  stewardship: ["action", "ds", "field", "pattern", "view"],
   /* R11-S13 (M3): the documentation workspace's three tabs, and the union of
      every field the three screens declared. `view` is the tab discriminator;
      `ranking`/`zero` are Priorities', `focus`/`type` are Drafts', `document`
@@ -309,7 +324,6 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   /* R11-S10: `agent` is which task agent's console is open. It replaces the
      three routes that differed only by that value. */
   "task-agents": ["agent"],
-  playbooks: [],
   "negative-knowledge": ["assertion_type", "subject", "suppression"],
   meaning: ["asset", "ds", "node", "q", "view"],
   /* R11-S13 (M3): `description-drafts` and `data-dictionaries` used to declare
