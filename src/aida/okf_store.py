@@ -10,26 +10,38 @@ the same approved snapshot" means structurally rather than coincidentally:
 `tests/test_okf_store.py` fails if a reading surface stops reaching this function or starts
 reaching the freeze or the renderer directly.
 
+**Two scopes, one discipline.** A bundle is a context product version's selected, approved
+references (`read_published_bundle`) or -- design section 14, "Source bundles are scoped exports
+of discovered, authorized objects" -- one datasource's discovered objects as the reader may read
+them (`read_published_source_bundle`). Each scope supplies only what differs: how it is
+authorized, which rows its change marks watch, how it counts itself for early refusal, and how
+it freezes. Everything below that -- lineage lookup, staleness, the read-consistent capture, the
+no-op rule, incremental rebuild, atomic publication, retention and pinned reads -- is `_serve`
+and `_publish`, called by both, so a rule cannot hold for one scope and drift for the other.
+
 **Keyed on the reader's authority, evaluated on every request (INV-5, OKF-D).** A stored bundle
-belongs to a *lineage*: one product version under one `authority_digest`, a digest of the
-version and of the exact set of datasources the reader's own authorization admitted
-(`aida.okf_snapshot.admit_datasources` -- the freeze's own decision, taken once and handed to the
-freeze). Every read takes that decision again before it looks anything up, so:
+belongs to a *lineage*: one scope under one `authority_digest`, a digest of the scope and of
+exactly what the reader's own authorization admitted of it -- the datasources a product reaches
+(`aida.okf_snapshot.admit_datasources`) or the schemas of a source
+(`aida.okf_snapshot.admit_source`). That decision is taken once per request, handed to the
+freeze, and taken again on the next request before anything stored is looked up, so:
 
 * two readers with the same authority share one publication and see identical bytes;
 * a reader whose cross-boundary grant, source binding or policy was revoked computes a
-  different digest, and the bundle built under the grant is simply not in their lineage. There
-  is no cache entry keyed without the caller's authority that a revoked caller could still hit,
-  and nothing to "invalidate" by hand -- the key moved with the authorization.
+  different digest -- or, for a source, is refused outright -- and the bundle built under the
+  grant is simply not in their lineage. There is no cache entry keyed without the caller's
+  authority that a revoked caller could still hit, and nothing to "invalidate" by hand -- the
+  key moved with the authorization.
 
 **Stale content is detected before it is served.** A lineage's head records the digest of the
-*change marks* inside a window: FP15/FP16 change signals for the product's tables and routines,
+*change marks* inside a window: FP15/FP16 change signals for the scope's tables and routines,
 approved-description versions (asset, column, routine), reviewed view and procedure lineage,
-captured definition versions and the pinned tool versions. Every read recomputes that digest; a
-new mark -- including one that committed late with an earlier timestamp -- makes the head stale
-and the read rebuilds. A change that leaves no mark at all (a column reclassified in place, a
-datasource renamed) is caught by revalidation once the head is older than
-`OKF_REVALIDATE_AFTER`, which re-freezes and publishes **only if content moved**.
+captured definition versions and the pinned tool versions -- and, for a source, the object rows
+themselves, because a source's membership moves when a table is discovered or retired. Every
+read recomputes that digest; a new mark -- including one that committed late with an earlier
+timestamp -- makes the head stale and the read rebuilds. A change that leaves no mark at all (a
+column reclassified in place, a datasource renamed) is caught by revalidation once the head is
+older than `OKF_REVALIDATE_AFTER`, which re-freezes and publishes **only if content moved**.
 
 **Rebuilds are incremental (OKF-C).** A rebuild freezes once, then
 `aida.okf_export.export_okf_bundle_incremental` renders only the documents whose subject, source
@@ -56,7 +68,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -64,15 +76,17 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.authorization_gate import AuthorizationDenied
 from aida.change_signal_models import MetadataChangeSignal
 from aida.config import Settings
 from aida.context import get_correlation_id
 from aida.context_compiler_api import _load_source
 from aida.envelope_models import (
+    MetadataRoutine,
     MetadataRoutineDefinitionVersion,
     RoutineDocumentation,
     RoutineDocumentationVersion,
@@ -86,6 +100,7 @@ from aida.models import (
     ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductVersion,
+    DataSource,
     GovernedToolVersion,
     MetadataCatalog,
     MetadataColumn,
@@ -105,6 +120,7 @@ from aida.okf_export import (
     EXPORT_PROFILE_VERSION,
     MAX_DOCUMENTS,
     OKF_SPEC_REVISION,
+    SCOPE_DATASOURCE,
     TRIGGER_INITIAL,
     TRIGGER_RENDERER_CHANGE,
     TRIGGER_REVALIDATION,
@@ -123,9 +139,16 @@ from aida.okf_export import (
     snapshot_to_document,
     validate_atlas_publish_policy,
 )
-from aida.okf_snapshot import admit_datasources, freeze_snapshot
+from aida.okf_snapshot import (
+    OkfSourceAdmission,
+    admit_datasources,
+    admit_source,
+    freeze_snapshot,
+    freeze_source_snapshot,
+)
 from aida.okf_store_models import OkfBundleDocument, OkfBundleHead, OkfBundlePublication
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.resource_scope import load_datasource_in_scope
 from aida.security import enforce_organization
 from aida.security_types import SecurityContext
 
@@ -163,15 +186,27 @@ BUNDLE_ROLE_CHANNELS: Final = {
     "mcp_context": "MCP_OKF_CONTEXT",
     "ask": "ASK_OKF_CONTEXT",
 }
+#: R11-OKF02 source bundles: the same doors onto one datasource's bundle. Recorded in the audit
+#: and outbox evidence only -- a source is not a context product, so no consumption edge.
+SOURCE_BUNDLE_CHANNELS: Final = {
+    "manifest": "OKF_SOURCE_MANIFEST",
+    "download": "OKF_SOURCE_DOWNLOAD",
+    "document": "OKF_SOURCE_DOCUMENT",
+    "history": "OKF_SOURCE_HISTORY",
+    "context": "OKF_SOURCE_CONTEXT",
+}
 
 #: Findings that mean a document may carry code text. Never stored, whatever else is true.
 _UNSTORABLE_FINDINGS: Final = ("FORBIDDEN_CODE_FENCE",)
+#: The object lifecycle a source bundle holds (`aida.okf_snapshot`'s `_DISCOVERED`), repeated
+#: here for the early refusal's count, which must count exactly what the freeze would load.
+_DISCOVERED: Final = "ACTIVE"
 
 
 @dataclass(frozen=True, slots=True)
 class OkfMarks:
-    """Change marks for one product scope: `kind:subject:row:instant` strings with their
-    instant. Value-free: ids and timestamps only."""
+    """Change marks for one scope: `kind:subject:row:instant` strings with their instant.
+    Value-free: ids and timestamps only."""
 
     marks: tuple[tuple[str, datetime], ...]
 
@@ -183,6 +218,56 @@ class OkfMarks:
         return frozenset(
             mark.split(":", 2)[1] for mark, at in self.marks if at >= since
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OkfLineage:
+    """Which stored lineage a read addresses: one scope under one authority digest.
+
+    A product lineage names its version and a source lineage its datasource -- exactly one of
+    the two, which the tables' `one_scope` check constraint also holds. Every lookup of stored
+    rows goes through `where`, so a lineage's rows are reachable only by its full key, the
+    organization included (INV-5).
+    """
+
+    organization_id: UUID
+    authority_digest: str
+    context_product_version_id: UUID | None = None
+    datasource_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if (self.context_product_version_id is None) == (self.datasource_id is None):
+            raise ValueError("an OKF lineage names a product version or a datasource, not both")
+
+    def where(self, model: type[OkfBundlePublication] | type[OkfBundleHead]) -> list[Any]:
+        clauses: list[Any] = [
+            model.organization_id == self.organization_id,
+            model.authority_digest == self.authority_digest,
+        ]
+        if self.context_product_version_id is not None:
+            clauses.append(model.context_product_version_id == self.context_product_version_id)
+        else:
+            clauses.append(model.datasource_id == self.datasource_id)
+            clauses.append(model.context_product_version_id.is_(None))
+        return clauses
+
+    def key_columns(self) -> dict[str, UUID | None]:
+        return {
+            "context_product_version_id": self.context_product_version_id,
+            "datasource_id": self.datasource_id,
+        }
+
+
+def _validation_of(publication: OkfBundlePublication) -> OkfValidation:
+    verdict = dict(publication.change_summary.get("validation") or {})
+    return OkfValidation(
+        valid=bool(verdict.get("valid", False)),
+        findings=tuple(str(item) for item in verdict.get("findings") or ()),
+    )
+
+
+def _history_of(publication: OkfBundlePublication) -> tuple[OkfLogEntry, ...]:
+    return tuple(_entry_from_document(item) for item in publication.history or [])
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,15 +285,52 @@ class OkfPublishedBundle:
 
     @property
     def validation(self) -> OkfValidation:
-        verdict = dict(self.publication.change_summary.get("validation") or {})
-        return OkfValidation(
-            valid=bool(verdict.get("valid", False)),
-            findings=tuple(str(item) for item in verdict.get("findings") or ()),
-        )
+        return _validation_of(self.publication)
 
     @property
     def history(self) -> tuple[OkfLogEntry, ...]:
-        return tuple(_entry_from_document(item) for item in self.publication.history or [])
+        return _history_of(self.publication)
+
+    @property
+    def lineage(self) -> OkfLineage:
+        return OkfLineage(
+            organization_id=self.version.organization_id,
+            authority_digest=self.authority_digest,
+            context_product_version_id=self.version.id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OkfPublishedSourceBundle:
+    """R11-OKF02: one stored source-bundle publication as a reader receives it.
+
+    `admission` is the read decision it was served under -- the datasource and the schemas the
+    reader may see -- taken on this request, never remembered from an earlier one.
+    """
+
+    publication: OkfBundlePublication
+    head: OkfBundleHead
+    datasource: DataSource
+    admission: OkfSourceAdmission
+    authority_digest: str
+    is_current: bool
+    published_now: bool
+
+    @property
+    def validation(self) -> OkfValidation:
+        return _validation_of(self.publication)
+
+    @property
+    def history(self) -> tuple[OkfLogEntry, ...]:
+        return _history_of(self.publication)
+
+    @property
+    def lineage(self) -> OkfLineage:
+        return OkfLineage(
+            organization_id=self.datasource.organization_id,
+            authority_digest=self.authority_digest,
+            datasource_id=self.datasource.id,
+        )
 
 
 # --- time -------------------------------------------------------------------------------
@@ -222,21 +344,45 @@ def _utc(value: datetime) -> datetime:
 # --- authority --------------------------------------------------------------------------
 
 
+def _digest_payload(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def authority_digest(version: ContextProductVersion, admitted: Sequence[UUID]) -> str:
     """The lineage key: this version, under this admitted datasource set, by this renderer.
 
     The renderer pin is part of the key's *publication* chain rather than of the key, so a
     profile bump is a RENDERER_CHANGE publication in the same lineage (its log keeps history).
     """
-    payload = {
-        "organization_id": str(version.organization_id),
-        "context_product_version_id": str(version.id),
-        "product_fingerprint": version.fingerprint,
-        "admitted_datasource_ids": sorted(str(value) for value in admitted),
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return _digest_payload(
+        {
+            "organization_id": str(version.organization_id),
+            "context_product_version_id": str(version.id),
+            "product_fingerprint": version.fingerprint,
+            "admitted_datasource_ids": sorted(str(value) for value in admitted),
+        }
+    )
+
+
+def source_authority_digest(admission: OkfSourceAdmission) -> str:
+    """R11-OKF02: a source lineage's key -- this datasource, under these admitted schemas.
+
+    Keyed on what was *admitted*, not on how (which workspace, whether a decision was reached):
+    two readers who may see the same schemas see the same bytes and share one publication,
+    exactly as two product readers admitted to the same datasources do. A reader refused the
+    datasource never gets this far, and a reader refused a schema computes a different key.
+    """
+    datasource = admission.datasource
+    return _digest_payload(
+        {
+            "scope": SCOPE_DATASOURCE,
+            "organization_id": str(datasource.organization_id),
+            "datasource_id": str(datasource.id),
+            "admitted_schema_ids": sorted(str(value) for value in admission.schema_ids),
+        }
+    )
 
 
 # --- change marks -----------------------------------------------------------------------
@@ -252,21 +398,36 @@ def _uuid_list(values: Sequence[Any] | None) -> list[UUID]:
     return out
 
 
-async def change_marks(
-    session: AsyncSession, version: ContextProductVersion, *, since: datetime
+#: The rows of a scope its marks are read over: a product's pinned ids, or a subquery of a
+#: datasource's ids. `in_` takes either, so one set of mark queries serves both scopes.
+type _Members = Sequence[UUID] | Select[Any]
+
+
+def _present(members: _Members) -> bool:
+    return isinstance(members, Select) or bool(members)
+
+
+async def _scope_marks(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    since: datetime,
+    tables: _Members,
+    routines: _Members,
+    tool_ids: Sequence[UUID],
+    signals: Any | None,
+    catalog_of: UUID | None,
 ) -> OkfMarks:
-    """Every value-free change mark on this product's scope at or after `since`.
+    """Every value-free change mark on one scope at or after `since`.
 
     FP15 change signals are the primary source -- they are how FP16 already knows which view was
     redefined, which table reshaped or retired, which routine changed -- and the rest are the
     approval and review events FP15 does not signal but a document states: approved descriptions,
-    reviewed lineage and the pinned tools. Each query restates `organization_id` (INV-5).
+    reviewed lineage and the pinned tools. `catalog_of` (a source scope) adds the object rows
+    themselves, because a source's *membership* is content: a table discovered or retired moves
+    the bundle's indexes and counts whether or not a signal named it. Each query restates
+    `organization_id` (INV-5).
     """
-    organization_id = version.organization_id
-    table_ids = _uuid_list(version.table_ids)
-    routine_ids = _uuid_list(version.routine_ids)
-    tool_ids = _uuid_list(version.eligible_tool_version_ids)
-    subject_ids = [*table_ids, *routine_ids]
     marks: list[tuple[str, datetime]] = []
 
     async def collect(kind: str, statement: Any) -> None:
@@ -276,7 +437,7 @@ async def change_marks(
             moment = _utc(at)
             marks.append((f"{kind}:{subject}:{row_id}:{moment.isoformat()}", moment))
 
-    if subject_ids:
+    if signals is not None:
         await collect(
             "signal",
             select(
@@ -285,11 +446,28 @@ async def change_marks(
                 MetadataChangeSignal.detected_at,
             ).where(
                 MetadataChangeSignal.organization_id == organization_id,
-                MetadataChangeSignal.subject_id.in_(subject_ids),
+                signals,
                 MetadataChangeSignal.detected_at >= since,
             ),
         )
-    if table_ids:
+    if catalog_of is not None:
+        await collect(
+            "object",
+            select(MetadataTable.id, MetadataTable.id, MetadataTable.updated_at).where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.datasource_id == catalog_of,
+                MetadataTable.updated_at >= since,
+            ),
+        )
+        await collect(
+            "routine-object",
+            select(MetadataRoutine.id, MetadataRoutine.id, MetadataRoutine.updated_at).where(
+                MetadataRoutine.organization_id == organization_id,
+                MetadataRoutine.datasource_id == catalog_of,
+                MetadataRoutine.updated_at >= since,
+            ),
+        )
+    if _present(tables):
         await collect(
             "asset-description",
             select(
@@ -304,7 +482,7 @@ async def change_marks(
             .where(
                 AssetDocumentation.organization_id == organization_id,
                 AssetDocumentationVersion.organization_id == organization_id,
-                AssetDocumentation.table_id.in_(table_ids),
+                AssetDocumentation.table_id.in_(tables),
                 AssetDocumentationVersion.updated_at >= since,
             ),
         )
@@ -322,7 +500,7 @@ async def change_marks(
             .where(
                 ColumnDocumentation.organization_id == organization_id,
                 ColumnDocumentationVersion.organization_id == organization_id,
-                ColumnDocumentation.table_id.in_(table_ids),
+                ColumnDocumentation.table_id.in_(tables),
                 ColumnDocumentationVersion.updated_at >= since,
             ),
         )
@@ -332,11 +510,11 @@ async def change_marks(
                 ViewLineageEdge.id, ViewLineageEdge.target_table_id, ViewLineageEdge.updated_at
             ).where(
                 ViewLineageEdge.organization_id == organization_id,
-                ViewLineageEdge.target_table_id.in_(table_ids),
+                ViewLineageEdge.target_table_id.in_(tables),
                 ViewLineageEdge.updated_at >= since,
             ),
         )
-    if routine_ids:
+    if _present(routines):
         await collect(
             "routine-description",
             select(
@@ -351,7 +529,7 @@ async def change_marks(
             .where(
                 RoutineDocumentation.organization_id == organization_id,
                 RoutineDocumentationVersion.organization_id == organization_id,
-                RoutineDocumentation.routine_id.in_(routine_ids),
+                RoutineDocumentation.routine_id.in_(routines),
                 RoutineDocumentationVersion.updated_at >= since,
             ),
         )
@@ -363,7 +541,7 @@ async def change_marks(
                 DeepProcedureLineageEdge.updated_at,
             ).where(
                 DeepProcedureLineageEdge.organization_id == organization_id,
-                DeepProcedureLineageEdge.routine_id.in_(routine_ids),
+                DeepProcedureLineageEdge.routine_id.in_(routines),
                 DeepProcedureLineageEdge.updated_at >= since,
             ),
         )
@@ -375,7 +553,7 @@ async def change_marks(
                 MetadataRoutineDefinitionVersion.captured_at,
             ).where(
                 MetadataRoutineDefinitionVersion.organization_id == organization_id,
-                MetadataRoutineDefinitionVersion.routine_id.in_(routine_ids),
+                MetadataRoutineDefinitionVersion.routine_id.in_(routines),
                 MetadataRoutineDefinitionVersion.captured_at >= since,
             ),
         )
@@ -393,6 +571,55 @@ async def change_marks(
     return OkfMarks(marks=tuple(sorted(marks)))
 
 
+async def change_marks(
+    session: AsyncSession, version: ContextProductVersion, *, since: datetime
+) -> OkfMarks:
+    """Every value-free change mark on this product's scope at or after `since`: signals for
+    its pinned tables and routines, their approvals and reviewed lineage, its pinned tools."""
+    table_ids = _uuid_list(version.table_ids)
+    routine_ids = _uuid_list(version.routine_ids)
+    subject_ids = [*table_ids, *routine_ids]
+    return await _scope_marks(
+        session,
+        version.organization_id,
+        since=since,
+        tables=table_ids,
+        routines=routine_ids,
+        tool_ids=_uuid_list(version.eligible_tool_version_ids),
+        signals=MetadataChangeSignal.subject_id.in_(subject_ids) if subject_ids else None,
+        catalog_of=None,
+    )
+
+
+async def source_change_marks(
+    session: AsyncSession, datasource: DataSource, *, since: datetime
+) -> OkfMarks:
+    """R11-OKF02: every value-free change mark on one datasource at or after `since`.
+
+    The same mark kinds as a product's, over every object the datasource holds (all lifecycle
+    states, so a retirement is seen), plus every signal the datasource's scans recorded and the
+    object rows themselves. Subqueries rather than id lists: a source can hold far more objects
+    than any product pins, and none of them needs to be loaded to be watched.
+    """
+    organization_id = datasource.organization_id
+    return await _scope_marks(
+        session,
+        organization_id,
+        since=since,
+        tables=select(MetadataTable.id).where(
+            MetadataTable.organization_id == organization_id,
+            MetadataTable.datasource_id == datasource.id,
+        ),
+        routines=select(MetadataRoutine.id).where(
+            MetadataRoutine.organization_id == organization_id,
+            MetadataRoutine.datasource_id == datasource.id,
+        ),
+        tool_ids=(),
+        signals=MetadataChangeSignal.datasource_id == datasource.id,
+        catalog_of=datasource.id,
+    )
+
+
 def _document_digest(snapshot: OkfSnapshot) -> str:
     """The snapshot's identity as far as any *document* is concerned.
 
@@ -407,6 +634,22 @@ def _document_digest(snapshot: OkfSnapshot) -> str:
 # --- early refusal ----------------------------------------------------------------------
 
 
+def _refuse_subjects(subjects: int, described: str) -> None:
+    if subjects > MAX_SCOPE_SUBJECTS:
+        raise OkfExportError(
+            f"scope {described} {subjects} objects, routines and tools; the bundle limit "
+            f"allows {MAX_SCOPE_SUBJECTS}. Refused before any document was built."
+        )
+
+
+def _refuse_columns(columns: int) -> None:
+    if columns > MAX_SCOPE_COLUMNS:
+        raise OkfExportError(
+            f"scope holds {columns} columns; the snapshot limit is "
+            f"{MAX_SCOPE_COLUMNS}. Refused before any column was loaded."
+        )
+
+
 async def _refuse_oversized_scope(session: AsyncSession, version: ContextProductVersion) -> None:
     """Refuse a scope that cannot produce a bundle within limits, before loading it.
 
@@ -414,16 +657,12 @@ async def _refuse_oversized_scope(session: AsyncSession, version: ContextProduct
     counted from the version's own pins and one column count, so an oversized product is refused
     without first materializing every column and document in memory.
     """
-    subjects = (
+    _refuse_subjects(
         len(version.table_ids or [])
         + len(version.routine_ids or [])
-        + len(version.eligible_tool_version_ids or [])
+        + len(version.eligible_tool_version_ids or []),
+        "names",
     )
-    if subjects > MAX_SCOPE_SUBJECTS:
-        raise OkfExportError(
-            f"scope names {subjects} objects, routines and tools; the bundle limit allows "
-            f"{MAX_SCOPE_SUBJECTS}. Refused before any document was built."
-        )
     table_ids = _uuid_list(version.table_ids)
     if table_ids:
         columns = await session.scalar(
@@ -432,11 +671,47 @@ async def _refuse_oversized_scope(session: AsyncSession, version: ContextProduct
                 MetadataColumn.table_id.in_(table_ids),
             )
         )
-        if int(columns or 0) > MAX_SCOPE_COLUMNS:
-            raise OkfExportError(
-                f"scope holds {int(columns or 0)} columns; the snapshot limit is "
-                f"{MAX_SCOPE_COLUMNS}. Refused before any column was loaded."
-            )
+        _refuse_columns(int(columns or 0))
+
+
+async def _refuse_oversized_source(session: AsyncSession, admission: OkfSourceAdmission) -> None:
+    """R11-OKF02: the same two bounds for a source, counted -- not loaded -- over exactly the
+    objects the freeze would load: ACTIVE tables and routines of the admitted schemas."""
+    datasource = admission.datasource
+    schema_ids = list(admission.schema_ids)
+    if not schema_ids:
+        return
+    organization_id = datasource.organization_id
+    tables = select(MetadataTable.id).where(
+        MetadataTable.organization_id == organization_id,
+        MetadataTable.datasource_id == datasource.id,
+        MetadataTable.schema_id.in_(schema_ids),
+        MetadataTable.status == _DISCOVERED,
+    )
+    objects = await session.scalar(
+        select(func.count(MetadataTable.id)).where(
+            MetadataTable.organization_id == organization_id,
+            MetadataTable.datasource_id == datasource.id,
+            MetadataTable.schema_id.in_(schema_ids),
+            MetadataTable.status == _DISCOVERED,
+        )
+    )
+    routines = await session.scalar(
+        select(func.count(MetadataRoutine.id)).where(
+            MetadataRoutine.organization_id == organization_id,
+            MetadataRoutine.datasource_id == datasource.id,
+            MetadataRoutine.schema_id.in_(schema_ids),
+            MetadataRoutine.status == _DISCOVERED,
+        )
+    )
+    _refuse_subjects(int(objects or 0) + int(routines or 0), "holds")
+    columns = await session.scalar(
+        select(func.count(MetadataColumn.id)).where(
+            MetadataColumn.organization_id == organization_id,
+            MetadataColumn.table_id.in_(tables),
+        )
+    )
+    _refuse_columns(int(columns or 0))
 
 
 # --- history serialization --------------------------------------------------------------
@@ -473,33 +748,22 @@ def _entry_from_document(payload: dict[str, Any]) -> OkfLogEntry:
 # --- reads ------------------------------------------------------------------------------
 
 
-async def _head(
-    session: AsyncSession, version: ContextProductVersion, digest: str
-) -> OkfBundleHead | None:
+async def _head(session: AsyncSession, lineage: OkfLineage) -> OkfBundleHead | None:
     head: OkfBundleHead | None = await session.scalar(
-        select(OkfBundleHead).where(
-            OkfBundleHead.organization_id == version.organization_id,
-            OkfBundleHead.context_product_version_id == version.id,
-            OkfBundleHead.authority_digest == digest,
-        )
+        select(OkfBundleHead).where(*lineage.where(OkfBundleHead))
     )
     return head
 
 
 async def _publication(
-    session: AsyncSession,
-    version: ContextProductVersion,
-    digest: str,
-    publication_id: UUID,
+    session: AsyncSession, lineage: OkfLineage, publication_id: UUID
 ) -> OkfBundlePublication | None:
     """A publication, only if it is in the caller's own lineage. Anything else reads as absent,
     which is the same answer a publication that never existed gives."""
     publication: OkfBundlePublication | None = await session.scalar(
         select(OkfBundlePublication).where(
             OkfBundlePublication.id == publication_id,
-            OkfBundlePublication.organization_id == version.organization_id,
-            OkfBundlePublication.context_product_version_id == version.id,
-            OkfBundlePublication.authority_digest == digest,
+            *lineage.where(OkfBundlePublication),
         )
     )
     return publication
@@ -572,6 +836,31 @@ class OkfStoredContext:
     context: OkfContext
 
 
+@dataclass(frozen=True, slots=True)
+class OkfStoredSourceContext:
+    """R11-OKF02: question-specific context from one datasource's stored bundle."""
+
+    stored: OkfPublishedSourceBundle
+    context: OkfContext
+
+
+async def _select_context(
+    session: AsyncSession, publication: OkfBundlePublication, question: str, *, max_chars: int
+) -> OkfContext:
+    """Rank from the publication's own frozen snapshot, then load only the ranked documents and
+    one hop of their links. Shared by the product and source doors, so a question is answered
+    by one selection rule whichever bundle it is asked of."""
+    snapshot = snapshot_from_document(publication.snapshot)
+    plan = plan_context(snapshot, question)
+    loaded = await load_documents_by_path(session, publication, plan.paths)
+    targets = hop_targets(plan, loaded)
+    fetched = await load_documents_by_path(session, publication, targets)
+    # In the ranking's order, not the database's: citation ids follow document order, so the
+    # same question over the same publication must number its sources the same way anywhere.
+    hops = {path: fetched[path] for path in targets if path in fetched}
+    return assemble_context(plan, loaded, hops, max_chars=max_chars)
+
+
 async def read_okf_context(
     session: AsyncSession,
     version_id: UUID,
@@ -593,17 +882,38 @@ async def read_okf_context(
     stored = await read_published_bundle(
         session, version_id, context, settings, publication_id=publication_id, now=now
     )
-    snapshot = snapshot_from_document(stored.publication.snapshot)
-    plan = plan_context(snapshot, question)
-    loaded = await load_documents_by_path(session, stored.publication, plan.paths)
-    targets = hop_targets(plan, loaded)
-    fetched = await load_documents_by_path(session, stored.publication, targets)
-    # In the ranking's order, not the database's: citation ids follow document order, so the
-    # same question over the same publication must number its sources the same way anywhere.
-    hops = {path: fetched[path] for path in targets if path in fetched}
     return OkfStoredContext(
         stored=stored,
-        context=assemble_context(plan, loaded, hops, max_chars=max_chars),
+        context=await _select_context(
+            session, stored.publication, question, max_chars=max_chars
+        ),
+    )
+
+
+async def read_okf_source_context(
+    session: AsyncSession,
+    datasource_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    question: str,
+    *,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    publication_id: UUID | None = None,
+    now: datetime | None = None,
+) -> OkfStoredSourceContext:
+    """R11-OKF02: the sections of a datasource's stored bundle a question needs.
+
+    Through `read_published_source_bundle` first -- the datasource's read decision, its lineage
+    key -- then the same selection a product's context read uses.
+    """
+    stored = await read_published_source_bundle(
+        session, datasource_id, context, settings, publication_id=publication_id, now=now
+    )
+    return OkfStoredSourceContext(
+        stored=stored,
+        context=await _select_context(
+            session, stored.publication, question, max_chars=max_chars
+        ),
     )
 
 
@@ -622,21 +932,166 @@ def as_bundle(
 
 
 async def list_publications(
-    session: AsyncSession, stored: OkfPublishedBundle
+    session: AsyncSession, stored: OkfPublishedBundle | OkfPublishedSourceBundle
 ) -> list[OkfBundlePublication]:
     """The caller's lineage, newest first: every retained publication of the same authority."""
     return list(
         (
             await session.scalars(
                 select(OkfBundlePublication)
-                .where(
-                    OkfBundlePublication.organization_id == stored.version.organization_id,
-                    OkfBundlePublication.context_product_version_id == stored.version.id,
-                    OkfBundlePublication.authority_digest == stored.authority_digest,
-                )
+                .where(*stored.lineage.where(OkfBundlePublication))
                 .order_by(OkfBundlePublication.sequence.desc())
             )
         ).all()
+    )
+
+
+# --- the shared read discipline ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Served:
+    """What `_serve` hands back to the scope that asked: a publication and its head."""
+
+    publication: OkfBundlePublication
+    head: OkfBundleHead
+    is_current: bool
+    published_now: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopeRules:
+    """Everything a scope supplies to the shared read, and nothing about how it is applied.
+
+    `read_marks(since)` re-reads the scope's change marks; `refuse_oversized()` counts the scope
+    before anything is loaded; `freeze(captured_at)` captures it under the admission already
+    decided for this request. The rest names the scope in the publish audit.
+    """
+
+    lineage: OkfLineage
+    read_marks: Callable[[datetime], Awaitable[OkfMarks]]
+    refuse_oversized: Callable[[], Awaitable[None]]
+    freeze: Callable[[datetime], Awaitable[OkfSnapshot]]
+    resource_type: str
+    resource_id: str
+    publish_action: str
+
+
+async def _serve(
+    session: AsyncSession,
+    context: SecurityContext,
+    rules: _ScopeRules,
+    *,
+    marks: OkfMarks,
+    marks_since: datetime,
+    clock: datetime,
+    publication_id: UUID | None,
+) -> _Served:
+    """The stored publication for one lineage: served, rebuilt, or refused.
+
+    Called only after the scope has read its marks and taken the reader's authorization
+    decision, which is what `rules.lineage` was computed from. A pinned `publication_id` is
+    served only from that lineage and never rebuilt.
+    """
+    head = await _head(session, rules.lineage)
+
+    if publication_id is not None:
+        pinned = await _publication(session, rules.lineage, publication_id)
+        if pinned is None or head is None:
+            raise HTTPException(
+                status_code=404,
+                detail="OKF publication not found for this reader, or no longer retained",
+            )
+        return _Served(
+            publication=pinned,
+            head=head,
+            is_current=pinned.id == head.publication_id,
+            published_now=False,
+        )
+
+    current = await session.get(OkfBundlePublication, head.publication_id) if head else None
+    trigger: str | None = None
+    if head is None or current is None:
+        trigger = TRIGGER_INITIAL
+    else:
+        prior_snapshot = snapshot_from_document(current.snapshot)
+        renderer = (
+            prior_snapshot.profile,
+            prior_snapshot.profile_version,
+            prior_snapshot.spec_revision,
+        )
+        window_known = _utc(head.marks_window_start) >= marks_since
+        if renderer != (EXPORT_PROFILE, EXPORT_PROFILE_VERSION, OKF_SPEC_REVISION):
+            trigger = TRIGGER_RENDERER_CHANGE
+        elif window_known and marks.digest(_utc(head.marks_window_start)) != head.marks_digest:
+            trigger = TRIGGER_SOURCE_CHANGE
+        elif clock - _utc(head.validated_at) > OKF_REVALIDATE_AFTER:
+            # Also the case where the head's window predates what was read: a head that old is
+            # past its revalidation age by construction.
+            trigger = TRIGGER_REVALIDATION
+    if trigger is None and head is not None and current is not None:
+        return _Served(publication=current, head=head, is_current=True, published_now=False)
+
+    try:
+        await rules.refuse_oversized()
+    except OkfExportError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    window_start = clock - MARK_LOOKBACK
+    before = marks.digest(window_start)
+    snapshot = await rules.freeze(clock)
+    after_marks = await rules.read_marks(window_start)
+    if after_marks.digest(window_start) != before:
+        # Something committed while the snapshot was being read. Publishing now could combine a
+        # column list from one catalog state with a definition digest from the next.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the bundle's sources changed while the OKF snapshot was being captured; "
+                "nothing was published. Retry to capture a consistent state."
+            ),
+        )
+
+    if head is not None and current is not None and trigger in (
+        TRIGGER_SOURCE_CHANGE,
+        TRIGGER_REVALIDATION,
+    ):
+        prior_snapshot = snapshot_from_document(current.snapshot)
+        if _document_digest(prior_snapshot) == _document_digest(snapshot):
+            # A no-op: the marks moved or the head aged, and the content did not. OKF-C says a
+            # no-op must reproduce every hash, and the surest way is to publish nothing at all.
+            await session.execute(
+                update(OkfBundleHead)
+                .where(
+                    OkfBundleHead.id == head.id,
+                    OkfBundleHead.organization_id == rules.lineage.organization_id,
+                    OkfBundleHead.publication_id == current.id,
+                )
+                .values(
+                    validated_at=clock,
+                    marks_window_start=window_start,
+                    marks_digest=after_marks.digest(window_start),
+                )
+            )
+            head.validated_at = clock
+            head.marks_window_start = window_start
+            head.marks_digest = after_marks.digest(window_start)
+            return _Served(publication=current, head=head, is_current=True, published_now=False)
+
+    assert trigger is not None
+    signalled = sorted(after_marks.subjects_since(_utc(head.validated_at))) if head else []
+    return await _publish(
+        session,
+        context=context,
+        rules=rules,
+        head=head,
+        current=current,
+        snapshot=snapshot,
+        trigger=trigger,
+        clock=clock,
+        window_start=window_start,
+        marks_digest=after_marks.digest(window_start),
+        signalled=signalled,
     )
 
 
@@ -649,13 +1104,13 @@ async def read_published_bundle(
     publication_id: UUID | None = None,
     now: datetime | None = None,
 ) -> OkfPublishedBundle:
-    """The one way any surface obtains an OKF bundle for a consumer.
+    """The one way any surface obtains a context product's OKF bundle for a consumer.
 
     Order matters and is the whole design: the change marks are read first, before any content,
     so nothing the capture reads can predate them; then the compiler's own scope resolver decides
     whether the caller may consume the version at all; then the per-datasource admission decides
-    the caller's lineage; only then is anything stored looked up. A pinned `publication_id` is
-    served only from the caller's own lineage and never rebuilt.
+    the caller's lineage; only then is anything stored looked up (`_serve`). A pinned
+    `publication_id` is served only from the caller's own lineage and never rebuilt.
     """
     clock = now or datetime.now(UTC)
     # The marks before anything else. `_load_source` repeats this get and the organization check
@@ -683,142 +1138,132 @@ async def read_published_bundle(
     ) = await _load_source(session, version_id, context)
     admitted = await admit_datasources(session, context, settings, product=product, version=version)
     digest = authority_digest(version, list(admitted))
-    head = await _head(session, version, digest)
 
-    if publication_id is not None:
-        pinned = await _publication(session, version, digest, publication_id)
-        if pinned is None or head is None:
-            raise HTTPException(
-                status_code=404,
-                detail="OKF publication not found for this reader, or no longer retained",
-            )
-        return OkfPublishedBundle(
-            publication=pinned,
-            head=head,
-            product=product,
-            version=version,
-            quality_snapshot=quality_snapshot,
-            authority_digest=digest,
-            is_current=pinned.id == head.publication_id,
-            published_now=False,
-        )
+    async def read_marks(since: datetime) -> OkfMarks:
+        return await change_marks(session, version, since=since)
 
-    current = await session.get(OkfBundlePublication, head.publication_id) if head else None
-    trigger: str | None = None
-    if head is None or current is None:
-        trigger = TRIGGER_INITIAL
-    else:
-        prior_snapshot = snapshot_from_document(current.snapshot)
-        renderer = (
-            prior_snapshot.profile,
-            prior_snapshot.profile_version,
-            prior_snapshot.spec_revision,
-        )
-        window_known = _utc(head.marks_window_start) >= marks_since
-        if renderer != (EXPORT_PROFILE, EXPORT_PROFILE_VERSION, OKF_SPEC_REVISION):
-            trigger = TRIGGER_RENDERER_CHANGE
-        elif window_known and marks.digest(_utc(head.marks_window_start)) != head.marks_digest:
-            trigger = TRIGGER_SOURCE_CHANGE
-        elif clock - _utc(head.validated_at) > OKF_REVALIDATE_AFTER:
-            # Also the case where the head's window predates what was read: a head that old is
-            # past its revalidation age by construction.
-            trigger = TRIGGER_REVALIDATION
-    if trigger is None and head is not None and current is not None:
-        return OkfPublishedBundle(
-            publication=current,
-            head=head,
-            product=product,
-            version=version,
-            quality_snapshot=quality_snapshot,
-            authority_digest=digest,
-            is_current=True,
-            published_now=False,
-        )
-
-    try:
+    async def refuse_oversized() -> None:
         await _refuse_oversized_scope(session, version)
-    except OkfExportError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
 
-    window_start = clock - MARK_LOOKBACK
-    before = marks.digest(window_start)
-    snapshot = await freeze_snapshot(
+    async def freeze(captured_at: datetime) -> OkfSnapshot:
+        return await freeze_snapshot(
+            session,
+            context,
+            settings,
+            product=product,
+            version=version,
+            routines=routines,
+            views=views,
+            ontology=ontology,
+            freshness=freshness,
+            captured_at=captured_at,
+            admitted=admitted,
+        )
+
+    served = await _serve(
         session,
         context,
-        settings,
-        product=product,
-        version=version,
-        routines=routines,
-        views=views,
-        ontology=ontology,
-        freshness=freshness,
-        captured_at=clock,
-        admitted=admitted,
-    )
-    after_marks = await change_marks(session, version, since=window_start)
-    if after_marks.digest(window_start) != before:
-        # Something committed while the snapshot was being read. Publishing now could combine a
-        # column list from one catalog state with a definition digest from the next.
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "the product's sources changed while the OKF snapshot was being captured; "
-                "nothing was published. Retry to capture a consistent state."
-            ),
-        )
-
-    if head is not None and current is not None and trigger in (
-        TRIGGER_SOURCE_CHANGE,
-        TRIGGER_REVALIDATION,
-    ):
-        prior_snapshot = snapshot_from_document(current.snapshot)
-        if _document_digest(prior_snapshot) == _document_digest(snapshot):
-            # A no-op: the marks moved or the head aged, and the content did not. OKF-C says a
-            # no-op must reproduce every hash, and the surest way is to publish nothing at all.
-            await session.execute(
-                update(OkfBundleHead)
-                .where(
-                    OkfBundleHead.id == head.id,
-                    OkfBundleHead.organization_id == version.organization_id,
-                    OkfBundleHead.publication_id == current.id,
-                )
-                .values(
-                    validated_at=clock,
-                    marks_window_start=window_start,
-                    marks_digest=after_marks.digest(window_start),
-                )
-            )
-            head.validated_at = clock
-            head.marks_window_start = window_start
-            head.marks_digest = after_marks.digest(window_start)
-            return OkfPublishedBundle(
-                publication=current,
-                head=head,
-                product=product,
-                version=version,
-                quality_snapshot=quality_snapshot,
+        _ScopeRules(
+            lineage=OkfLineage(
+                organization_id=version.organization_id,
                 authority_digest=digest,
-                is_current=True,
-                published_now=False,
-            )
-
-    assert trigger is not None
-    signalled = sorted(after_marks.subjects_since(_utc(head.validated_at))) if head else []
-    return await _publish(
-        session,
-        context=context,
+                context_product_version_id=version.id,
+            ),
+            read_marks=read_marks,
+            refuse_oversized=refuse_oversized,
+            freeze=freeze,
+            resource_type="context_product_version",
+            resource_id=str(version.id),
+            publish_action="context_product.okf_bundle_publish",
+        ),
+        marks=marks,
+        marks_since=marks_since,
+        clock=clock,
+        publication_id=publication_id,
+    )
+    return OkfPublishedBundle(
+        publication=served.publication,
+        head=served.head,
         product=product,
         version=version,
         quality_snapshot=quality_snapshot,
-        digest=digest,
-        head=head,
-        current=current,
-        snapshot=snapshot,
-        trigger=trigger,
+        authority_digest=digest,
+        is_current=served.is_current,
+        published_now=served.published_now,
+    )
+
+
+async def read_published_source_bundle(
+    session: AsyncSession,
+    datasource_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    publication_id: UUID | None = None,
+    now: datetime | None = None,
+) -> OkfPublishedSourceBundle:
+    """R11-OKF02: the one way any surface obtains a datasource's OKF bundle for a reader.
+
+    The product read's order, with the source's own decision in the middle: the datasource is
+    loaded inside the caller's organization (404 absent, 403 across the tenant boundary); its
+    change marks are read before any content; the reader's `READ_METADATA` decision on the
+    datasource -- and on each schema, where a workspace decides -- is taken (`admit_source`), a
+    refusal answering 403 with the bare reason code exactly as the catalog's own read of the
+    datasource does; only then is the lineage that admission keys looked up, and the shared
+    `_serve` decides whether to serve, rebuild or refuse. A pinned `publication_id` is served
+    only from the lineage this request's admission computes: a reader whose binding or policy
+    changed cannot reach a publication built under the old decision by naming it.
+    """
+    clock = now or datetime.now(UTC)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    marks_since = clock - MARK_LOOKBACK - OKF_REVALIDATE_AFTER
+    marks = await source_change_marks(session, datasource, since=marks_since)
+    try:
+        admission = await admit_source(session, context, settings, datasource=datasource)
+    except AuthorizationDenied as refusal:
+        raise HTTPException(status_code=403, detail=refusal.reason_code) from refusal
+    digest = source_authority_digest(admission)
+
+    async def read_marks(since: datetime) -> OkfMarks:
+        return await source_change_marks(session, datasource, since=since)
+
+    async def refuse_oversized() -> None:
+        await _refuse_oversized_source(session, admission)
+
+    async def freeze(captured_at: datetime) -> OkfSnapshot:
+        return await freeze_source_snapshot(
+            session, admission=admission, captured_at=captured_at
+        )
+
+    served = await _serve(
+        session,
+        context,
+        _ScopeRules(
+            lineage=OkfLineage(
+                organization_id=datasource.organization_id,
+                authority_digest=digest,
+                datasource_id=datasource.id,
+            ),
+            read_marks=read_marks,
+            refuse_oversized=refuse_oversized,
+            freeze=freeze,
+            resource_type="datasource",
+            resource_id=str(datasource.id),
+            publish_action="datasource.okf_bundle_publish",
+        ),
+        marks=marks,
+        marks_since=marks_since,
         clock=clock,
-        window_start=window_start,
-        marks_digest=after_marks.digest(window_start),
-        signalled=signalled,
+        publication_id=publication_id,
+    )
+    return OkfPublishedSourceBundle(
+        publication=served.publication,
+        head=served.head,
+        datasource=datasource,
+        admission=admission,
+        authority_digest=digest,
+        is_current=served.is_current,
+        published_now=served.published_now,
     )
 
 
@@ -826,10 +1271,7 @@ async def _publish(
     session: AsyncSession,
     *,
     context: SecurityContext,
-    product: ContextProduct,
-    version: ContextProductVersion,
-    quality_snapshot: dict[str, object],
-    digest: str,
+    rules: _ScopeRules,
     head: OkfBundleHead | None,
     current: OkfBundlePublication | None,
     snapshot: OkfSnapshot,
@@ -838,8 +1280,9 @@ async def _publish(
     window_start: datetime,
     marks_digest: str,
     signalled: Sequence[str],
-) -> OkfPublishedBundle:
+) -> _Served:
     """Render incrementally against the stored head and publish atomically, or refuse."""
+    lineage = rules.lineage
     prior_snapshot = snapshot_from_document(current.snapshot) if current is not None else None
     prior_rows = await load_documents(session, current) if current is not None else ()
     prior_documents = {row.path: row.content for row in prior_rows}
@@ -874,9 +1317,9 @@ async def _publish(
     subjects = document_subjects(snapshot)
     carried = set(report.carried)
     publication = OkfBundlePublication(
-        organization_id=version.organization_id,
-        context_product_version_id=version.id,
-        authority_digest=digest,
+        organization_id=lineage.organization_id,
+        **lineage.key_columns(),
+        authority_digest=lineage.authority_digest,
         sequence=sequence,
         trigger=trigger,
         captured_at=clock,
@@ -908,7 +1351,7 @@ async def _publish(
             await session.flush()
             session.add_all(
                 OkfBundleDocument(
-                    organization_id=version.organization_id,
+                    organization_id=lineage.organization_id,
                     publication_id=publication.id,
                     path=document.path,
                     subject_key=subjects.get(document.path),
@@ -929,9 +1372,9 @@ async def _publish(
             await session.flush()
             if head is None:
                 head = OkfBundleHead(
-                    organization_id=version.organization_id,
-                    context_product_version_id=version.id,
-                    authority_digest=digest,
+                    organization_id=lineage.organization_id,
+                    **lineage.key_columns(),
+                    authority_digest=lineage.authority_digest,
                     publication_id=publication.id,
                     validated_at=clock,
                     marks_window_start=window_start,
@@ -945,7 +1388,7 @@ async def _publish(
                     update(OkfBundleHead)
                     .where(
                         OkfBundleHead.id == head.id,
-                        OkfBundleHead.organization_id == version.organization_id,
+                        OkfBundleHead.organization_id == lineage.organization_id,
                         # Optimistic: only if nobody published over this head meanwhile.
                         OkfBundleHead.publication_id == current.id,
                     )
@@ -962,11 +1405,11 @@ async def _publish(
                 head.validated_at = clock
                 head.marks_window_start = window_start
                 head.marks_digest = marks_digest
-            await _prune(session, version, digest, keep_from=sequence - RETAINED_PUBLICATIONS + 1)
+            await _prune(session, lineage, keep_from=sequence - RETAINED_PUBLICATIONS + 1)
     except (IntegrityError, _LostRace):
         # A concurrent reader published this lineage first. Its publication is as current as
         # ours would have been; serve it rather than fail the read.
-        winner = await _head(session, version, digest)
+        winner = await _head(session, lineage)
         published = (
             await session.get(OkfBundlePublication, winner.publication_id) if winner else None
         )
@@ -974,23 +1417,14 @@ async def _publish(
             raise HTTPException(
                 status_code=409, detail="OKF bundle publication raced; retry"
             ) from None
-        return OkfPublishedBundle(
-            publication=published,
-            head=winner,
-            product=product,
-            version=version,
-            quality_snapshot=quality_snapshot,
-            authority_digest=digest,
-            is_current=True,
-            published_now=False,
-        )
+        return _Served(publication=published, head=winner, is_current=True, published_now=False)
 
     record_audit(
         session,
-        replace(context, organization_id=version.organization_id),
-        action="context_product.okf_bundle_publish",
-        resource_type="context_product_version",
-        resource_id=str(version.id),
+        replace(context, organization_id=lineage.organization_id),
+        action=rules.publish_action,
+        resource_type=rules.resource_type,
+        resource_id=rules.resource_id,
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
         details={
@@ -1006,31 +1440,21 @@ async def _publish(
     )
     logger.info(
         "okf_bundle_published",
-        context_product_version_id=str(version.id),
+        scope=rules.resource_type,
+        scope_id=rules.resource_id,
         sequence=sequence,
         trigger=trigger,
         rendered=len(report.rendered),
         carried=len(report.carried),
     )
-    return OkfPublishedBundle(
-        publication=publication,
-        head=head,
-        product=product,
-        version=version,
-        quality_snapshot=quality_snapshot,
-        authority_digest=digest,
-        is_current=True,
-        published_now=True,
-    )
+    return _Served(publication=publication, head=head, is_current=True, published_now=True)
 
 
 class _LostRace(Exception):
     """The optimistic head update matched no row: another publisher moved the head first."""
 
 
-async def _prune(
-    session: AsyncSession, version: ContextProductVersion, digest: str, *, keep_from: int
-) -> None:
+async def _prune(session: AsyncSession, lineage: OkfLineage, *, keep_from: int) -> None:
     """Drop publications more than `RETAINED_PUBLICATIONS` behind, documents first.
 
     Never the head's: the head always names the newest, and `keep_from` is at most its sequence.
@@ -1040,9 +1464,7 @@ async def _prune(
     stale = (
         await session.scalars(
             select(OkfBundlePublication.id).where(
-                OkfBundlePublication.organization_id == version.organization_id,
-                OkfBundlePublication.context_product_version_id == version.id,
-                OkfBundlePublication.authority_digest == digest,
+                *lineage.where(OkfBundlePublication),
                 OkfBundlePublication.sequence < keep_from,
             )
         )
@@ -1051,13 +1473,13 @@ async def _prune(
         return
     await session.execute(
         delete(OkfBundleDocument).where(
-            OkfBundleDocument.organization_id == version.organization_id,
+            OkfBundleDocument.organization_id == lineage.organization_id,
             OkfBundleDocument.publication_id.in_(list(stale)),
         )
     )
     await session.execute(
         delete(OkfBundlePublication).where(
-            OkfBundlePublication.organization_id == version.organization_id,
+            OkfBundlePublication.organization_id == lineage.organization_id,
             OkfBundlePublication.id.in_(list(stale)),
         )
     )
@@ -1146,6 +1568,30 @@ async def read_object_knowledge(
 # --- evidence ---------------------------------------------------------------------------
 
 
+def _read_details(
+    publication: OkfBundlePublication,
+    *,
+    is_current: bool,
+    path: str | None,
+    sections: Sequence[str],
+) -> dict[str, Any]:
+    """The audit details of one read, whichever scope it was of. Ids, digests and counts."""
+    details: dict[str, Any] = {
+        "publication_id": str(publication.id),
+        "publication_sequence": publication.sequence,
+        "bundle_content_digest": publication.bundle_content_digest,
+        "content_snapshot_digest": publication.content_snapshot_digest,
+        "documents": publication.document_count,
+        "is_current": is_current,
+    }
+    if path is not None:
+        details["path"] = path
+    if sections:
+        details["section_count"] = len(sections)
+        details["sections"] = list(sections)[:MAX_AUDITED_SECTIONS]
+    return details
+
+
 def record_okf_read(
     session: AsyncSession,
     context: SecurityContext,
@@ -1167,19 +1613,6 @@ def record_okf_read(
     version = stored.version
     publication = stored.publication
     correlation_id = get_correlation_id()
-    details: dict[str, Any] = {
-        "publication_id": str(publication.id),
-        "publication_sequence": publication.sequence,
-        "bundle_content_digest": publication.bundle_content_digest,
-        "content_snapshot_digest": publication.content_snapshot_digest,
-        "documents": publication.document_count,
-        "is_current": stored.is_current,
-    }
-    if path is not None:
-        details["path"] = path
-    if sections:
-        details["section_count"] = len(sections)
-        details["sections"] = list(sections)[:MAX_AUDITED_SECTIONS]
     record_audit(
         session,
         replace(context, organization_id=version.organization_id),
@@ -1188,7 +1621,9 @@ def record_okf_read(
         resource_id=str(version.id),
         outcome="SUCCESS",
         correlation_id=correlation_id,
-        details=details,
+        details=_read_details(
+            publication, is_current=stored.is_current, path=path, sections=sections
+        ),
     )
     record_outbox(
         session,
@@ -1217,3 +1652,46 @@ def record_okf_read(
                 quality_snapshot=stored.quality_snapshot,
             )
         )
+
+
+def record_okf_source_read(
+    session: AsyncSession,
+    context: SecurityContext,
+    stored: OkfPublishedSourceBundle,
+    *,
+    action: str,
+    channel: str,
+    path: str | None = None,
+    sections: Sequence[str] = (),
+) -> None:
+    """R11-OKF02: one read of a stored source bundle -- audit and outbox, the product read's
+    evidence less the consumption edge, because a datasource is not a context product and has
+    no consumption ledger. Ids, digests and counts only; a context read names section anchors,
+    never the question."""
+    datasource = stored.datasource
+    publication = stored.publication
+    record_audit(
+        session,
+        replace(context, organization_id=datasource.organization_id),
+        action=action,
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details=_read_details(
+            publication, is_current=stored.is_current, path=path, sections=sections
+        ),
+    )
+    record_outbox(
+        session,
+        organization_id=datasource.organization_id,
+        aggregate_type="datasource",
+        aggregate_id=str(datasource.id),
+        event_type="datasource.okf_bundle_exported.v1",
+        payload={
+            "bundle_content_digest": publication.bundle_content_digest,
+            "documents": publication.document_count,
+            "channel": channel,
+            "publication_id": str(publication.id),
+        },
+    )

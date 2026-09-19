@@ -548,3 +548,49 @@ describe("registering a source is reachable from the fleet console", () => {
     expect(screen.queryByRole("button", { name: /Register a data source/ })).toBeNull();
   });
 });
+
+/* R11-OKF02: the Sources entry point onto a datasource's source bundle. The
+   bundle is a full authorized read (and a rebuild if the source moved), so
+   nothing is read until someone opens it; opening it mounts the knowledge view
+   for the selected source, permalinked as `?knowledge=1`. */
+const fetchSourceOkfBundle = vi.fn<(datasourceId: string, signal?: AbortSignal) => Promise<unknown>>();
+const fetchSourceOkfPublications = vi.fn<(datasourceId: string, signal?: AbortSignal) => Promise<unknown>>();
+
+vi.mock("../lib/api/knowledge", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/api/knowledge")>();
+  return {
+    ...actual,
+    fetchSourceOkfBundle: (datasourceId: string, signal?: AbortSignal) => fetchSourceOkfBundle(datasourceId, signal),
+    fetchSourceOkfPublications: (datasourceId: string, signal?: AbortSignal) =>
+      fetchSourceOkfPublications(datasourceId, signal),
+  };
+});
+
+describe("the source knowledge bundle opens from the source's details", () => {
+  it("reads nothing until opened, then mounts the bundle for the selected source", async () => {
+    listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    fetchDatasourceHealth.mockResolvedValue(HEALTH);
+    fetchSourceOkfPublications.mockReset().mockResolvedValue({ datasource_id: SNOWFLAKE.id, items: [] });
+    const SourcesScreen = await loadScreen();
+    // A refusal keeps this test about the entry point, not the view's own rendering (the
+    // refusal's wording is `KnowledgeView.test.tsx`'s to hold).
+    fetchSourceOkfBundle.mockReset().mockRejectedValue(new Error("NO_BINDING_FOR_DATASOURCE"));
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
+    const panel = await screen.findByLabelText("Source details for snowflake_prod");
+    expect(fetchSourceOkfBundle).not.toHaveBeenCalled();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Open knowledge bundle" }));
+    expect(new URLSearchParams(location.search).get("knowledge")).toBe("1");
+    const view = await screen.findByRole("article", { name: "Knowledge for snowflake_prod · source bundle" });
+    await waitFor(() => expect(fetchSourceOkfBundle).toHaveBeenCalledWith("ds_snowflake_prod", expect.anything()));
+    expect(await within(view).findByRole("alert")).toHaveTextContent("NO_BINDING_FOR_DATASOURCE");
+    expect(within(view).queryByLabelText("Coverage")).toBeNull();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Close knowledge bundle" }));
+    await waitFor(() => expect(screen.queryByRole("article", { name: /source bundle/ })).toBeNull());
+    expect(new URLSearchParams(location.search).get("knowledge")).toBeNull();
+  });
+});

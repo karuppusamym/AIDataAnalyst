@@ -16,6 +16,7 @@ import { useSession } from "../lib/session";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
+import { KnowledgeView } from "../components/KnowledgeView";
 import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
@@ -129,6 +130,8 @@ function SourceDetailsPane({
   source,
   onClose,
   onSourceChanged,
+  knowledgeOpen,
+  onToggleKnowledge,
 }: {
   source: DataSourceRead;
   onClose: () => void;
@@ -136,6 +139,9 @@ function SourceDetailsPane({
    *  fleet list is re-read rather than patched from the write's response --
    *  the row and the pane then agree because both came from the same read. */
   onSourceChanged: () => void;
+  /** R11-OKF02: whether this source's knowledge bundle is open below the list. */
+  knowledgeOpen: boolean;
+  onToggleKnowledge: () => void;
 }) {
   const roles = useSession().me?.roles;
   const canImportWorkbook =
@@ -287,6 +293,25 @@ function SourceDetailsPane({
           )}
         </section>
 
+        {/* R11-OKF02: the source bundle -- this datasource's discovered,
+            authorized objects as one stored knowledge bundle. A toggle, not a
+            fetch: the bundle is read (and, if the source moved, rebuilt) only
+            when someone opens it, and it opens below the list at full width,
+            as a product's does in Context Products. */}
+        <section className="src__model" aria-labelledby="src-knowledge-heading">
+          <div className="evp__sub" id="src-knowledge-heading">Knowledge bundle</div>
+          <div className="src__modelaction">
+            <Button
+              aria-pressed={knowledgeOpen}
+              onClick={onToggleKnowledge}
+              title="Read this source's stored knowledge bundle: its discovered objects, structure and approved descriptions"
+            >
+              {knowledgeOpen ? "Close knowledge bundle" : "Open knowledge bundle"}
+            </Button>
+            <span>Only what you may read of this source is in it, and nothing else is counted.</span>
+          </div>
+        </section>
+
         {health ? (
           <section className="src__factors" aria-labelledby="src-factors-heading">
             <div className="evp__sub" id="src-factors-heading">Factor breakdown</div>
@@ -376,6 +401,8 @@ export function SourcesScreen() {
   const q = params.get("q") ?? "";
   const statusFilter = params.get("status") ?? "ALL";
   const selectedId = params.get("source");
+  // R11-OKF02: `?knowledge=1` keeps an open source bundle permalinkable with its `?source=`.
+  const knowledgeOpen = params.get("knowledge") === "1";
 
   const [draftQ, setDraftQ] = useState(q);
   const [projectGenerating, setProjectGenerating] = useState<"markdown" | "json" | null>(null);
@@ -614,15 +641,21 @@ export function SourcesScreen() {
               />
             }
             renderItem={(s) => (
-              <SourceRow source={s} selected={s.id === selectedId} onSelect={() => setParams({ source: s.id })} />
+              <SourceRow
+                source={s}
+                selected={s.id === selectedId}
+                onSelect={() => setParams({ source: s.id, knowledge: null })}
+              />
             )}
           />
         )}
         {selected ? (
           <SourceDetailsPane
             source={selected}
-            onClose={() => setParams({ source: null })}
+            onClose={() => setParams({ source: null, knowledge: null })}
             onSourceChanged={load}
+            knowledgeOpen={knowledgeOpen}
+            onToggleKnowledge={() => setParams({ knowledge: knowledgeOpen ? null : "1" })}
           />
         ) : selectedId ? (
           <aside className="evp evp--idle" aria-label="Source details">
@@ -640,6 +673,14 @@ export function SourcesScreen() {
           </aside>
         )}
       </div>
+      {selected && knowledgeOpen ? (
+        <KnowledgeView
+          key={selected.id}
+          datasourceId={selected.id}
+          title={`${selected.name} · source bundle`}
+          onClose={() => setParams({ knowledge: null })}
+        />
+      ) : null}
     </div>
   );
 }

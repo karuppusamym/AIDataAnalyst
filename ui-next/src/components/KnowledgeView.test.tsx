@@ -10,6 +10,8 @@ import type {
   OkfPublicationHistoryRead,
   OkfPublicationRead,
 } from "../lib/types";
+import type { OkfSourceContextRead, OkfSourcePublicationHistoryRead } from "../lib/api/knowledge";
+import { ApiError } from "../lib/http";
 
 /* ---------------------------------------------------------------------------
    R11-OKF02. The knowledge view inside Context Products, its section inside
@@ -41,11 +43,33 @@ const fetchObjectKnowledge =
 const downloadOkfBundle = vi.fn<(versionId: string, publicationId: string) => Promise<void>>();
 const selectOkfContext =
   vi.fn<(versionId: string, body: OkfContextRequest, signal?: AbortSignal) => Promise<OkfContextRead>>();
+/* R11-OKF02 source bundles: the same five reads against one datasource. */
+const fetchSourceOkfBundle = vi.fn<(datasourceId: string, signal?: AbortSignal) => Promise<OkfBundleRead>>();
+const fetchSourceOkfDocument =
+  vi.fn<
+    (datasourceId: string, path: string, publicationId: string | null, signal?: AbortSignal) => Promise<OkfDocumentRead>
+  >();
+const fetchSourceOkfPublications =
+  vi.fn<(datasourceId: string, signal?: AbortSignal) => Promise<OkfSourcePublicationHistoryRead>>();
+const downloadSourceOkfBundle = vi.fn<(datasourceId: string, publicationId: string) => Promise<void>>();
+const selectSourceOkfContext =
+  vi.fn<
+    (datasourceId: string, body: OkfContextRequest, signal?: AbortSignal) => Promise<OkfSourceContextRead>
+  >();
 
 vi.mock("../lib/api/knowledge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/knowledge")>();
   return {
     ...actual,
+    fetchSourceOkfBundle: (datasourceId: string, signal?: AbortSignal) => fetchSourceOkfBundle(datasourceId, signal),
+    fetchSourceOkfDocument: (datasourceId: string, path: string, publicationId: string | null, signal?: AbortSignal) =>
+      fetchSourceOkfDocument(datasourceId, path, publicationId, signal),
+    fetchSourceOkfPublications: (datasourceId: string, signal?: AbortSignal) =>
+      fetchSourceOkfPublications(datasourceId, signal),
+    downloadSourceOkfBundle: (datasourceId: string, publicationId: string) =>
+      downloadSourceOkfBundle(datasourceId, publicationId),
+    selectSourceOkfContext: (datasourceId: string, body: OkfContextRequest, signal?: AbortSignal) =>
+      selectSourceOkfContext(datasourceId, body, signal),
     fetchOkfBundle: (versionId: string, signal?: AbortSignal) => fetchOkfBundle(versionId, signal),
     fetchOkfDocument: (versionId: string, path: string, publicationId: string | null, signal?: AbortSignal) =>
       fetchOkfDocument(versionId, path, publicationId, signal),
@@ -157,6 +181,20 @@ beforeEach(() => {
   fetchObjectKnowledge.mockReset();
   downloadOkfBundle.mockReset().mockResolvedValue(undefined);
   selectOkfContext.mockReset();
+  fetchSourceOkfBundle.mockReset().mockResolvedValue({
+    ...bundle(),
+    manifest: {
+      scope: { kind: "DATASOURCE", datasource_id: "ds-1" },
+      counts: { tables: 1, views: 1, routines: 0, schemas: 1, concepts: 0, tools: 0, sources: 1 },
+      source_objects: [{ key: "fedcba9876543210fedcba9876543210", qualified_name: "bank.sales.orders" }],
+    },
+  });
+  fetchSourceOkfDocument.mockReset().mockImplementation(async (_source, path) =>
+    path === VIEW ? doc(VIEW, VIEW_DOC, 2) : doc(path, INDEX),
+  );
+  fetchSourceOkfPublications.mockReset().mockResolvedValue({ datasource_id: "ds-1", items: [publication()] });
+  downloadSourceOkfBundle.mockReset().mockResolvedValue(undefined);
+  selectSourceOkfContext.mockReset();
 });
 
 function context(overrides: Partial<OkfContextRead> = {}): OkfContextRead {
@@ -392,5 +430,67 @@ describe("ObjectKnowledge", () => {
     expect(screen.getByText("definition abcdef012345")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Download bundle" }));
     expect(downloadOkfBundle).toHaveBeenCalledWith("ver-1", "pub-2");
+  });
+});
+
+/* R11-OKF02 source bundles: the same view over one datasource's bundle. What
+   these hold in place: the view reads ONLY the source routes (never a product
+   route), pins every read and the download to the manifest's publication as it
+   does for a product, says what a source bundle is and is not, and shows the
+   server's refusal as a sentence rather than an empty bundle. */
+describe("KnowledgeView over a source bundle", () => {
+  it("reads the datasource's own routes, pinned to the publication on screen", async () => {
+    const user = userEvent.setup();
+    render(<KnowledgeView datasourceId="ds-1" title="warehouse · source bundle" onClose={() => {}} />);
+    expect(await screen.findByText("bank.sales.orders_v")).toBeInTheDocument();
+    expect(fetchSourceOkfBundle).toHaveBeenCalledWith("ds-1", expect.anything());
+    expect(fetchSourceOkfPublications).toHaveBeenCalledWith("ds-1", expect.anything());
+    expect(fetchSourceOkfDocument).toHaveBeenCalledWith("ds-1", "index.md", "pub-2", expect.anything());
+    // Nothing is read through a product's routes.
+    expect(fetchOkfBundle).not.toHaveBeenCalled();
+    expect(fetchOkfDocument).not.toHaveBeenCalled();
+    expect(fetchOkfPublications).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "bank.sales.orders_v" }));
+    await waitFor(() =>
+      expect(fetchSourceOkfDocument).toHaveBeenLastCalledWith("ds-1", VIEW, "pub-2", expect.anything()),
+    );
+    await user.click(screen.getByRole("button", { name: "Download bundle" }));
+    expect(downloadSourceOkfBundle).toHaveBeenCalledWith("ds-1", "pub-2");
+    expect(downloadOkfBundle).not.toHaveBeenCalled();
+  });
+
+  it("says what a source bundle holds and counts schemas, not concepts or tools", async () => {
+    render(<KnowledgeView datasourceId="ds-1" title="warehouse · source bundle" onClose={() => {}} />);
+    const coverage = await screen.findByLabelText("Coverage");
+    expect(coverage).toHaveTextContent("1 schemas");
+    expect(coverage).not.toHaveTextContent("concepts");
+    expect(coverage).not.toHaveTextContent("tools");
+    expect(screen.getByText(/Business concepts and tools are selected in a context product/)).toBeInTheDocument();
+  });
+
+  it("asks a question of the source bundle, pinned to the publication on screen", async () => {
+    const user = userEvent.setup();
+    const { context_product_version_id: _v, product_key: _k, product_version: _n, ...selection } = context();
+    selectSourceOkfContext.mockResolvedValue({ ...selection, datasource_id: "ds-1", datasource_name: "warehouse" });
+    render(<KnowledgeView datasourceId="ds-1" title="warehouse · source bundle" onClose={() => {}} />);
+    const preview = await screen.findByRole("region", { name: "What an agent reads" });
+    await user.type(within(preview).getByLabelText("Question"), "order identifier");
+    await user.click(within(preview).getByRole("button", { name: "Preview" }));
+    expect(selectSourceOkfContext).toHaveBeenCalledWith(
+      "ds-1",
+      { question: "order identifier", publication_id: "pub-2" },
+      undefined,
+    );
+    expect(selectOkfContext).not.toHaveBeenCalled();
+    expect(await within(preview).findByText("[K1]")).toBeInTheDocument();
+  });
+
+  it("shows a refused datasource as a refusal, never as an empty bundle", async () => {
+    fetchSourceOkfBundle.mockRejectedValue(new ApiError(403, "NO_BINDING_FOR_DATASOURCE"));
+    render(<KnowledgeView datasourceId="ds-1" title="warehouse · source bundle" onClose={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("You are not permitted to read this bundle.");
+    expect(screen.queryByLabelText("Coverage")).toBeNull();
+    expect(fetchSourceOkfDocument).not.toHaveBeenCalled();
   });
 });

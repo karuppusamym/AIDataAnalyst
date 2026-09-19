@@ -138,6 +138,11 @@ TYPE_TOOL_VERSION: Final = "Atlas Tool Version"
 #: One ordinal range of a wide object's columns (`MAX_COLUMNS_PER_DOCUMENT`).
 TYPE_COLUMN_SET: Final = "Atlas Column Set"
 
+#: R11-OKF02 source bundles: the scope kind of a bundle holding one datasource's discovered,
+#: authorized objects rather than a context product's selected references. A product scope's
+#: kind (`CONTEXT_PRODUCT`) is named by `aida.okf_snapshot`, which assembles it.
+SCOPE_DATASOURCE: Final = "DATASOURCE"
+
 #: `MetadataTable` kinds, as `discovery_selection.table_kind` normalizes them.
 KIND_TABLE: Final = "TABLE"
 KIND_VIEW: Final = "VIEW"
@@ -467,7 +472,13 @@ class OkfPolicyPartition:
 
 @dataclass(frozen=True, slots=True)
 class OkfScope:
-    """What was selected, and under whose authority it was frozen."""
+    """What was selected, and under whose authority it was frozen.
+
+    Two kinds. A `CONTEXT_PRODUCT` scope is a product version's selected, approved references
+    and fills the `product_*` fields. A `DATASOURCE` scope (R11-OKF02) is one datasource's
+    discovered objects as the reader may read them, names that datasource in `datasource_id`
+    and leaves every `product_*` field empty: a source bundle asserts no product's purpose.
+    """
 
     kind: str
     organization_id: str
@@ -481,6 +492,10 @@ class OkfScope:
     #: Approved tool versions the product makes eligible. References only: a data answer goes
     #: through Atlas execution, and no runnable code or credential is ever exported.
     eligible_tool_version_ids: tuple[str, ...] = ()
+    #: R11-OKF02: the one datasource of a `DATASOURCE` scope. Last, and left out of a product
+    #: snapshot's written form when empty (`snapshot_to_document`), so a product snapshot -- and
+    #: its `content_snapshot_digest` -- reads exactly as it did before source bundles existed.
+    datasource_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,9 +604,18 @@ def _as_document(value: Any) -> Any:
 
 
 def snapshot_to_document(snapshot: OkfSnapshot) -> dict[str, Any]:
-    """The snapshot as a plain JSON-able mapping. Lossless, so the round trip below is real."""
+    """The snapshot as a plain JSON-able mapping. Lossless, so the round trip below is real.
+
+    One key is written only when set: `scope.datasource_id`, which only a source bundle has.
+    Written as `null` on every product snapshot it would change every stored product
+    snapshot's `content_snapshot_digest` for content that did not change -- the thing that
+    digest exists to rule out. Absent, `snapshot_from_document` restores the field's default,
+    so the round trip stays lossless either way.
+    """
     document = _as_document(snapshot)
     assert isinstance(document, dict)
+    if document["scope"].get("datasource_id") is None:
+        document["scope"].pop("datasource_id", None)
     return document
 
 
@@ -1696,6 +1720,14 @@ def _concept_document(
 
 def _scope_extension(snapshot: OkfSnapshot) -> dict[str, Any]:
     scope = snapshot.scope
+    if scope.kind == SCOPE_DATASOURCE and scope.datasource_id is not None:
+        # A source bundle's documents name their source, not an empty product. A branch rather
+        # than extra keys on the product shape, so no product document's bytes move.
+        return {
+            "kind": scope.kind,
+            "source_key": source_key(scope.datasource_id),
+            "policy_partition_digest": _policy_partition_digest(scope.policy_partition),
+        }
     return {
         "kind": scope.kind,
         "product_key": scope.product_key,
@@ -1797,6 +1829,8 @@ def _entry(label: str, target: str, description: str) -> str:
 
 def _root_index(snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
     scope = snapshot.scope
+    if scope.kind == SCOPE_DATASOURCE:
+        return _source_root_index(snapshot)
     overview = [
         f"* Scope: {scope.kind}.",
         f"* Sources in scope: {len(snapshot.sources)}.",
@@ -1862,6 +1896,45 @@ def _root_index(snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
             )
         )
     return _index_document("index.md", sections, root=True)
+
+
+def _source_root_index(snapshot: OkfSnapshot) -> OkfDocument:
+    """The root of a source bundle (R11-OKF02): one datasource, as discovered.
+
+    Says what a source bundle is *not* as well as what it is. It holds discovered objects and
+    the approved descriptions Atlas has for them; business concepts and tool versions are
+    selected, approved and pinned by a context product, so a reader who needs meaning or a
+    governed figure is pointed there rather than handed an unpinned copy. Every count is over
+    the objects the reader's own read decision admitted, exactly as in a product bundle.
+    """
+    overview = [
+        f"* Scope: {snapshot.scope.kind}.",
+        f"* Objects in scope: {len(snapshot.objects)} "
+        f"(routines {len(snapshot.routines)}, packages {len(snapshot.packages)}).",
+        f"* Schemas in scope: {len(snapshot.schemas)}.",
+        "* This bundle is one data source as Atlas discovered it: its objects, their captured "
+        "structure and the approved descriptions Atlas holds. It asserts no business purpose "
+        "for the source.",
+        "* Business concepts and approved tool versions are not part of a source bundle. They "
+        "are selected and approved in a context product, whose bundle carries them.",
+        "* Every count on this page is over the objects the reader was authorized to see. "
+        "Nothing outside that authority is counted, linked or named anywhere in this bundle.",
+        "* Source values are not in this bundle. A current figure needs an approved Atlas tool "
+        "through the query gateway, and its execution receipt.",
+    ]
+    source_entries = [
+        _entry(
+            source.name,
+            f"{_source_dir(source.key)}/",
+            f"{source.dialect} source, "
+            f"{sum(1 for schema in snapshot.schemas if schema.source_key == source.key)} "
+            f"schema(s) in scope",
+        )
+        for source in sorted(snapshot.sources, key=lambda item: (item.name, item.key))
+    ]
+    return _index_document(
+        "index.md", [("Bundle", overview), ("Sources", source_entries)], root=True
+    )
 
 
 def _source_index(source: OkfSourceFacts, snapshot: OkfSnapshot, paths: _Paths) -> OkfDocument:
@@ -2257,25 +2330,25 @@ def _scope_digest(snapshot: OkfSnapshot) -> str:
     to match but whose scope differs are not the same export, and a reader comparing digests
     needs to see that.
     """
-    return _digest_text(
-        _canonical_json(
-            {
-                "kind": snapshot.scope.kind,
-                "organization_id": snapshot.scope.organization_id,
-                "product_key": snapshot.scope.product_key,
-                "product_version": snapshot.scope.product_version,
-                "product_fingerprint": snapshot.scope.product_fingerprint,
-                "policy_partition": _as_document(snapshot.scope.policy_partition),
-                "sources": sorted(source.key for source in snapshot.sources),
-                "schemas": sorted(schema.key for schema in snapshot.schemas),
-                "objects": sorted(obj.key for obj in snapshot.objects),
-                "routines": sorted(routine.key for routine in snapshot.routines),
-                "packages": sorted(package.key for package in snapshot.packages),
-                "concepts": sorted(concept.key for concept in snapshot.concepts),
-                "tools": sorted(tool.key for tool in snapshot.tools),
-            }
-        )
-    )
+    payload: dict[str, Any] = {
+        "kind": snapshot.scope.kind,
+        "organization_id": snapshot.scope.organization_id,
+        "product_key": snapshot.scope.product_key,
+        "product_version": snapshot.scope.product_version,
+        "product_fingerprint": snapshot.scope.product_fingerprint,
+        "policy_partition": _as_document(snapshot.scope.policy_partition),
+        "sources": sorted(source.key for source in snapshot.sources),
+        "schemas": sorted(schema.key for schema in snapshot.schemas),
+        "objects": sorted(obj.key for obj in snapshot.objects),
+        "routines": sorted(routine.key for routine in snapshot.routines),
+        "packages": sorted(package.key for package in snapshot.packages),
+        "concepts": sorted(concept.key for concept in snapshot.concepts),
+        "tools": sorted(tool.key for tool in snapshot.tools),
+    }
+    if snapshot.scope.datasource_id is not None:
+        # Only a source scope has one, so a product's scope digest is unchanged by the key.
+        payload["datasource_id"] = snapshot.scope.datasource_id
+    return _digest_text(_canonical_json(payload))
 
 
 def _source_object_versions(snapshot: OkfSnapshot) -> list[dict[str, Any]]:
@@ -2319,6 +2392,27 @@ def _source_object_versions(snapshot: OkfSnapshot) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: (str(row["kind"]), str(row["key"])))
 
 
+def _manifest_scope(scope: OkfScope) -> dict[str, Any]:
+    """The manifest's `scope` block. A source bundle names its datasource and source key; a
+    product bundle's block is exactly what it was before source bundles existed."""
+    if scope.kind == SCOPE_DATASOURCE and scope.datasource_id is not None:
+        return {
+            "kind": scope.kind,
+            "organization_id": scope.organization_id,
+            "datasource_id": scope.datasource_id,
+            "source_key": source_key(scope.datasource_id),
+        }
+    return {
+        "kind": scope.kind,
+        "organization_id": scope.organization_id,
+        "product_key": scope.product_key,
+        "product_version": scope.product_version,
+        "product_version_id": scope.product_version_id,
+        "product_fingerprint": scope.product_fingerprint,
+        "eligible_tool_version_ids": sorted(scope.eligible_tool_version_ids),
+    }
+
+
 def _manifest(snapshot: OkfSnapshot, documents: Sequence[OkfDocument]) -> dict[str, Any]:
     return {
         "manifest_version": MANIFEST_VERSION,
@@ -2338,15 +2432,7 @@ def _manifest(snapshot: OkfSnapshot, documents: Sequence[OkfDocument]) -> dict[s
             "profile_version": snapshot.profile_version,
         },
         "captured_at": snapshot.captured_at,
-        "scope": {
-            "kind": snapshot.scope.kind,
-            "organization_id": snapshot.scope.organization_id,
-            "product_key": snapshot.scope.product_key,
-            "product_version": snapshot.scope.product_version,
-            "product_version_id": snapshot.scope.product_version_id,
-            "product_fingerprint": snapshot.scope.product_fingerprint,
-            "eligible_tool_version_ids": sorted(snapshot.scope.eligible_tool_version_ids),
-        },
+        "scope": _manifest_scope(snapshot.scope),
         "policy_partition": {
             **_as_document(snapshot.scope.policy_partition),
             "digest": _policy_partition_digest(snapshot.scope.policy_partition),
@@ -2956,6 +3042,30 @@ def _validate_snapshot_shape(snapshot: OkfSnapshot) -> None:
             raise OkfExportError(
                 f"freshness names source {freshness.source_key!r}, which is not in the snapshot"
             )
+    if snapshot.scope.kind == SCOPE_DATASOURCE:
+        _validate_source_scope(snapshot, source_keys)
+
+
+def _validate_source_scope(snapshot: OkfSnapshot, source_keys: set[str]) -> None:
+    """R11-OKF02: a source bundle holds its one datasource and nothing else.
+
+    Structural rather than trusted to the freeze. A source snapshot carrying a second source,
+    a concept or a tool would render a count or a link reaching past the one datasource whose
+    read decision admitted the reader -- so it is a refused export, not a larger bundle.
+    """
+    datasource_id = snapshot.scope.datasource_id
+    if datasource_id is None:
+        raise OkfExportError("a DATASOURCE scope must name its datasource")
+    if source_keys != {source_key(datasource_id)}:
+        raise OkfExportError(
+            "a DATASOURCE scope holds exactly its own source; the snapshot names "
+            f"{len(source_keys)} source(s)"
+        )
+    if snapshot.concepts or snapshot.tools:
+        raise OkfExportError(
+            "business concepts and tool versions belong to a context product's bundle, "
+            "not to a source bundle"
+        )
 
 
 # --- validation: general OKF conformance, then Atlas's stronger publish policy ----------

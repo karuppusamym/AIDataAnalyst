@@ -40,6 +40,7 @@ already produced by an organization-scoped read.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
@@ -54,6 +55,11 @@ from aida.context_compiler import (
     ResolvedRoutineReference,
     ResolvedSourceFreshness,
     ResolvedViewCoverage,
+)
+from aida.context_product_coverage import (
+    load_routine_references,
+    load_source_freshness,
+    load_view_coverage,
 )
 from aida.discovery_selection import table_kind
 from aida.domain_service import check_cross_boundary_grant
@@ -90,6 +96,7 @@ from aida.okf_export import (
     DESCRIPTION_NONE,
     DESCRIPTION_WITHHELD,
     KIND_TABLE,
+    SCOPE_DATASOURCE,
     OkfApproval,
     OkfColumnFacts,
     OkfConceptFacts,
@@ -122,6 +129,15 @@ from aida.security_types import SecurityContext
 #: takes away, which is the distinction `api.preview_agent_retrieval` already draws.
 BUNDLE_ACTION: Final = "CONSUME_CONTEXT"
 SCOPE_CONTEXT_PRODUCT: Final = "CONTEXT_PRODUCT"
+#: R11-OKF02: the action a *source* bundle read is. `READ_METADATA`, the decision every catalog
+#: read of the datasource already takes, because a source bundle carries nothing a catalog read
+#: of that datasource does not return -- names, captured structure, approved descriptions,
+#: definition coverage -- and none of the product-selected meaning or tools that make a product
+#: bundle consumable context (`BUNDLE_ACTION`).
+SOURCE_BUNDLE_ACTION: Final = "READ_METADATA"
+#: Only objects the source currently holds. A deprecated table leaves the source bundle (its
+#: `log.md` records the removal); a product that pins it still renders it as deprecated.
+_DISCOVERED: Final = "ACTIVE"
 #: Principal-id prefixes that mark an automated actor. `agent:` is the platform's existing
 #: convention (`agent_contracts`, `mcp_server`); the rest are defensive.
 _AUTOMATION_PREFIXES: Final = ("agent:", "service:", "process:", "system:", "job:")
@@ -505,6 +521,95 @@ async def admit_datasources(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class OkfSourceAdmission:
+    """R11-OKF02: one reader's read decision over one datasource, taken on the request.
+
+    `schema_ids` are the schemas whose objects the reader may see, sorted. They are what the
+    store keys a source bundle's lineage on, and what the freeze is cut to, so the bundle stored
+    under an admission is the bundle that admission produced -- the same hand-over
+    `admit_datasources` makes for a product.
+    """
+
+    datasource: DataSource
+    schema_ids: tuple[UUID, ...]
+    #: Whether a workspace decision was reached at all. False when the datasource resolves to
+    #: no workspace and the deployment's unresolved posture let the read proceed.
+    decided: bool
+    workspace_id: UUID | None
+
+
+async def admit_source(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    datasource: DataSource,
+) -> OkfSourceAdmission:
+    """R11-OKF02: decide what one reader may see of one datasource, or raise the refusal.
+
+    Two steps, both the platform's own gate and neither a second opinion:
+
+    1. **The datasource's `READ_METADATA` decision** -- exactly the one the catalog table list,
+       the lineage routes and the MCP lineage tools take for this datasource. A refusal raises
+       `AuthorizationDenied` and the source bundle does not exist for this reader: no lineage,
+       no stored publication by id, nothing counted.
+    2. **One decision per schema, with the schema named**, when step 1 reached a workspace. A
+       schema a policy's `schema_pattern` denies is left out entirely -- its objects, routines
+       and packages are absent from the text, the links and every count, which is acceptance
+       OKF-D inside one source. Skipped when step 1 resolved no workspace, because every schema
+       would then get step 1's own undecided answer, and a gate call that cannot differ is a
+       query per schema for nothing.
+
+    A binding scoped to named schemas refuses step 1 (the gate reads an unnamed schema as
+    outside it), exactly as it refuses the catalog's read of the whole datasource; a source
+    bundle is never wider than that read, and here it is no narrower either.
+    """
+    outcome = await gate(
+        session,
+        context,
+        settings=settings,
+        action=SOURCE_BUNDLE_ACTION,
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
+    schemas = (
+        await session.execute(
+            select(MetadataSchema.id, MetadataSchema.name)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(
+                MetadataCatalog.datasource_id == datasource.id,
+                MetadataCatalog.organization_id == datasource.organization_id,
+                MetadataSchema.organization_id == datasource.organization_id,
+            )
+        )
+    ).all()
+    admitted: list[UUID] = []
+    for schema_id, schema_name in sorted(schemas, key=lambda row: str(row[0])):
+        if outcome.decided:
+            try:
+                await gate(
+                    session,
+                    context,
+                    settings=settings,
+                    action=SOURCE_BUNDLE_ACTION,
+                    resource_type="datasource",
+                    resource_id=str(datasource.id),
+                    datasource_id=datasource.id,
+                    schema_name=schema_name,
+                )
+            except AuthorizationDenied:
+                continue
+        admitted.append(schema_id)
+    return OkfSourceAdmission(
+        datasource=datasource,
+        schema_ids=tuple(admitted),
+        decided=outcome.decided,
+        workspace_id=outcome.workspace_id,
+    )
+
+
 # --- assembly ---------------------------------------------------------------------------
 
 
@@ -599,6 +704,138 @@ async def freeze_snapshot(
     table_rows = [row for row in table_rows if row[0].datasource_id in admitted]
     routine_rows = [row for row in routine_rows if row[0].datasource_id in admitted]
     tool_rows = [row for row in tool_rows if row[0].datasource_id in admitted]
+    return await _freeze_admitted(
+        session,
+        organization_id=organization_id,
+        scope=_product_scope(product, version, tool_rows),
+        captured_at=captured_at,
+        admitted=admitted,
+        table_rows=[(row[0], row[1], row[2]) for row in table_rows],
+        routine_rows=[(row[0], row[1], row[2]) for row in routine_rows],
+        tool_rows=tool_rows,
+        routines=routines,
+        views=views,
+        ontology=ontology,
+        freshness=freshness,
+    )
+
+
+async def freeze_source_snapshot(
+    session: AsyncSession,
+    *,
+    admission: OkfSourceAdmission,
+    captured_at: datetime,
+) -> OkfSnapshot:
+    """R11-OKF02: freeze one datasource's discovered, authorized objects (design section 14:
+    "Source bundles are scoped exports of discovered, authorized objects").
+
+    `admission` is the reader's decision from `admit_source`, handed in for the same reason a
+    product's `admitted` is: the bundle stored under an authority digest must be the bundle that
+    decision produced. Objects are the datasource's ACTIVE tables, views and routines in the
+    admitted schemas; routine, view and freshness coverage come from the context compiler's own
+    resolvers (`load_routine_references`, `load_view_coverage`, `load_source_freshness`), called
+    with this scope's ids instead of a product's pins, so a source document and a product
+    document about one object are built from the same facts by the same code.
+
+    No ontology and no tools: concepts and tool versions are approved and pinned by a context
+    product, and a source has no pin to read them at. `freeze_snapshot`'s other half -- columns,
+    descriptions, capture versions, reviewed lineage, packages -- is shared, unchanged.
+    """
+    datasource = admission.datasource
+    organization_id = datasource.organization_id
+    schema_ids = list(admission.schema_ids)
+    table_rows = (
+        (
+            await session.execute(
+                select(MetadataTable, MetadataSchema, MetadataCatalog)
+                .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+                .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+                .where(
+                    MetadataTable.organization_id == organization_id,
+                    MetadataTable.datasource_id == datasource.id,
+                    MetadataTable.schema_id.in_(schema_ids),
+                    MetadataTable.status == _DISCOVERED,
+                )
+            )
+        ).all()
+        if schema_ids
+        else []
+    )
+    routine_rows = (
+        (
+            await session.execute(
+                select(MetadataRoutine, MetadataSchema, MetadataCatalog)
+                .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+                .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+                .where(
+                    MetadataRoutine.organization_id == organization_id,
+                    MetadataRoutine.datasource_id == datasource.id,
+                    MetadataRoutine.schema_id.in_(schema_ids),
+                    MetadataRoutine.status == _DISCOVERED,
+                )
+            )
+        ).all()
+        if schema_ids
+        else []
+    )
+    table_ids = [row[0].id for row in table_rows]
+    # Reads and writes are cut to this scope's tables by the resolver itself, so a routine
+    # writing a table in another datasource -- or in a schema this reader was refused -- keeps
+    # no link to it, and the renderer is never handed a dangling reference.
+    routines = await load_routine_references(
+        session, organization_id, [row[0].id for row in routine_rows], table_ids
+    )
+    views = await load_view_coverage(session, organization_id, table_ids)
+    freshness = await load_source_freshness(session, organization_id, table_ids)
+    return await _freeze_admitted(
+        session,
+        organization_id=organization_id,
+        scope=OkfScope(
+            kind=SCOPE_DATASOURCE,
+            organization_id=str(organization_id),
+            # A source has no approved product policy to partition by. What it can state is
+            # that source values stay behind the gateway; the reader's authority is the
+            # lineage key the store computes, not a partition field.
+            policy_partition=OkfPolicyPartition(
+                allowed_consumer_roles=(), source_values="GATEWAY_ONLY", classifications=()
+            ),
+            datasource_id=str(datasource.id),
+        ),
+        captured_at=captured_at,
+        admitted={datasource.id: datasource},
+        table_rows=[(row[0], row[1], row[2]) for row in table_rows],
+        routine_rows=[(row[0], row[1], row[2]) for row in routine_rows],
+        tool_rows=[],
+        routines=routines,
+        views=views,
+        ontology=[],
+        freshness=freshness,
+    )
+
+
+async def _freeze_admitted(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    scope: OkfScope,
+    captured_at: datetime,
+    admitted: Mapping[UUID, DataSource],
+    table_rows: Sequence[tuple[MetadataTable, MetadataSchema, MetadataCatalog]],
+    routine_rows: Sequence[tuple[MetadataRoutine, MetadataSchema, MetadataCatalog]],
+    tool_rows: Sequence[tuple[GovernedToolVersion, GovernedTool]],
+    routines: Sequence[ResolvedRoutineReference],
+    views: Sequence[ResolvedViewCoverage],
+    ontology: Sequence[ResolvedOntologyMeaning],
+    freshness: Sequence[ResolvedSourceFreshness],
+) -> OkfSnapshot:
+    """The half of a freeze every scope shares: rows already admitted in, the value out.
+
+    Columns, approved descriptions, captured definition versions, parameters and reviewed view
+    lineage are loaded for the admitted objects only, then `_assemble` builds the frozen value.
+    A product and a source differ only in how they chose `table_rows`/`routine_rows` and in the
+    `scope` they are frozen under -- so the INV-6 and approval rules below hold for both by
+    construction rather than by a second copy.
+    """
     admitted_table_ids = [row[0].id for row in table_rows]
     admitted_routine_ids = [row[0].id for row in routine_rows]
 
@@ -660,12 +897,11 @@ async def freeze_snapshot(
         session, organization_id, [meaning.version_id for meaning in ontology]
     )
     return _assemble(
-        product=product,
-        version=version,
+        scope=scope,
         captured_at=captured_at,
         admitted=admitted,
-        table_rows=[(row[0], row[1], row[2]) for row in table_rows],
-        routine_rows=[(row[0], row[1], row[2]) for row in routine_rows],
+        table_rows=table_rows,
+        routine_rows=routine_rows,
         columns=list(columns),
         parameters=list(parameters),
         asset_descriptions=asset_descriptions,
@@ -731,6 +967,31 @@ def _tool_facts(
             )
         )
     return tuple(sorted(facts, key=lambda item: (item.name, item.version, item.key)))
+
+
+def _product_scope(
+    product: ContextProduct,
+    version: ContextProductVersion,
+    tool_rows: Sequence[tuple[GovernedToolVersion, GovernedTool]],
+) -> OkfScope:
+    """A product version's scope, exactly as `_assemble` built it before source bundles."""
+    return OkfScope(
+        kind=SCOPE_CONTEXT_PRODUCT,
+        organization_id=str(version.organization_id),
+        policy_partition=_policy_partition(version),
+        product_key=product.product_key,
+        product_version=version.version,
+        product_version_id=str(version.id),
+        product_fingerprint=version.fingerprint,
+        product_name=version.name,
+        product_purpose=version.purpose,
+        # R11-OKF02: only the pins that resolved to a tool over an admitted datasource. A pin to
+        # a tool the reader's authorization refused is not listed, exactly as the tool's own
+        # document is not rendered and not counted (OKF-D).
+        eligible_tool_version_ids=tuple(
+            sorted(str(tool_version.id) for tool_version, _tool in tool_rows)
+        ),
+    )
 
 
 def _policy_partition(version: ContextProductVersion) -> OkfPolicyPartition:
@@ -856,8 +1117,7 @@ def _routine_limitations(resolved: ResolvedRoutineReference) -> tuple[str, ...]:
 
 def _assemble(
     *,
-    product: ContextProduct,
-    version: ContextProductVersion,
+    scope: OkfScope,
     captured_at: datetime,
     admitted: Mapping[UUID, DataSource],
     table_rows: Sequence[tuple[MetadataTable, MetadataSchema, MetadataCatalog]],
@@ -952,7 +1212,12 @@ def _assemble(
         }
 
     objects: list[OkfObjectFacts] = []
-    for table, schema, catalog in sorted(table_rows, key=lambda row: row[0].name):
+    # By name, then identity key: two same-named objects in different schemas -- routine in a
+    # source bundle, which holds every schema -- otherwise keep the database's unordered row
+    # order, and a snapshot of unchanged content would digest differently on a re-read.
+    for table, schema, catalog in sorted(
+        table_rows, key=lambda row: (row[0].name, keys_by_table[row[0].id])
+    ):
         key = keys_by_table[table.id]
         kind = table_kind(table.object_type)
         asset_version = asset_descriptions.get(table.id)
@@ -1031,7 +1296,10 @@ def _assemble(
     routine_facts: list[OkfRoutineFacts] = []
     packages: dict[str, list[str]] = {}
     package_rows: dict[str, tuple[MetadataRoutine, MetadataSchema, MetadataCatalog]] = {}
-    for routine, schema, catalog in sorted(routine_rows, key=lambda row: row[0].name):
+    # Overloads share a name; the key separates them, as for objects above.
+    for routine, schema, catalog in sorted(
+        routine_rows, key=lambda row: (row[0].name, keys_by_routine[row[0].id])
+    ):
         key = keys_by_routine[routine.id]
         reference = resolved_by_id.get(routine.id)
         if reference is None:
@@ -1172,23 +1440,7 @@ def _assemble(
     source_keys = {source.key: source for source in sources}
     return OkfSnapshot(
         captured_at=captured_at.isoformat(),
-        scope=OkfScope(
-            kind=SCOPE_CONTEXT_PRODUCT,
-            organization_id=str(version.organization_id),
-            policy_partition=_policy_partition(version),
-            product_key=product.product_key,
-            product_version=version.version,
-            product_version_id=str(version.id),
-            product_fingerprint=version.fingerprint,
-            product_name=version.name,
-            product_purpose=version.purpose,
-            # R11-OKF02: only the pins that resolved to a tool over an admitted datasource. A
-            # pin to a tool the reader's authorization refused is not listed, exactly as the
-            # tool's own document is not rendered and not counted (OKF-D).
-            eligible_tool_version_ids=tuple(
-                sorted(str(tool_version.id) for tool_version, _tool in tool_rows)
-            ),
-        ),
+        scope=scope,
         sources=sources,
         schemas=tuple(sorted(schemas.values(), key=lambda item: item.qualified_name)),
         objects=tuple(objects),

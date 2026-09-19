@@ -3763,6 +3763,29 @@ export interface OkfPublicationRead {
   changes: OkfChangeSummaryRead;
 }
 
+/** R11-OKF02: question-specific context from one datasource's stored OKF bundle. */
+export interface OkfSourceContextRead {
+  datasource_id: string;
+  datasource_name: string;
+  publication: OkfPublicationRead;
+  status: string;
+  question_terms: string[];
+  documents: OkfContextDocumentRead[];
+  omitted: OkfContextOmissionRead[];
+  omitted_count: number;
+  ambiguous: string[];
+  max_chars: number;
+  used_chars: number;
+  guidance: string;
+  markdown: string;
+}
+
+/** R11-OKF02: the reader's own lineage of stored publications for one datasource's bundle, */
+export interface OkfSourcePublicationHistoryRead {
+  datasource_id: string;
+  items: OkfPublicationRead[];
+}
+
 export interface OntologyCreate {
   ontology_key: string;
   base_version?: number;

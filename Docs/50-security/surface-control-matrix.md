@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **532**
-- By family: BULK 11, EXPORT 7, GRAPHQL 23, JOB 27, MCP 9, REST 454, SDK 1
+- Surfaces covered: **537**
+- By family: BULK 11, EXPORT 8, GRAPHQL 23, JOB 27, MCP 9, REST 458, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -74,6 +74,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/context-product-versions/{version_id}/compile/download` | EXPORT | `aida.context_compiler_api.download_context_compilation` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-product-versions/{version_id}/okf-bundle/download` | EXPORT | `aida.okf_export_api.download_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/datasources/{datasource_id}/model/export.xlsx` | EXPORT | `aida.model_export_api.export_datasource_model` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/okf-bundle/download` | EXPORT | `aida.okf_export_api.download_source_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export` | EXPORT | `aida.lineage_evidence_export_api.export_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/metadata/tables/{table_id}/evidence/export` | EXPORT | `aida.asset_evidence_api.export_asset_evidence` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/audit-events/export.jsonl` | EXPORT | `aida.audit_export_api.export_audit_events` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
@@ -202,6 +203,9 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/metadata-ingestion-batches` | REST | `atlas.modules.ingestion.router.list_metadata_ingestion_batches` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.list_metadata_ingestions` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/model-imports` | REST | `aida.model_import_api.list_model_imports` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | yes | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/okf-bundle/document` | REST | `aida.okf_export_api.read_source_okf_document` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GET /v1/datasources/{datasource_id}/okf-bundle/publications` | REST | `aida.okf_export_api.list_source_okf_publications` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GET /v1/datasources/{datasource_id}/okf-bundle` | REST | `aida.okf_export_api.inspect_source_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GET /v1/datasources/{datasource_id}/openlineage-events` | REST | `aida.openlineage_api.list_openlineage_run_events` | Auditor, DataAdmin, DataSteward, MetadataAdmin, Operations, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage` | REST | `aida.procedure_lineage_api.list_deep_procedure_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/procedures/{routine_id}/parse-coverage` | REST | `aida.procedure_lineage_api.get_routine_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
@@ -430,6 +434,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/datasources/{datasource_id}/metadata-ingestions` | REST | `atlas.modules.ingestion.router.ingest_metadata_envelope` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/model/import` | REST | `aida.model_import_api.upload_model_workbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/native-policy-sync/preview` | REST | `aida.policy_native_sync_api.preview_native_policy_sync` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/datasources/{datasource_id}/okf-bundle/context` | REST | `aida.okf_export_api.select_source_okf_context` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage/parse` | REST | `aida.procedure_lineage_api.parse_deep_procedure_lineage_endpoint` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/profiling-exception-policies` | REST | `aida.api.request_profiling_exception_policy` | DataAdmin, DataSteward, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/datasources/{datasource_id}/quality-rule-packs` | REST | `aida.quality_api.create_rule_pack` | DataAdmin, DataSteward, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |

@@ -34,6 +34,14 @@ even after a newer publication, for as long as it is retained.
 **Question-specific context.** `POST .../okf-bundle/context` is how a reader that has a
 question -- rather than a path -- takes the few sections of the bundle it needs, with exact
 receipts (`aida.okf_context`). It reads through the same store function as every other door.
+
+**Source bundles (R11-OKF02).** `/v1/datasources/{datasource_id}/okf-bundle...` are the same five
+doors -- manifest, download, document, publications, question context -- onto one datasource's
+bundle of discovered, authorized objects (design section 14). They read through
+`aida.okf_store.read_published_source_bundle`, which takes the datasource's `READ_METADATA`
+decision on every request and then applies the product bundle's own store rules, and they
+answer with the product routes' own response shapes wherever the shape does not name a product.
+A refused datasource is a 403 with the bare reason code, as the catalog's read of it is.
 """
 
 from __future__ import annotations
@@ -46,23 +54,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
 from aida.db import get_session
-from aida.okf_context import citation_ids, render_markdown
-from aida.okf_export import OKF_CONFORMANCE_STATUS, bundle_archive_bytes
+from aida.okf_context import OkfContext, citation_ids, render_markdown
+from aida.okf_export import OKF_CONFORMANCE_STATUS, OkfBundle, bundle_archive_bytes
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
+    SOURCE_BUNDLE_CHANNELS,
     OkfPublishedBundle,
+    OkfPublishedSourceBundle,
     OkfStoredContext,
+    OkfStoredSourceContext,
     as_bundle,
     list_publications,
     load_document,
     load_documents,
     read_object_knowledge,
     read_okf_context,
+    read_okf_source_context,
     read_published_bundle,
+    read_published_source_bundle,
     record_okf_read,
+    record_okf_source_read,
 )
 from aida.okf_store_models import OkfBundleDocument, OkfBundlePublication
 from aida.schemas import (
+    ApiModel,
     OkfBundleFileRead,
     OkfBundleRead,
     OkfChangeSummaryRead,
@@ -147,7 +162,39 @@ def document_read(
     )
 
 
-def bundle_read(stored: OkfPublishedBundle) -> OkfBundleRead:
+class OkfSourcePublicationHistoryRead(ApiModel):
+    """R11-OKF02: the reader's own lineage of stored publications for one datasource's bundle,
+    newest first. Only the lineage this request's read decision computes: a publication built
+    under another admission is neither listed nor counted."""
+
+    datasource_id: UUID
+    items: list[OkfPublicationRead]
+
+
+class OkfSourceContextRead(ApiModel):
+    """R11-OKF02: question-specific context from one datasource's stored OKF bundle.
+
+    The product context read's fields, with the datasource in place of the product. A source
+    bundle holds no business concepts and no tools, so a question about meaning or a current
+    figure is better asked of a context product; `NO_MATCH` is still an answer, not an error.
+    """
+
+    datasource_id: UUID
+    datasource_name: str
+    publication: OkfPublicationRead
+    status: str
+    question_terms: list[str]
+    documents: list[OkfContextDocumentRead]
+    omitted: list[OkfContextOmissionRead]
+    omitted_count: int
+    ambiguous: list[str]
+    max_chars: int
+    used_chars: int
+    guidance: str
+    markdown: str
+
+
+def bundle_read(stored: OkfPublishedBundle | OkfPublishedSourceBundle) -> OkfBundleRead:
     """The manifest view of a stored publication. Built from stored columns only -- no document
     body is loaded to answer it."""
     publication = stored.publication
@@ -173,13 +220,35 @@ def bundle_read(stored: OkfPublishedBundle) -> OkfBundleRead:
 
 def context_read(found: OkfStoredContext) -> OkfContextRead:
     """Question-specific context as the API describes it. Shared with the MCP knowledge tool."""
-    stored, selected = found.stored, found.context
-    ids = citation_ids(selected)
+    stored = found.stored
     return OkfContextRead(
         context_product_version_id=stored.version.id,
         product_key=stored.product.product_key,
         product_version=stored.version.version,
         publication=publication_read(stored.publication, is_current=stored.is_current),
+        **_selection_fields(
+            found.context,
+            label=f"{stored.product.product_key} v{stored.version.version}",
+        ),
+    )
+
+
+def source_context_read(found: OkfStoredSourceContext) -> OkfSourceContextRead:
+    """R11-OKF02: question-specific context from a source bundle, built by the same field
+    mapping as a product's so the two answers cannot describe one selection differently."""
+    stored = found.stored
+    return OkfSourceContextRead(
+        datasource_id=stored.datasource.id,
+        datasource_name=stored.datasource.name,
+        publication=publication_read(stored.publication, is_current=stored.is_current),
+        **_selection_fields(found.context, label=f"data source {stored.datasource.name}"),
+    )
+
+
+def _selection_fields(selected: OkfContext, *, label: str) -> dict[str, Any]:
+    """The part of a context answer that is the selection itself, whichever bundle it is of."""
+    ids = citation_ids(selected)
+    return dict(
         status=selected.status,
         question_terms=list(selected.question_terms),
         documents=[
@@ -221,9 +290,7 @@ def context_read(found: OkfStoredContext) -> OkfContextRead:
         max_chars=selected.max_chars,
         used_chars=selected.used_chars,
         guidance=selected.guidance,
-        markdown=render_markdown(
-            selected, product=f"{stored.product.product_key} v{stored.version.version}"
-        ),
+        markdown=render_markdown(selected, product=label),
     )
 
 
@@ -319,12 +386,7 @@ async def download_okf_bundle(
     stored = await read_published_bundle(
         session, version_id, context, settings, publication_id=publication_id
     )
-    validation = stored.validation
-    if not validation.valid:
-        raise HTTPException(status_code=409, detail={"findings": list(validation.findings)})
-    publication = stored.publication
-    bundle = as_bundle(publication, await load_documents(session, publication))
-    archive = bundle_archive_bytes(bundle)
+    bundle = await _publishable_bundle(session, stored)
     record_okf_read(
         session,
         context,
@@ -335,13 +397,31 @@ async def download_okf_bundle(
     product_key = stored.product.product_key
     product_version = stored.version.version
     await session.commit()
+    return _archive_response(
+        stored.publication, bundle, filename=f"{product_key}-{product_version}-okf-bundle.zip"
+    )
+
+
+async def _publishable_bundle(
+    session: AsyncSession, stored: OkfPublishedBundle | OkfPublishedSourceBundle
+) -> OkfBundle:
+    """The stored rows of a publication that may be handed out, or the 409 that says why not.
+    One rule for every download door: a file cannot be recalled, so policy findings refuse it."""
+    validation = stored.validation
+    if not validation.valid:
+        raise HTTPException(status_code=409, detail={"findings": list(validation.findings)})
+    return as_bundle(stored.publication, await load_documents(session, stored.publication))
+
+
+def _archive_response(
+    publication: OkfBundlePublication, bundle: OkfBundle, *, filename: str
+) -> Response:
+    """The archive of exactly the stored bytes, with the digests a caller compares it against."""
     return Response(
-        content=archive,
+        content=bundle_archive_bytes(bundle),
         media_type="application/zip",
         headers={
-            "Content-Disposition": (
-                f'attachment; filename="{product_key}-{product_version}-okf-bundle.zip"'
-            ),
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Atlas-Bundle-Content-SHA256": publication.bundle_content_digest,
             "X-Atlas-Content-Snapshot-SHA256": publication.content_snapshot_digest,
             "X-Atlas-OKF-Spec-Revision": str(bundle.manifest["specification"]["revision"]),
@@ -418,6 +498,163 @@ async def list_okf_publications(
     )
     await session.commit()
     return OkfPublicationHistoryRead(context_product_version_id=version_id, items=items)
+
+
+# --- source bundles (R11-OKF02) ------------------------------------------------------------
+
+
+@router.get("/datasources/{datasource_id}/okf-bundle", response_model=OkfBundleRead)
+async def inspect_source_okf_bundle(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    publication_id: Annotated[UUID | None, Query(description=_PINNED_READ)] = None,
+) -> OkfBundleRead:
+    """One datasource's stored bundle: manifest, file index and verdict, no document bodies.
+
+    The same contract as a product's manifest route. Every object in it is one the reader's
+    `READ_METADATA` decision on this datasource -- and on each schema, where a workspace
+    decides -- admitted; nothing else is named or counted.
+    """
+    stored = await read_published_source_bundle(
+        session, datasource_id, context, settings, publication_id=publication_id
+    )
+    record_okf_source_read(
+        session,
+        context,
+        stored,
+        action="datasource.okf_bundle_inspect",
+        channel=SOURCE_BUNDLE_CHANNELS["manifest"],
+    )
+    read = bundle_read(stored)
+    await session.commit()
+    return read
+
+
+@router.get("/datasources/{datasource_id}/okf-bundle/download")
+async def download_source_okf_bundle(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    publication_id: Annotated[UUID | None, Query(description=_PINNED_DOWNLOAD)] = None,
+) -> Response:
+    """One datasource's stored bundle as a deterministic archive, under the product download's
+    rule: refused unless it satisfies the publish policy, built from the stored rows. Named by
+    the datasource id rather than its name, which is catalog text and has no place in a header.
+    """
+    stored = await read_published_source_bundle(
+        session, datasource_id, context, settings, publication_id=publication_id
+    )
+    bundle = await _publishable_bundle(session, stored)
+    record_okf_source_read(
+        session,
+        context,
+        stored,
+        action="datasource.okf_bundle_download",
+        channel=SOURCE_BUNDLE_CHANNELS["download"],
+    )
+    await session.commit()
+    return _archive_response(
+        stored.publication, bundle, filename=f"datasource-{datasource_id}-okf-bundle.zip"
+    )
+
+
+@router.get("/datasources/{datasource_id}/okf-bundle/document", response_model=OkfDocumentRead)
+async def read_source_okf_document(
+    datasource_id: UUID,
+    path: Annotated[
+        str, Query(min_length=1, max_length=512, description="Bundle-relative document path")
+    ],
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    publication_id: Annotated[UUID | None, Query(description=_PINNED_READ)] = None,
+) -> OkfDocumentRead:
+    """One stored document of a datasource's bundle, looked up only among the rows of the
+    caller's own publication -- a path in another lineage reads as not found."""
+    stored = await read_published_source_bundle(
+        session, datasource_id, context, settings, publication_id=publication_id
+    )
+    document = await load_document(session, stored.publication, path.lstrip("/"))
+    if document is None:
+        raise HTTPException(status_code=404, detail="document not found in this bundle")
+    record_okf_source_read(
+        session,
+        context,
+        stored,
+        action="datasource.okf_document_read",
+        channel=SOURCE_BUNDLE_CHANNELS["document"],
+        path=document.path,
+    )
+    read = document_read(stored.publication, document)
+    await session.commit()
+    return read
+
+
+@router.get(
+    "/datasources/{datasource_id}/okf-bundle/publications",
+    response_model=OkfSourcePublicationHistoryRead,
+)
+async def list_source_okf_publications(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> OkfSourcePublicationHistoryRead:
+    """The caller's lineage of stored publications for one datasource -- what changed, when."""
+    stored = await read_published_source_bundle(session, datasource_id, context, settings)
+    items = [
+        publication_read(item, is_current=item.id == stored.head.publication_id)
+        for item in await list_publications(session, stored)
+    ]
+    record_okf_source_read(
+        session,
+        context,
+        stored,
+        action="datasource.okf_publications_read",
+        channel=SOURCE_BUNDLE_CHANNELS["history"],
+    )
+    await session.commit()
+    return OkfSourcePublicationHistoryRead(datasource_id=datasource_id, items=items)
+
+
+@router.post(
+    "/datasources/{datasource_id}/okf-bundle/context", response_model=OkfSourceContextRead
+)
+async def select_source_okf_context(
+    datasource_id: UUID,
+    payload: OkfContextRequest,
+    context: SecurityContext = Depends(require_roles(*OKF_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> OkfSourceContextRead:
+    """The sections of one datasource's stored bundle a question needs, with receipts.
+
+    The product context route's contract: a POST so the question stays out of URLs, `NO_MATCH`
+    as an answer, and an audit record naming section anchors but never the question.
+    """
+    found = await read_okf_source_context(
+        session,
+        datasource_id,
+        context,
+        settings,
+        payload.question,
+        max_chars=payload.max_chars or settings.okf_context_default_max_chars,
+        publication_id=payload.publication_id,
+    )
+    record_okf_source_read(
+        session,
+        context,
+        found.stored,
+        action="datasource.okf_context_read",
+        channel=SOURCE_BUNDLE_CHANNELS["context"],
+        sections=found.context.receipts(),
+    )
+    read = source_context_read(found)
+    await session.commit()
+    return read
 
 
 @router.get(

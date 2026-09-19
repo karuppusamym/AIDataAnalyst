@@ -18,6 +18,12 @@
    `./definitionHistory` is imported. Demo mode answers with nothing rather
    than a fabricated bundle -- a made-up knowledge document is the one fixture
    that would be read as governed meaning.
+
+   SOURCE BUNDLES (R11-OKF02). The same five reads against one datasource's
+   bundle of discovered, authorized objects, under
+   `/v1/datasources/{id}/okf-bundle`. The server takes the datasource's own
+   read decision on every request; a refusal is a 403, and the view says so
+   rather than showing an empty bundle.
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
@@ -29,7 +35,25 @@ import type {
   OkfDocumentRead,
   OkfObjectKnowledgeRead,
   OkfPublicationHistoryRead,
+  OkfPublicationRead,
 } from "../types";
+
+/** `GET /v1/datasources/{id}/okf-bundle/publications`. Declared here, beside the
+ *  read that returns it, until `lib/types.ts` is next regenerated from the API. */
+export type OkfSourcePublicationHistoryRead = {
+  datasource_id: string;
+  items: OkfPublicationRead[];
+};
+
+/** `POST /v1/datasources/{id}/okf-bundle/context`: the product selection's
+ *  fields, with the datasource in place of the product. */
+export type OkfSourceContextRead = Omit<
+  OkfContextRead,
+  "context_product_version_id" | "product_key" | "product_version"
+> & {
+  datasource_id: string;
+  datasource_name: string;
+};
 
 const DEMO_REFUSAL = "Knowledge bundles are read from a live Atlas deployment; demo data has none.";
 
@@ -109,8 +133,69 @@ export function fetchObjectKnowledge(
  *  publication on screen. The server refuses a bundle that fails its publish
  *  policy; that refusal surfaces as the thrown `ApiError`. */
 export async function downloadOkfBundle(versionId: string, publicationId: string): Promise<void> {
+  await saveArchive(versionPath(versionId), publicationId);
+}
+
+function sourcePath(datasourceId: string): string {
+  return `/v1/datasources/${encodeURIComponent(datasourceId)}/okf-bundle`;
+}
+
+/** `GET /v1/datasources/{id}/okf-bundle` -- one datasource's stored source
+ *  bundle: manifest, file index and publication, the product manifest's shape. */
+export function fetchSourceOkfBundle(datasourceId: string, signal?: AbortSignal): Promise<OkfBundleRead> {
+  return demoOr(
+    () => demoUnavailable<OkfBundleRead>(),
+    () => get<OkfBundleRead>(sourcePath(datasourceId), signal),
+  );
+}
+
+/** `GET /v1/datasources/{id}/okf-bundle/document?path=` -- pinned like a product's. */
+export function fetchSourceOkfDocument(
+  datasourceId: string,
+  path: string,
+  publicationId: string | null,
+  signal?: AbortSignal,
+): Promise<OkfDocumentRead> {
+  const params = new URLSearchParams({ path });
+  if (publicationId) params.set("publication_id", publicationId);
+  return demoOr(
+    () => demoUnavailable<OkfDocumentRead>(),
+    () => get<OkfDocumentRead>(`${sourcePath(datasourceId)}/document?${params.toString()}`, signal),
+  );
+}
+
+/** `GET /v1/datasources/{id}/okf-bundle/publications` -- the reader's own lineage. */
+export function fetchSourceOkfPublications(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<OkfSourcePublicationHistoryRead> {
+  return demoOr(
+    () => demoUnavailable<OkfSourcePublicationHistoryRead>(),
+    () => get<OkfSourcePublicationHistoryRead>(`${sourcePath(datasourceId)}/publications`, signal),
+  );
+}
+
+/** `POST /v1/datasources/{id}/okf-bundle/context` -- the question in the body. */
+export function selectSourceOkfContext(
+  datasourceId: string,
+  body: OkfContextRequest,
+  signal?: AbortSignal,
+): Promise<OkfSourceContextRead> {
+  return demoOr(
+    () => demoUnavailable<OkfSourceContextRead>(),
+    () => postJson<OkfSourceContextRead>(`${sourcePath(datasourceId)}/context`, body, signal),
+  );
+}
+
+/** `GET /v1/datasources/{id}/okf-bundle/download?publication_id=` -- exactly the
+ *  publication on screen, refused by the server if it fails the publish policy. */
+export async function downloadSourceOkfBundle(datasourceId: string, publicationId: string): Promise<void> {
+  await saveArchive(sourcePath(datasourceId), publicationId);
+}
+
+async function saveArchive(base: string, publicationId: string): Promise<void> {
   const { blob, response } = await requestBlob(
-    `${versionPath(versionId)}/download?publication_id=${encodeURIComponent(publicationId)}`,
+    `${base}/download?publication_id=${encodeURIComponent(publicationId)}`,
   );
   const disposition = response.headers.get("Content-Disposition") || "";
   const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `okf-bundle-${publicationId}.zip`;
@@ -130,7 +215,7 @@ export async function downloadOkfBundle(versionId: string, publicationId: string
  *  something exists. */
 export function describeKnowledgeError(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.status === 404) return "No knowledge bundle you may read exists for this version.";
+    if (error.status === 404) return "No knowledge bundle you may read exists here.";
     if (error.status === 409) return `The bundle could not be published: ${error.detail}`;
     if (error.status === 401 || error.status === 403) return "You are not permitted to read this bundle.";
     return error.detail || `The bundle could not be read (HTTP ${error.status}).`;

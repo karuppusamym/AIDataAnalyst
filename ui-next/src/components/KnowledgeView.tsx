@@ -3,17 +3,22 @@ import type { FormEvent } from "react";
 import type {
   OkfBundleRead,
   OkfContextRead,
+  OkfContextRequest,
   OkfDocumentRead,
-  OkfPublicationHistoryRead,
   OkfPublicationRead,
 } from "../lib/types";
 import {
   describeKnowledgeError,
   downloadOkfBundle,
+  downloadSourceOkfBundle,
   fetchOkfBundle,
   fetchOkfDocument,
   fetchOkfPublications,
+  fetchSourceOkfBundle,
+  fetchSourceOkfDocument,
+  fetchSourceOkfPublications,
   selectOkfContext,
+  selectSourceOkfContext,
 } from "../lib/api/knowledge";
 import { Button, Empty, Pill } from "./primitives";
 import { LoadingPanel, useAsyncResource } from "./screenState";
@@ -43,7 +48,57 @@ import "./Knowledge.css";
    manifest described. A rebuild that lands while someone is reading therefore
    cannot splice a newer document into the older bundle they are looking at;
    "Refresh" is how they move to the newer one, and it says so.
+
+   TWO SCOPES (R11-OKF02). The same view reads a context product version's
+   bundle or one datasource's source bundle -- the datasource's discovered,
+   authorized objects, opened from the Sources screen. Which one is the only
+   difference: `readsFor` picks the five reads, and every rule above (pinning,
+   in-place links, receipts, no client-side assembly) holds for both.
 --------------------------------------------------------------------------- */
+
+/** Which stored bundle the view reads. */
+export type KnowledgeScope =
+  | { kind: "product"; versionId: string }
+  | { kind: "source"; datasourceId: string };
+
+/** The part of a context answer the preview shows; both scopes return it. */
+type ContextSelection = Pick<
+  OkfContextRead,
+  "status" | "ambiguous" | "documents" | "used_chars" | "max_chars" | "omitted_count"
+>;
+
+type KnowledgeReads = {
+  key: string;
+  bundle: (signal?: AbortSignal) => Promise<OkfBundleRead>;
+  document: (path: string, publicationId: string | null, signal?: AbortSignal) => Promise<OkfDocumentRead>;
+  publications: (signal?: AbortSignal) => Promise<{ items: OkfPublicationRead[] }>;
+  select: (body: OkfContextRequest) => Promise<ContextSelection>;
+  download: (publicationId: string) => Promise<void>;
+};
+
+/** The five reads for one scope, each against that scope's own routes. */
+function readsFor(scope: KnowledgeScope): KnowledgeReads {
+  if (scope.kind === "product") {
+    const id = scope.versionId;
+    return {
+      key: `product:${id}`,
+      bundle: (signal) => fetchOkfBundle(id, signal),
+      document: (path, publicationId, signal) => fetchOkfDocument(id, path, publicationId, signal),
+      publications: (signal) => fetchOkfPublications(id, signal),
+      select: (body) => selectOkfContext(id, body),
+      download: (publicationId) => downloadOkfBundle(id, publicationId),
+    };
+  }
+  const id = scope.datasourceId;
+  return {
+    key: `source:${id}`,
+    bundle: (signal) => fetchSourceOkfBundle(id, signal),
+    document: (path, publicationId, signal) => fetchSourceOkfDocument(id, path, publicationId, signal),
+    publications: (signal) => fetchSourceOkfPublications(id, signal),
+    select: (body) => selectSourceOkfContext(id, body),
+    download: (publicationId) => downloadSourceOkfBundle(id, publicationId),
+  };
+}
 
 type Group = { label: string; test: (path: string) => boolean };
 
@@ -169,12 +224,15 @@ function PublicationEntry({
  *  uses it to see whether the bundle answers a question before an agent does --
  *  and when it does not, which is `NO_MATCH`, not an error. */
 export function AgentContextPreview({
-  versionId,
+  scopeKey,
+  select,
   publicationId,
   names,
   onOpen,
 }: {
-  versionId: string;
+  /** Distinguishes one view's form from another's on the same page. */
+  scopeKey: string;
+  select: (body: OkfContextRequest) => Promise<ContextSelection>;
   publicationId: string | null;
   names: ReadonlyMap<string, string>;
   onOpen: (path: string) => void;
@@ -182,7 +240,7 @@ export function AgentContextPreview({
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<OkfContextRead | null>(null);
+  const [result, setResult] = useState<ContextSelection | null>(null);
 
   const submit = useCallback(
     async (event: FormEvent) => {
@@ -192,7 +250,7 @@ export function AgentContextPreview({
       setLoading(true);
       setError(null);
       try {
-        setResult(await selectOkfContext(versionId, { question: asked, publication_id: publicationId }));
+        setResult(await select({ question: asked, publication_id: publicationId }));
       } catch (reason) {
         setResult(null);
         setError(describeKnowledgeError(reason));
@@ -200,17 +258,18 @@ export function AgentContextPreview({
         setLoading(false);
       }
     },
-    [question, versionId, publicationId],
+    [question, select, publicationId],
   );
 
   const citations = new Map((result?.documents ?? []).map((item) => [item.path, item.citation]));
+  const inputId = `kview-ask-${scopeKey.replace(/[^A-Za-z0-9_-]/g, "-")}`;
   return (
     <section aria-label="What an agent reads">
       <p className="kview__sub">What an agent reads</p>
       <form className="kview__ask" onSubmit={(event) => void submit(event)}>
-        <label htmlFor={`kview-ask-${versionId}`}>Question</label>
+        <label htmlFor={inputId}>Question</label>
         <input
-          id={`kview-ask-${versionId}`}
+          id={inputId}
           value={question}
           maxLength={2000}
           onChange={(event) => setQuestion(event.target.value)}
@@ -277,28 +336,35 @@ export function AgentContextPreview({
   );
 }
 
-export function KnowledgeView({
-  versionId,
-  title,
-  onClose,
-}: {
-  versionId: string;
-  title: string;
-  onClose: () => void;
-}) {
+type KnowledgeViewProps = { title: string; onClose: () => void } & (
+  | { versionId: string; datasourceId?: undefined }
+  | { datasourceId: string; versionId?: undefined }
+);
+
+export function KnowledgeView(props: KnowledgeViewProps) {
+  const { title, onClose } = props;
+  const scope: KnowledgeScope =
+    props.versionId !== undefined
+      ? { kind: "product", versionId: props.versionId }
+      : { kind: "source", datasourceId: props.datasourceId };
+  const isSource = scope.kind === "source";
+  const scopeKey = readsFor(scope).key;
+  // Keyed on the scope's identity, so a parent re-render cannot re-issue every read.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const reads = useMemo(() => readsFor(scope), [scopeKey]);
   const bundle = useAsyncResource<OkfBundleRead>(
-    (signal) => readable(() => fetchOkfBundle(versionId, signal)),
-    [versionId],
+    (signal) => readable(() => reads.bundle(signal)),
+    [reads.key],
   );
-  const history = useAsyncResource<OkfPublicationHistoryRead>(
-    (signal) => readable(() => fetchOkfPublications(versionId, signal)),
-    [versionId],
+  const history = useAsyncResource<{ items: OkfPublicationRead[] }>(
+    (signal) => readable(() => reads.publications(signal)),
+    [reads.key],
   );
   const publicationId = bundle.data?.publication.publication_id ?? null;
   const [path, setPath] = useState<string>("index.md");
   const doc = useAsyncResource<OkfDocumentRead>(
-    (signal) => readable(() => fetchOkfDocument(versionId, path, publicationId, signal)),
-    [versionId, path, publicationId],
+    (signal) => readable(() => reads.document(path, publicationId, signal)),
+    [reads.key, path, publicationId],
     { enabled: publicationId !== null },
   );
   const [downloading, setDownloading] = useState(false);
@@ -323,13 +389,13 @@ export function KnowledgeView({
     setDownloading(true);
     setDownloadError(null);
     try {
-      await downloadOkfBundle(versionId, publicationId);
+      await reads.download(publicationId);
     } catch (reason) {
       setDownloadError(describeKnowledgeError(reason));
     } finally {
       setDownloading(false);
     }
-  }, [versionId, publicationId]);
+  }, [reads, publicationId]);
 
   const counts = (bundle.data?.manifest?.counts ?? {}) as Record<string, number>;
   const publication = bundle.data?.publication;
@@ -340,11 +406,21 @@ export function KnowledgeView({
         <div>
           <p className="kview__eyebrow">KNOWLEDGE</p>
           <h2 className="kview__h2">{title}</h2>
-          <p className="kview__lede">
-            The stored, approved knowledge bundle this version publishes to agents -- the same
-            publication REST and MCP serve. Only what you are authorized to read is here, and
-            nothing outside it is counted.
-          </p>
+          {isSource ? (
+            <p className="kview__lede">
+              This data source as Atlas discovered it -- its objects, their structure and the
+              approved descriptions Atlas holds -- stored as one knowledge bundle, the same
+              publication the REST routes serve. Only what you are authorized to read is here,
+              and nothing outside it is counted. Business concepts and tools are selected in a
+              context product, whose bundle carries them.
+            </p>
+          ) : (
+            <p className="kview__lede">
+              The stored, approved knowledge bundle this version publishes to agents -- the same
+              publication REST and MCP serve. Only what you are authorized to read is here, and
+              nothing outside it is counted.
+            </p>
+          )}
         </div>
         <div className="kview__actions">
           <Button onClick={reload} title="Read the current publication; a rebuild may have landed">
@@ -388,12 +464,20 @@ export function KnowledgeView({
               <b>{counts.tables ?? 0}</b> tables, <b>{counts.views ?? 0}</b> views,{" "}
               <b>{counts.routines ?? 0}</b> routines
             </span>
-            <span>
-              <b>{counts.concepts ?? 0}</b> concepts, <b>{counts.tools ?? 0}</b> tools
-            </span>
-            <span>
-              <b>{counts.sources ?? 0}</b> sources
-            </span>
+            {isSource ? (
+              <span>
+                <b>{counts.schemas ?? 0}</b> schemas
+              </span>
+            ) : (
+              <>
+                <span>
+                  <b>{counts.concepts ?? 0}</b> concepts, <b>{counts.tools ?? 0}</b> tools
+                </span>
+                <span>
+                  <b>{counts.sources ?? 0}</b> sources
+                </span>
+              </>
+            )}
             <span>
               <b>{publication.document_count}</b> documents ({publication.rendered_count} rendered,{" "}
               {publication.carried_count} carried unchanged)
@@ -461,7 +545,8 @@ export function KnowledgeView({
           </div>
 
           <AgentContextPreview
-            versionId={versionId}
+            scopeKey={reads.key}
+            select={reads.select}
             publicationId={publicationId}
             names={names}
             onOpen={open}

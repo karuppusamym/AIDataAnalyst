@@ -16,6 +16,10 @@ publication), `src/aida/okf_store_models.py` (the three tables) and the MCP reso
 `src/aida/mcp_server.py`. Tests: `tests/test_okf_store.py`. See
 [Stored publications](#stored-publications-r11-okf02) below.
 
+Also under R11-OKF02, a bundle has two scopes: a context product version's, and one
+datasource's (`DATASOURCE`). See [Source bundles](#source-bundles-r11-okf02). Tests:
+`tests/test_okf_source_bundles.py`.
+
 ## The pinned specification, and what is actually tested
 
 | Field | Value |
@@ -227,7 +231,7 @@ module, resolved as one by `tests/test_doc_claims.py`, and a frontmatter key is 
 | `concept` | Business concept identity: `concept.key`, `concept.name`, `concept.ontology_key`, `concept.ontology_version`, `concept.lifecycle`. |
 | `tool` | On a tool-version document only: `tool.key`, `tool.tool_version_id`, `tool.slug`, `tool.version`, `tool.lifecycle`, `tool.fingerprint`, and `tool.invocation` (the MCP tool name and the REST execute route). No SQL and no executor. |
 | `statements` | Which parts of the document an Atlas approval covers (`statements.approved`) and which are derived (`statements.derived`). This is the per-statement answer OKF's single document-level `verified` cannot give. |
-| `scope` | The export's scope: `scope.kind`, `scope.product_key`, `scope.product_version`, `scope.policy_partition_digest`. |
+| `scope` | The export's scope: `scope.kind`, `scope.product_key`, `scope.product_version`, `scope.policy_partition_digest`. In a source bundle (`scope.kind` is `DATASOURCE`) the two product keys are replaced by `scope.source_key`, the opaque key of the one source the bundle holds. |
 | `withheld` | On a concept document only: `withheld.reason_codes` when screening refused released text. |
 | `column_sets` | On a wide object's own document only: one entry per column set, with its `path`, `first_ordinal`, `last_ordinal` and `columns` count. |
 | `part_of` | On a column-set document only: the object it belongs to and where it sits -- `part_of.key`, `part_of.path`, `part_of.qualified_name`, `part_of.set`, `part_of.sets`, `part_of.first_ordinal`, `part_of.last_ordinal`. |
@@ -239,6 +243,12 @@ module, resolved as one by `tests/test_doc_claims.py`, and a frontmatter key is 
 sha256, conformance), `compiler`, `captured_at`, `scope`, `policy_partition` (with its digest),
 `scope_digest`, `content_snapshot_digest`, `bundle_content_digest`, `counts` (including `tools`
 since R11-OKF02), `files` (path, sha256, bytes), `source_objects` and `source_freshness`.
+
+`scope` for a product bundle holds `kind`, `organization_id`, `product_key`, `product_version`,
+`product_version_id`, `product_fingerprint` and `eligible_tool_version_ids`. For a source bundle
+it holds `kind` (`DATASOURCE`), `organization_id`, `datasource_id` and `source_key`, and the
+datasource id is also hashed into `scope_digest`; neither changes anything in a product
+bundle's manifest.
 
 `captured_at` and `source_freshness` are the only clock readings anywhere in an export, and both
 live here rather than in a concept document. A scan that completes without changing anything
@@ -316,6 +326,62 @@ than storing a mixed snapshot. A scope whose pins or column count exceed the bun
 refused before the freeze runs. A bundle whose documents contain a fenced code block is never
 stored.
 
+## Source bundles (R11-OKF02)
+
+Design section 14: "Source bundles are scoped exports of discovered, authorized objects. Product
+bundles contain only the selected approved references and permitted dependencies." A source
+bundle is one datasource as Atlas discovered it, read through
+`aida.okf_store.read_published_source_bundle`.
+
+**What it holds.** The datasource's `ACTIVE` tables, views and materialized views, routines and
+packages in the schemas the reader may read, each with the same document a product bundle would
+render for it: captured structure, the approved descriptions Atlas holds, definition coverage and
+reviewed lineage between objects of the bundle. The routine, view and freshness coverage comes
+from the context compiler's own resolvers, called with the source's ids instead of a product's
+pins. A deprecated object is not a discovered object and leaves the bundle -- its removal is in
+`log.md` -- while a product that pins it keeps rendering it as deprecated. A dependency on an
+object in another datasource is not linked, whatever the reader may see there.
+
+**What it does not hold, deliberately: business concepts and tool versions.** Both are
+*selected, approved and pinned* by a context product -- a concept from a pinned ontology version,
+a tool from the product's eligible versions -- and a source has no pin to read them at. Exporting
+the ontology's head, or every tool over the source, would put unselected meaning into a bundle an
+agent reads as governed. The root index says so and points a reader to a context product; the
+renderer refuses a `DATASOURCE` snapshot carrying a concept, a tool or a second source, so a
+source bundle cannot count or link past its one source.
+
+**Authorization.** A source bundle read is `READ_METADATA` -- the decision every catalog read of
+the datasource already takes -- because it carries nothing a catalog read of that datasource does
+not return. It is taken on every request, before anything stored is looked up
+(`aida.okf_snapshot.admit_source`):
+
+1. The datasource's own decision. A refusal is a 403 with the gate's bare reason code, as the
+   catalog's read gives, and nothing exists for that reader: no lineage, no publication by id.
+   A binding scoped to named schemas refuses this step, exactly as it refuses the catalog's read
+   of the whole datasource.
+2. Where step 1 reached a workspace, one decision per schema with the schema named. A schema a
+   policy's `schema_pattern` refuses is absent from the text, the links and every count
+   (acceptance OKF-D inside one source). When no workspace resolves, every schema would get
+   step 1's own undecided answer, so the per-schema calls are skipped.
+
+**Lineage.** A source lineage is keyed on the datasource and the admitted schema set, not on
+which workspace decided: readers who may see the same schemas share one publication. The key is
+stored in `datasource_id` beside `authority_digest` on the same publication and head tables a
+product uses (migration `f7c2d9a4b61e`; a check constraint holds that a row is one scope or the
+other), so publication, pinning, retention and pruning are the product's own code.
+
+**Staleness.** The product's mark kinds, over every object the datasource holds, plus every
+change signal its scans recorded and the object rows' own update times -- because a source's
+membership is content: a table discovered or retired moves its indexes and counts whether or not
+a signal named it. Revalidation, the read-consistent capture, the no-op rule, incremental rebuild
+and atomic publication are the shared `_serve` and `_publish`. Early refusal counts the ACTIVE
+objects and their columns in the admitted schemas before anything is loaded.
+
+**The profile was not bumped.** The source scope's new field (`datasource_id`) is omitted from a
+product snapshot's written form, and the manifest `scope` block, the extension's `scope` key and
+`scope_digest` keep their product shape, so the bytes rendered for unchanged product content are
+what profile `4` rendered before. Evidence is recorded against R11-OKF02.
+
 ## Question-specific context
 
 A bundle is many small documents so that a reader can take the few a question needs.
@@ -371,6 +437,9 @@ assembled, and a refused datasource's objects are absent from the text, the inde
 **and every count**. No "withheld: 1" is reported anywhere, because a withheld count is itself the
 existence leak acceptance OKF-D exists to catch.
 
+A source bundle read is `READ_METADATA` on its one datasource, and per schema where a workspace
+decides; see [Source bundles](#source-bundles-r11-okf02).
+
 ## Surfaces
 
 | Method and path | Returns |
@@ -383,6 +452,11 @@ existence leak acceptance OKF-D exists to catch.
 | MCP `resources/read` of `atlas://context-products/{key}/versions/{n}/okf` | The same stored manifest and file index; append a bundle path to read one document (R11-OKF02). |
 | `POST /v1/context-product-versions/{version_id}/okf-bundle/context` | The sections of the stored bundle a question needs, with receipts: see [Question-specific context](#question-specific-context). The question travels in the body, never the URL. |
 | MCP `tools/call` of `atlas__get_knowledge_context` | The same selection for an agent that has a question rather than a path: Markdown to read, then the structured selection. |
+| `GET /v1/datasources/{datasource_id}/okf-bundle` | One datasource's stored source bundle: manifest, file index, verdict and publication, as for a product. Optional `publication_id`. |
+| `GET /v1/datasources/{datasource_id}/okf-bundle/download` | The source bundle as one deterministic ZIP, refused unless it satisfies the publish policy. Named by datasource id. Optional `publication_id`. |
+| `GET /v1/datasources/{datasource_id}/okf-bundle/document?path=` | One stored document of the source bundle. Optional `publication_id`. |
+| `GET /v1/datasources/{datasource_id}/okf-bundle/publications` | The reader's own lineage of source-bundle publications. |
+| `POST /v1/datasources/{datasource_id}/okf-bundle/context` | The sections of the source bundle a question needs, with receipts; the product context route's contract, with the datasource in place of the product. |
 
 These are new surfaces beside the single-file context compiler, which is untouched: no
 `ContextCompilerTarget` value was added and no compile response shape changed, so an existing

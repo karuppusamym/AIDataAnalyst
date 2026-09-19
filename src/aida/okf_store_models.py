@@ -29,6 +29,13 @@ produces the same digest. A bundle built while a cross-boundary grant was ACTIVE
 being reachable by anyone the moment the grant is revoked: their digest no longer matches it, so
 the stored rows are not a cache anyone can hit.
 
+**Two scopes, one discipline (R11-OKF02 source bundles, migration `f7c2d9a4b61e`).** A lineage
+is either a context product version's (`context_product_version_id`) or one datasource's
+(`datasource_id`) -- exactly one of the two, which a check constraint holds -- under an
+authority digest. The source key was added to these tables rather than to a second set of
+tables, so a source bundle is published, retained, pinned and pruned by the same rows and the
+same code as a product bundle, and there is no second store whose rules could drift.
+
 **Value-free (INV-6).** The stored snapshot is `aida.okf_export.OkfSnapshot` written out, and no
 field of that type can hold a body, a definition, a default expression or a row. The document
 text is the rendered bundle, which the publish policy has already checked. `aida.okf_store`
@@ -42,6 +49,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -55,9 +63,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aida.db import Base
 from aida.models import TimestampMixin
 
+#: Exactly one scope per row: a product version's lineage or a datasource's, never both and
+#: never neither. The text must stay what migration `f7c2d9a4b61e` creates.
+ONE_SCOPE: str = "(context_product_version_id IS NULL) <> (datasource_id IS NULL)"
+
 
 class OkfBundlePublication(Base, TimestampMixin):
-    """One immutable published OKF bundle for one product version under one authority."""
+    """One immutable published OKF bundle for one product version -- or one datasource -- under
+    one authority."""
 
     __tablename__ = "okf_bundle_publication"
     __table_args__ = (
@@ -67,9 +80,24 @@ class OkfBundlePublication(Base, TimestampMixin):
             "sequence",
             name="uq_okf_bundle_publication_lineage_sequence",
         ),
+        # A source lineage's sequence is unique the same way. NULLs are distinct in a unique
+        # constraint, so a product row (no datasource) and a source row (no version) never
+        # collide in the other scope's constraint.
+        UniqueConstraint(
+            "datasource_id",
+            "authority_digest",
+            "sequence",
+            name="uq_okf_bundle_publication_source_sequence",
+        ),
+        CheckConstraint(ONE_SCOPE, name="one_scope"),
         Index(
             "ix_okf_bundle_publication_lineage",
             "context_product_version_id",
+            "authority_digest",
+        ),
+        Index(
+            "ix_okf_bundle_publication_source_lineage",
+            "datasource_id",
             "authority_digest",
         ),
     )
@@ -78,10 +106,17 @@ class OkfBundlePublication(Base, TimestampMixin):
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    context_product_version_id: Mapped[UUID] = mapped_column(
-        ForeignKey("context_product_version.id", ondelete="CASCADE"), nullable=False, index=True
+    #: The product version of a product bundle; NULL for a source bundle.
+    context_product_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="CASCADE"), index=True
     )
-    #: Digest of the product version plus the datasources the reader's authorization admitted.
+    #: R11-OKF02: the datasource of a source bundle; NULL for a product bundle. CASCADE for the
+    #: reason the version key cascades: a deleted datasource's bundles describe nothing.
+    datasource_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
+    )
+    #: Digest of the scope plus what the reader's authorization admitted of it: the datasources
+    #: of a product, or the schemas of a source.
     authority_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     #: 1 for the first publication under this authority, then +1 per content change.
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -138,7 +173,8 @@ class OkfBundleDocument(Base, TimestampMixin):
 
 
 class OkfBundleHead(Base, TimestampMixin):
-    """Which publication is current for one product version under one authority.
+    """Which publication is current for one product version -- or one datasource -- under one
+    authority.
 
     The only mutable row of the three. `publication_id` moves forward in the same transaction
     that writes the publication it points at. `validated_at` and the mark fields record the
@@ -154,14 +190,23 @@ class OkfBundleHead(Base, TimestampMixin):
             "authority_digest",
             name="uq_okf_bundle_head_lineage",
         ),
+        UniqueConstraint(
+            "datasource_id",
+            "authority_digest",
+            name="uq_okf_bundle_head_source_lineage",
+        ),
+        CheckConstraint(ONE_SCOPE, name="one_scope"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    context_product_version_id: Mapped[UUID] = mapped_column(
-        ForeignKey("context_product_version.id", ondelete="CASCADE"), nullable=False, index=True
+    context_product_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="CASCADE"), index=True
+    )
+    datasource_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
     )
     authority_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     publication_id: Mapped[UUID] = mapped_column(

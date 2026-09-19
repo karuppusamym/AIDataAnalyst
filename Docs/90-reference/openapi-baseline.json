@@ -22563,6 +22563,117 @@
         "title": "OkfPublicationRead",
         "type": "object"
       },
+      "OkfSourceContextRead": {
+        "additionalProperties": false,
+        "description": "R11-OKF02: question-specific context from one datasource's stored OKF bundle.\n\nThe product context read's fields, with the datasource in place of the product. A source\nbundle holds no business concepts and no tools, so a question about meaning or a current\nfigure is better asked of a context product; `NO_MATCH` is still an answer, not an error.",
+        "properties": {
+          "ambiguous": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ambiguous",
+            "type": "array"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "datasource_name": {
+            "title": "Datasource Name",
+            "type": "string"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/OkfContextDocumentRead"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "guidance": {
+            "title": "Guidance",
+            "type": "string"
+          },
+          "markdown": {
+            "title": "Markdown",
+            "type": "string"
+          },
+          "max_chars": {
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "omitted": {
+            "items": {
+              "$ref": "#/components/schemas/OkfContextOmissionRead"
+            },
+            "title": "Omitted",
+            "type": "array"
+          },
+          "omitted_count": {
+            "title": "Omitted Count",
+            "type": "integer"
+          },
+          "publication": {
+            "$ref": "#/components/schemas/OkfPublicationRead"
+          },
+          "question_terms": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Question Terms",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "used_chars": {
+            "title": "Used Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "datasource_name",
+          "publication",
+          "status",
+          "question_terms",
+          "documents",
+          "omitted",
+          "omitted_count",
+          "ambiguous",
+          "max_chars",
+          "used_chars",
+          "guidance",
+          "markdown"
+        ],
+        "title": "OkfSourceContextRead",
+        "type": "object"
+      },
+      "OkfSourcePublicationHistoryRead": {
+        "additionalProperties": false,
+        "description": "R11-OKF02: the reader's own lineage of stored publications for one datasource's bundle,\nnewest first. Only the lineage this request's read decision computes: a publication built\nunder another admission is neither listed nor counted.",
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OkfPublicationRead"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "items"
+        ],
+        "title": "OkfSourcePublicationHistoryRead",
+        "type": "object"
+      },
       "OntologyCreate": {
         "additionalProperties": false,
         "properties": {
@@ -55131,6 +55242,729 @@
         "summary": "Generate source-native row/column policy DDL without applying it",
         "tags": [
           "policy-native-sync"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/okf-bundle": {
+      "get": {
+        "description": "One datasource's stored bundle: manifest, file index and verdict, no document bodies.\n\nThe same contract as a product's manifest route. Every object in it is one the reader's\n`READ_METADATA` decision on this datasource -- and on each schema, where a workspace\ndecides -- admitted; nothing else is named or counted.",
+        "operationId": "inspect_source_okf_bundle_v1_datasources__datasource_id__okf_bundle_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read this stored publication of the caller's own lineage instead of the current one. Refused as not found once it is no longer retained.",
+            "in": "query",
+            "name": "publication_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Read this stored publication of the caller's own lineage instead of the current one. Refused as not found once it is no longer retained.",
+              "title": "Publication Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfBundleRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Inspect Source Okf Bundle",
+        "tags": [
+          "okf-export"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/okf-bundle/context": {
+      "post": {
+        "description": "The sections of one datasource's stored bundle a question needs, with receipts.\n\nThe product context route's contract: a POST so the question stays out of URLs, `NO_MATCH`\nas an answer, and an audit record naming section anchors but never the question.",
+        "operationId": "select_source_okf_context_v1_datasources__datasource_id__okf_bundle_context_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OkfContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfSourceContextRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Select Source Okf Context",
+        "tags": [
+          "okf-export"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/okf-bundle/document": {
+      "get": {
+        "description": "One stored document of a datasource's bundle, looked up only among the rows of the\ncaller's own publication -- a path in another lineage reads as not found.",
+        "operationId": "read_source_okf_document_v1_datasources__datasource_id__okf_bundle_document_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bundle-relative document path",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "description": "Bundle-relative document path",
+              "maxLength": 512,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read this stored publication of the caller's own lineage instead of the current one. Refused as not found once it is no longer retained.",
+            "in": "query",
+            "name": "publication_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Read this stored publication of the caller's own lineage instead of the current one. Refused as not found once it is no longer retained.",
+              "title": "Publication Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfDocumentRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Source Okf Document",
+        "tags": [
+          "okf-export"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/okf-bundle/download": {
+      "get": {
+        "description": "One datasource's stored bundle as a deterministic archive, under the product download's\nrule: refused unless it satisfies the publish policy, built from the stored rows. Named by\nthe datasource id rather than its name, which is catalog text and has no place in a header.",
+        "operationId": "download_source_okf_bundle_v1_datasources__datasource_id__okf_bundle_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Download this stored publication -- the one a manifest named -- rather than the current one, so an inspected manifest and its archive are the same bytes.",
+            "in": "query",
+            "name": "publication_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Download this stored publication -- the one a manifest named -- rather than the current one, so an inspected manifest and its archive are the same bytes.",
+              "title": "Publication Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Source Okf Bundle",
+        "tags": [
+          "okf-export"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/okf-bundle/publications": {
+      "get": {
+        "description": "The caller's lineage of stored publications for one datasource -- what changed, when.",
+        "operationId": "list_source_okf_publications_v1_datasources__datasource_id__okf_bundle_publications_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfSourcePublicationHistoryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Source Okf Publications",
+        "tags": [
+          "okf-export"
         ]
       }
     },
