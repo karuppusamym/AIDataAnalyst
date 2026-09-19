@@ -25,6 +25,12 @@ declares eligible, its declared dependencies must lie inside the product's table
 contract Ask applies, `GOVERNED_TOOL_DEPENDENCY_CONTRACT`), and the rendered statement is held
 to the product at the gateway as well.
 
+**Settled from evidence, never by guessing.** The receipt names the `ToolExecution` id
+before the tool path runs. Once a PENDING receipt is older than the execution deadline,
+reading it settles it from that row (`reconcile_pending`): no row means nothing reached
+the source, a finished row says how it finished, and only a row still in flight leaves
+the receipt PENDING for a person.
+
 **Value-free (INV-6).** The record holds an HMAC of the request, not its parameter values, and
 refusals carry stable codes. Result rows go back to the caller once, in the executing response,
 and are not retained.
@@ -35,9 +41,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -52,7 +58,13 @@ from aida.context_product_execution_scope import (
 )
 from aida.events import record_audit
 from aida.governed_execution_models import GovernedExecutionRequest
-from aida.models import ContextProductVersion, DataSource, GovernedToolVersion
+from aida.models import (
+    ContextProductVersion,
+    DataSource,
+    GovernedToolVersion,
+    QueryExecution,
+    ToolExecution,
+)
 from aida.schemas import ToolExecutionRequest, ToolExecutionResponse
 from aida.security_types import SecurityContext
 from aida.signing import sign_value
@@ -70,6 +82,9 @@ RECEIPT_READ_ROLES: Final = tuple(sorted({*TOOL_EXECUTION_ROLES, *RECEIPT_OVERSI
 
 SURFACE_GRAPHQL: Final = "GRAPHQL"
 
+#: Seconds beyond the gateway's statement timeout an execution mutation may take.
+EXECUTION_DEADLINE_MARGIN_SECONDS: Final = 15.0
+
 STATUS_PENDING: Final = "PENDING"
 STATUS_COMPLETED: Final = "COMPLETED"
 STATUS_REJECTED: Final = "REJECTED"
@@ -84,6 +99,8 @@ TOOL_VERSION_NOT_FOUND: Final = "TOOL_VERSION_NOT_FOUND"
 CONTEXT_PRODUCT_NOT_FOUND: Final = "CONTEXT_PRODUCT_NOT_FOUND"
 CONTEXT_PRODUCT_TOOL_NOT_ELIGIBLE: Final = "CONTEXT_PRODUCT_TOOL_NOT_ELIGIBLE"
 EXECUTION_RECEIPT_NOT_FOUND: Final = "EXECUTION_RECEIPT_NOT_FOUND"
+#: A settled receipt whose execution never reached the source.
+NOT_STARTED: Final = "NOT_STARTED"
 
 
 class ExecutionRefused(Exception):
@@ -143,10 +160,16 @@ async def _existing(
     ).scalar_one_or_none()
 
 
-def _replay(record: GovernedExecutionRequest, fingerprint: str) -> ExecutionOutcome:
+async def _replay(
+    session: AsyncSession,
+    settings: Settings,
+    record: GovernedExecutionRequest,
+    fingerprint: str,
+) -> ExecutionOutcome:
     if record.request_fingerprint != fingerprint:
         raise ExecutionRefused("CONFLICT", IDEMPOTENCY_KEY_REUSED)
-    return ExecutionOutcome(record=record, replayed=True, response=None)
+    settled = await reconcile_pending(session, settings, record)
+    return ExecutionOutcome(record=settled, replayed=True, response=None)
 
 
 async def execute_governed_tool(
@@ -177,7 +200,7 @@ async def execute_governed_tool(
     )
     existing = await _existing(session, context, organization_id, idempotency_key)
     if existing is not None:
-        return _replay(existing, fingerprint)
+        return await _replay(session, settings, existing, fingerprint)
 
     version = await session.get(GovernedToolVersion, tool_version_id)
     if version is None or version.organization_id != organization_id:
@@ -193,6 +216,8 @@ async def execute_governed_tool(
         surface=surface,
         tool_version_id=version.id,
         status=STATUS_PENDING,
+        # Named now, so an outcome this request never hears can be settled from the row.
+        tool_execution_id=uuid4(),
     )
     session.add(record)
     try:
@@ -204,7 +229,7 @@ async def execute_governed_tool(
         claimed = await _existing(session, context, organization_id, idempotency_key)
         if claimed is None:  # pragma: no cover - the constraint fired, so the row exists
             raise
-        return _replay(claimed, fingerprint)
+        return await _replay(session, settings, claimed, fingerprint)
 
     scoped_context = replace(context, organization_id=organization_id)
     scope: ContextProductExecutionScope | None = None
@@ -226,6 +251,7 @@ async def execute_governed_tool(
             session,
             settings,
             context_product_scope=scope,
+            tool_execution_id=record.tool_execution_id,
         )
     except HTTPException as refused:
         code, reason, status = _classify(refused)
@@ -240,6 +266,63 @@ async def execute_governed_tool(
     record.completed_at = datetime.now(UTC)
     await session.commit()
     return ExecutionOutcome(record=record, replayed=False, response=response)
+
+
+def execution_deadline(settings: Settings) -> timedelta:
+    """How long one execution mutation may take: the gateway's statement timeout plus the
+    admission, authorization, quality gate and masking around it. The GraphQL route cancels a
+    mutation at this deadline, so a receipt older than it is no longer in flight."""
+    return timedelta(seconds=settings.query_timeout_seconds + EXECUTION_DEADLINE_MARGIN_SECONDS)
+
+
+def _utc(value: datetime) -> datetime:
+    """SQLite hands back naive datetimes and PostgreSQL aware ones; compare them as UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def reconcile_pending(
+    session: AsyncSession,
+    settings: Settings,
+    record: GovernedExecutionRequest,
+    *,
+    now: datetime | None = None,
+) -> GovernedExecutionRequest:
+    """Settle a PENDING receipt from the execution the platform recorded, once it cannot be
+    in flight any more -- never by executing again.
+
+    The receipt names its `ToolExecution` id before the tool path runs, so the evidence is one
+    row away. No row means nothing reached the source: the tool path commits that row, with the
+    gateway's own `requested` record, before any source session opens. A row that finished says
+    how. A row still `RECEIVED` is the one case the platform cannot settle -- the source may or
+    may not have run the statement -- so the receipt stays PENDING, for a person.
+    """
+    if record.status != STATUS_PENDING or record.tool_execution_id is None:
+        return record
+    clock = now or datetime.now(UTC)
+    if clock - _utc(record.created_at) < execution_deadline(settings):
+        return record
+    execution = await session.get(ToolExecution, record.tool_execution_id)
+    if execution is None:
+        record.tool_execution_id = None
+        status, code = STATUS_FAILED, NOT_STARTED
+    elif execution.status == "COMPLETED":
+        status, code = STATUS_COMPLETED, None
+        record.query_execution_id = execution.query_execution_id
+        if execution.query_execution_id is not None:
+            query = await session.get(QueryExecution, execution.query_execution_id)
+            record.row_count = query.row_count if query is not None else None
+    elif execution.status == "REJECTED":
+        status, code = STATUS_REJECTED, "EXECUTION_REJECTED"
+        record.query_execution_id = execution.query_execution_id
+    elif execution.status == "FAILED":
+        status, code = STATUS_FAILED, "SOURCE_EXECUTION_FAILED"
+    else:
+        return record
+    record.status = status
+    record.outcome_code = code
+    record.completed_at = clock
+    await session.commit()
+    return record
 
 
 async def _product_scope(
@@ -332,6 +415,12 @@ async def _refuse_before_execution(
 async def _finish(
     session: AsyncSession, record: GovernedExecutionRequest, *, status: str, outcome_code: str
 ) -> None:
+    # A refusal before the tool path created its row leaves the named id pointing nowhere.
+    if (
+        record.tool_execution_id is not None
+        and await session.get(ToolExecution, record.tool_execution_id) is None
+    ):
+        record.tool_execution_id = None
     record.status = status
     record.outcome_code = outcome_code
     record.completed_at = datetime.now(UTC)
@@ -353,9 +442,7 @@ def _classify(refused: HTTPException) -> tuple[str, str, str]:
         return "NOT_FOUND", stable or TOOL_VERSION_NOT_FOUND, STATUS_REJECTED
     if refused.status_code == 409:
         reason = (
-            "QUALITY_HOLD"
-            if "quality incident" in detail.lower()
-            else (stable or "NOT_EXECUTABLE")
+            "QUALITY_HOLD" if "quality incident" in detail.lower() else (stable or "NOT_EXECUTABLE")
         )
         return "CONFLICT", reason, STATUS_REJECTED
     if refused.status_code == 422:
@@ -366,6 +453,7 @@ def _classify(refused: HTTPException) -> tuple[str, str, str]:
 async def load_receipt(
     session: AsyncSession,
     context: SecurityContext,
+    settings: Settings,
     *,
     organization_id: UUID,
     record_id: UUID,
@@ -386,4 +474,4 @@ async def load_receipt(
     )
     if not own and context.roles.isdisjoint(RECEIPT_OVERSIGHT_ROLES):
         raise ExecutionRefused("NOT_FOUND", EXECUTION_RECEIPT_NOT_FOUND)
-    return record
+    return await reconcile_pending(session, settings, record)

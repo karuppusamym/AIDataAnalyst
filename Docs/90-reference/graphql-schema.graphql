@@ -152,7 +152,7 @@ type GovernedExecutionReceipt {
   id: ID!
 
   """
-  PENDING (running, or ended without the platform learning its outcome -- never retried as a new execution), COMPLETED, REJECTED or FAILED.
+  PENDING (running, or ended without the platform learning its outcome -- never retried as a new execution, and settled from the recorded execution once it cannot still be running), COMPLETED, REJECTED or FAILED (`NOT_STARTED` when nothing reached the source).
   """
   status: String!
   toolVersionId: ID!

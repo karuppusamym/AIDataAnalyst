@@ -20,7 +20,7 @@ the connector doubled so it records every statement it executes.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
@@ -699,3 +699,114 @@ async def test_a_sensitive_column_is_masked_exactly_as_rest_masks_it(
     assert result["maskedColumns"] == rest_execution["masked_columns"] == ["email"]
     assert result["rows"] == [[rest_execution["rows"][0]["email"]]]
     assert raw_email not in graphql.text and raw_email not in rest.text
+
+
+# ---------------------------------------------------------------------------
+# Settling a PENDING receipt from evidence, never by executing again
+# ---------------------------------------------------------------------------
+
+
+async def _age_receipt(scenario: _Scenario) -> None:
+    """Move the only receipt past the execution deadline: it can no longer be in flight."""
+    record = await scenario.db.scalar(select(GovernedExecutionRequest))
+    assert record is not None
+    record.created_at = datetime.now(UTC) - timedelta(hours=1)
+    await scenario.db.commit()
+
+
+async def test_a_pending_receipt_whose_execution_never_started_settles_as_not_started(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = await _orders_tool(scenario)
+    calls: list[UUID] = []
+
+    async def _lost(version_id: UUID, *args: Any, **kwargs: Any) -> Any:
+        calls.append(version_id)
+        raise ConnectionResetError("dropped before the tool path wrote anything")
+
+    monkeypatch.setattr("aida.governed_execution.execute_tool_version", _lost)
+    await _run(http, scenario, version)
+    await _age_receipt(scenario)
+
+    settled = _outcome(await _run(http, scenario, version))
+
+    assert settled["replayed"] is True
+    assert settled["receipt"]["status"] == "FAILED"
+    assert settled["receipt"]["outcomeCode"] == "NOT_STARTED"
+    assert settled["receipt"]["toolExecutionId"] is None
+    assert calls == [version.id] and executed == []
+
+
+async def test_a_pending_receipt_whose_execution_finished_settles_from_that_execution(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source ran the statement and the response was lost on the way back: the receipt
+    settles as COMPLETED from the recorded execution, and nothing runs a second time."""
+    from aida.tool_api import execute_tool_version as real_execute
+
+    version = await _orders_tool(scenario)
+
+    async def _answered_then_lost(*args: Any, **kwargs: Any) -> Any:
+        await real_execute(*args, **kwargs)
+        raise ConnectionResetError("the response never reached the caller")
+
+    monkeypatch.setattr("aida.governed_execution.execute_tool_version", _answered_then_lost)
+    first = await _run(http, scenario, version)
+    assert first.json()["errors"][0]["extensions"]["code"] == "INTERNAL_ERROR"
+    young = _outcome(await _run(http, scenario, version))
+    assert young["receipt"]["status"] == "PENDING", "not settled while it could be in flight"
+    await _age_receipt(scenario)
+
+    receipt_id = young["receipt"]["id"]
+    read = await http.post(
+        "/graphql",
+        json={"operationName": "Receipt", "query": RECEIPT, "variables": {"id": receipt_id}},
+        headers=_headers(scenario),
+    )
+
+    receipt = read.json()["data"]["governedExecution"]
+    assert receipt["status"] == "COMPLETED"
+    assert receipt["rowCount"] == 2 and receipt["queryExecutionId"] is not None
+    assert len(executed) == 1, "settling reads the evidence; it does not execute"
+
+
+async def test_a_pending_receipt_whose_execution_is_unfinished_stays_pending(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded execution that never finished may or may not have reached the source: the
+    one case the platform cannot settle, so it is left for a person."""
+    version = await _orders_tool(scenario)
+
+    async def _lost(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionResetError("dropped mid-execution")
+
+    monkeypatch.setattr("aida.governed_execution.execute_tool_version", _lost)
+    await _run(http, scenario, version)
+    record = await scenario.db.scalar(select(GovernedExecutionRequest))
+    assert record is not None and record.tool_execution_id is not None
+    scenario.db.add(
+        ToolExecution(
+            id=record.tool_execution_id,
+            organization_id=scenario.organization.id,
+            tool_version_id=version.id,
+            principal_id="gql-analyst",
+            parameter_fingerprint="f" * 64,
+            status="RECEIVED",
+        )
+    )
+    await scenario.db.commit()
+    await _age_receipt(scenario)
+
+    settled = _outcome(await _run(http, scenario, version))
+
+    assert settled["receipt"]["status"] == "PENDING"
+    assert executed == []

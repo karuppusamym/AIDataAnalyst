@@ -473,6 +473,7 @@ class Query:
                 record = await load_receipt(
                     scope.session,
                     scope.context,
+                    scope.settings,
                     organization_id=scope.organization_id,
                     record_id=_uuid(id),
                 )
@@ -557,7 +558,9 @@ class GovernedExecutionReceipt:
     status: str = strawberry.field(
         description=(
             "PENDING (running, or ended without the platform learning its outcome -- never "
-            "retried as a new execution), COMPLETED, REJECTED or FAILED."
+            "retried as a new execution, and settled from the recorded execution once it "
+            "cannot still be running), COMPLETED, REJECTED or FAILED (`NOT_STARTED` when "
+            "nothing reached the source)."
         )
     )
     tool_version_id: strawberry.ID

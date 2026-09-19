@@ -52,7 +52,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.types.graphql import OperationType
 
-from aida.governed_execution import RECEIPT_OVERSIGHT_ROLES, TOOL_EXECUTION_ROLES
+from aida.governed_execution import (
+    RECEIPT_OVERSIGHT_ROLES,
+    TOOL_EXECUTION_ROLES,
+    execution_deadline,
+)
 from aida.graphql_limits import DEFAULT_LIMITS, DocumentCost, DocumentRefused, admit_document
 from aida.graphql_reads import GRAPHQL_ENDPOINT_ROLES, open_read_scope
 from aida.graphql_schema import error_code, metadata_schema
@@ -77,9 +81,6 @@ GRAPHQL_ROUTE_ROLES: tuple[str, ...] = tuple(
         set(GRAPHQL_ENDPOINT_ROLES) | set(TOOL_EXECUTION_ROLES) | set(RECEIPT_OVERSIGHT_ROLES)
     )
 )
-#: Seconds beyond the gateway's statement timeout a mutation may take: admission,
-#: authorization, quality gate and masking around the statement itself.
-_EXECUTION_DEADLINE_MARGIN_SECONDS = 15.0
 
 
 class GraphQLErrorRead(BaseModel):
@@ -282,7 +283,7 @@ async def graphql_query(
     }
     mutation = cost.operation_type == "mutation"
     deadline = (
-        settings.query_timeout_seconds + _EXECUTION_DEADLINE_MARGIN_SECONDS
+        execution_deadline(settings).total_seconds()
         if mutation
         else limits.deadline_seconds
     )

@@ -971,12 +971,17 @@ async def execute_tool_version(
     settings: Settings,
     *,
     context_product_scope: ContextProductExecutionScope | None = None,
+    tool_execution_id: UUID | None = None,
 ) -> ToolExecutionResponse:
     """Shared governed execution path for HTTP callers, persisted tool plans and GraphQL.
 
     `context_product_scope` (R11-GQL02) holds the rendered statement to a published product's
     tables at the gateway, exactly as Ask and the direct-SQL route are held; the REST route
     passes none, so its behaviour is unchanged.
+
+    `tool_execution_id` (R11-GQL02) is the id the `ToolExecution` row will carry, chosen by a
+    caller that recorded it first -- so an execution whose outcome that caller never heard can
+    later be settled from this row rather than guessed at.
     """
     if context.roles.isdisjoint({"PlatformAdmin", "Analyst", "AgentDeveloper", "ToolConsumer"}):
         raise HTTPException(status_code=403, detail="tool execution role is required")
@@ -1059,6 +1064,7 @@ async def execute_tool_version(
         json.dumps(rendered.normalized_parameters, sort_keys=True, separators=(",", ":")),
     )
     tool_execution = ToolExecution(
+        **({"id": tool_execution_id} if tool_execution_id is not None else {}),
         organization_id=version.organization_id,
         tool_version_id=version.id,
         principal_id=context.principal_id,
