@@ -197,6 +197,24 @@
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLSQL_RETURN_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
       "view_parser_status": "N/A"
+    },
+    {
+      "construct": "PL/SQL call statement p(x); / pkg.p; (nested call; a sibling package member is read through)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLSQL_CALL_STATEMENT_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "CURSOR c IS <query> declaration (PL/SQL; read into routine-local state)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLSQL_CURSOR_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLSQL_LINEAGE_FREE_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
+      "view_parser_status": "N/A"
     }
   ],
   "dialects": [
@@ -206,7 +224,7 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-19T03:52:55.053897+00:00",
+  "generated_at": "2026-09-19T11:43:49.600441+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",

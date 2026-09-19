@@ -1,6 +1,6 @@
 # Procedure lineage parser capability matrix
 
-Generated 2026-09-19T03:52:55.053897+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
+Generated 2026-09-19T11:43:49.600441+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
 
 ## Dialects attempted
 
@@ -43,6 +43,9 @@ Generated 2026-09-19T03:52:55.053897+00:00 by `scripts/generate_procedure_capabi
 | PACKAGE / PACKAGE BODY (Oracle; each member's edges attributed to the member) | N/A | SUPPORTED |
 | PROCEDURE p / FUNCTION f RETURN t declaration (Oracle spec or forward declaration) | N/A | RECOGNISED_NO_LINEAGE |
 | RETURN <expression> (PL/SQL; no subquery is allowed there) | N/A | RECOGNISED_NO_LINEAGE |
+| PL/SQL call statement p(x); / pkg.p; (nested call; a sibling package member is read through) | N/A | EXPLICIT_UNPARSED |
+| CURSOR c IS <query> declaration (PL/SQL; read into routine-local state) | N/A | SUPPORTED |
+| TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL) | N/A | RECOGNISED_NO_LINEAGE |
 
 `SUPPORTED` -- real column/table-level lineage extracted.
 `EXPLICIT_UNPARSED` -- recognised, but this parser cannot safely resolve it: an explicit `UNPARSED` marker edge is produced instead (INV-9/AT-C4), never a silent drop.

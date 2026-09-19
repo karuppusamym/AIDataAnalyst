@@ -538,7 +538,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -583,7 +583,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1618,7 +1618,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1663,7 +1663,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2068,7 +2068,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2113,7 +2113,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2608,7 +2608,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2653,7 +2653,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3058,7 +3058,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3103,7 +3103,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3482,9 +3482,9 @@
     }
   ],
   "source_mapping": {
-    "evidence": "each parsed lineage fact carries statement_range (half-open code-point offsets, 1-based start/end line and column) and statement_range_status (STATEMENT / GAP_STATEMENT / CALL_SITE / NOT_LOCATED) into the stored, redacted body, pinned by statement_text_digest (SHA-256 of that text); persisted on deep_procedure_lineage_edge and trigger_lineage_edge; NULL positions with NOT_LOCATED where no statement of the text holds the fact, never a range of zero",
-    "granularity": "statement_ordinal, statement_range, statement_range_status",
-    "rationale": "Ranges index the text Atlas holds and parsed -- body_sql_redacted, the text a steward is shown -- never the customer's source bytes, which Atlas does not keep (R11-D16): a PARSED redaction re-renders the body, so a raw-text offset would point at the wrong place, and the digest lets a reader prove a range still indexes the stored body. Statement grain, from the parser's own splitter and control-flow peel, not token grain: sqlglot's positions are relative to the peeled, sometimes rewritten, remainder. An unparsed statement reads GAP_STATEMENT with the span of the text it could not read. PARTIAL because a fact with no statement of the text is NOT_LOCATED rather than approximated.",
+    "evidence": "each parsed lineage fact carries statement_range (half-open code-point offsets, 1-based start/end line and column) and statement_range_status (STATEMENT / GAP_STATEMENT / CALL_SITE / NOT_LOCATED) into the stored, redacted body, pinned by statement_text_digest (SHA-256 of that text); persisted on deep_procedure_lineage_edge and trigger_lineage_edge; NULL positions with NOT_LOCATED where no statement of the text holds the fact, never a range of zero; inside that statement, source_token_range and target_token_range (COLUMN or TABLE, half-open offsets into the same body) name the token each end of the fact was read from, NULL where it is not exactly one token",
+    "granularity": "source_token_range, statement_ordinal, statement_range, statement_range_status, target_token_range",
+    "rationale": "Ranges index the text Atlas holds and parsed -- body_sql_redacted, the text a steward is shown -- never the customer's source bytes, which Atlas does not keep (R11-D16): a PARSED redaction re-renders the body, so a raw-text offset would point at the wrong place, and the digest lets a reader prove a range still indexes the stored body. Statement ranges come from the parser's own splitter and control-flow peel. Token ranges come from sqlglot's identifier positions, which are relative to the peeled, sometimes rewritten, remainder: every rewrite keeps the statement's tail in place, and every identifier must slice out of the stored body unchanged before any token of that statement is recorded. A token is recorded only when exactly one reference can be the fact's evidence -- the same table named twice, or a column read twice in one expression, is NULL rather than the first occurrence. An unparsed statement reads GAP_STATEMENT with the span of the text it could not read, and no token. PARTIAL because a fact with no statement of the text is NOT_LOCATED, and an end with no single token is NULL, rather than approximated.",
     "reason": "PARSER_DEGRADES_EXPLICITLY",
     "state": "PARTIAL"
   },
