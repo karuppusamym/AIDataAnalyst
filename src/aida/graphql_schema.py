@@ -52,6 +52,7 @@ from aida.governed_execution import (
     ExecutionOutcome,
     ExecutionRefused,
     execute_governed_tool,
+    list_receipts,
     load_receipt,
 )
 from aida.governed_execution_models import GovernedExecutionRequest
@@ -461,6 +462,41 @@ class Query:
         return DataSourceConnection.of(page)
 
     @field_resolver(
+        "Execution receipts (R11-GQL02), newest first: the caller's own, or every caller's in "
+        "the organization for PlatformAdmin and Auditor, optionally of one status. A stale "
+        "PENDING receipt is settled from its recorded execution as it is read, so asking for "
+        "PENDING lists what is still genuinely unknown. Never rows."
+    )
+    async def governed_executions(
+        self,
+        info: Info,
+        status: str | None = None,
+        first: int = _DEFAULT_PAGE,
+        after: str | None = None,
+    ) -> GovernedExecutionReceiptConnection | None:
+        scope = info.context
+        if first < 1 or first > scope.limits.max_page_size:
+            raise ReadRefused("INVALID_ARGUMENT", "PAGE_SIZE_OUT_OF_RANGE")
+        async with scope.lock:
+            try:
+                page = await list_receipts(
+                    scope.session,
+                    scope.context,
+                    scope.settings,
+                    organization_id=scope.organization_id,
+                    status=status,
+                    first=first,
+                    after=after,
+                )
+            except ExecutionRefused as refused:
+                raise ReadRefused(refused.code, refused.reason) from refused
+        return GovernedExecutionReceiptConnection(
+            nodes=[GovernedExecutionReceipt.of(record) for record in page.items],
+            page_info=PageInfo(has_next_page=page.has_next_page, end_cursor=page.end_cursor),
+            total_count=page.total,
+        )
+
+    @field_resolver(
         "One governed execution receipt (R11-GQL02): the caller's own, or any in the "
         "organization for PlatformAdmin and Auditor. Never rows."
     )
@@ -591,6 +627,13 @@ class GovernedExecutionReceipt:
             created_at=record.created_at,
             completed_at=record.completed_at,
         )
+
+
+@strawberry.type(description="A page of execution receipts, newest first.")
+class GovernedExecutionReceiptConnection:
+    nodes: list[GovernedExecutionReceipt]
+    page_info: PageInfo
+    total_count: int | None
 
 
 @strawberry.type(

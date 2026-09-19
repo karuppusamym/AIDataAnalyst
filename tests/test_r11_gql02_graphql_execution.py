@@ -941,3 +941,122 @@ async def test_an_unreachable_store_fails_closed_only_where_it_must(
     )
 
     assert decision.allowed is allowed and decision.degraded is True
+
+
+# ---------------------------------------------------------------------------
+# Listing receipts
+# ---------------------------------------------------------------------------
+
+RECEIPTS = """
+query Receipts($status: String, $first: Int!, $after: String) {
+  governedExecutions(status: $status, first: $first, after: $after) {
+    totalCount
+    pageInfo { hasNextPage endCursor }
+    nodes { id status outcomeCode }
+  }
+}
+"""
+
+
+async def _receipts(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    *,
+    principal: str = "gql-analyst",
+    roles: str = "Analyst",
+    **variables: Any,
+) -> dict[str, Any]:
+    response = await http.post(
+        "/graphql",
+        json={
+            "operationName": "Receipts",
+            "query": RECEIPTS,
+            "variables": {"first": 20, **variables},
+        },
+        headers=_headers(scenario, principal=principal, roles=roles),
+    )
+    assert response.status_code == 200, response.text
+    body: dict[str, Any] = response.json()
+    return body
+
+
+async def test_receipts_list_newest_first_and_page_by_cursor(
+    http: httpx.AsyncClient, scenario: _Scenario, executed: list[str]
+) -> None:
+    version = await _orders_tool(scenario)
+    ids = []
+    for index in range(3):
+        outcome = _outcome(await _run(http, scenario, version, key=f"gql02-list-{index:04d}"))
+        ids.append(outcome["receipt"]["id"])
+
+    first = (await _receipts(http, scenario, first=2))["data"]["governedExecutions"]
+    rest = (
+        await _receipts(http, scenario, first=2, after=first["pageInfo"]["endCursor"])
+    )["data"]["governedExecutions"]
+
+    assert first["totalCount"] == 3
+    assert [node["id"] for node in first["nodes"] + rest["nodes"]] == list(reversed(ids))
+    assert first["pageInfo"]["hasNextPage"] is True and rest["pageInfo"]["hasNextPage"] is False
+    assert len(executed) == 3, "listing executes nothing"
+
+
+async def test_receipts_are_the_callers_own_unless_oversight(
+    http: httpx.AsyncClient, scenario: _Scenario, executed: list[str]
+) -> None:
+    version = await _orders_tool(scenario)
+    _outcome(await _run(http, scenario, version, key="gql02-mine-0001"))
+
+    other = await _receipts(http, scenario, principal="another-analyst")
+    auditor = await _receipts(http, scenario, principal="auditor-1", roles="Auditor")
+    viewer = await _receipts(http, scenario, principal="viewer-1", roles="Viewer")
+
+    assert other["data"]["governedExecutions"]["nodes"] == []
+    assert len(auditor["data"]["governedExecutions"]["nodes"]) == 1
+    assert viewer["data"]["governedExecutions"] is None
+    assert viewer["errors"][0]["extensions"] == {"code": "FORBIDDEN", "reason": "ROLE_REQUIRED"}
+
+
+async def test_listing_pending_settles_what_evidence_can_settle(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version = await _orders_tool(scenario)
+
+    async def _lost(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionResetError("dropped before the tool path wrote anything")
+
+    monkeypatch.setattr("aida.governed_execution.execute_tool_version", _lost)
+    await _run(http, scenario, version, key="gql02-pend-0001")
+    young = await _receipts(http, scenario, status="PENDING")
+    assert [n["status"] for n in young["data"]["governedExecutions"]["nodes"]] == ["PENDING"]
+    await _age_receipt(scenario)
+
+    settled = await _receipts(http, scenario, status="PENDING")
+
+    [node] = settled["data"]["governedExecutions"]["nodes"]
+    assert (node["status"], node["outcomeCode"]) == ("FAILED", "NOT_STARTED")
+    again = await _receipts(http, scenario, status="PENDING")
+    assert again["data"]["governedExecutions"]["nodes"] == []
+
+
+@pytest.mark.parametrize(
+    ("variables", "code", "reason"),
+    [
+        ({"status": "DONE"}, "INVALID_ARGUMENT", "STATUS_UNKNOWN"),
+        ({"first": 0}, "INVALID_ARGUMENT", "PAGE_SIZE_OUT_OF_RANGE"),
+        ({"after": "not-a-cursor"}, "INVALID_CURSOR", "CURSOR_INVALID"),
+    ],
+)
+async def test_receipt_listing_refuses_bad_arguments(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    variables: dict[str, Any],
+    code: str,
+    reason: str,
+) -> None:
+    body = await _receipts(http, scenario, **variables)
+
+    assert body["data"]["governedExecutions"] is None
+    assert body["errors"][0]["extensions"] == {"code": code, "reason": reason}

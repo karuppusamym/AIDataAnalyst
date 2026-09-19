@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **514**
-- By family: BULK 11, EXPORT 7, GRAPHQL 14, JOB 27, MCP 9, REST 445, SDK 1
+- Surfaces covered: **515**
+- By family: BULK 11, EXPORT 7, GRAPHQL 15, JOB 27, MCP 9, REST 445, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -84,6 +84,7 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL Query.datasource` | GRAPHQL | `aida.graphql_schema.Query.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.datasources` | GRAPHQL | `aida.graphql_schema.Query.datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.governedExecution` | GRAPHQL | `aida.graphql_schema.Query.governed_execution` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |
+| `GRAPHQL Query.governedExecutions` | GRAPHQL | `aida.graphql_schema.Query.governed_executions` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |
 | `GRAPHQL Query.table` | GRAPHQL | `aida.graphql_schema.Query.table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.tables` | GRAPHQL | `aida.graphql_schema.Query.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Table.columns` | GRAPHQL | `aida.graphql_schema.Table.columns` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |

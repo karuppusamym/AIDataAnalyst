@@ -167,6 +167,13 @@ type GovernedExecutionReceipt {
   completedAt: DateTime
 }
 
+"""A page of execution receipts, newest first."""
+type GovernedExecutionReceiptConnection {
+  nodes: [GovernedExecutionReceipt!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
 """
 The rows one execution returned, after the gateway masked them. Present only in the response of the request that executed; never stored, never replayed.
 """
@@ -213,6 +220,11 @@ type Query {
   The caller's organization's datasources, as `GET /v1/organizations/{id}/datasources`.
   """
   datasources(first: Int! = 20, after: String = null, q: String = null, status: String = null): DataSourceConnection
+
+  """
+  Execution receipts (R11-GQL02), newest first: the caller's own, or every caller's in the organization for PlatformAdmin and Auditor, optionally of one status. A stale PENDING receipt is settled from its recorded execution as it is read, so asking for PENDING lists what is still genuinely unknown. Never rows.
+  """
+  governedExecutions(status: String = null, first: Int! = 20, after: String = null): GovernedExecutionReceiptConnection
 
   """
   One governed execution receipt (R11-GQL02): the caller's own, or any in the organization for PlatformAdmin and Auditor. Never rows.

@@ -46,7 +46,7 @@ from typing import Any, Final
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, literal, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,7 +57,7 @@ from aida.context_product_execution_scope import (
     resolve_scope_names,
 )
 from aida.events import record_audit
-from aida.governed_execution_models import GovernedExecutionRequest
+from aida.governed_execution_models import STATUSES, GovernedExecutionRequest
 from aida.models import (
     ContextProductVersion,
     DataSource,
@@ -65,6 +65,7 @@ from aida.models import (
     QueryExecution,
     ToolExecution,
 )
+from aida.pagination import InvalidCursor, decode_cursor, encode_cursor
 from aida.schemas import ToolExecutionRequest, ToolExecutionResponse
 from aida.security_types import SecurityContext
 from aida.signing import sign_value
@@ -475,3 +476,72 @@ async def load_receipt(
     if not own and context.roles.isdisjoint(RECEIPT_OVERSIGHT_ROLES):
         raise ExecutionRefused("NOT_FOUND", EXECUTION_RECEIPT_NOT_FOUND)
     return await reconcile_pending(session, settings, record)
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptPage:
+    """One page of receipts, newest first. `total` is counted on the first page only."""
+
+    items: list[GovernedExecutionRequest]
+    total: int | None
+    end_cursor: str | None
+    has_next_page: bool
+
+
+async def list_receipts(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    organization_id: UUID,
+    status: str | None,
+    first: int,
+    after: str | None,
+) -> ReceiptPage:
+    """The caller's execution receipts, newest first -- every caller's in the organization for
+    the oversight roles -- optionally one status. Never rows.
+
+    A stale PENDING receipt on the page is settled from its recorded execution as it is read
+    (`reconcile_pending`), so a list asked for PENDING shows what is still genuinely unknown.
+    """
+    if context.roles.isdisjoint(RECEIPT_READ_ROLES):
+        raise ExecutionRefused("FORBIDDEN", "ROLE_REQUIRED")
+    if status is not None and status not in STATUSES:
+        raise ExecutionRefused("INVALID_ARGUMENT", "STATUS_UNKNOWN")
+    filters = [GovernedExecutionRequest.organization_id == organization_id]
+    if context.roles.isdisjoint(RECEIPT_OVERSIGHT_ROLES):
+        filters += [
+            GovernedExecutionRequest.principal_type == context.principal_type,
+            GovernedExecutionRequest.principal_id == context.principal_id,
+        ]
+    if status is not None:
+        filters.append(GovernedExecutionRequest.status == status)
+    statement = (
+        select(GovernedExecutionRequest)
+        .where(*filters)
+        .order_by(GovernedExecutionRequest.created_at.desc(), GovernedExecutionRequest.id.desc())
+    )
+    total: int | None = None
+    if after is not None:
+        try:
+            created_raw, id_raw = decode_cursor(after, arity=2)
+            last = (datetime.fromisoformat(created_raw), UUID(id_raw))
+        except (InvalidCursor, ValueError) as exc:
+            raise ExecutionRefused("INVALID_CURSOR", "CURSOR_INVALID") from exc
+        statement = statement.where(
+            tuple_(GovernedExecutionRequest.created_at, GovernedExecutionRequest.id)
+            < tuple_(literal(last[0]), literal(last[1]))
+        )
+    else:
+        total = int(
+            await session.scalar(
+                select(func.count()).select_from(GovernedExecutionRequest).where(*filters)
+            )
+            or 0
+        )
+    rows = list((await session.scalars(statement.limit(first + 1))).all())
+    has_next = len(rows) > first
+    rows = rows[:first]
+    end_cursor = encode_cursor(rows[-1].created_at.isoformat(), rows[-1].id) if rows else None
+    settled = [await reconcile_pending(session, settings, row) for row in rows]
+    return ReceiptPage(items=settled, total=total, end_cursor=end_cursor, has_next_page=has_next)
