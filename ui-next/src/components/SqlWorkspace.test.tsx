@@ -125,6 +125,10 @@ describe("SqlWorkspace (R11-SQL01)", () => {
     );
     await waitFor(() => expect(screen.getByText("O-1")).toBeTruthy());
     expect(runButton().disabled).toBe(true);
+    // Found in the deployed browser journey: the badge kept saying "not run" after the run.
+    expect(screen.queryByText("Valid — not run")).toBeNull();
+    expect(screen.getByText("Ran once")).toBeTruthy();
+    expect(screen.getByText("Validate again to run it again.")).toBeTruthy();
   });
 
   it("disables Run once the validated text is edited, and validates the edit as pasted SQL", async () => {

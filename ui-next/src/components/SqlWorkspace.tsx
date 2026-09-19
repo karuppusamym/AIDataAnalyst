@@ -181,16 +181,20 @@ export function SqlWorkspace({
       {draft?.validation ? (
         <div className="sqlws__verdict" aria-label="Validation result">
           <div className="sqlws__verdicthead">
-            {draft.validation.valid ? (
-              <Pill tone="ok">Valid — not run</Pill>
-            ) : (
+            {!draft.validation.valid ? (
               <Pill tone="bad">Cannot run</Pill>
+            ) : receipt?.status === "EXECUTED" ? (
+              <Pill tone="info">Ran once</Pill>
+            ) : (
+              <Pill tone="ok">Valid — not run</Pill>
             )}
             {draft.origin === "GENERATED" ? <Pill tone="mute">Drafted by the model</Pill> : null}
             {receipt && receipt.status === "VALIDATED" ? (
               <span className="sqlws__note">
                 Run before {new Date(receipt.expires_at).toLocaleTimeString()}
               </span>
+            ) : receipt?.status === "EXECUTED" ? (
+              <span className="sqlws__note">Validate again to run it again.</span>
             ) : null}
           </div>
           {draft.validation.referenced_tables.length > 0 ? (
