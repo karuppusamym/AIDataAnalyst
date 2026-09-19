@@ -4979,6 +4979,7 @@ export interface SqlDraftReceiptRead {
   agent_run_id?: string | null;
   query_execution_id?: string | null;
   failure_reason?: string | null;
+  created_at: string;
   expires_at: string;
   executed_at?: string | null;
 }

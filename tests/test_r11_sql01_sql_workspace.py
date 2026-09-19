@@ -561,3 +561,54 @@ async def test_an_unknown_receipt_is_not_found(
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "RECEIPT_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# History: the caller's own receipts, value-free
+# ---------------------------------------------------------------------------
+
+
+async def _history(
+    http: httpx.AsyncClient, scenario: _Scenario, *, principal: str = "reviewing-analyst"
+) -> httpx.Response:
+    return await http.get(
+        f"/v1/datasources/{scenario.datasource.id}/sql-drafts",
+        headers=_headers(scenario, principal),
+    )
+
+
+async def test_history_lists_the_callers_own_receipts_newest_first(
+    http: httpx.AsyncClient, scenario: _Scenario, executed: list[str]
+) -> None:
+    first = await _receipt(http, scenario, sql=ORDERS_SQL)
+    ran = await _run(http, scenario, first, sql=ORDERS_SQL)
+    assert ran.status_code == 200, ran.text
+    second = await _receipt(http, scenario, sql="SELECT c.customer_id FROM retail.customer AS c")
+    theirs = await http.post(
+        f"/v1/datasources/{scenario.datasource.id}/sql-drafts",
+        json={"sql": ORDERS_SQL},
+        headers=_headers(scenario, "another-analyst"),
+    )
+    assert theirs.status_code == 200, theirs.text
+
+    response = await _history(http, scenario)
+
+    assert response.status_code == 200, response.text
+    listed = response.json()
+    assert [item["id"] for item in listed] == [second, first]
+    assert [item["status"] for item in listed] == ["VALIDATED", "EXECUTED"]
+    assert listed[1]["query_execution_id"] == ran.json()["execution"]["execution_id"]
+    assert all(LITERAL not in str(item) for item in listed), "history is value-free"
+    assert len(executed) == 1, "listing executes nothing"
+
+
+async def test_history_is_refused_across_organizations(
+    http: httpx.AsyncClient, scenario: _Scenario
+) -> None:
+    other = await _Scenario(scenario.db).build()
+
+    response = await http.get(
+        f"/v1/datasources/{other.datasource.id}/sql-drafts", headers=_headers(scenario)
+    )
+
+    assert response.status_code == 403

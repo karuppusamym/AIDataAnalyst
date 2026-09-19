@@ -29461,6 +29461,11 @@
             ],
             "title": "Context Product Version Id"
           },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
           "executed_at": {
             "anyOf": [
               {
@@ -29566,6 +29571,7 @@
           "status",
           "statement_digest",
           "referenced_tables",
+          "created_at",
           "expires_at"
         ],
         "title": "SqlDraftReceiptRead",
@@ -56904,6 +56910,149 @@
       }
     },
     "/v1/datasources/{datasource_id}/sql-drafts": {
+      "get": {
+        "description": "R11-SQL01's history: what this caller validated and ran here, as receipts.\n\nOnly the caller's own -- a receipt is a record of one person's review, and another\nanalyst's statements are theirs. Value-free by construction: a receipt holds the redacted\nshape and a digest, never the statement's literals, and never a row.",
+        "operationId": "list_sql_drafts_v1_datasources__datasource_id__sql_drafts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SqlDraftReceiptRead"
+                  },
+                  "title": "Response List Sql Drafts V1 Datasources  Datasource Id  Sql Drafts Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The caller's recent reviewed SQL on this datasource, newest first",
+        "tags": [
+          "sql-workspace"
+        ]
+      },
       "post": {
         "description": "Nothing runs here. An invalid statement is a 200 with findings and no receipt.",
         "operationId": "create_sql_draft_v1_datasources__datasource_id__sql_drafts_post",

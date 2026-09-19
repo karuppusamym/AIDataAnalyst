@@ -8,6 +8,8 @@ Two routes, and nothing executes on the first:
   the gateway validates it without executing it and a valid statement gets a receipt.
 * `POST /v1/sql-drafts/{receipt_id}/run` sends the statement back with the receipt and runs it
   once, through the gateway's full authorization and validation.
+* `GET /v1/datasources/{datasource_id}/sql-drafts` lists the caller's own recent receipts on
+  that datasource: the redacted shape, status and execution, never a literal or a row.
 
 Roles are the execution route's, `PlatformAdmin` and `Analyst`: a receipt is only worth having to
 someone who may run it. An `agent:` identity is held to its contract exactly as on Ask.
@@ -21,8 +23,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.agent_contracts import AgentContractValidationError, load_contract_for_principal
@@ -94,6 +97,7 @@ class SqlDraftReceiptRead(ApiModel):
     agent_run_id: UUID | None = None
     query_execution_id: UUID | None = None
     failure_reason: str | None = None
+    created_at: datetime
     expires_at: datetime
     executed_at: datetime | None = None
 
@@ -321,3 +325,40 @@ async def run_sql_draft(
         receipt=SqlDraftReceiptRead.model_validate(ran),
         execution=query_execution_response(result),
     )
+
+
+@router.get(
+    "/datasources/{datasource_id}/sql-drafts",
+    response_model=list[SqlDraftReceiptRead],
+    summary="The caller's recent reviewed SQL on this datasource, newest first",
+)
+async def list_sql_drafts(
+    datasource_id: UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+    context: SecurityContext = Depends(require_roles(*SQL_WORKSPACE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> list[SqlDraftReceiptRead]:
+    """R11-SQL01's history: what this caller validated and ran here, as receipts.
+
+    Only the caller's own -- a receipt is a record of one person's review, and another
+    analyst's statements are theirs. Value-free by construction: a receipt holds the redacted
+    shape and a digest, never the statement's literals, and never a row.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    receipts = (
+        await session.scalars(
+            select(SqlDraftReceipt)
+            .where(
+                SqlDraftReceipt.organization_id == datasource.organization_id,
+                SqlDraftReceipt.datasource_id == datasource.id,
+                SqlDraftReceipt.principal_id == context.principal_id,
+                SqlDraftReceipt.principal_type == context.principal_type,
+            )
+            .order_by(SqlDraftReceipt.created_at.desc(), SqlDraftReceipt.id)
+            .limit(limit)
+        )
+    ).all()
+    return [SqlDraftReceiptRead.model_validate(receipt) for receipt in receipts]

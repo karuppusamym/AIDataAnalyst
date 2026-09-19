@@ -8,11 +8,13 @@ import type {
 import {
   createSqlDraft,
   describeSqlWorkspaceError,
+  listSqlDrafts,
   runSqlDraft,
   type SqlWorkspaceProblem,
 } from "../lib/api/sqlWorkspace";
 import { QueryResultTable } from "./QueryResultTable";
 import { Button, Field, Pill } from "./primitives";
+import type { Tone } from "./primitives";
 import "./SqlWorkspace.css";
 
 /**
@@ -24,6 +26,18 @@ import "./SqlWorkspace.css";
  * disables Run until it is validated again -- the server refuses an edited statement anyway,
  * and saying so up front is kinder than a refusal.
  */
+/** A receipt's state as a person reads it: an unrun validation past its expiry is expired. */
+export function receiptState(
+  receipt: SqlDraftReceiptRead,
+  now: Date = new Date(),
+): { label: string; tone: Tone } {
+  if (receipt.status === "EXECUTED") return { label: "Ran", tone: "info" };
+  if (receipt.status === "FAILED") return { label: "Refused at run", tone: "bad" };
+  if (receipt.status === "EXECUTING") return { label: "Running", tone: "warn" };
+  if (new Date(receipt.expires_at) <= now) return { label: "Expired", tone: "mute" };
+  return { label: "Validated, not run", tone: "ok" };
+}
+
 export function SqlWorkspace({
   datasourceId,
   productKey,
@@ -42,6 +56,9 @@ export function SqlWorkspace({
   const [execution, setExecution] = useState<QueryExecutionResponse | null>(null);
   const [executedAt, setExecutedAt] = useState<Date | null>(null);
   const controller = useRef<AbortController | null>(null);
+  const [recent, setRecent] = useState<SqlDraftReceiptRead[] | null>(null);
+  const [recentError, setRecentError] = useState<string | null>(null);
+  const [historyTick, setHistoryTick] = useState(0);
 
   // A receipt names one datasource and one product; switching either spends it.
   useEffect(() => {
@@ -53,6 +70,22 @@ export function SqlWorkspace({
   }, [datasourceId, productKey]);
 
   useEffect(() => () => controller.current?.abort(), []);
+
+  // The caller's own history on this datasource, read again after every validate and run.
+  useEffect(() => {
+    const active = new AbortController();
+    setRecentError(null);
+    listSqlDrafts(datasourceId, active.signal)
+      .then((items) => {
+        if (!active.signal.aborted) setRecent(items);
+      })
+      .catch((error: unknown) => {
+        if (active.signal.aborted) return;
+        setRecent([]);
+        setRecentError(error instanceof Error ? error.message : String(error));
+      });
+    return () => active.abort();
+  }, [datasourceId, historyTick]);
 
   const edited = validatedSql !== null && sql !== validatedSql;
   const canRun = receipt !== null && receipt.status === "VALIDATED" && !edited && busy === null;
@@ -78,6 +111,7 @@ export function SqlWorkspace({
       setDraft(response);
       setReceipt(response.receipt ?? null);
       setValidatedSql(response.receipt ? text : null);
+      if (response.receipt) setHistoryTick((tick) => tick + 1);
     } catch (error) {
       if (active.signal.aborted) return;
       setProblem(describeSqlWorkspaceError(error));
@@ -113,6 +147,7 @@ export function SqlWorkspace({
       if (described.revalidate) setReceipt(null);
     } finally {
       if (controller.current === active) setBusy(null);
+      setHistoryTick((tick) => tick + 1);
     }
   }
 
@@ -224,6 +259,43 @@ export function SqlWorkspace({
           executedAt={executedAt}
         />
       ) : null}
+
+      <div className="sqlws__recent" aria-label="Your recent reviewed SQL">
+        <h3 className="sqlws__h3">Your recent reviewed SQL</h3>
+        {recentError ? (
+          <p className="sqlws__note" role="alert">
+            Your history could not be read ({recentError}). Validating and running still work.
+          </p>
+        ) : recent === null ? (
+          <p className="sqlws__note">Loading…</p>
+        ) : recent.length === 0 ? (
+          <p className="sqlws__note">Nothing validated here yet.</p>
+        ) : (
+          <ul className="sqlws__recentlist">
+            {recent.map((item) => {
+              const state = receiptState(item);
+              return (
+                <li key={item.id} className="sqlws__recentitem">
+                  <div className="sqlws__recenthead">
+                    <Pill tone={state.tone}>{state.label}</Pill>
+                    <span className="sqlws__note">
+                      {item.origin === "GENERATED" ? "drafted by the model" : "your SQL"} ·{" "}
+                      {new Date(item.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                  <code className="sqlws__shape">
+                    {item.redacted_sql ?? "Shape withheld: it could not be redacted safely."}
+                  </code>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        <p className="sqlws__note">
+          Literals are replaced in this list and results are never kept: validate again to run a
+          statement again.
+        </p>
+      </div>
     </section>
   );
 }

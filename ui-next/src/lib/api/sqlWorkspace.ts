@@ -13,10 +13,11 @@
    nothing would teach the wrong thing about what Run means.
 --------------------------------------------------------------------------- */
 
-import { postJson } from "./transport";
+import { get, postJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
 import { ApiError } from "../http";
 import type {
+  SqlDraftReceiptRead,
   SqlDraftRequest,
   SqlDraftResponse,
   SqlDraftRunRequest,
@@ -43,6 +44,16 @@ export function runSqlDraft(
 ): Promise<SqlDraftRunResponse> {
   if (USE_FIXTURES) return Promise.reject(new Error(FIXTURE_REFUSAL));
   return postJson<SqlDraftRunResponse>(`/v1/sql-drafts/${receiptId}/run`, body, signal);
+}
+
+/** `GET /v1/datasources/{id}/sql-drafts` -- the caller's own recent receipts here, newest
+ *  first. Value-free: the redacted shape, status and execution, never a literal or a row. */
+export function listSqlDrafts(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<SqlDraftReceiptRead[]> {
+  if (USE_FIXTURES) return Promise.resolve([]);
+  return get<SqlDraftReceiptRead[]>(`/v1/datasources/${datasourceId}/sql-drafts`, signal);
 }
 
 /** Why a Run was refused, in the words a person can act on. Keyed by the server's stable

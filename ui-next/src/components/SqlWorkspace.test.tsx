@@ -18,6 +18,8 @@ const createSqlDraft =
   vi.fn<(datasourceId: string, body: unknown, signal?: AbortSignal) => Promise<SqlDraftResponse>>();
 const runSqlDraft =
   vi.fn<(receiptId: string, body: unknown, signal?: AbortSignal) => Promise<SqlDraftRunResponse>>();
+const listSqlDrafts =
+  vi.fn<(datasourceId: string, signal?: AbortSignal) => Promise<SqlDraftReceiptRead[]>>();
 
 vi.mock("../lib/api/sqlWorkspace", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/sqlWorkspace")>();
@@ -27,10 +29,12 @@ vi.mock("../lib/api/sqlWorkspace", async (importOriginal) => {
       createSqlDraft(datasourceId, body, signal),
     runSqlDraft: (receiptId: string, body: unknown, signal?: AbortSignal) =>
       runSqlDraft(receiptId, body, signal),
+    listSqlDrafts: (datasourceId: string, signal?: AbortSignal) =>
+      listSqlDrafts(datasourceId, signal),
   };
 });
 
-const { SqlWorkspace } = await import("./SqlWorkspace");
+const { SqlWorkspace, receiptState } = await import("./SqlWorkspace");
 
 const GENERATED = "SELECT o.order_id FROM retail.orders AS o";
 
@@ -41,6 +45,7 @@ function receipt(overrides: Partial<SqlDraftReceiptRead> = {}): SqlDraftReceiptR
     status: "VALIDATED",
     statement_digest: "d".repeat(64),
     referenced_tables: ["retail.orders"],
+    created_at: "2026-09-18T12:00:00Z",
     expires_at: "2026-09-18T12:15:00Z",
     ...overrides,
   };
@@ -95,6 +100,8 @@ function runButton(): HTMLButtonElement {
 beforeEach(() => {
   createSqlDraft.mockReset();
   runSqlDraft.mockReset();
+  listSqlDrafts.mockReset();
+  listSqlDrafts.mockResolvedValue([]);
 });
 
 describe("SqlWorkspace (R11-SQL01)", () => {
@@ -256,5 +263,64 @@ describe("SqlWorkspace (R11-SQL01)", () => {
     expect((screen.getByRole("button", { name: "Validate" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
+  });
+});
+
+
+describe("SqlWorkspace history (R11-SQL01)", () => {
+  const FUTURE = "2999-01-01T00:00:00Z";
+
+  it("lists the caller's recent reviewed SQL as value-free shapes with their state", async () => {
+    listSqlDrafts.mockResolvedValue([
+      receipt({
+        id: "r-ran",
+        origin: "PASTED",
+        status: "EXECUTED",
+        redacted_sql: "SELECT a.status FROM customer.account AS a WHERE a.status <> :redacted",
+        expires_at: FUTURE,
+      }),
+      receipt({ id: "r-open", status: "VALIDATED", redacted_sql: null, expires_at: FUTURE }),
+    ]);
+    renderWorkspace();
+
+    await waitFor(() => expect(screen.getByText("Ran")).toBeTruthy());
+    expect(listSqlDrafts).toHaveBeenCalledWith("ds-1", expect.any(AbortSignal));
+    expect(screen.getByText("Validated, not run")).toBeTruthy();
+    expect(screen.getByText(/:redacted/)).toBeTruthy();
+    expect(screen.getByText("Shape withheld: it could not be redacted safely.")).toBeTruthy();
+    expect(screen.getByText(/your SQL/)).toBeTruthy();
+    expect(screen.getByText(/drafted by the model/)).toBeTruthy();
+  });
+
+  it("reads the history again after a validation and after a run", async () => {
+    createSqlDraft.mockResolvedValue(drafted());
+    runSqlDraft.mockResolvedValue({ receipt: receipt({ status: "EXECUTED" }), execution: EXECUTION });
+    renderWorkspace();
+    await waitFor(() => expect(listSqlDrafts).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Draft from question" }));
+    await waitFor(() => expect(listSqlDrafts).toHaveBeenCalledTimes(2));
+    fireEvent.click(runButton());
+    await waitFor(() => expect(listSqlDrafts).toHaveBeenCalledTimes(3));
+  });
+
+  it("keeps working when the history cannot be read", async () => {
+    listSqlDrafts.mockRejectedValue(new Error("history unavailable"));
+    createSqlDraft.mockResolvedValue(drafted());
+    renderWorkspace();
+
+    await waitFor(() => expect(screen.getByText(/could not be read/)).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Draft from question" }));
+    await waitFor(() => expect(runButton().disabled).toBe(false));
+  });
+
+  it("calls an unrun validation past its expiry expired", () => {
+    const now = new Date("2026-09-18T13:00:00Z");
+    expect(receiptState(receipt({ expires_at: "2026-09-18T12:15:00Z" }), now).label).toBe(
+      "Expired",
+    );
+    expect(receiptState(receipt({ expires_at: FUTURE }), now).label).toBe("Validated, not run");
+    expect(receiptState(receipt({ status: "FAILED" }), now).label).toBe("Refused at run");
+    expect(receiptState(receipt({ status: "EXECUTED" }), now).label).toBe("Ran");
   });
 });

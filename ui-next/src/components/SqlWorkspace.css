@@ -16,3 +16,9 @@
 .sqlws__code{font-family:var(--mono);font-size:11px;color:var(--ink)}
 .sqlws__ref{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .sqlws__hint{font-size:12.5px;color:var(--ink-2)}
+.sqlws__recent{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:10px}
+.sqlws__h3{margin:0;font-size:13px}
+.sqlws__recentlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto}
+.sqlws__recentitem{display:flex;flex-direction:column;gap:3px}
+.sqlws__recenthead{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sqlws__shape{font-family:var(--mono);font-size:11px;color:var(--ink-2);overflow-wrap:anywhere;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}

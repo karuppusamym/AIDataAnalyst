@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **513**
-- By family: BULK 11, EXPORT 7, GRAPHQL 14, JOB 27, MCP 9, REST 444, SDK 1
+- Surfaces covered: **514**
+- By family: BULK 11, EXPORT 7, GRAPHQL 14, JOB 27, MCP 9, REST 445, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -209,6 +209,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/relationship-candidates` | REST | `aida.intelligence_api.list_relationship_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/rename-candidates` | REST | `aida.intelligence_api.list_rename_candidates` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/scan-policy` | REST | `atlas.modules.connectivity.router.get_scan_policy` | DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}/sql-drafts` | REST | `aida.sql_workspace_api.list_sql_drafts` | Analyst, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/table-family-candidates` | REST | `aida.table_family_api.list_table_family_candidates_for_datasource` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/tables` | REST | `aida.api.list_tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/triggers/{trigger_id}/parse-coverage` | REST | `aida.procedure_lineage_api.get_trigger_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
