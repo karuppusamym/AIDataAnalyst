@@ -85,7 +85,7 @@
       "view_parser_status": "N/A"
     },
     {
-      "construct": "CASE ... WHEN ... THEN (PL/SQL statement form)",
+      "construct": "CASE [selector] WHEN ... THEN (PL/SQL statement form, searched or simple)",
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._CASE_WHEN_THEN_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "SUPPORTED",
       "view_parser_status": "N/A"
@@ -215,6 +215,36 @@
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLSQL_LINEAGE_FREE_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
       "view_parser_status": "N/A"
+    },
+    {
+      "construct": "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state; OPEN c FOR <string> / FOR EXECUTE is dynamic SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._OPEN_FOR_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "DECLARE c CURSOR ... FOR <query> / SET @c = CURSOR FOR <query> (T-SQL; read into routine-local state)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._TSQL_CURSOR_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "c [NO] [SCROLL] CURSOR [(args)] FOR <query> declaration (PL/pgSQL; read into routine-local state)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLPGSQL_CURSOR_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "v type := (<query>) declaration (PL/pgSQL; the default read into routine-local state; %TYPE/%ROWTYPE anchors and ALIAS FOR are not reads)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLPGSQL_ITEM_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "<<label>> statement label (PL/SQL, PL/pgSQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._LABEL_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
     }
   ],
   "dialects": [
@@ -224,7 +254,7 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-19T11:43:49.600441+00:00",
+  "generated_at": "2026-09-19T13:28:10.306820+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",

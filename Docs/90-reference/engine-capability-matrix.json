@@ -538,7 +538,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -583,7 +583,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1618,7 +1618,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1663,7 +1663,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2068,7 +2068,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2113,7 +2113,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2608,7 +2608,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2653,7 +2653,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3058,7 +3058,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3103,7 +3103,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 7 of 36 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 7 of 41 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"

@@ -1,6 +1,6 @@
 # Procedure lineage parser capability matrix
 
-Generated 2026-09-19T11:43:49.600441+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
+Generated 2026-09-19T13:28:10.306820+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
 
 ## Dialects attempted
 
@@ -24,7 +24,7 @@ Generated 2026-09-19T11:43:49.600441+00:00 by `scripts/generate_procedure_capabi
 | IF/ELSIF ... THEN (PL/SQL) | N/A | SUPPORTED |
 | WHILE ... BEGIN (T-SQL) | N/A | SUPPORTED |
 | WHILE ... LOOP (PL/SQL) | N/A | SUPPORTED |
-| CASE ... WHEN ... THEN (PL/SQL statement form) | N/A | SUPPORTED |
+| CASE [selector] WHEN ... THEN (PL/SQL statement form, searched or simple) | N/A | SUPPORTED |
 | cursor FOR ... IN (SELECT ...) LOOP (PL/SQL) | N/A | SUPPORTED |
 | bare FOR ... LOOP (PL/SQL) | N/A | SUPPORTED |
 | EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL) | N/A | EXPLICIT_UNPARSED |
@@ -46,6 +46,11 @@ Generated 2026-09-19T11:43:49.600441+00:00 by `scripts/generate_procedure_capabi
 | PL/SQL call statement p(x); / pkg.p; (nested call; a sibling package member is read through) | N/A | EXPLICIT_UNPARSED |
 | CURSOR c IS <query> declaration (PL/SQL; read into routine-local state) | N/A | SUPPORTED |
 | TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL) | N/A | RECOGNISED_NO_LINEAGE |
+| OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state; OPEN c FOR <string> / FOR EXECUTE is dynamic SQL) | N/A | SUPPORTED |
+| DECLARE c CURSOR ... FOR <query> / SET @c = CURSOR FOR <query> (T-SQL; read into routine-local state) | N/A | SUPPORTED |
+| c [NO] [SCROLL] CURSOR [(args)] FOR <query> declaration (PL/pgSQL; read into routine-local state) | N/A | SUPPORTED |
+| v type := (<query>) declaration (PL/pgSQL; the default read into routine-local state; %TYPE/%ROWTYPE anchors and ALIAS FOR are not reads) | N/A | SUPPORTED |
+| <<label>> statement label (PL/SQL, PL/pgSQL) | N/A | SUPPORTED |
 
 `SUPPORTED` -- real column/table-level lineage extracted.
 `EXPLICIT_UNPARSED` -- recognised, but this parser cannot safely resolve it: an explicit `UNPARSED` marker edge is produced instead (INV-9/AT-C4), never a silent drop.
