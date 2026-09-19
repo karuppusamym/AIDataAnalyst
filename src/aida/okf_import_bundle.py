@@ -15,7 +15,7 @@ reads no database, no clock, no network and no model, and never writes a file. I
    as a bomb.
 2. **`analyze_bundle_edits`** compares each uploaded document with the bytes Atlas itself stored
    for the publication the bundle was exported from, and reports what the editor changed as
-   *edits* in the three proposal families import feeds, plus a *note* for everything else: what
+   *edits* in the proposal families import feeds, plus a *note* for everything else: what
    is refused, what is unsupported and dropped, what is a claim that grants nothing, and what is
    tolerated without being stored. Nothing is dropped silently.
 
@@ -79,7 +79,9 @@ from aida.okf_export import (
     TYPE_VIEW,
     OkfColumnFacts,
     OkfConceptFacts,
+    OkfDescription,
     OkfObjectFacts,
+    OkfRoutineFacts,
     OkfSnapshot,
     _as_syntax,
     column_set_members,
@@ -226,6 +228,15 @@ TARGET_AMBIGUOUS: Final = "TARGET_AMBIGUOUS"
 DATASOURCE_NOT_AUTHORIZED: Final = "DATASOURCE_NOT_AUTHORIZED"
 MEANING_DEFINITION_INVALID: Final = "MEANING_DEFINITION_INVALID"
 MEANING_MAPPING_INVALID: Final = "MEANING_MAPPING_INVALID"
+# A routine's purpose, decided by the routine description workflow's own rules.
+#: The routine's captured body moved since the export: the edit describes a body that is gone.
+DEFINITION_CHANGED_SINCE_EXPORT: Final = "DEFINITION_CHANGED_SINCE_EXPORT"
+#: A draft for this routine is already open; the workflow allows one at a time.
+PROPOSAL_ALREADY_OPEN: Final = "PROPOSAL_ALREADY_OPEN"
+#: A reviewer already rejected this exact text for this routine, or it was approved and withdrawn.
+TEXT_PREVIOUSLY_REFUSED: Final = "TEXT_PREVIOUSLY_REFUSED"
+#: The routine's catalog evidence is below the bar every routine draft must clear for review.
+EVIDENCE_BELOW_REVIEW_THRESHOLD: Final = "EVIDENCE_BELOW_REVIEW_THRESHOLD"
 
 # --- outcomes, families and edit kinds --------------------------------------------------
 
@@ -240,17 +251,21 @@ EDIT_TABLE_PURPOSE: Final = "TABLE_PURPOSE"
 EDIT_COLUMN_DESCRIPTION: Final = "COLUMN_DESCRIPTION"
 EDIT_CONCEPT_DEFINITION: Final = "CONCEPT_DEFINITION"
 EDIT_CONCEPT_ALIASES: Final = "CONCEPT_ALIASES"
+EDIT_ROUTINE_PURPOSE: Final = "ROUTINE_PURPOSE"
 
 #: The existing proposal families an edit lands in. Nothing else is written.
 FAMILY_ASSET_DOCUMENTATION: Final = "ASSET_DOCUMENTATION"
 FAMILY_COLUMN_DESCRIPTION: Final = "COLUMN_DESCRIPTION"
 FAMILY_ONTOLOGY_MEANING: Final = "ONTOLOGY_MEANING"
+#: R11-FP08's routine description drafts: the description family's routine member.
+FAMILY_ROUTINE_DESCRIPTION: Final = "ROUTINE_DESCRIPTION"
 
 EDIT_FAMILIES: Final[Mapping[str, str]] = {
     EDIT_TABLE_PURPOSE: FAMILY_ASSET_DOCUMENTATION,
     EDIT_COLUMN_DESCRIPTION: FAMILY_COLUMN_DESCRIPTION,
     EDIT_CONCEPT_DEFINITION: FAMILY_ONTOLOGY_MEANING,
     EDIT_CONCEPT_ALIASES: FAMILY_ONTOLOGY_MEANING,
+    EDIT_ROUTINE_PURPOSE: FAMILY_ROUTINE_DESCRIPTION,
 }
 
 _OBJECT_TYPES: Final = frozenset({TYPE_TABLE, TYPE_VIEW, TYPE_MATERIALIZED_VIEW})
@@ -268,16 +283,22 @@ SUPPORTED_SECTIONS: Final[Mapping[tuple[str, str], str]] = {
     (TYPE_COLUMN_SET, "# Schema"): FAMILY_COLUMN_DESCRIPTION,
     (TYPE_CONCEPT, "# Definition"): FAMILY_ONTOLOGY_MEANING,
     (TYPE_CONCEPT, "# Also called"): FAMILY_ONTOLOGY_MEANING,
+    # A routine's purpose is a routine description draft, decided by that workflow's own rules:
+    # the edit carries the description version and the captured-definition version the export
+    # showed, which are exactly the two things the workflow's approval re-checks.
+    (TYPE_ROUTINE, "# Purpose"): FAMILY_ROUTINE_DESCRIPTION,
 }
-#: Document types Atlas exports and deliberately does not import in this slice.
+#: Document types Atlas exports and deliberately does not import. Each reason is why no
+#: existing proposal family could carry the edit safely -- not a gap waiting on parsing.
 UNSUPPORTED_TYPES: Final[Mapping[str, str]] = {
-    TYPE_ROUTINE: (
-        "a routine's description is proposed through the routine draft workflow, whose evidence "
-        "and definition-version checks an edited file cannot supply"
+    TYPE_PACKAGE: (
+        "a package has no description family: the routine description workflow refuses a "
+        "package by name (PACKAGE_NOT_DESCRIBABLE) and package documentation waits on R11-FP03, "
+        "so an edit would need a new store and a new review type"
     ),
-    TYPE_PACKAGE: "a package is navigational; it has no description family of its own",
     TYPE_TOOL_VERSION: (
-        "a tool version is a reviewed executable interface; import never touches one"
+        "a tool version is a versioned, reviewed executable interface; its text changes only by "
+        "authoring a new version under its own review, which a file edit cannot stand in for"
     ),
 }
 
@@ -802,6 +823,10 @@ class OkfImportEdit:
     base_version: int | None = None
     #: Aliases added to a concept; the edit never removes one.
     added_aliases: tuple[str, ...] = ()
+    #: A routine's captured-definition version as the export showed it (`None`: none captured).
+    #: Read from Atlas's stored snapshot, never from the upload, so an editor cannot vouch for
+    #: a body they never saw by rewriting a frontmatter number.
+    base_definition_version: int | None = None
 
     @property
     def family(self) -> str:
@@ -838,6 +863,7 @@ class _Base:
     subjects: dict[str, str]
     objects: dict[str, OkfObjectFacts]
     concepts: dict[str, OkfConceptFacts]
+    routines: dict[str, OkfRoutineFacts]
     #: Column-set path -> its object and, in row order, its columns. Empty columns when the
     #: set's names cannot be matched to exactly one column each.
     column_sets: dict[str, tuple[OkfObjectFacts, tuple[OkfColumnFacts, ...]]]
@@ -860,6 +886,7 @@ def _base(snapshot: OkfSnapshot) -> _Base:
         subjects=document_subjects(snapshot),
         objects=objects,
         concepts={concept.key: concept for concept in snapshot.concepts},
+        routines={routine.key: routine for routine in snapshot.routines},
         column_sets=column_sets,
         wide_objects=frozenset(members_by_object),
     )
@@ -1018,11 +1045,25 @@ def _object_edits(
     return handled
 
 
-def _purpose_edit(document: _Document, obj: OkfObjectFacts, base: str, upload: str) -> None:
+def _purpose_edit(
+    document: _Document,
+    obj: OkfObjectFacts | OkfRoutineFacts,
+    base: str,
+    upload: str,
+    *,
+    kind: str = EDIT_TABLE_PURPOSE,
+) -> None:
+    """An edit to `# Purpose`, for a table or view and -- R11-OKF03 -- for a routine.
+
+    One rule for both, because the exporter writes both sections with one renderer
+    (`okf_export._purpose_section`): the same footnote, the same placeholders, the same
+    withheld sentence. A routine edit also carries the captured-definition version the export
+    showed, so the routine workflow's body check has an export-time baseline to hold it to.
+    """
     base_text, upload_text = _purpose_text(base), _purpose_text(upload)
     if _collapsed(base_text) == _collapsed(upload_text):
         return
-    description = obj.description
+    description: OkfDescription = obj.description
     approved = description.state == DESCRIPTION_APPROVED and description.text
     if approved and _collapsed(base_text) != _collapsed(description.text or ""):
         # The stored document does not split where the renderer wrote it -- approved text that
@@ -1035,15 +1076,17 @@ def _purpose_edit(document: _Document, obj: OkfObjectFacts, base: str, upload: s
     if description.state == DESCRIPTION_WITHHELD:
         document.note(OUTCOME_UNSUPPORTED, BASE_TEXT_WITHHELD, "# Purpose")
         return
+    definition = obj.definition if isinstance(obj, OkfRoutineFacts) else None
     document.edits.append(
         OkfImportEdit(
             path=document.path,
-            kind=EDIT_TABLE_PURPOSE,
+            kind=kind,
             subject_key=obj.key,
             field="purpose",
             proposed=upload_text,
             base_text=description.text if approved else None,
             base_version=description.version if approved else None,
+            base_definition_version=definition.capture_version if definition else None,
         )
     )
 
@@ -1289,6 +1332,18 @@ def _analyze_document(document: _Document, upload: str, base_text: str, base: _B
         )
     elif concept_type == TYPE_CONCEPT and subject in base.concepts:
         handled |= _concept_edits(document, base.concepts[subject], base_sections, upload_sections)
+    elif concept_type == TYPE_ROUTINE and subject in base.routines:
+        # Only the purpose: Interface, Reads and writes, Coverage and Limitations are catalog
+        # and lineage facts Atlas re-derives, and fall through to SECTION_DERIVED below.
+        if "# Purpose" in base_sections and "# Purpose" in upload_sections:
+            handled.add("# Purpose")
+            _purpose_edit(
+                document,
+                base.routines[subject],
+                base_sections["# Purpose"],
+                upload_sections["# Purpose"],
+                kind=EDIT_ROUTINE_PURPOSE,
+            )
     for heading in sorted(set(base_sections) | set(upload_sections)):
         if heading in handled or base_sections.get(heading) == upload_sections.get(heading):
             continue

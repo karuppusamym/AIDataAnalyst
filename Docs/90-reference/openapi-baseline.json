@@ -22389,14 +22389,335 @@
           },
           "preview": {
             "$ref": "#/components/schemas/OkfImportPreviewRead"
+          },
+          "routine_drafts": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportRoutineRead"
+            },
+            "title": "Routine Drafts",
+            "type": "array"
           }
         },
         "required": [
           "preview",
           "description_batches",
-          "meaning_versions"
+          "meaning_versions",
+          "routine_drafts"
         ],
         "title": "OkfImportRead",
+        "type": "object"
+      },
+      "OkfImportReviewChangeRead": {
+        "additionalProperties": false,
+        "description": "One proposed change and what approving it will do, predicted from the approval's own\ncomparisons. `state` is APPLIES, CONFLICT, TARGET_UNAVAILABLE or DECIDED.",
+        "properties": {
+          "approval_effect": {
+            "title": "Approval Effect",
+            "type": "string"
+          },
+          "before_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before Value"
+          },
+          "change_id": {
+            "title": "Change Id",
+            "type": "string"
+          },
+          "current_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Value"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "proposed_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed Value"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "skip_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skip Reason"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "subject_type": {
+            "title": "Subject Type",
+            "type": "string"
+          },
+          "target_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Active"
+          }
+        },
+        "required": [
+          "change_id",
+          "subject_type",
+          "subject_id",
+          "field",
+          "label",
+          "status",
+          "state",
+          "approval_effect"
+        ],
+        "title": "OkfImportReviewChangeRead",
+        "type": "object"
+      },
+      "OkfImportReviewDocumentRead": {
+        "additionalProperties": false,
+        "description": "The changes about one object: a table (with its columns) or a routine.",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportReviewChangeRead"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "conflicts": {
+            "title": "Conflicts",
+            "type": "integer"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id",
+          "label",
+          "object_type",
+          "conflicts",
+          "changes"
+        ],
+        "title": "OkfImportReviewDocumentRead",
+        "type": "object"
+      },
+      "OkfImportReviewRead": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Sha256"
+          },
+          "authority": {
+            "title": "Authority",
+            "type": "string"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportReviewDocumentRead"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "proposal_status": {
+            "title": "Proposal Status",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "total_documents": {
+            "title": "Total Documents",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "review_id",
+          "object_type",
+          "object_id",
+          "review_status",
+          "requested_by",
+          "proposal_status",
+          "datasource_id",
+          "counts",
+          "offset",
+          "limit",
+          "total_documents",
+          "documents",
+          "authority"
+        ],
+        "title": "OkfImportReviewRead",
+        "type": "object"
+      },
+      "OkfImportRoutineRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "draft_id": {
+            "format": "uuid",
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "governance_review_id": {
+            "format": "uuid",
+            "title": "Governance Review Id",
+            "type": "string"
+          },
+          "routine_id": {
+            "format": "uuid",
+            "title": "Routine Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_id",
+          "routine_id",
+          "datasource_id",
+          "governance_review_id"
+        ],
+        "title": "OkfImportRoutineRead",
         "type": "object"
       },
       "OkfObjectKnowledgeItemRead": {
@@ -66449,6 +66770,162 @@
         "summary": "Get Governance Review Diff",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/governance/reviews/{review_id}/okf-import-preview": {
+      "get": {
+        "description": "What an OKF import review asks a reviewer to approve, document by document: each\nchange's before and proposed text, whether its approved description moved since the export,\nand what approving will do with it. Counts cover every document; `documents` is one page.\nReads only; 404 for a review that is not an OKF import's.",
+        "operationId": "get_okf_import_review_v1_governance_reviews__review_id__okf_import_preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Documents to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Documents to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Documents to return.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "description": "Documents to return.",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfImportReviewRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Okf Import Review",
+        "tags": [
+          "okf-import"
         ]
       }
     },

@@ -32,9 +32,12 @@ import pytest
 
 import aida.okf_import_bundle as bundle_module
 from aida.okf_export import (
+    DESCRIPTION_APPROVED,
     DESCRIPTION_WITHHELD,
     MANIFEST_FILENAME,
+    OkfApproval,
     OkfBundle,
+    OkfDefinitionFacts,
     OkfDescription,
     OkfSnapshot,
     bundle_archive_bytes,
@@ -59,10 +62,12 @@ from aida.okf_import_bundle import (
     EDIT_COLUMN_DESCRIPTION,
     EDIT_CONCEPT_ALIASES,
     EDIT_CONCEPT_DEFINITION,
+    EDIT_ROUTINE_PURPOSE,
     EDIT_TABLE_PURPOSE,
     ENCODING_INVALID,
     EXECUTABLE_FIELD_REFUSED,
     FAMILY_NOT_SUPPORTED,
+    FAMILY_ROUTINE_DESCRIPTION,
     FIELD_DERIVED,
     FRONTMATTER_MISSING,
     FRONTMATTER_NOT_A_MAPPING,
@@ -116,7 +121,7 @@ from aida.okf_import_bundle import (
 from tests.test_okf_export import _snapshot
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-_MODULES = ("okf_import_bundle.py", "okf_import.py", "okf_import_api.py")
+_MODULES = ("okf_import_bundle.py", "okf_import.py", "okf_import_api.py", "okf_import_review.py")
 
 
 # --- builders -----------------------------------------------------------------------------
@@ -710,11 +715,18 @@ def test_unsupported_and_derived_changes_are_listed_not_dropped() -> None:
     _snapshot_value, _bundle, texts = _base()
     table = _path(texts, "/tables/")
     routine = _path(texts, "/routines/")
+    package = _path(texts, "/packages/")
     new = "concepts/concept-" + "a" * 32 + ".md"
     analysis = _analyze(
         {
             "index.md": texts["index.md"] + "\nAn edit to an index.\n",
+            # A routine's interface is catalog fact, re-derived: SECTION_DERIVED, not an edit.
             routine: texts[routine].replace("# Interface", "# Interface\n\nEdited.", 1),
+            # A package has no description family at all: FAMILY_NOT_SUPPORTED.
+            package: texts[package].replace(
+                "Not established. No approved description of this package exists.",
+                "Risk calculations for the sales ledger.",
+            ),
             new: "---\ntype: Atlas Business Concept\n---\n\n# Definition\n\nNew.\n",
             table: texts[table]
             .replace("One row per completed order.[^approved-description]", "")
@@ -793,6 +805,95 @@ def test_an_edit_to_withheld_text_is_not_proposed() -> None:
     assert BASE_TEXT_WITHHELD in _codes(analysis)
     assert analysis.edits == ()
 
+
+
+def _routine_analysis(
+    snapshot: OkfSnapshot, edit: Any
+) -> tuple[OkfImportAnalysis, str, dict[str, str]]:
+    """Export `snapshot`, apply `edit(texts, routine_path)` to its first routine, and analyze."""
+    bundle = export_okf_bundle(snapshot)
+    texts = {document.path: document.text for document in bundle.documents}
+    key = snapshot.routines[0].key
+    path = next(path for path in texts if path.endswith(f"routine-{key}.md"))
+    edited = edit(texts, path)
+    members: list[tuple[str | zipfile.ZipInfo, bytes]] = [
+        (f"bundle/{name}", text.encode()) for name, text in {**texts, path: edited}.items()
+    ]
+    members.append((MANIFEST_FILENAME, bundle.manifest_json().encode()))
+    analysis = analyze_bundle_edits(
+        read_import_archive(_zip(members)), snapshot=snapshot, base_documents=texts
+    )
+    return analysis, path, texts
+
+
+def test_a_routine_purpose_becomes_a_routine_description_edit() -> None:
+    """The export's baseline -- the approved version and the captured-definition version -- is
+    carried from Atlas's snapshot; the file's own `capture_version` is a derived field."""
+    snapshot, _bundle, _texts = _base()
+    routine = replace(
+        snapshot.routines[0],
+        description=OkfDescription(
+            state=DESCRIPTION_APPROVED,
+            text="Rebuilds one day.",
+            version=2,
+            approval=OkfApproval("steward", "2026-09-05T00:00:00+00:00", True),
+        ),
+        definition=OkfDefinitionFacts(
+            available=True,
+            digest="b" * 64,
+            truncated=False,
+            lineage="ACTIVE",
+            capture_version=4,
+            captured_at="2026-08-01T00:00:00+00:00",
+        ),
+    )
+    snapshot = replace(snapshot, routines=(routine, *snapshot.routines[1:]))
+
+    def edit(texts: dict[str, str], path: str) -> str:
+        return (
+            texts[path]
+            .replace("Rebuilds one day.[^approved-description]", "Rebuilds one day's totals.")
+            .replace("capture_version: 4", "capture_version: 9")
+        )
+
+    analysis, path, _texts = _routine_analysis(snapshot, edit)
+    (routine_edit,) = analysis.edits
+    assert (routine_edit.kind, routine_edit.family) == (
+        EDIT_ROUTINE_PURPOSE,
+        FAMILY_ROUTINE_DESCRIPTION,
+    )
+    assert (routine_edit.path, routine_edit.subject_key) == (path, routine.key)
+    assert routine_edit.proposed == "Rebuilds one day's totals."
+    assert (routine_edit.base_version, routine_edit.base_definition_version) == (2, 4)
+    assert FIELD_DERIVED in _codes(analysis)
+
+
+def test_a_routine_without_approved_text_or_with_withheld_text() -> None:
+    snapshot, _bundle, _texts = _base()
+    placeholder = "Not established. No approved description of this routine exists."
+
+    def written(texts: dict[str, str], path: str) -> str:
+        return texts[path].replace(placeholder, "Rebuilds one day's totals.")
+
+    analysis, _path, _texts = _routine_analysis(snapshot, written)
+    (routine_edit,) = analysis.edits
+    assert (routine_edit.base_version, routine_edit.base_definition_version) == (None, None)
+
+    withheld = replace(
+        snapshot.routines[0],
+        description=OkfDescription(
+            state=DESCRIPTION_WITHHELD, version=2, withheld_reason_codes=("EGRESS_SCREENING",)
+        ),
+    )
+    snapshot = replace(snapshot, routines=(withheld, *snapshot.routines[1:]))
+
+    def blind(texts: dict[str, str], path: str) -> str:
+        start = texts[path].index("Withheld.")
+        end = texts[path].index("\n", start)
+        return texts[path][:start] + "A description written blind." + texts[path][end:]
+
+    analysis, _path, _texts = _routine_analysis(snapshot, blind)
+    assert analysis.edits == () and BASE_TEXT_WITHHELD in _codes(analysis)
 
 def test_a_document_without_frontmatter_is_refused() -> None:
     _snapshot_value, _bundle, texts = _base()

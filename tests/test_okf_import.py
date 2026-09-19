@@ -790,5 +790,16 @@ def test_the_round_trip_contract_document_matches_the_code() -> None:
         "TABLE_PURPOSE",
         "CONCEPT_DEFINITION",
         "CONCEPT_ALIASES",
+        # R11-OKF03 routines: the family, its review types, the workflow's own codes and the
+        # reviewer preview's states -- names the page explains, not import reason codes.
+        "ROUTINE_DESCRIPTION",
+        "OKF_IMPORT_ROUTINE_DESCRIPTION",
+        "ROUTINE_DESCRIPTION_DRAFT",
+        "DEFINITION_MOVED",
+        "PACKAGE_NOT_DESCRIBABLE",
+        "MINIMUM_EVIDENCE_FOR_REVIEW",
+        "GOVERNED_TOOL_VERSION",
+        "TARGET_UNAVAILABLE",
+        "SKIPPED_MISSING",
     }
     assert sorted(codes_in_tables - allowed) == []

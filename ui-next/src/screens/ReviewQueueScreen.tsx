@@ -38,8 +38,19 @@ import "../components/ProposalRow.css";
 import "../components/EvidencePane.css";
 import "./ReviewQueueScreen.css";
 import { ReviewChangePreview } from "../components/ReviewChangePreview";
+/* R11-OKF03: an OKF import's own reviews get the import preview -- per
+   document, before and after text, and whether approving still applies each
+   change -- instead of the generic diff. Same gate: no decision until it has
+   loaded for this review. */
+import { OkfImportReviewPreview } from "../components/OkfImportReviewPreview";
+import { OKF_IMPORT_REVIEW_TYPES } from "../lib/api/okfImport";
 
-const FULL_PREVIEW_TYPES = new Set(["MODEL_IMPORT_BATCH", "CONTEXT_PRODUCT_VERSION", "ONTOLOGY_VERSION"]);
+const FULL_PREVIEW_TYPES = new Set([
+  "MODEL_IMPORT_BATCH",
+  "CONTEXT_PRODUCT_VERSION",
+  "ONTOLOGY_VERSION",
+  ...OKF_IMPORT_REVIEW_TYPES,
+]);
 
 /* ---------------------------------------------------------------------------
    Review queue — UX-15, migrated onto UX-17's real read model.
@@ -101,6 +112,8 @@ const OBJECT_TYPES = [
   "CONTEXT_PRODUCT_VERSION",
   "MODEL_IMPORT_BATCH",
   "ONTOLOGY_VERSION",
+  "OKF_IMPORT_BATCH",
+  "OKF_IMPORT_ROUTINE_DESCRIPTION",
 ] as const;
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
@@ -214,6 +227,12 @@ function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
             : "Table description draft",
       subtitle: parts.join(" — ") || undefined,
     };
+  }
+  if (proposal.object_type === "OKF_IMPORT_BATCH") {
+    return { subject: "Descriptions imported from an edited OKF bundle" };
+  }
+  if (proposal.object_type === "OKF_IMPORT_ROUTINE_DESCRIPTION") {
+    return { subject: "Routine purpose imported from an edited OKF bundle" };
   }
   return { subject: proposal.object_id };
 }
@@ -622,7 +641,9 @@ function GovernanceReviewQueue() {
                     ? "Load the full change preview before deciding."
                     : null,
           }}
-          diff={FULL_PREVIEW_TYPES.has(focused.object_type)
+          diff={OKF_IMPORT_REVIEW_TYPES.has(focused.object_type)
+            ? <OkfImportReviewPreview key={focused.review_id} reviewId={focused.review_id} onReady={setDetailReady} />
+            : FULL_PREVIEW_TYPES.has(focused.object_type)
             ? <ReviewChangePreview key={focused.review_id} reviewId={focused.review_id} onReady={setDetailReady} />
             : <DiffEntries proposal={focused} />}
           /* Impact: this queue composes no consumer/impact set today. Saying so

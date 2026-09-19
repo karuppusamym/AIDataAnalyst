@@ -16,9 +16,15 @@ There is no approve step here and no shortcut to one.
 
 **Off until accepted.** `Settings.okf_import_enabled` ships `False`; both routes refuse with
 `OKF_IMPORT_DISABLED` before reading the body or any row. Roles are the population that may
-author every family import writes into -- workbook descriptions and ontology drafts -- and
-beyond the role, the caller must be able to read the bundle exactly as the OKF read routes
-require (`aida.okf_store.read_published_bundle`).
+author every family import writes into -- workbook descriptions, ontology drafts and routine
+description drafts -- and beyond the role, the caller must be able to read the bundle exactly as
+the OKF read routes require (`aida.okf_store.read_published_bundle`).
+
+**The reviewer's read.** What an import raised is decided in the ordinary review queue, and
+`GET /v1/governance/reviews/{review_id}/okf-import-preview` is what that queue shows a reviewer
+of an `OKF_IMPORT_BATCH` or `OKF_IMPORT_ROUTINE_DESCRIPTION` review (`aida.okf_import_review`).
+It is not behind `okf_import_enabled`: a deployment that switches import off must still let a
+reviewer read -- and so decide -- the imports already waiting in its queue.
 """
 
 from __future__ import annotations
@@ -45,15 +51,26 @@ from aida.okf_import_bundle import (
     OKF_IMPORT_DISABLED,
     OkfImportRefused,
 )
+from aida.okf_import_review import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    OkfReviewChange,
+    OkfReviewPreview,
+    read_okf_import_review,
+)
 from aida.schemas import ApiModel
 from aida.security import SecurityContext, require_roles
 
 router = APIRouter(prefix="/v1", tags=["okf-import"])
 
-#: Who may import: the roles that may author both families import writes into (a workbook's
-#: descriptions and an ontology draft). A role is necessary and never sufficient -- the bundle
-#: read's own scope, consumer-role and per-datasource checks all still apply.
+#: Who may import: the roles that may author every family import writes into (a workbook's
+#: descriptions, an ontology draft and a routine description draft). A role is necessary and
+#: never sufficient -- the bundle read's own scope, consumer-role and per-datasource checks all
+#: still apply.
 OKF_IMPORT_ROLES = ("PlatformAdmin", "MetadataAdmin", "DataSteward")
+#: Who may read an import review's full preview: exactly the roles of the generic review diff
+#: (`semantic_api.get_governance_review_diff`), so this view widens nobody's reach.
+OKF_IMPORT_REVIEW_ROLES = ("PlatformAdmin", "SemanticAdmin", "DataSteward", "Reviewer")
 
 _FILENAME = Query(min_length=1, max_length=255, description="The uploaded file's name.")
 
@@ -131,12 +148,75 @@ class OkfImportMeaningRead(ApiModel):
     concept_count: int
 
 
+class OkfImportRoutineRead(ApiModel):
+    draft_id: UUID
+    routine_id: UUID
+    datasource_id: UUID
+    governance_review_id: UUID
+
+
 class OkfImportRead(ApiModel):
     preview: OkfImportPreviewRead
     #: Pending description batches, one per datasource, each under an OKF_IMPORT_BATCH review.
     description_batches: list[OkfImportBatchRead]
     #: Pending ontology versions, each under its ONTOLOGY_VERSION review.
     meaning_versions: list[OkfImportMeaningRead]
+    #: Pending routine description drafts, each under an OKF_IMPORT_ROUTINE_DESCRIPTION review.
+    routine_drafts: list[OkfImportRoutineRead]
+
+
+class OkfImportReviewChangeRead(ApiModel):
+    """One proposed change and what approving it will do, predicted from the approval's own
+    comparisons. `state` is APPLIES, CONFLICT, TARGET_UNAVAILABLE or DECIDED."""
+
+    change_id: str
+    subject_type: str
+    subject_id: str
+    field: str
+    label: str
+    #: What the proposal replaces, as the import recorded it. Released as export screening would.
+    before_value: str | None = None
+    proposed_value: str | None = None
+    expected_version: int | None = None
+    current_version: int | None = None
+    #: The approved text now, only when it is not what the import replaces.
+    current_value: str | None = None
+    status: str
+    skip_reason: str | None = None
+    state: str
+    reason_code: str | None = None
+    target_active: bool | None = None
+    approval_effect: str
+
+
+class OkfImportReviewDocumentRead(ApiModel):
+    """The changes about one object: a table (with its columns) or a routine."""
+
+    document_id: str
+    label: str
+    object_type: str
+    conflicts: int
+    changes: list[OkfImportReviewChangeRead]
+
+
+class OkfImportReviewRead(ApiModel):
+    review_id: UUID
+    object_type: str
+    object_id: str
+    review_status: str
+    requested_by: str
+    #: The batch's or draft's own status (PENDING_REVIEW / PENDING_APPROVAL until decided).
+    proposal_status: str
+    datasource_id: UUID
+    filename: str | None = None
+    archive_sha256: str | None = None
+    #: Over every document, not only this page.
+    counts: dict[str, int]
+    offset: int
+    limit: int
+    total_documents: int
+    documents: list[OkfImportReviewDocumentRead]
+    authority: str
 
 
 _AUTHORITY = (
@@ -248,6 +328,66 @@ def _applied_read(applied: OkfImportApplied) -> OkfImportRead:
             )
             for meaning in applied.meaning
         ],
+        routine_drafts=[
+            OkfImportRoutineRead(
+                draft_id=routine.draft_id,
+                routine_id=routine.routine_id,
+                datasource_id=routine.datasource_id,
+                governance_review_id=routine.governance_review_id,
+            )
+            for routine in applied.routines
+        ],
+    )
+
+
+def _change_read(change: OkfReviewChange) -> OkfImportReviewChangeRead:
+    return OkfImportReviewChangeRead(
+        change_id=change.change_id,
+        subject_type=change.subject_type,
+        subject_id=change.subject_id,
+        field=change.field,
+        label=change.label,
+        before_value=change.before_value,
+        proposed_value=change.proposed_value,
+        expected_version=change.expected_version,
+        current_version=change.current_version,
+        current_value=change.current_value,
+        status=change.status,
+        skip_reason=change.skip_reason,
+        state=change.state,
+        reason_code=change.reason_code,
+        target_active=change.target_active,
+        approval_effect=change.approval_effect,
+    )
+
+
+def _review_read(preview: OkfReviewPreview, *, offset: int, limit: int) -> OkfImportReviewRead:
+    review = preview.review
+    return OkfImportReviewRead(
+        review_id=review.id,
+        object_type=review.object_type,
+        object_id=review.object_id,
+        review_status=review.status,
+        requested_by=review.requested_by,
+        proposal_status=preview.proposal_status,
+        datasource_id=preview.datasource_id,
+        filename=preview.filename,
+        archive_sha256=preview.archive_sha256,
+        counts=preview.counts(),
+        offset=offset,
+        limit=limit,
+        total_documents=len(preview.documents),
+        documents=[
+            OkfImportReviewDocumentRead(
+                document_id=document.document_id,
+                label=document.label,
+                object_type=document.object_type,
+                conflicts=document.conflicts,
+                changes=[_change_read(change) for change in document.changes],
+            )
+            for document in preview.documents[offset : offset + limit]
+        ],
+        authority=preview.authority,
     )
 
 
@@ -355,6 +495,7 @@ async def apply_okf_bundle_import(
     details = preview_audit_details(applied.preview)
     details["description_batches"] = [str(batch.batch_id) for batch in applied.batches]
     details["meaning_versions"] = [str(item.ontology_version_id) for item in applied.meaning]
+    details["routine_drafts"] = [str(item.draft_id) for item in applied.routines]
     record_import_audit(
         session,
         context,
@@ -367,3 +508,25 @@ async def apply_okf_bundle_import(
     read = _applied_read(applied)
     await session.commit()
     return read
+
+
+@router.get(
+    "/governance/reviews/{review_id}/okf-import-preview",
+    response_model=OkfImportReviewRead,
+)
+async def get_okf_import_review(
+    review_id: UUID,
+    offset: Annotated[int, Query(ge=0, description="Documents to skip.")] = 0,
+    limit: Annotated[
+        int, Query(ge=1, le=MAX_PAGE_SIZE, description="Documents to return.")
+    ] = DEFAULT_PAGE_SIZE,
+    context: SecurityContext = Depends(require_roles(*OKF_IMPORT_REVIEW_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> OkfImportReviewRead:
+    """What an OKF import review asks a reviewer to approve, document by document: each
+    change's before and proposed text, whether its approved description moved since the export,
+    and what approving will do with it. Counts cover every document; `documents` is one page.
+    Reads only; 404 for a review that is not an OKF import's."""
+    preview = await read_okf_import_review(session, review_id, context, settings)
+    return _review_read(preview, offset=offset, limit=limit)

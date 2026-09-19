@@ -28,6 +28,14 @@ nothing of its own:
      `OntologyVersion` on the version the bundle was exported from, submitted for its ordinary
      `ONTOLOGY_VERSION` review. `ontology_api.decide_ontology` refuses it if the ontology was
      published past that base in the meantime.
+   * **A routine's purpose** lands as a `RoutineDescriptionDraft` -- R11-FP08's own store --
+     created `PENDING_APPROVAL` with the description version the export showed as its
+     `base_description_version`, and decided by `apply_routine_description_draft`, the one
+     function that publishes a routine description. Everything that workflow refuses, import
+     refuses first: a second open draft, text a reviewer already rejected or withdrew, catalog
+     evidence below the review bar, and a body that moved since the export. Its review is
+     `OKF_IMPORT_ROUTINE_DESCRIPTION` rather than `ROUTINE_DESCRIPTION_DRAFT` for the reason the
+     batch has its own type: the text came from a file, so no agent may decide it.
 
 Nothing here approves, publishes or regenerates a bundle. A re-export shows an imported change
 only after a different principal approved it in the review queue, because only then does the
@@ -55,18 +63,34 @@ import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
 
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.asset_description_service import (
+    MINIMUM_EVIDENCE_FOR_REVIEW,
+    ConfidenceBreakdown,
+    text_fingerprint,
+)
 from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings
 from aida.context import get_correlation_id
+from aida.envelope_models import (
+    MetadataRoutine,
+    MetadataRoutineDefinitionVersion,
+    RoutineDescriptionDraft,
+    RoutineDocumentation,
+    RoutineDocumentationVersion,
+)
 from aida.events import record_audit, record_outbox
+from aida.governance_decision_contracts import TargetEffect
+from aida.governance_decision_service import register_target_adapters
 from aida.ingest_screening import CLEAN, screen_text
 from aida.models import (
     AssetDocumentation,
@@ -89,18 +113,23 @@ from aida.okf_export import (
     OkfConceptFacts,
     OkfSnapshot,
     object_key,
+    routine_key,
     snapshot_from_document,
 )
 from aida.okf_import_bundle import (
     ALREADY_CURRENT,
     BASE_PUBLICATION_NOT_RETAINED,
     DATASOURCE_NOT_AUTHORIZED,
+    DEFINITION_CHANGED_SINCE_EXPORT,
     EDIT_COLUMN_DESCRIPTION,
     EDIT_CONCEPT_DEFINITION,
     EDIT_TABLE_PURPOSE,
+    EVIDENCE_BELOW_REVIEW_THRESHOLD,
     FAMILY_ASSET_DOCUMENTATION,
     FAMILY_COLUMN_DESCRIPTION,
+    FAMILY_NOT_SUPPORTED,
     FAMILY_ONTOLOGY_MEANING,
+    FAMILY_ROUTINE_DESCRIPTION,
     IMPORT_ALREADY_PENDING,
     IMPORT_NOTHING_TO_PROPOSE,
     MANIFEST_INVALID,
@@ -117,10 +146,12 @@ from aida.okf_import_bundle import (
     OUTCOME_TOLERATED,
     OUTCOME_UNSUPPORTED,
     PREVIEW_STALE,
+    PROPOSAL_ALREADY_OPEN,
     SOURCE_CHANGED_SINCE_EXPORT,
     TARGET_AMBIGUOUS,
     TARGET_NOT_ACTIVE,
     TARGET_NOT_FOUND,
+    TEXT_PREVIOUSLY_REFUSED,
     TEXT_SCREENING_REFUSED,
     OkfImportAnalysis,
     OkfImportEdit,
@@ -134,6 +165,15 @@ from aida.okf_store import OkfPublishedBundle, load_documents_by_path, read_publ
 from aida.okf_store_models import OkfBundlePublication
 from aida.ontology_api import Concept, OntologyDefinition, validate_mappings
 from aida.ontology_models import OntologyHead, OntologyVersion
+from aida.routine_description_service import (
+    OPEN_DRAFT_STATUSES,
+    apply_routine_description_draft,
+    gather_routine_evidence,
+    is_describable_routine,
+    reject_routine_description_draft,
+    routine_refusal_reason,
+    score_routine_evidence,
+)
 from aida.security_types import SecurityContext
 
 #: Item outcomes, beside the note outcomes `aida.okf_import_bundle` defines.
@@ -144,13 +184,24 @@ OUTCOME_UNCHANGED: Final = "UNCHANGED"
 #: The review an imported description batch waits in. Its own object type, so the tier table can
 #: pin it at T2 whatever its size; decided by the workbook batch's adapter (`semantic_api`).
 OKF_IMPORT_REVIEW_TYPE: Final = "OKF_IMPORT_BATCH"
+#: The review an imported routine purpose waits in: a `RoutineDescriptionDraft` under its own
+#: object type, so the text an untrusted file supplied is never agent-decidable -- the routine
+#: workflow's own type is T0. Decided by `decide_okf_routine_description` below, registered
+#: with the decision service at import time.
+OKF_IMPORT_ROUTINE_REVIEW_TYPE: Final = "OKF_IMPORT_ROUTINE_DESCRIPTION"
 OKF_IMPORT_ACTION: Final = "APPLY_OKF_IMPORT"
+#: Every review type an import raises that `aida.okf_import_review` previews.
+OKF_IMPORT_REVIEW_TYPES: Final = frozenset({OKF_IMPORT_REVIEW_TYPE, OKF_IMPORT_ROUTINE_REVIEW_TYPE})
 #: What a change row's `sheet_name` says, so a reviewer reading the batch knows its origin.
 OKF_SHEET_NAME: Final = "OKF bundle"
+#: A routine draft's `evidence["origin"]`: the routine workflow's origin vocabulary, extended by
+#: the one place its text can now come from besides the catalog and a person's edit.
+ORIGIN_OKF_IMPORT: Final = "OKF_IMPORT"
 
 TARGET_TABLE: Final = "TABLE"
 TARGET_COLUMN: Final = "COLUMN"
 TARGET_CONCEPT: Final = "ONTOLOGY_CONCEPT"
+TARGET_ROUTINE: Final = "ROUTINE"
 
 #: The field names `model_import` applies: the same two a workbook edits.
 _MODEL_IMPORT_FIELDS: Final = {
@@ -204,6 +255,26 @@ class _MeaningPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class _RoutinePlan:
+    """One routine draft an apply would open, exactly as the preview decided it.
+
+    The scores and body facts are the routine workflow's own, computed from catalog evidence
+    at preview time; the digest covers the decision they led to, so evidence that moved before
+    the apply is a stale preview, not a draft nobody previewed.
+    """
+
+    item_id: str
+    path: str
+    routine_id: UUID
+    datasource_id: UUID
+    proposed: str
+    base_description_version: int | None
+    scores: ConfidenceBreakdown
+    body_state: str
+    source_definition_version_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
 class OkfImportPreview:
     stored: OkfPublishedBundle
     base: OkfBundlePublication
@@ -215,6 +286,7 @@ class OkfImportPreview:
     #: What each proposed description replaces, as the family records it (`old_value`).
     replaced: Mapping[str, str | None] = field(default_factory=dict)
     meaning: tuple[_MeaningPlan, ...] = ()
+    routines: tuple[_RoutinePlan, ...] = ()
 
     @property
     def notes(self) -> tuple[OkfImportNote, ...]:
@@ -779,6 +851,245 @@ async def _meaning_items(
     return items, plans
 
 
+async def _load_routines(
+    session: AsyncSession, stored: OkfPublishedBundle, edits: Sequence[OkfImportEdit]
+) -> dict[str, tuple[MetadataRoutine, str]]:
+    """Resolve the routine keys the edits name to the product's own routines, in this tenant.
+
+    The key is recomputed from each routine's catalog identity (`okf_export.routine_key`) --
+    never read from the upload -- so an edit reaches only a routine the product scopes.
+    """
+    wanted = {edit.subject_key for edit in edits}
+    if not wanted:
+        return {}
+    organization_id = stored.version.organization_id
+    rows = (
+        await session.execute(
+            select(MetadataRoutine, MetadataSchema, MetadataCatalog)
+            .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(
+                MetadataRoutine.id.in_(_uuids(stored.version.routine_ids)),
+                MetadataRoutine.organization_id == organization_id,
+                MetadataSchema.organization_id == organization_id,
+                MetadataCatalog.organization_id == organization_id,
+            )
+        )
+    ).all()
+    found: dict[str, tuple[MetadataRoutine, str]] = {}
+    for routine, schema, source_catalog in rows:
+        key = routine_key(
+            str(routine.datasource_id),
+            source_catalog.name,
+            schema.name,
+            routine.package_name,
+            routine.name,
+            routine.signature,
+        )
+        if key in wanted:
+            # The signature is part of the label: overloads share every other part of it.
+            parts = (source_catalog.name, schema.name, routine.package_name, routine.name)
+            found[key] = (routine, ".".join(part for part in parts if part) + routine.signature)
+    return found
+
+
+async def current_routine_documentation(
+    session: AsyncSession, organization_id: UUID, routine_id: UUID
+) -> RoutineDocumentationVersion | None:
+    """The routine's approved description, tenant-restated (INV-5).
+
+    `routine_description_service.current_routine_description` asks the same question by
+    routine id alone; this is its twin with the organization restated, for the import and its
+    review preview, which read on behalf of a caller rather than inside an approval.
+    """
+    version: RoutineDocumentationVersion | None = await session.scalar(
+        select(RoutineDocumentationVersion)
+        .join(
+            RoutineDocumentation,
+            RoutineDocumentation.id == RoutineDocumentationVersion.documentation_id,
+        )
+        .where(
+            RoutineDocumentation.routine_id == routine_id,
+            RoutineDocumentation.organization_id == organization_id,
+            RoutineDocumentationVersion.organization_id == organization_id,
+            RoutineDocumentationVersion.status == DESCRIPTION_APPROVED,
+        )
+        .order_by(RoutineDocumentationVersion.version.desc())
+        .limit(1)
+    )
+    return version
+
+
+async def current_definition_version(
+    session: AsyncSession, organization_id: UUID, routine_id: UUID
+) -> int | None:
+    """The newest captured definition's version number -- what an export prints as
+    `capture_version`. Append-only and written only when the body changed, so a different
+    number is a different body."""
+    number: int | None = await session.scalar(
+        select(func.max(MetadataRoutineDefinitionVersion.version_number)).where(
+            MetadataRoutineDefinitionVersion.routine_id == routine_id,
+            MetadataRoutineDefinitionVersion.organization_id == organization_id,
+        )
+    )
+    return number
+
+
+async def _routine_items(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    stored: OkfPublishedBundle,
+    catalog: _Catalog,
+    edits: Sequence[OkfImportEdit],
+) -> tuple[list[OkfImportItem], list[_RoutinePlan]]:
+    """Routine purposes, decided by the routine description workflow's own rules.
+
+    The order is the family's: who may propose (scope, lifecycle, source authorization), what
+    Atlas would publish (text rules, screening), whether the edit still describes the routine as
+    it is (description version and captured body since the export), then the workflow's own
+    gates -- one open draft per routine, no re-proposal of refused text, and the evidence bar
+    every routine draft must clear before a reviewer sees it.
+    """
+    organization_id = stored.version.organization_id
+    routines = await _load_routines(session, stored, edits)
+    items: list[OkfImportItem] = []
+    plans: list[_RoutinePlan] = []
+    for edit in edits:
+        item = OkfImportItem(
+            item_id=_item_id(edit),
+            path=edit.path,
+            family=edit.family,
+            kind=edit.kind,
+            field=edit.field,
+            outcome=OUTCOME_UNSUPPORTED,
+            expected_version=edit.base_version,
+        )
+        found = routines.get(edit.subject_key)
+        if found is None:
+            items.append(_with(item, reason_code=TARGET_NOT_FOUND))
+            continue
+        routine, label = found
+        item = _with(
+            item,
+            target_type=TARGET_ROUTINE,
+            target_id=str(routine.id),
+            target_label=label,
+            datasource_id=routine.datasource_id,
+        )
+        if routine.status != "ACTIVE":
+            items.append(_with(item, reason_code=TARGET_NOT_ACTIVE))
+            continue
+        if not is_describable_routine(routine):
+            items.append(_with(item, reason_code=FAMILY_NOT_SUPPORTED))
+            continue
+        if not await _authorized(session, context, settings, catalog, routine.datasource_id):
+            items.append(
+                _with(item, outcome=OUTCOME_REFUSED, reason_code=DATASOURCE_NOT_AUTHORIZED)
+            )
+            continue
+        refusal = text_refusal(edit.proposed, limit=MAX_DESCRIPTION_CHARS)
+        if refusal is not None:
+            items.append(_with(item, outcome=OUTCOME_REFUSED, reason_code=refusal))
+            continue
+        origin = f"okf_import:{edit.kind.lower()}"
+        screened = _screening_refusal(edit.proposed, origin)
+        if screened is not None:
+            items.append(
+                _with(
+                    item,
+                    outcome=OUTCOME_REFUSED,
+                    reason_code=TEXT_SCREENING_REFUSED,
+                    detail=screened,
+                )
+            )
+            continue
+        current = await current_routine_documentation(session, organization_id, routine.id)
+        current_text = current.description if current is not None else None
+        item = _with(
+            item,
+            current_version=current.version if current is not None else None,
+            current_value=_screened(current_text, origin),
+            proposed_value=edit.proposed,
+        )
+        if item.current_version != edit.base_version:
+            items.append(
+                _with(item, outcome=OUTCOME_CONFLICT, reason_code=SOURCE_CHANGED_SINCE_EXPORT)
+            )
+            continue
+        body_now = await current_definition_version(session, organization_id, routine.id)
+        if body_now != edit.base_definition_version:
+            # The editor described the body the export showed. The workflow's approval check
+            # (`routine_definition_moved`) compares against the body at draft time, so a body
+            # that moved *before* the draft would pass it: this is the check that catches that.
+            items.append(
+                _with(
+                    item,
+                    outcome=OUTCOME_CONFLICT,
+                    reason_code=DEFINITION_CHANGED_SINCE_EXPORT,
+                )
+            )
+            continue
+        if current_text is not None and " ".join(current_text.split()) == " ".join(
+            edit.proposed.split()
+        ):
+            items.append(_with(item, outcome=OUTCOME_UNCHANGED, reason_code=ALREADY_CURRENT))
+            continue
+        open_draft = await session.scalar(
+            select(RoutineDescriptionDraft.id)
+            .where(
+                RoutineDescriptionDraft.routine_id == routine.id,
+                RoutineDescriptionDraft.organization_id == organization_id,
+                RoutineDescriptionDraft.status.in_(OPEN_DRAFT_STATUSES),
+            )
+            .limit(1)
+        )
+        if open_draft is not None:
+            # `uq_routine_description_draft_open`: one live proposal per routine, so two
+            # reviews are never deciding the same text. Decide the open one first.
+            items.append(
+                _with(item, outcome=OUTCOME_CONFLICT, reason_code=PROPOSAL_ALREADY_OPEN)
+            )
+            continue
+        # Text-only: an empty payload matches no rejected draft's evidence, so a rejection of
+        # a machine draft never refuses a person's different words about the same routine.
+        if await routine_refusal_reason(
+            session, routine.id, drafted_text=edit.proposed, payload={}
+        ):
+            items.append(
+                _with(item, outcome=OUTCOME_REFUSED, reason_code=TEXT_PREVIOUSLY_REFUSED)
+            )
+            continue
+        evidence = await gather_routine_evidence(session, routine)
+        scores = score_routine_evidence(evidence)
+        if scores.overall < MINIMUM_EVIDENCE_FOR_REVIEW:
+            # `ensure_reviewable`'s bar, which the workflow's submit applies to an edited draft
+            # too: the score measures what a reviewer can check the text against, not the text.
+            items.append(
+                _with(
+                    item,
+                    outcome=OUTCOME_REFUSED,
+                    reason_code=EVIDENCE_BELOW_REVIEW_THRESHOLD,
+                )
+            )
+            continue
+        items.append(_with(item, outcome=OUTCOME_PROPOSE))
+        plans.append(
+            _RoutinePlan(
+                item_id=item.item_id,
+                path=edit.path,
+                routine_id=routine.id,
+                datasource_id=routine.datasource_id,
+                proposed=edit.proposed,
+                base_description_version=edit.base_version,
+                scores=scores,
+                body_state=evidence.body_state,
+                source_definition_version_id=evidence.source_definition_version_id,
+            )
+        )
+    return items, plans
+
+
 def _preview_digest(
     base: OkfBundlePublication, archive_sha256: str, items: Sequence[OkfImportItem]
 ) -> str:
@@ -850,6 +1161,9 @@ async def preview_okf_import(
         if edit.family in (FAMILY_ASSET_DOCUMENTATION, FAMILY_COLUMN_DESCRIPTION)
     ]
     meaning_edits = [edit for edit in analysis.edits if edit.family == FAMILY_ONTOLOGY_MEANING]
+    routine_edits = [
+        edit for edit in analysis.edits if edit.family == FAMILY_ROUTINE_DESCRIPTION
+    ]
     catalog = await _load_catalog(session, stored, description_edits)
     replaced: dict[str, str | None] = {}
     items = [
@@ -860,6 +1174,10 @@ async def preview_okf_import(
         session, context, settings, stored, snapshot, meaning_edits
     )
     items.extend(meaning_items)
+    routine_items, routine_plans = await _routine_items(
+        session, context, settings, stored, catalog, routine_edits
+    )
+    items.extend(routine_items)
     return OkfImportPreview(
         stored=stored,
         base=base,
@@ -874,6 +1192,7 @@ async def preview_okf_import(
             if any(item.item_id == key and item.outcome == OUTCOME_PROPOSE for item in items)
         },
         meaning=tuple(plans),
+        routines=tuple(routine_plans),
     )
 
 
@@ -938,10 +1257,19 @@ class OkfImportMeaning:
 
 
 @dataclass(frozen=True, slots=True)
+class OkfImportRoutine:
+    draft_id: UUID
+    routine_id: UUID
+    datasource_id: UUID
+    governance_review_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class OkfImportApplied:
     preview: OkfImportPreview
     batches: tuple[OkfImportBatch, ...]
     meaning: tuple[OkfImportMeaning, ...]
+    routines: tuple[OkfImportRoutine, ...] = ()
 
 
 async def _refuse_repeat(
@@ -977,6 +1305,33 @@ async def _refuse_repeat(
             )
         ).all()
         duplicate = duplicate or any(draft.definition == plan.definition for draft in drafts)
+    if not duplicate:
+        # A routine draft this archive already opened. The preview reports that routine as
+        # PROPOSAL_ALREADY_OPEN, which is true but less useful than naming the repeat.
+        routine_drafts = (
+            await session.scalars(
+                select(RoutineDescriptionDraft)
+                .join(
+                    GovernanceReview,
+                    GovernanceReview.id == RoutineDescriptionDraft.governance_review_id,
+                )
+                .where(
+                    RoutineDescriptionDraft.organization_id == organization_id,
+                    GovernanceReview.organization_id == organization_id,
+                    RoutineDescriptionDraft.status == "PENDING_APPROVAL",
+                    RoutineDescriptionDraft.created_by == context.principal_id,
+                    RoutineDescriptionDraft.routine_id.in_(
+                        _uuids(preview.stored.version.routine_ids)
+                    ),
+                    GovernanceReview.object_type == OKF_IMPORT_ROUTINE_REVIEW_TYPE,
+                )
+            )
+        ).all()
+        duplicate = any(
+            (draft.evidence or {}).get("okf_import", {}).get("archive_sha256")
+            == preview.archive_sha256
+            for draft in routine_drafts
+        )
     if duplicate:
         raise _refused(
             IMPORT_ALREADY_PENDING,
@@ -1152,6 +1507,109 @@ async def _propose_meaning(
     return proposed
 
 
+async def _propose_routines(
+    session: AsyncSession,
+    context: SecurityContext,
+    preview: OkfImportPreview,
+) -> list[OkfImportRoutine]:
+    """One pending routine description draft per edited routine, in R11-FP08's own store.
+
+    Written in the shape `routine_description_api` gives a draft a person edited and then
+    submitted, in one step because the importer is author and submitter both: the text and its
+    fingerprint, the catalog-evidence scores, `base_description_version` for the approval's
+    version check, and the body state and definition version `routine_definition_moved`
+    compares at approval. The importer is stamped as the editor, which the decision adapter
+    refuses as approver exactly as the workflow's own adapter does.
+
+    The evidence deliberately carries only what the approval re-checks, not the full signal
+    set a generated draft records: R11-FP10 refuses any later draft standing on the *evidence*
+    of a rejected one, and a reviewer rejecting an editor's words has not rejected the catalog
+    facts a machine would describe the routine from.
+    """
+    organization_id = preview.stored.version.organization_id
+    proposed: list[OkfImportRoutine] = []
+    for plan in preview.routines:
+        draft = RoutineDescriptionDraft(
+            organization_id=organization_id,
+            datasource_id=plan.datasource_id,
+            routine_id=plan.routine_id,
+            drafted_text=plan.proposed,
+            text_fingerprint=text_fingerprint(plan.proposed),
+            accuracy_score=plan.scores.accuracy,
+            clarity_score=plan.scores.clarity,
+            style_score=plan.scores.style,
+            completeness_score=plan.scores.completeness,
+            overall_score=plan.scores.overall,
+            evidence={
+                "origin": ORIGIN_OKF_IMPORT,
+                "body_state": plan.body_state,
+                "source_definition_version_id": (
+                    str(plan.source_definition_version_id)
+                    if plan.source_definition_version_id
+                    else None
+                ),
+                "base_description_version": plan.base_description_version,
+                "edited_by": context.principal_id,
+                "editors": [context.principal_id],
+                "okf_import": {
+                    "archive_sha256": preview.archive_sha256,
+                    "base_publication_id": str(preview.base.id),
+                    "document_path": plan.path,
+                },
+            },
+            # Straight to review, as an import batch is: a DRAFT could be edited or submitted
+            # through the routine routes, and their submit raises a T0 review.
+            status="PENDING_APPROVAL",
+            base_description_version=plan.base_description_version,
+            created_by=context.principal_id,
+        )
+        session.add(draft)
+        try:
+            await session.flush()
+        except IntegrityError as error:
+            # `uq_routine_description_draft_open`: another request opened a draft for this
+            # routine after the preview. The caller rolls the whole apply back.
+            raise _refused(
+                PREVIEW_STALE,
+                "a routine in this bundle gained an open description draft after the "
+                "preview; preview the bundle again",
+                status_code=409,
+            ) from error
+        review = GovernanceReview(
+            organization_id=organization_id,
+            object_type=OKF_IMPORT_ROUTINE_REVIEW_TYPE,
+            object_id=str(draft.id),
+            requested_action=OKF_IMPORT_ACTION,
+            requested_by=context.principal_id,
+        )
+        session.add(review)
+        await session.flush()
+        draft.governance_review_id = review.id
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="governance_review",
+            aggregate_id=str(review.id),
+            event_type="governance.review_requested.v1",
+            payload={
+                "review_id": str(review.id),
+                "object_type": review.object_type,
+                "object_id": str(draft.id),
+                "requested_action": review.requested_action,
+                "overall_score": draft.overall_score,
+            },
+        )
+        proposed.append(
+            OkfImportRoutine(
+                draft_id=draft.id,
+                routine_id=plan.routine_id,
+                datasource_id=plan.datasource_id,
+                governance_review_id=review.id,
+            )
+        )
+    return proposed
+
+
 async def apply_okf_import(
     session: AsyncSession,
     version_id: UUID,
@@ -1165,11 +1623,15 @@ async def apply_okf_import(
     """Raise the proposals an accepted preview listed -- pending review, never applied.
 
     The preview is recomputed from the same upload and must reproduce `preview_digest`
-    exactly; anything that moved in between refuses the apply with `PREVIEW_STALE`.
+    exactly; anything that moved in between refuses the apply with `PREVIEW_STALE`. A repeat
+    of an archive whose proposals are still waiting is named as that first: its own open
+    routine drafts change the preview, and "stale" would send the importer to preview again
+    for nothing.
     """
     preview = await preview_okf_import(
         session, version_id, context, settings, content, filename=filename
     )
+    await _refuse_repeat(session, context, preview)
     if preview.digest != preview_digest:
         raise _refused(
             PREVIEW_STALE,
@@ -1184,7 +1646,87 @@ async def apply_okf_import(
             "already current",
             status_code=409,
         )
-    await _refuse_repeat(session, context, preview)
     batches = await _propose_descriptions(session, context, preview)
     meaning = await _propose_meaning(session, context, preview)
-    return OkfImportApplied(preview=preview, batches=tuple(batches), meaning=tuple(meaning))
+    routines = await _propose_routines(session, context, preview)
+    return OkfImportApplied(
+        preview=preview,
+        batches=tuple(batches),
+        meaning=tuple(meaning),
+        routines=tuple(routines),
+    )
+
+
+# --- deciding an imported routine purpose ---------------------------------------------------
+
+
+async def decide_okf_routine_description(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> TargetEffect:
+    """Publish or reject one imported routine purpose.
+
+    `semantic_api._decide_routine_description_draft`'s rule, on the draft an import opened:
+    reached only through `governance_decision_service.decide_review`, after its maker-checker
+    guard and its agent oversight; an editor -- the importer is stamped as one -- is refused as
+    approver; publishing is `apply_routine_description_draft`'s alone, so a routine that went
+    inactive, a body that moved and a description version that moved all refuse the approval
+    (409, review stays PENDING) rather than overwrite. One check of its own: the draft must be
+    the one this review was raised for, so an `OKF_IMPORT_ROUTINE_DESCRIPTION` review can never
+    be pointed at a draft that some other review owns.
+    """
+    try:
+        draft_id = UUID(review.object_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="review target is unavailable") from error
+    draft = await session.get(RoutineDescriptionDraft, draft_id)
+    if (
+        draft is None
+        or draft.organization_id != review.organization_id
+        or draft.governance_review_id != review.id
+    ):
+        raise HTTPException(status_code=409, detail="review target is unavailable")
+    published_version_id: str | None = None
+    if decision == "APPROVE":
+        evidence = draft.evidence or {}
+        if (
+            context.principal_id in evidence.get("editors", [])
+            or evidence.get("edited_by") == context.principal_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="A description editor cannot approve their own edits"
+            )
+        event_type, published = await apply_routine_description_draft(
+            session, draft, reviewer=context.principal_id, now=now
+        )
+        published_version_id = str(published.id)
+    else:
+        event_type = await reject_routine_description_draft(
+            draft, reviewer=context.principal_id, now=now
+        )
+    return TargetEffect(
+        event_type,
+        "routine_description_draft",
+        str(draft.id),
+        {
+            "draft_id": str(draft.id),
+            "routine_id": str(draft.routine_id),
+            "datasource_id": str(draft.datasource_id),
+            "overall_score": draft.overall_score,
+            "published_version_id": published_version_id,
+            "review_id": str(review.id),
+            "origin": ORIGIN_OKF_IMPORT,
+        },
+    )
+
+
+# The module that raises the review registers its decider, as the decision service asks
+# (`register_target_adapters`). The application imports this module through its router
+# (`okf_import_api`), so every process serving the decision endpoint can decide one; a process
+# that never imported it refuses the type as unsupported (422), never decides it some other way.
+register_target_adapters({OKF_IMPORT_ROUTINE_REVIEW_TYPE: decide_okf_routine_description})

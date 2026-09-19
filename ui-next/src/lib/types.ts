@@ -3722,6 +3722,61 @@ export interface OkfImportRead {
   preview: OkfImportPreviewRead;
   description_batches: OkfImportBatchRead[];
   meaning_versions: OkfImportMeaningRead[];
+  routine_drafts: OkfImportRoutineRead[];
+}
+
+/** One proposed change and what approving it will do, predicted from the approval's own */
+export interface OkfImportReviewChangeRead {
+  change_id: string;
+  subject_type: string;
+  subject_id: string;
+  field: string;
+  label: string;
+  before_value?: string | null;
+  proposed_value?: string | null;
+  expected_version?: number | null;
+  current_version?: number | null;
+  current_value?: string | null;
+  status: string;
+  skip_reason?: string | null;
+  state: string;
+  reason_code?: string | null;
+  target_active?: boolean | null;
+  approval_effect: string;
+}
+
+/** The changes about one object: a table (with its columns) or a routine. */
+export interface OkfImportReviewDocumentRead {
+  document_id: string;
+  label: string;
+  object_type: string;
+  conflicts: number;
+  changes: OkfImportReviewChangeRead[];
+}
+
+export interface OkfImportReviewRead {
+  review_id: string;
+  object_type: string;
+  object_id: string;
+  review_status: string;
+  requested_by: string;
+  proposal_status: string;
+  datasource_id: string;
+  filename?: string | null;
+  archive_sha256?: string | null;
+  counts: Record<string, number>;
+  offset: number;
+  limit: number;
+  total_documents: number;
+  documents: OkfImportReviewDocumentRead[];
+  authority: string;
+}
+
+export interface OkfImportRoutineRead {
+  draft_id: string;
+  routine_id: string;
+  datasource_id: string;
+  governance_review_id: string;
 }
 
 /** One catalog object's document, as one context product's stored bundle holds it. */

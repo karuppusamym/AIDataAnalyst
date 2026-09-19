@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **537**
-- By family: BULK 11, EXPORT 8, GRAPHQL 23, JOB 27, MCP 9, REST 458, SDK 1
+- Surfaces covered: **538**
+- By family: BULK 11, EXPORT 8, GRAPHQL 23, JOB 27, MCP 9, REST 459, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -247,6 +247,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/governance/reviews/queue/summary` | REST | `aida.review_queue_api.get_review_queue_summary` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/queue` | REST | `aida.review_queue_api.get_review_queue` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/{review_id}/diff` | REST | `aida.semantic_api.get_governance_review_diff` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/governance/reviews/{review_id}/okf-import-preview` | REST | `aida.okf_import_api.get_okf_import_review` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | yes | read | no | not cancellable |
 | `GET /v1/governance/reviews` | REST | `aida.semantic_api.list_governance_reviews` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/lineage/parsed-edges/review-queue` | REST | `aida.parsed_lineage_review_api.get_parsed_lineage_review_queue` | DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/lines-of-business/{lob_id}/data-domains` | REST | `atlas.modules.identity_tenancy.router.list_data_domains` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
