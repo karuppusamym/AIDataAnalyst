@@ -9,7 +9,7 @@ branch, and this row's exit condition does not require touching either. See
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import MetadataPlaybook
+from aida.playbook_dry_run import dry_run_playbook
 from aida.playbooks import PlaybookRunOutcome, evaluate_and_run_playbook
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -134,6 +135,51 @@ class PlaybookRunResultRead(ApiModel):
     bulk_action_run_id: UUID | None
     bulk_stewardship_operation_id: UUID | None
     governance_review_id: UUID | None
+
+
+class PlaybookActionAutomationRead(ApiModel):
+    """R11-REV01: how this playbook's action is actually applied -- per action, not a
+    blanket claim about playbooks. See `aida.playbook_dry_run`."""
+
+    action: str
+    subject_type: str
+    has_automatic_branch: bool
+    automatic_branch_enabled: bool
+    automatic_when: str
+    automatic_path: str
+    automatic_principal: str
+    involves_model: bool
+    reviewed_operation_type: str
+    compensating_operation_when_reviewed: str
+    compensating_operation_when_automatic: str | None
+    automatic_correction_reason: str | None
+
+
+class PlaybookDryRunItemRead(ApiModel):
+    subject_type: str
+    subject_id: UUID
+    qualified_name: str
+    current_value: str | None
+    proposed_value: str | None
+    change: str
+    evidence_version: str
+
+
+class PlaybookDryRunRead(ApiModel):
+    """R11-REV01: what a run would do now, without doing it."""
+
+    playbook_id: UUID
+    action: str
+    enabled: bool
+    rule_version: str
+    evaluated_at: datetime
+    matched_count: int
+    tables_truncated: bool
+    columns_truncated: bool
+    auto_apply_max_items: int
+    predicted_disposition: str
+    automation: PlaybookActionAutomationRead
+    items: list[PlaybookDryRunItemRead]
 
 
 def _run_result_read(result: PlaybookRunOutcome) -> PlaybookRunResultRead:
@@ -328,3 +374,60 @@ async def run_playbook_now(
     result = await evaluate_and_run_playbook(session, playbook)
     await session.commit()
     return _run_result_read(result)
+
+
+@router.get("/playbooks/{playbook_id}/dry-run", response_model=PlaybookDryRunRead)
+async def dry_run_playbook_now(
+    playbook_id: UUID,
+    context: SecurityContext = Depends(require_roles(*PLAYBOOK_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> PlaybookDryRunRead:
+    """R11-REV01: evaluate this playbook's rule against the live catalog and report what a
+    run would do -- the subjects, each one's before/after and evidence version, the rule's
+    version, and whether the action would be applied automatically or queued for review --
+    without applying, queuing or recording anything (not even `last_run_at`).
+
+    Same population as `run`: previewing what you may trigger. A disabled playbook can be
+    previewed; that is how a steward checks one before enabling it.
+    """
+    playbook = await _get_playbook_in_scope(session, playbook_id, context)
+    preview = await dry_run_playbook(session, playbook, now=datetime.now(UTC))
+    automation = preview.automation
+    return PlaybookDryRunRead(
+        playbook_id=preview.playbook_id,
+        action=preview.action,
+        enabled=preview.enabled,
+        rule_version=preview.rule_version,
+        evaluated_at=preview.evaluated_at,
+        matched_count=preview.matched_count,
+        tables_truncated=preview.tables_truncated,
+        columns_truncated=preview.columns_truncated,
+        auto_apply_max_items=preview.auto_apply_max_items,
+        predicted_disposition=preview.predicted_disposition,
+        automation=PlaybookActionAutomationRead(
+            action=automation.action,
+            subject_type=automation.subject_type,
+            has_automatic_branch=automation.has_automatic_branch,
+            automatic_branch_enabled=preview.auto_apply_max_items > 0,
+            automatic_when="0 < matched_count <= auto_apply_max_items",
+            automatic_path=automation.automatic_path,
+            automatic_principal=automation.automatic_principal,
+            involves_model=automation.involves_model,
+            reviewed_operation_type=automation.reviewed_operation_type,
+            compensating_operation_when_reviewed=automation.compensating_operation_when_reviewed,
+            compensating_operation_when_automatic=automation.compensating_operation_when_automatic,
+            automatic_correction_reason=automation.automatic_correction_reason,
+        ),
+        items=[
+            PlaybookDryRunItemRead(
+                subject_type=item.subject_type,
+                subject_id=item.subject_id,
+                qualified_name=item.qualified_name,
+                current_value=item.current_value,
+                proposed_value=item.proposed_value,
+                change=item.change,
+                evidence_version=item.evidence_version,
+            )
+            for item in preview.items
+        ],
+    )

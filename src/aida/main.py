@@ -92,6 +92,7 @@ from aida.readiness import (
 )
 from aida.relationship_validation_api import router as relationship_validation_router
 from aida.retrieval_ops_api import router as retrieval_ops_router
+from aida.review_batch_api import router as review_batch_router
 from aida.review_queue_api import router as review_queue_router
 from aida.routine_description_api import router as routine_description_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
@@ -477,6 +478,8 @@ app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
 app.include_router(review_queue_router)
+# R11-REV01: the change-focused queue and frozen review batches over it.
+app.include_router(review_batch_router)
 # ADR-0029: task agents.
 app.include_router(steward_agent_router)
 app.include_router(lineage_agent_router)
