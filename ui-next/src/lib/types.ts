@@ -2311,6 +2311,7 @@ export interface DomainLineageGraphRead {
   truncated?: boolean;
   truncation_reasons?: string[];
   withheld_cross_boundary_domain_ids?: string[];
+  withheld_datasource_count?: number;
 }
 
 export interface EnforcementReadinessRead {

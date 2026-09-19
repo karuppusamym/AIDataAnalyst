@@ -284,6 +284,36 @@ describe("UnifiedLineageScreen against the real unified-lineage graph/impact end
     expect(screen.getByRole("button", { name: /Request access to dom_retail/ })).toBeInTheDocument();
   });
 
+  it("says how many of the domain's sources the workspace withheld, without naming them", async () => {
+    fetchDomainLineageGraph.mockResolvedValueOnce({
+      data_domain_id: "dom1",
+      datasource_ids: ["ds_1"],
+      nodes: [],
+      edges: [],
+      counts_by_source: {},
+      returned_node_count: 0, returned_edge_count: 0, node_limit: 300, edge_limit: 1500,
+      truncated: false, truncation_reasons: [],
+      withheld_cross_boundary_domain_ids: [],
+      withheld_datasource_count: 2,
+    });
+    history.replaceState(null, "", "/?scope=domain&dom=dom1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+
+    const notice = await screen.findByText("2 data sources in this domain are not shown.");
+    expect(notice.closest("[role=status]")).toHaveTextContent(/their tables and edges are left out/);
+    expect(screen.queryByText(/Some edges are withheld/)).not.toBeInTheDocument();
+  });
+
+  it("shows no withheld-source notice when the server withheld none", async () => {
+    history.replaceState(null, "", "/?scope=domain&dom=dom1");
+    const UnifiedLineageScreen = await loadScreen();
+    render(<UnifiedLineageScreen />);
+
+    await waitFor(() => expect(screen.getByText(/Some edges are withheld/)).toBeInTheDocument());
+    expect(screen.queryByText(/in this domain (is|are) not shown/)).not.toBeInTheDocument();
+  });
+
   it("resolves impact against the source that owns the node, not the domain", async () => {
     // The impact endpoint is datasource-scoped, so a domain-graph node id has
     // to be split back into its `{datasource_id}:{node_id}` parts.

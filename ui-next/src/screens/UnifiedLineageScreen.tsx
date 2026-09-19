@@ -298,6 +298,7 @@ export function UnifiedLineageScreen({ lead = "graph" }: { lead?: UnifiedLineage
   // Reported by the domain graph, never inferred here: domains with
   // candidates reaching into this one that no ACTIVE grant covers.
   const [withheldDomainIds, setWithheldDomainIds] = useState<string[]>([]);
+  const [withheldSourceCount, setWithheldSourceCount] = useState(0);
   const [grantTargetDomainId, setGrantTargetDomainId] = useState<string | null>(null);
 
   const [impact, setImpact] = useState<UnifiedLineageImpactRead | null>(null);
@@ -340,6 +341,7 @@ export function UnifiedLineageScreen({ lead = "graph" }: { lead?: UnifiedLineage
       setGraph(null);
       setError(null);
       setWithheldDomainIds([]);
+      setWithheldSourceCount(0);
       setLoading(false);
       return;
     }
@@ -362,12 +364,14 @@ export function UnifiedLineageScreen({ lead = "graph" }: { lead?: UnifiedLineage
         // the same shape, so everything downstream is untouched.
         setGraph({ ...result, datasource_id: "" } as unknown as UnifiedLineageGraphRead);
         setWithheldDomainIds(result.withheld_cross_boundary_domain_ids ?? []);
+        setWithheldSourceCount(result.withheld_datasource_count ?? 0);
         return;
       }
       const result = await fetchUnifiedLineageGraph(scopeId, options, ac.signal);
       if (seq !== graphSeq.current) return;
       setGraph(result);
       setWithheldDomainIds([]);
+      setWithheldSourceCount(0);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
       if (seq !== graphSeq.current) return;
@@ -678,6 +682,21 @@ export function UnifiedLineageScreen({ lead = "graph" }: { lead?: UnifiedLineage
             }`}
           </button>
         </div>
+      ) : null}
+
+      {/* R11-D28: also reported by the server. A data source of this domain that the
+          caller's workspace refuses contributes nothing to the graph; it is counted,
+          never named, so a short graph still says it is short. */}
+      {scopeKind === "domain" && withheldSourceCount > 0 ? (
+        <p className="ult__withheld" role="status">
+          <strong>
+            {withheldSourceCount === 1
+              ? "One data source in this domain is not shown."
+              : `${withheldSourceCount} data sources in this domain are not shown.`}
+          </strong>{" "}
+          Your workspace does not give you access to {withheldSourceCount === 1 ? "it" : "them"}, so{" "}
+          {withheldSourceCount === 1 ? "its" : "their"} tables and edges are left out of this graph.
+        </p>
       ) : null}
 
       {scopeKind === "domain" && dom ? (

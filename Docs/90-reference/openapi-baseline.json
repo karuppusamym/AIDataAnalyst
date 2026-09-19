@@ -13952,6 +13952,11 @@
             },
             "title": "Withheld Cross Boundary Domain Ids",
             "type": "array"
+          },
+          "withheld_datasource_count": {
+            "default": 0,
+            "title": "Withheld Datasource Count",
+            "type": "integer"
           }
         },
         "required": [
@@ -48703,7 +48708,7 @@
     },
     "/v1/data-domains/{domain_id}/unified-lineage/graph": {
       "get": {
-        "description": "Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph across every\ndatasource in one data_domain (ADR-0017 SS3) -- the domain-scoped\ntraversal endpoint closing KG-2/RL-5's \"cross-source traversal\" gap for\nsources sharing a governance boundary, without opening an unbounded\norg-wide graph (ADR-0010's bounded/lazy/value-free contract still\napplies at this wider scope; see build_domain_unified_lineage_graph_payload).",
+        "description": "Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph across every\ndatasource in one data_domain (ADR-0017 SS3) -- the domain-scoped\ntraversal endpoint closing KG-2/RL-5's \"cross-source traversal\" gap for\nsources sharing a governance boundary, without opening an unbounded\norg-wide graph (ADR-0010's bounded/lazy/value-free contract still\napplies at this wider scope; see build_domain_unified_lineage_graph_payload).\n\nR11-D28: each datasource of the domain is admitted by the caller's workspace gate or\nwithheld -- it contributes no node and no edge, and is counted in\n`withheld_datasource_count`, never named.",
         "operationId": "get_domain_unified_lineage_graph_v1_data_domains__domain_id__unified_lineage_graph_get",
         "parameters": [
           {
@@ -60199,7 +60204,7 @@
     },
     "/v1/datasources/{datasource_id}/unified-lineage/graph": {
       "get": {
-        "description": "Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph for one\ndatasource.\n\nThis is the canonical lineage graph called for in the Collibra-parity\nplan: one node/edge set spanning every lineage source instead of\nseparate, unlinked workbenches. Also served as the native MCP tool\n`atlas__get_lineage_graph` (`mcp_server.py`).",
+        "description": "Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph for one\ndatasource.\n\nThis is the canonical lineage graph called for in the Collibra-parity\nplan: one node/edge set spanning every lineage source instead of\nseparate, unlinked workbenches. Also served as the native MCP tool\n`atlas__get_lineage_graph` (`mcp_server.py`).\n\nR11-D28: the datasource's workspace gate is asked, as its tables route asks it -- the\ngraph names those tables.",
         "operationId": "get_unified_lineage_graph_v1_datasources__datasource_id__unified_lineage_graph_get",
         "parameters": [
           {
@@ -60380,7 +60385,7 @@
     },
     "/v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}": {
       "get": {
-        "description": "Transitive upstream/downstream impact across every merged lineage source.\n\nReplaces `GET /v1/metadata/tables/{table_id}/impact`'s direct-reference\ncount with a bounded multi-hop traversal: \"what would break, N hops out,\nif this node changed\" -- the gap called out against Collibra's impact\nanalysis view. Also served as the native MCP tool\n`atlas__get_lineage_impact` (`mcp_server.py`).",
+        "description": "Transitive upstream/downstream impact across every merged lineage source.\n\nReplaces `GET /v1/metadata/tables/{table_id}/impact`'s direct-reference\ncount with a bounded multi-hop traversal: \"what would break, N hops out,\nif this node changed\" -- the gap called out against Collibra's impact\nanalysis view. Also served as the native MCP tool\n`atlas__get_lineage_impact` (`mcp_server.py`).\n\nR11-D28: the datasource's workspace gate is asked, as its tables route asks it.",
         "operationId": "get_unified_lineage_impact_v1_datasources__datasource_id__unified_lineage_impact__node_id__get",
         "parameters": [
           {
@@ -60542,7 +60547,7 @@
     },
     "/v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export": {
       "get": {
-        "description": "A downloadable, hash-verifiable artifact of the same point-in-time\nlineage `GET .../unified-lineage/impact/{node_id}` would return for the\nchosen asset and depth -- the AT-20 \"lineage evidence export as a signed\nartifact\" deliverable. Same authorization as that live route (not a\nseparate or weaker check), and `compose_lineage_export_artifact` reused\nfor both, so the export can never disagree with what the live pane would\nshow for the same asset/depth at the same instant.",
+        "description": "A downloadable, hash-verifiable artifact of the same point-in-time\nlineage `GET .../unified-lineage/impact/{node_id}` would return for the\nchosen asset and depth -- the AT-20 \"lineage evidence export as a signed\nartifact\" deliverable. Same authorization as that live route (not a\nseparate or weaker check), and `compose_lineage_export_artifact` reused\nfor both, so the export can never disagree with what the live pane would\nshow for the same asset/depth at the same instant.\n\nR11-D28: including the datasource's workspace gate, which the live route now asks too.",
         "operationId": "export_unified_lineage_impact_v1_datasources__datasource_id__unified_lineage_impact__node_id__export_get",
         "parameters": [
           {
