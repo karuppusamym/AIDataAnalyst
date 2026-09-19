@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.authorization_gate import gate_read
 from aida.capability_states import parse_coverage_state
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -64,6 +65,34 @@ _LINEAGE_READER_ROLES = (
     "PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward",
     "MetadataReviewer", "Analyst", "Auditor", "Viewer",
 )
+
+
+async def _load_readable_datasource(
+    session: AsyncSession, context: SecurityContext, datasource_id: UUID
+) -> DataSource:
+    """The datasource, once the caller's organization owns it **and** its workspace gate admits
+    `READ_METADATA` -- the decision its tables route takes.
+
+    R11-D30: these routes checked roles and tenant only (`load_datasource_in_scope`), so in an
+    organization with an enforcing workspace a caller refused a datasource's tables could still
+    read its routines' and triggers' lineage -- the tables they read and write -- and their parse
+    coverage. The same gap R11-D28 closed for the unified-lineage surfaces. Asked before any
+    routine or trigger is looked up, so a refusal says nothing about what exists. Under the
+    default SHADOW posture the gate allows and records, so nothing changes until a workspace
+    enforces. Settings are read here, as the parse route already read them, so the handlers'
+    signatures -- which tests call directly -- are unchanged.
+    """
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    await gate_read(
+        session,
+        context,
+        get_settings(),
+        action="READ_METADATA",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
+    return datasource
 
 
 async def _load_routine(
@@ -177,7 +206,7 @@ async def parse_deep_procedure_lineage_endpoint(
     `require_eligible_routine_body`. The SQL is never executed. The edges are
     stored under the deployment's review mode (`persist_routine_edges`).
     """
-    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    datasource = await _load_readable_datasource(session, context, datasource_id)
     routine = await _load_routine(session, datasource, routine_id)
     try:
         body = require_eligible_routine_body(routine)
@@ -261,7 +290,7 @@ async def list_deep_procedure_lineage(
     context: SecurityContext = Depends(require_roles(*_LINEAGE_READER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> list[DeepProcedureLineageEdgeRead]:
-    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    datasource = await _load_readable_datasource(session, context, datasource_id)
     rows = (
         await session.scalars(
             select(DeepProcedureLineageEdge)
@@ -335,7 +364,7 @@ async def get_routine_parse_coverage(
     (`aida.capability_states.parse_coverage_state`); the row itself keeps them
     as booleans, so no sentinel string ever stands where a real value would.
     """
-    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    datasource = await _load_readable_datasource(session, context, datasource_id)
     await _load_routine(session, datasource, routine_id)
     coverage = (
         await session.scalars(
@@ -391,7 +420,7 @@ async def get_trigger_parse_coverage(
     from "fully understood". The coverage row restates the organization and the datasource
     (INV-5).
     """
-    datasource = await load_datasource_in_scope(session, context, datasource_id)
+    datasource = await _load_readable_datasource(session, context, datasource_id)
     trigger = await session.get(MetadataTrigger, trigger_id)
     if (
         trigger is None
