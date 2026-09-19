@@ -5,9 +5,12 @@
    `createSqlDraft` drafts SQL from a question, or takes a pasted statement,
    and validates it without running it; a valid statement comes back with a
    receipt. `runSqlDraft` sends the exact statement back with that receipt and
-   runs it once. An edited statement, another row limit or another product is
-   refused as `REVALIDATION_REQUIRED` — the server checks, and the screen
-   disables Run on an edit so the person is not surprised by the refusal.
+   runs it once. An edited statement, another parameter value, another row
+   limit or another product is refused as `REVALIDATION_REQUIRED` — the server
+   checks, and the screen disables Run on an edit so the person is not
+   surprised by the refusal. Parameters travel beside the text
+   (`SqlDraftParameter`) and are bound server-side; a value that does not bind
+   comes back as a `PARAMETER_*` validation finding, not as an error.
 
    Fixture mode refuses rather than pretending: a review step whose "Run" ran
    nothing would teach the wrong thing about what Run means.
@@ -76,8 +79,8 @@ const RUN_REFUSALS: Readonly<Record<SqlRunRefusalCode, SqlWorkspaceProblem>> = {
   REVALIDATION_REQUIRED: {
     title: "Changed since it was validated",
     detail:
-      "The statement, its row limit or the context product is not the one that was validated. " +
-      "Validate it again to run it.",
+      "The statement, its parameter values, its row limit or the context product is not the one " +
+      "that was validated. Validate it again to run it.",
     revalidate: true,
   },
   RECEIPT_EXPIRED: {

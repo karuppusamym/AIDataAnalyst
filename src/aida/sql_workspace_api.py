@@ -11,6 +11,10 @@ Two routes, and nothing executes on the first:
 * `GET /v1/datasources/{datasource_id}/sql-drafts` lists the caller's own recent receipts on
   that datasource: the redacted shape, status and execution, never a literal or a row.
 
+A statement may carry `parameters`: `:name` placeholders in the text, each declared with a type
+and a value sent beside it, bound by the governed-tool renderer (see `aida.sql_workspace`). Run
+sends the same parameters back; any other value is REVALIDATION_REQUIRED.
+
 Roles are the execution route's, `PlatformAdmin` and `Analyst`: a receipt is only worth having to
 someone who may run it. An `agent:` identity is held to its contract exactly as on Ask.
 
@@ -20,11 +24,20 @@ vocabulary stays beside the module that defines it.
 
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StringConstraints,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +62,7 @@ from aida.sql_validation_api import GatewaySqlValidationResponse, validation_res
 from aida.sql_workspace import (
     ORIGIN_GENERATED,
     ORIGIN_PASTED,
+    DraftParameter,
     SqlWorkspaceRefused,
     run_receipt,
     validate_draft,
@@ -67,11 +81,51 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
+#: The governed-tool parameter types (`ToolParameterDefinition.parameter_type`), repeated here
+#: because a `Literal` cannot be derived at runtime; a test holds the two equal.
+SqlParameterType = Literal["STRING", "INTEGER", "NUMBER", "BOOLEAN", "DATE"]
+
+#: A value as JSON carries it. Strict, so `"5"` stays a string and `true` a boolean: whether a
+#: value fits its declared type is the binder's decision, reported as a finding, not a coercion
+#: made quietly here. The length bound is transport hygiene; the binder's own, lower one is
+#: what a person meets, as PARAMETER_TOO_LONG.
+SqlParameterValue = (
+    Annotated[str, StringConstraints(strict=True, max_length=10_000)]
+    | StrictBool
+    | StrictInt
+    | StrictFloat
+    | None
+)
+
+
+class SqlDraftParameter(ApiModel):
+    """One named parameter: the type it is declared as and the value bound to it.
+
+    The statement names it as a `:name` placeholder. The value travels here, beside the text,
+    and is bound as one typed literal into the parsed statement -- never spliced into the text --
+    and never stored: the receipt keeps a keyed digest of it. A missing or null value is refused
+    as PARAMETER_VALUE_MISSING.
+    """
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    parameter_type: SqlParameterType
+    value: SqlParameterValue = None
+
+
+def _distinct_names(parameters: list[SqlDraftParameter]) -> None:
+    names = [parameter.name for parameter in parameters]
+    if len(names) != len(set(names)):
+        raise ValueError("each parameter name may be declared once")
+
+
 class SqlDraftRequest(ApiModel):
     """A question to draft SQL for, or a statement to validate -- exactly one."""
 
     question: str | None = Field(default=None, min_length=1, max_length=4_000)
     sql: str | None = Field(default=None, min_length=1, max_length=200_000)
+    #: Values for the statement's `:name` placeholders. Only with `sql`: a question drafts a
+    #: statement, and its parameters are declared once the person has read it.
+    parameters: list[SqlDraftParameter] = Field(default_factory=list, max_length=50)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
     context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
     workspace_id: UUID | None = None
@@ -80,6 +134,9 @@ class SqlDraftRequest(ApiModel):
     def _one_input(self) -> "SqlDraftRequest":
         if (self.question is None) == (self.sql is None):
             raise ValueError("send a question or a sql statement, not both and not neither")
+        if self.question is not None and self.parameters:
+            raise ValueError("parameters bind a statement you send, not a question")
+        _distinct_names(self.parameters)
         return self
 
 
@@ -120,9 +177,26 @@ class SqlDraftResponse(ApiModel):
 
 class SqlDraftRunRequest(ApiModel):
     sql: str = Field(min_length=1, max_length=200_000)
+    #: The parameters validated with the statement, sent again: another value, type or name is
+    #: REVALIDATION_REQUIRED, exactly as an edited statement is.
+    parameters: list[SqlDraftParameter] = Field(default_factory=list, max_length=50)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
     context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
     workspace_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _distinct(self) -> "SqlDraftRunRequest":
+        _distinct_names(self.parameters)
+        return self
+
+
+def _draft_parameters(parameters: list[SqlDraftParameter]) -> list[DraftParameter]:
+    return [
+        DraftParameter(
+            name=parameter.name, parameter_type=parameter.parameter_type, value=parameter.value
+        )
+        for parameter in parameters
+    ]
 
 
 class SqlDraftRunResponse(ApiModel):
@@ -159,7 +233,8 @@ async def create_sql_draft(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> SqlDraftResponse:
-    """Nothing runs here. An invalid statement is a 200 with findings and no receipt."""
+    """Nothing runs here. An invalid statement is a 200 with findings and no receipt -- and a
+    statement whose parameters do not bind is an invalid statement, with `PARAMETER_*` findings."""
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
@@ -246,6 +321,7 @@ async def create_sql_draft(
             scope=scope,
             origin=origin,
             agent_run_id=agent_run_id,
+            parameters=_draft_parameters(body.parameters),
         )
     except AuthorizationRejected as exc:
         raise HTTPException(status_code=403, detail=exc.reason_code) from exc
@@ -306,6 +382,7 @@ async def run_sql_draft(
             max_rows=body.max_rows,
             workspace_id=body.workspace_id,
             scope=scope,
+            parameters=_draft_parameters(body.parameters),
         )
     except SqlWorkspaceRefused as exc:
         raise HTTPException(

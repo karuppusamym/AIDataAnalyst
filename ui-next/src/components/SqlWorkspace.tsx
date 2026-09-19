@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   QueryExecutionResponse,
+  SqlDraftParameter,
   SqlDraftReceiptRead,
   SqlDraftResponse,
   SqlFindingRead,
@@ -15,6 +16,13 @@ import {
 import { QueryResultTable } from "./QueryResultTable";
 import { Button, Field, Pill } from "./primitives";
 import type { Tone } from "./primitives";
+import {
+  bindingKey,
+  parameterProblems,
+  SqlParameterEditor,
+  toSqlDraftParameters,
+  type ParameterRow,
+} from "./SqlWorkspaceParameters";
 import "./SqlWorkspace.css";
 
 /**
@@ -24,8 +32,15 @@ import "./SqlWorkspace.css";
  * statement; Validate runs the gateway's checks without executing anything; Run sends the exact
  * validated text back with its receipt and runs it once. Editing the text after validating
  * disables Run until it is validated again -- the server refuses an edited statement anyway,
- * and saying so up front is kinder than a refusal.
+ * and saying so up front is kinder than a refusal. Parameter values are part of what was
+ * validated: changing one is the same as editing the text.
  */
+
+/** What a receipt was earned for: the exact text and the exact parameters sent with it. */
+interface ValidatedBinding {
+  sql: string;
+  parameters: SqlDraftParameter[];
+}
 /** A receipt's state as a person reads it: an unrun validation past its expiry is expired. */
 export function receiptState(
   receipt: SqlDraftReceiptRead,
@@ -49,7 +64,9 @@ export function SqlWorkspace({
 }) {
   const [sql, setSql] = useState("");
   const [draft, setDraft] = useState<SqlDraftResponse | null>(null);
-  const [validatedSql, setValidatedSql] = useState<string | null>(null);
+  const [validated, setValidated] = useState<ValidatedBinding | null>(null);
+  const [parameters, setParameters] = useState<ParameterRow[]>([]);
+  const nextParameterKey = useRef(1);
   const [receipt, setReceipt] = useState<SqlDraftReceiptRead | null>(null);
   const [busy, setBusy] = useState<"draft" | "validate" | "run" | null>(null);
   const [problem, setProblem] = useState<SqlWorkspaceProblem | null>(null);
@@ -64,7 +81,7 @@ export function SqlWorkspace({
   useEffect(() => {
     setDraft(null);
     setReceipt(null);
-    setValidatedSql(null);
+    setValidated(null);
     setExecution(null);
     setProblem(null);
   }, [datasourceId, productKey]);
@@ -87,10 +104,36 @@ export function SqlWorkspace({
     return () => active.abort();
   }, [datasourceId, historyTick]);
 
-  const edited = validatedSql !== null && sql !== validatedSql;
+  const problems = useMemo(() => parameterProblems(parameters), [parameters]);
+  // Only a complete set has a wire form; an incomplete one cannot be what was validated.
+  const wireParameters = useMemo(
+    () => (problems.size === 0 ? toSqlDraftParameters(parameters) : null),
+    [parameters, problems],
+  );
+  const sqlEdited = validated !== null && sql !== validated.sql;
+  const parametersEdited =
+    validated !== null &&
+    (wireParameters === null || bindingKey(wireParameters) !== bindingKey(validated.parameters));
+  const edited = sqlEdited || parametersEdited;
   const canRun = receipt !== null && receipt.status === "VALIDATED" && !edited && busy === null;
 
+  function changeParameter(key: number, change: Partial<Omit<ParameterRow, "key">>) {
+    setParameters((rows) => rows.map((row) => (row.key === key ? { ...row, ...change } : row)));
+  }
+
+  function addParameter(name: string) {
+    const key = nextParameterKey.current;
+    nextParameterKey.current += 1;
+    setParameters((rows) => [...rows, { key, name, parameterType: "STRING", value: "" }]);
+  }
+
+  function removeParameter(key: number) {
+    setParameters((rows) => rows.filter((row) => row.key !== key));
+  }
+
   async function send(kind: "draft" | "validate") {
+    // A question drafts a statement; parameters bind one the person sends.
+    const sent: SqlDraftParameter[] = kind === "validate" ? (wireParameters ?? []) : [];
     controller.current?.abort();
     const active = new AbortController();
     controller.current = active;
@@ -101,7 +144,9 @@ export function SqlWorkspace({
       const response = await createSqlDraft(
         datasourceId,
         {
-          ...(kind === "draft" ? { question: question.trim() } : { sql }),
+          ...(kind === "draft"
+            ? { question: question.trim() }
+            : { sql, ...(sent.length > 0 ? { parameters: sent } : {}) }),
           context_product_key: productKey,
         },
         active.signal,
@@ -110,30 +155,35 @@ export function SqlWorkspace({
       if (text !== null) setSql(text);
       setDraft(response);
       setReceipt(response.receipt ?? null);
-      setValidatedSql(response.receipt ? text : null);
+      setValidated(response.receipt && text !== null ? { sql: text, parameters: sent } : null);
       if (response.receipt) setHistoryTick((tick) => tick + 1);
     } catch (error) {
       if (active.signal.aborted) return;
       setProblem(describeSqlWorkspaceError(error));
       setDraft(null);
       setReceipt(null);
-      setValidatedSql(null);
+      setValidated(null);
     } finally {
       if (controller.current === active) setBusy(null);
     }
   }
 
   async function run() {
-    if (receipt === null || validatedSql === null) return;
+    if (receipt === null || validated === null) return;
     controller.current?.abort();
     const active = new AbortController();
     controller.current = active;
     setBusy("run");
     setProblem(null);
     try {
+      // Exactly what was validated -- the text and the values -- never the fields as they are now.
       const response = await runSqlDraft(
         receipt.id,
-        { sql: validatedSql, context_product_key: productKey },
+        {
+          sql: validated.sql,
+          ...(validated.parameters.length > 0 ? { parameters: validated.parameters } : {}),
+          context_product_key: productKey,
+        },
         active.signal,
       );
       setReceipt(response.receipt);
@@ -175,10 +225,27 @@ export function SqlWorkspace({
           spellCheck={false}
         />
       </Field>
+      <SqlParameterEditor
+        rows={parameters}
+        problems={problems}
+        sql={sql}
+        onChange={changeParameter}
+        onAdd={addParameter}
+        onRemove={removeParameter}
+      />
       <div className="sqlws__actions">
-        {edited ? (
+        {sqlEdited ? (
           <span className="sqlws__note" role="status">
             Edited since it was validated — validate again to run it.
+          </span>
+        ) : parametersEdited ? (
+          <span className="sqlws__note" role="status">
+            Parameter values changed since it was validated — validate again to run it.
+          </span>
+        ) : null}
+        {problems.size > 0 ? (
+          <span className="sqlws__note" role="status">
+            Fix the parameters above to validate.
           </span>
         ) : null}
         <Button
@@ -188,7 +255,10 @@ export function SqlWorkspace({
         >
           {busy === "draft" ? "Drafting…" : "Draft from question"}
         </Button>
-        <Button onClick={() => void send("validate")} disabled={busy !== null || sql.trim() === ""}>
+        <Button
+          onClick={() => void send("validate")}
+          disabled={busy !== null || sql.trim() === "" || problems.size > 0}
+        >
           {busy === "validate" ? "Validating…" : "Validate"}
         </Button>
         <Button variant="primary" onClick={() => void run()} disabled={!canRun}>
@@ -292,8 +362,8 @@ export function SqlWorkspace({
           </ul>
         )}
         <p className="sqlws__note">
-          Literals are replaced in this list and results are never kept: validate again to run a
-          statement again.
+          Literals are replaced in this list, and parameter values and results are never kept:
+          validate again to run a statement again.
         </p>
       </div>
     </section>

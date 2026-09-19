@@ -314,6 +314,12 @@ describe("SqlWorkspace history (R11-SQL01)", () => {
     await waitFor(() => expect(runButton().disabled).toBe(false));
   });
 
+  it("says in the history that parameter values are never kept", async () => {
+    renderWorkspace();
+    await waitFor(() => expect(listSqlDrafts).toHaveBeenCalled());
+    expect(screen.getByText(/parameter values and results are never kept/)).toBeTruthy();
+  });
+
   it("calls an unrun validation past its expiry expired", () => {
     const now = new Date("2026-09-18T13:00:00Z");
     expect(receiptState(receipt({ expires_at: "2026-09-18T12:15:00Z" }), now).label).toBe(
@@ -322,5 +328,163 @@ describe("SqlWorkspace history (R11-SQL01)", () => {
     expect(receiptState(receipt({ expires_at: FUTURE }), now).label).toBe("Validated, not run");
     expect(receiptState(receipt({ status: "FAILED" }), now).label).toBe("Refused at run");
     expect(receiptState(receipt({ status: "EXECUTED" }), now).label).toBe("Ran");
+  });
+});
+
+describe("SqlWorkspace parameters (R11-SQL01)", () => {
+  const TEMPLATE = "SELECT o.order_id FROM retail.orders AS o WHERE o.order_id = :order_id";
+
+  function pasted(overrides: Partial<SqlDraftResponse> = {}): SqlDraftResponse {
+    return drafted({
+      origin: "PASTED",
+      sql: null,
+      receipt: receipt({ id: "rcpt-p", origin: "PASTED" }),
+      ...overrides,
+    });
+  }
+
+  function validateButton(): HTMLButtonElement {
+    return screen.getByRole("button", { name: "Validate" }) as HTMLButtonElement;
+  }
+
+  function field(label: string): HTMLInputElement | HTMLSelectElement {
+    return screen.getByLabelText(label) as HTMLInputElement | HTMLSelectElement;
+  }
+
+  async function declaredOrderId(type: string, value: string) {
+    renderWorkspace();
+    fireEvent.change(sqlBox(), { target: { value: TEMPLATE } });
+    fireEvent.click(screen.getByRole("button", { name: "Declare :order_id" }));
+    expect(field("Name of parameter 1").value).toBe("order_id");
+    fireEvent.change(field("Type of parameter 1"), { target: { value: type } });
+    fireEvent.change(field("Value of parameter 1"), { target: { value } });
+  }
+
+  it("sends typed values beside the SQL, and runs exactly what was validated", async () => {
+    createSqlDraft.mockResolvedValue(pasted());
+    runSqlDraft.mockResolvedValue({
+      receipt: receipt({ id: "rcpt-p", status: "EXECUTED" }),
+      execution: EXECUTION,
+    });
+    await declaredOrderId("INTEGER", "42");
+
+    fireEvent.click(validateButton());
+
+    await waitFor(() => expect(runButton().disabled).toBe(false));
+    const bound = [{ name: "order_id", parameter_type: "INTEGER", value: 42 }];
+    expect(createSqlDraft).toHaveBeenCalledWith(
+      "ds-1",
+      { sql: TEMPLATE, parameters: bound, context_product_key: null },
+      expect.any(AbortSignal),
+    );
+
+    fireEvent.click(runButton());
+
+    await waitFor(() => expect(runSqlDraft).toHaveBeenCalledTimes(1));
+    expect(runSqlDraft).toHaveBeenCalledWith(
+      "rcpt-p",
+      { sql: TEMPLATE, parameters: bound, context_product_key: null },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("says what is wrong with a value and will not validate until it fits its type", async () => {
+    await declaredOrderId("INTEGER", "4.5");
+
+    expect(screen.getByText("Enter a whole number.")).toBeTruthy();
+    expect(field("Value of parameter 1").getAttribute("aria-invalid")).toBe("true");
+    expect(validateButton().disabled).toBe(true);
+    expect(screen.getByText("Fix the parameters above to validate.")).toBeTruthy();
+
+    fireEvent.change(field("Type of parameter 1"), { target: { value: "DATE" } });
+    fireEvent.change(field("Value of parameter 1"), { target: { value: "2024-02-30" } });
+    expect(screen.getByText("Enter a date as YYYY-MM-DD.")).toBeTruthy();
+
+    fireEvent.change(field("Value of parameter 1"), { target: { value: "2024-02-29" } });
+    expect(screen.queryByText("Enter a date as YYYY-MM-DD.")).toBeNull();
+    expect(validateButton().disabled).toBe(false);
+    expect(createSqlDraft).not.toHaveBeenCalled();
+  });
+
+  it("locks Run when a value changes after validating, and says to validate again", async () => {
+    createSqlDraft.mockResolvedValue(pasted());
+    await declaredOrderId("STRING", "O-1");
+    fireEvent.click(validateButton());
+    await waitFor(() => expect(runButton().disabled).toBe(false));
+
+    fireEvent.change(field("Value of parameter 1"), { target: { value: "O-2" } });
+
+    expect(runButton().disabled).toBe(true);
+    expect(
+      screen.getByText(
+        "Parameter values changed since it was validated — validate again to run it.",
+      ),
+    ).toBeTruthy();
+
+    // The validated value again is the validated statement again.
+    fireEvent.change(field("Value of parameter 1"), { target: { value: "O-1" } });
+    expect(runButton().disabled).toBe(false);
+
+    // Another type for the same text is another binding.
+    fireEvent.change(field("Type of parameter 1"), { target: { value: "INTEGER" } });
+    fireEvent.change(field("Value of parameter 1"), { target: { value: "1" } });
+    expect(runButton().disabled).toBe(true);
+    expect(runSqlDraft).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's parameter findings and offers no Run", async () => {
+    createSqlDraft.mockResolvedValue(
+      pasted({
+        receipt: null,
+        validation: {
+          valid: false,
+          dialect: "postgres",
+          findings: [
+            {
+              code: "PARAMETER_TYPE_MISMATCH",
+              severity: "ERROR",
+              ref: "order_id",
+              hint: "the value does not match the declared type",
+              detail: { parameter_type: "INTEGER" },
+            },
+          ],
+          referenced_tables: [],
+          referenced_columns: [],
+          column_lineage: [],
+          estimate: {},
+        },
+      }),
+    );
+    await declaredOrderId("STRING", "O-1");
+
+    fireEvent.click(validateButton());
+
+    await waitFor(() => expect(screen.getByText("Cannot run")).toBeTruthy());
+    expect(screen.getByText("PARAMETER_TYPE_MISMATCH")).toBeTruthy();
+    expect(screen.getByText(/order_id/, { selector: ".sqlws__ref" })).toBeTruthy();
+    expect(runButton().disabled).toBe(true);
+  });
+
+  it("notes a declared value the SQL does not use, and removes a parameter", async () => {
+    renderWorkspace();
+    fireEvent.change(sqlBox(), { target: { value: "SELECT o.order_id FROM retail.orders AS o" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add parameter" }));
+    fireEvent.change(field("Name of parameter 1"), { target: { value: "region" } });
+
+    expect(screen.getByText("The SQL has no :region for this value.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByLabelText("Name of parameter 1")).toBeNull();
+  });
+
+  it("sends no parameters for SQL that has none", async () => {
+    createSqlDraft.mockResolvedValue(pasted());
+    renderWorkspace();
+    fireEvent.change(sqlBox(), { target: { value: GENERATED } });
+
+    fireEvent.click(validateButton());
+
+    await waitFor(() => expect(createSqlDraft).toHaveBeenCalledTimes(1));
+    expect(createSqlDraft.mock.calls[0]?.[1]).toEqual({ sql: GENERATED, context_product_key: null });
   });
 });

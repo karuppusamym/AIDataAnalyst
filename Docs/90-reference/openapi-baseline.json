@@ -31288,6 +31288,55 @@
         "title": "SourceEntitlementRead",
         "type": "object"
       },
+      "SqlDraftParameter": {
+        "additionalProperties": false,
+        "description": "One named parameter: the type it is declared as and the value bound to it.\n\nThe statement names it as a `:name` placeholder. The value travels here, beside the text,\nand is bound as one typed literal into the parsed statement -- never spliced into the text --\nand never stored: the receipt keeps a keyed digest of it. A missing or null value is refused\nas PARAMETER_VALUE_MISSING.",
+        "properties": {
+          "name": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "parameter_type": {
+            "enum": [
+              "STRING",
+              "INTEGER",
+              "NUMBER",
+              "BOOLEAN",
+              "DATE"
+            ],
+            "title": "Parameter Type",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 10000,
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "name",
+          "parameter_type"
+        ],
+        "title": "SqlDraftParameter",
+        "type": "object"
+      },
       "SqlDraftReceiptRead": {
         "additionalProperties": false,
         "properties": {
@@ -31472,6 +31521,14 @@
             ],
             "title": "Max Rows"
           },
+          "parameters": {
+            "items": {
+              "$ref": "#/components/schemas/SqlDraftParameter"
+            },
+            "maxItems": 50,
+            "title": "Parameters",
+            "type": "array"
+          },
           "question": {
             "anyOf": [
               {
@@ -31632,6 +31689,14 @@
               }
             ],
             "title": "Max Rows"
+          },
+          "parameters": {
+            "items": {
+              "$ref": "#/components/schemas/SqlDraftParameter"
+            },
+            "maxItems": 50,
+            "title": "Parameters",
+            "type": "array"
           },
           "sql": {
             "maxLength": 200000,
@@ -59282,7 +59347,7 @@
         ]
       },
       "post": {
-        "description": "Nothing runs here. An invalid statement is a 200 with findings and no receipt.",
+        "description": "Nothing runs here. An invalid statement is a 200 with findings and no receipt -- and a\nstatement whose parameters do not bind is an invalid statement, with `PARAMETER_*` findings.",
         "operationId": "create_sql_draft_v1_datasources__datasource_id__sql_drafts_post",
         "parameters": [
           {

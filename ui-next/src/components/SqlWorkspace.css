@@ -3,6 +3,17 @@
 .sqlws__h2{margin:0;font-size:14px}
 .sqlws__lede{margin:0;font-size:12.5px;color:var(--ink-2);max-width:80ch}
 .sqlws__sql{width:100%;box-sizing:border-box;resize:vertical;font-family:var(--mono);font-size:12.5px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk);color:var(--ink)}
+.sqlws__params{display:flex;flex-direction:column;gap:6px;margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);min-width:0}
+.sqlws__params > legend{padding:0 4px}
+.sqlws__paramlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.sqlws__param{display:flex;flex-direction:column;gap:2px}
+.sqlws__paramrow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sqlws__paramname,.sqlws__paramvalue,.sqlws__paramtype{font-family:var(--mono);font-size:12px;padding:4px 6px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk);color:var(--ink);min-width:0}
+.sqlws__paramname{flex:0 1 14ch}
+.sqlws__paramvalue{flex:1 1 18ch}
+.sqlws__paramname[aria-invalid="true"],.sqlws__paramvalue[aria-invalid="true"]{border-color:var(--warn)}
+.sqlws__paramproblem{font-size:12px;color:var(--ink);border-left:2px solid var(--warn);padding-left:8px}
+.sqlws__paramactions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .sqlws__actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .sqlws__note{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
 .sqlws__problem{border:1px solid var(--warn);border-left:3px solid var(--warn);border-radius:var(--radius-sm);padding:10px 12px;display:flex;flex-direction:column;gap:3px}

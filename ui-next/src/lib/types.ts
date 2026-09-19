@@ -5254,6 +5254,13 @@ export interface SourceEntitlementRead {
   expires_at: string | null;
 }
 
+/** One named parameter: the type it is declared as and the value bound to it. */
+export interface SqlDraftParameter {
+  name: string;
+  parameter_type: "STRING" | "INTEGER" | "NUMBER" | "BOOLEAN" | "DATE";
+  value?: string | boolean | number | null;
+}
+
 export interface SqlDraftReceiptRead {
   id: string;
   origin: string;
@@ -5277,6 +5284,7 @@ export interface SqlDraftReceiptRead {
 export interface SqlDraftRequest {
   question?: string | null;
   sql?: string | null;
+  parameters?: SqlDraftParameter[];
   max_rows?: number | null;
   context_product_key?: string | null;
   workspace_id?: string | null;
@@ -5295,6 +5303,7 @@ export interface SqlDraftResponse {
 
 export interface SqlDraftRunRequest {
   sql: string;
+  parameters?: SqlDraftParameter[];
   max_rows?: number | null;
   context_product_key?: string | null;
   workspace_id?: string | null;
