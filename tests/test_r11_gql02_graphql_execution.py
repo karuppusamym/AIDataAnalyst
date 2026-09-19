@@ -35,7 +35,13 @@ from sqlalchemy.pool import StaticPool
 from aida.connectors.base import QueryResult
 from aida.governed_execution_models import GovernedExecutionRequest
 from aida.main import app
-from aida.models import AuditEvent, DataQualityIncident, GovernedToolVersion, ToolExecution
+from aida.models import (
+    AuditEvent,
+    DataQualityIncident,
+    GovernedToolVersion,
+    MetadataColumn,
+    ToolExecution,
+)
 from atlas.platform.config import Settings, get_settings
 from atlas.platform.db import Base, get_session
 from tests.support.doubles import FakeSqlExecutor
@@ -650,3 +656,46 @@ async def test_an_agent_without_a_contract_is_refused_as_on_rest(
     assert executed == []
     record = await scenario.db.scalar(select(GovernedExecutionRequest))
     assert record is not None and record.status == "REJECTED"
+
+
+async def test_a_sensitive_column_is_masked_exactly_as_rest_masks_it(
+    http: httpx.AsyncClient, scenario: _Scenario, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Masking parity: the same tool through GraphQL and REST masks the same column the same
+    way, because both run the one governed path -- and the raw value reaches neither."""
+    raw_email = "person-7781@example.test"
+    scenario.db.add(
+        MetadataColumn(
+            organization_id=scenario.organization.id,
+            table_id=scenario.customer.id,
+            name="email",
+            ordinal_position=1,
+            physical_type="text",
+            nullable=True,
+            classification="PII",
+            fingerprint="fp-customer-email",
+        )
+    )
+    await scenario.db.commit()
+    version = await scenario.tool_version(
+        referenced_tables=["retail.customer"],
+        sql_template="SELECT c.email FROM retail.customer AS c",
+    )
+    monkeypatch.setattr(
+        "aida.query_gateway.open_execution_session",
+        lambda connector_type, dsn: FakeSqlExecutor(({"email": raw_email},)),
+    )
+
+    graphql = await _run(http, scenario, version)
+    rest = await http.post(
+        f"/v1/tool-versions/{version.id}/execute",
+        json={"parameters": {}, "max_rows": 10},
+        headers=_headers(scenario),
+    )
+
+    assert rest.status_code == 200, rest.text
+    result = _outcome(graphql)["result"]
+    rest_execution = rest.json()["execution"]
+    assert result["maskedColumns"] == rest_execution["masked_columns"] == ["email"]
+    assert result["rows"] == [[rest_execution["rows"][0]["email"]]]
+    assert raw_email not in graphql.text and raw_email not in rest.text
