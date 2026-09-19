@@ -30,15 +30,13 @@ the live routes' `require_roles` closures and fails if either side moves. The
 REST handlers compose these same shared checks inline, which is why there was
 no route-only permission check to extract first.
 
-**Two deliberate differences, both stricter than REST.** An organization-wide
+**One deliberate difference, stricter than REST.** An organization-wide
 `tables` listing authorizes each datasource *before* it counts or pages, so a
 datasource the caller may not read contributes nothing to `totalCount` and
 never shortens a page. `GET /v1/organizations/{id}/catalog/rows` drops such rows
-after paging and counts them in `total`; the rows it returns are the same. And the
-lineage reads ask the datasource's workspace gate, as `DataSource.tables` does: the
-unified-lineage routes check only the role and the tenant, but a lineage graph
-names a datasource's tables, and a caller refused those tables here must not read
-their names off the graph instead.
+after paging and counts them in `total`; the rows it returns are the same. (The
+lineage reads were a second until R11-D28: they ask the datasource's workspace gate,
+as `DataSource.tables` does, and the unified-lineage routes now ask it too.)
 
 **Request-scoped, never shared.** A `ReadScope` is built per request, for one
 caller, and dropped with it. Its loaders batch and cache by object id, and the
@@ -987,9 +985,9 @@ def _in_range(value: int, bounds: tuple[int, int], reason: str) -> int:
 async def _lineage_datasource(scope: ReadScope, datasource_id: UUID) -> DataSource:
     """What the unified-lineage routes decide before they build anything -- their role
     gate, then `load_datasource_in_scope`: missing is NOT_FOUND, another tenant's is
-    FORBIDDEN -- and the datasource's workspace gate, which those routes do not ask and
-    `DataSource.tables` does. A lineage graph names the datasource's tables, so a caller
-    this facade refuses the tables must not read their names off the graph instead."""
+    FORBIDDEN -- then the datasource's workspace gate, as `DataSource.tables` asks it (and,
+    since R11-D28, the routes too). A lineage graph names the datasource's tables, so a
+    caller refused the tables must not read their names off the graph instead."""
     _require_roles(scope, UNIFIED_LINEAGE_READER_ROLES)
     row = await scope.datasources.load(datasource_id)
     if row is None:

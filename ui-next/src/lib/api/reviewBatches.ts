@@ -6,12 +6,8 @@
      POST /v1/governance/review-batches                  freeze ids + versions
      POST /v1/governance/review-batches/{id}/decision    decide: re-check, apply
 
-   THE TYPES BELOW ARE HAND-WRITTEN, deliberately and temporarily. The routes
-   are new, so `lib/types.ts` (generated from the OpenAPI baseline) does not
-   know them until the baseline is regenerated -- which is an integration step
-   this change must not take on its own (another session owns that artifact
-   on this branch). They mirror `aida.review_batch_schemas` field for field;
-   once `types.ts` is regenerated, replace them with the generated names.
+   Response and request contracts use the generated OpenAPI types. Local aliases
+   preserve the screen-facing names without duplicating the server schemas.
 
    Demo mode (`VITE_USE_FIXTURES` unset) answers from a small deterministic
    queue in this module rather than from `lib/fixtures.ts`, so the screen is
@@ -20,106 +16,35 @@
 
 import { demoOr, get, postJson } from "./transport";
 
-export interface ChangeQueueEvidence {
-  category: string;
-  claim: string;
-  source: string;
-  occurred_at?: string | null;
-}
+import type {
+  EvidenceItemRead,
+  ChangeQueueItemRead,
+  ChangeQueuePageRead,
+  ChangeQueueDetailRead,
+  ReviewBatchCorrectionRead,
+  ReviewBatchRead,
+  ReviewBatchDecisionMemberRead,
+  ReviewBatchDecisionRead,
+  ReviewBatchSelectionWrite,
+  ChangeQueueDetailsRead,
+  ReviewBatchDecisionCreate,
+} from "../types";
 
-export interface ChangeQueueItem {
-  review_id: string;
-  object_type: string;
-  object_id: string;
-  review_family: string;
-  change_kind: string;
-  status: string;
-  requested_by: string;
-  created_at: string;
-  risk_tier: string;
-  confidence: number | null;
-  diffable: boolean;
-  evidence_count: number;
-  evidence_preview: ChangeQueueEvidence[];
-  evidence_fingerprint: string;
-  /** Why this reviewer may not decide the row at all (NOT_PENDING, MAKER_CHECKER, ...). */
-  decide_blocker: string | null;
-  /** Why batch *approval* would be refused (EVIDENCE_NOT_SHOWN, INDIVIDUAL_DECISION_REQUIRED). */
-  approve_gate: string | null;
-  target_unavailable: boolean;
-}
-
-export interface ChangeQueuePage {
-  organization_id: string;
-  generated_at: string;
-  limit: number;
-  next_cursor: string | null;
-  total: number | null;
-  items: ChangeQueueItem[];
-}
-
-export interface ChangeQueueDetail {
-  item: ChangeQueueItem;
-  evidence: ChangeQueueEvidence[];
-}
-
-export interface ReviewBatchCorrection {
-  kind: string;
-  available: boolean;
-  method: string | null;
-  path: string | null;
-  subject_type: string | null;
-  subject_id: string | null;
-  reason_code: string | null;
-}
-
-export interface ReviewBatch {
-  id: string;
-  status: string;
-  selection_mode: string;
-  selection_truncated: boolean;
-  item_count: number;
-  eligible_count: number;
-  excluded_count: number;
-  selection_fingerprint: string;
-  decision: string | null;
-  exclusion_counts: Record<string, number>;
-  approve_gate_counts: Record<string, number>;
-  outcome_counts: Record<string, number>;
-}
-
-export interface ReviewBatchMemberOutcome {
-  review_id: string;
-  position: number;
-  object_type: string | null;
-  review_family: string | null;
-  eligibility: string;
-  exclusion_code: string | null;
-  outcome: string;
-  reason_code: string | null;
-  detail?: string | null;
-  correction: ReviewBatchCorrection;
-}
-
-export interface ReviewBatchDecision {
-  batch: ReviewBatch;
-  overall: "SUCCESS" | "PARTIAL_SUCCESS" | "FAILURE";
-  applied_count: number;
-  refused_count: number;
-  skipped_count: number;
-  members: ReviewBatchMemberOutcome[];
-}
+export type ChangeQueueEvidence = EvidenceItemRead;
+export type ChangeQueueItem = ChangeQueueItemRead;
+export type ChangeQueuePage = ChangeQueuePageRead;
+export type ChangeQueueDetail = ChangeQueueDetailRead;
+export type ReviewBatchCorrection = ReviewBatchCorrectionRead;
+export type ReviewBatch = ReviewBatchRead;
+export type ReviewBatchMemberOutcome = ReviewBatchDecisionMemberRead;
+export type ReviewBatchDecision = ReviewBatchDecisionRead;
+export type ReviewBatchSelection = ReviewBatchSelectionWrite;
 
 export interface ChangeQueueQuery {
   family?: string | null;
   decidableOnly?: boolean;
   cursor?: string | null;
   limit?: number;
-}
-
-export interface ReviewBatchSelection {
-  review_id: string;
-  evidence_fingerprint: string;
 }
 
 /** `GET /v1/governance/reviews/change-queue` -- one keyset page. */
@@ -144,18 +69,19 @@ export function fetchChangeQueue(
 export function fetchChangeQueueDetails(
   reviewIds: string[],
   signal?: AbortSignal,
-): Promise<{ items: ChangeQueueDetail[] }> {
+): Promise<ChangeQueueDetailsRead> {
   return demoOr(
     async () => ({
       items: DEMO_QUEUE.filter((item) => reviewIds.includes(item.review_id)).map((item) => ({
         item,
         evidence: item.evidence_preview,
+        diff: null,
       })),
     }),
     async () => {
       const params = new URLSearchParams();
       for (const id of reviewIds) params.append("review_id", id);
-      return get<{ items: ChangeQueueDetail[] }>(
+      return get<ChangeQueueDetailsRead>(
         `/v1/governance/reviews/change-queue/details?${params}`,
         signal,
       );
@@ -177,11 +103,11 @@ export function freezeReviewBatch(
 /** `POST /v1/governance/review-batches/{id}/decision` -- one decision, per-member outcomes. */
 export function decideReviewBatch(
   batchId: string,
-  body: { decision: "APPROVE" | "REJECT"; reason: string | null },
+  body: Pick<ReviewBatchDecisionCreate, "decision" | "reason">,
   signal?: AbortSignal,
 ): Promise<ReviewBatchDecision> {
   return demoOr(
-    async () => demoDecide(batchId, body.decision, body.reason),
+    async () => demoDecide(batchId, body.decision, body.reason ?? null),
     async () =>
       postJson<ReviewBatchDecision>(
         `/v1/governance/review-batches/${encodeURIComponent(batchId)}/decision`,
@@ -248,6 +174,11 @@ function demoPage(query: ChangeQueueQuery): ChangeQueuePage {
   const next = start + limit < filtered.length ? String(start + limit) : null;
   return {
     organization_id: "demo-org",
+    filters: {
+      status: "PENDING", object_types: [], families: query.family ? [query.family] : [],
+      change_kinds: [], object_id: null, table_id: null,
+      decidable_only: query.decidableOnly ?? false,
+    },
     generated_at: new Date(0).toISOString(),
     limit,
     next_cursor: next,
@@ -272,6 +203,10 @@ function demoSummary(id: string, items: ReviewBatchSelection[]): ReviewBatch {
   }
   return {
     id,
+    organization_id: "demo-org",
+    created_by: "demo-reviewer",
+    created_at: new Date(0).toISOString(),
+    decided_at: null,
     status: "FROZEN",
     selection_mode: "EXPLICIT",
     selection_truncated: false,
@@ -311,6 +246,10 @@ function demoDecide(
       position,
       object_type: item?.object_type ?? null,
       review_family: item?.review_family ?? null,
+      frozen_status: item?.status ?? null,
+      evidence_fingerprint: selection.evidence_fingerprint ?? null,
+      approve_gate_code: item?.approve_gate ?? null,
+      decided_at: applied ? new Date(0).toISOString() : null,
       eligibility: "ELIGIBLE",
       exclusion_code: null,
       outcome: applied ? "APPLIED" : "REFUSED",
@@ -342,7 +281,7 @@ function demoDecide(
   const refused = members.length - applied;
   const frozen = demoSummary(batchId, selections);
   return {
-    batch: { ...frozen, status: "DECIDED", decision },
+    batch: { ...frozen, status: "DECIDED", decision, decided_at: new Date(0).toISOString() },
     overall: refused === 0 ? "SUCCESS" : applied > 0 ? "PARTIAL_SUCCESS" : "FAILURE",
     applied_count: applied,
     refused_count: refused,

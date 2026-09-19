@@ -8,6 +8,7 @@ import type {
   ReviewBatchMemberOutcome,
 } from "../lib/api";
 import { expectNoAxeViolations } from "../test/a11y";
+import type { ChangeQueueDetailsRead, ChangeQueueFilterRead } from "../lib/types";
 
 /* ---------------------------------------------------------------------------
    R11-REV01: batch review. The API boundary (`../lib/api`) is mocked, the same
@@ -20,7 +21,7 @@ import { expectNoAxeViolations } from "../test/a11y";
 --------------------------------------------------------------------------- */
 
 const fetchChangeQueue = vi.fn<(query: { cursor?: string | null }) => Promise<ChangeQueuePage>>();
-const fetchChangeQueueDetails = vi.fn<(ids: string[]) => Promise<{ items: unknown[] }>>();
+const fetchChangeQueueDetails = vi.fn<(ids: string[]) => Promise<ChangeQueueDetailsRead>>();
 const freezeReviewBatch = vi.fn<(items: unknown[]) => Promise<ReviewBatch>>();
 const decideReviewBatch =
   vi.fn<(id: string, body: { decision: string; reason: string | null }) => Promise<ReviewBatchDecision>>();
@@ -62,8 +63,14 @@ function row(id: string, overrides: Partial<ChangeQueueItem> = {}): ChangeQueueI
   };
 }
 
+const FILTERS: ChangeQueueFilterRead = {
+  status: "PENDING", object_types: [], families: [], change_kinds: [],
+  object_id: null, table_id: null, decidable_only: false,
+};
+
 const PAGES: Record<string, ChangeQueuePage> = {
   "": {
+    filters: FILTERS,
     organization_id: "org",
     generated_at: "2026-09-19T00:00:00Z",
     limit: 50,
@@ -72,6 +79,7 @@ const PAGES: Record<string, ChangeQueuePage> = {
     items: [row("a"), row("b"), row("own", { decide_blocker: "MAKER_CHECKER" })],
   },
   c1: {
+    filters: FILTERS,
     organization_id: "org",
     generated_at: "2026-09-19T00:00:00Z",
     limit: 50,
@@ -89,6 +97,7 @@ const PAGES: Record<string, ChangeQueuePage> = {
     ],
   },
   c2: {
+    filters: FILTERS,
     organization_id: "org",
     generated_at: "2026-09-19T00:00:00Z",
     limit: 50,
@@ -101,6 +110,10 @@ const PAGES: Record<string, ChangeQueuePage> = {
 function frozen(overrides: Partial<ReviewBatch> = {}): ReviewBatch {
   return {
     id: "batch-1",
+    organization_id: "org",
+    created_by: "reviewer",
+    created_at: "2026-09-19T00:00:00Z",
+    decided_at: null,
     status: "FROZEN",
     selection_mode: "EXPLICIT",
     selection_truncated: false,
@@ -127,6 +140,10 @@ function member(
     position: 0,
     object_type: "ASSET_DESCRIPTION_DRAFT",
     review_family: "DESCRIPTION",
+    frozen_status: "PENDING",
+    evidence_fingerprint: `fp-${id}`,
+    approve_gate_code: null,
+    decided_at: outcome === "APPLIED" ? "2026-09-19T00:00:00Z" : null,
     eligibility: outcome === "SKIPPED" ? "EXCLUDED" : "ELIGIBLE",
     exclusion_code: outcome === "SKIPPED" ? reasonCode : null,
     outcome,
@@ -263,7 +280,8 @@ describe("ReviewBatchQueue", () => {
     fetchChangeQueueDetails.mockResolvedValue({
       items: [
         {
-          item: PAGES[""]!.items[0],
+          item: PAGES[""]!.items[0]!,
+          diff: null,
           evidence: [
             { category: "DESCRIPTION_DRAFT", claim: "proposed_description: text a", source: "s:a" },
             { category: "DESCRIPTION_DRAFT", claim: "column_count: 3", source: "s:a.evidence" },

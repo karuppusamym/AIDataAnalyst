@@ -5,8 +5,8 @@
 the two side by side on one real SQLite estate: every page of a GraphQL read, concatenated,
 is the REST answer -- the same nodes in the same order, the same depths, edge kinds and
 quality states, the same truncation. What differs is deliberate and pinned here: GraphQL
-pages by cursor inside its object budget, and it asks the datasource's workspace gate, as
-`DataSource.tables` does, before it names a single table.
+pages by cursor inside its object budget. Both ask the datasource's workspace gate, as
+`DataSource.tables` does, before they name a single table (REST since R11-D28).
 """
 
 from __future__ import annotations
@@ -45,7 +45,10 @@ from aida.models import (
 from aida.relationship_validation import RECORDED_VALIDATION_KEY
 from aida.security_types import SecurityContext
 from aida.unified_lineage_api import get_unified_lineage_graph, get_unified_lineage_impact
-from aida.unified_lineage_service import UNIFIED_LINEAGE_READER_ROLES
+from aida.unified_lineage_service import (
+    UNIFIED_LINEAGE_READER_ROLES,
+    build_unified_lineage_impact_payload,
+)
 from aida.workspace_access import ENFORCE
 from atlas.platform.config import Settings
 from atlas.platform.db import Base
@@ -763,13 +766,11 @@ async def test_a_page_decides_its_datasource_again_rather_than_trust_its_parent(
     """A child page is handed a read its parent built. If that read is of a datasource this
     caller may not read -- a parent under a different decision, a cached object -- the page
     refuses it rather than page it."""
-    member = SecurityContext(
-        principal_id="platform-admin@bank.example",
-        principal_type="USER",
-        organization_id=estate.org.id,
-        roles=frozenset({"PlatformAdmin"}),
+    # Built by the service itself, which decides nothing about the caller -- the way a read
+    # reaches a page without this caller's decision.
+    impact = await build_unified_lineage_impact_payload(
+        estate.db, estate.closed_ds, str(estate.closed_table.id), settings=SETTINGS
     )
-    impact = await _rest_impact(estate, member, estate.closed_ds.id, str(estate.closed_table.id))
     assert impact.downstream, "the closed datasource has lineage to withhold"
 
     with pytest.raises(ReadRefused) as refused:

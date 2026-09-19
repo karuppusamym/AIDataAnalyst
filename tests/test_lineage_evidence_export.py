@@ -439,10 +439,13 @@ async def test_export_reuses_the_exact_same_gate_objects_as_the_live_lineage_rou
     resolve to that one object rather than to each other, so the export cannot
     diverge from the live route *or* from the other four routers."""
     import aida.lineage_evidence_export_api as export_api
+    from aida.authorization_gate import gate_read
     from aida.resource_scope import load_datasource_in_scope
 
     assert export_api.load_datasource_in_scope is load_datasource_in_scope
     assert unified_lineage_api.load_datasource_in_scope is load_datasource_in_scope
+    # R11-D28: the workspace gate too -- the same REST translation of the same gate.
+    assert export_api.gate_read is unified_lineage_api.gate_read is gate_read
     assert (
         export_api.UNIFIED_LINEAGE_READER_ROLES is unified_lineage_api.UNIFIED_LINEAGE_READER_ROLES
     )
