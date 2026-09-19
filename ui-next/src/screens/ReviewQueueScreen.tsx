@@ -769,9 +769,17 @@ const ParsedLineageReviewScreen = lazy(() =>
   })),
 );
 
+/** R11-REV01: batch review over the same governance queue, paged by the server
+ *  and decided through frozen batches. A tab of this destination rather than a
+ *  new one, so R11-S13's Stewardship consolidation gains no sidebar entry. */
+const ReviewBatchQueue = lazy(() =>
+  import("./ReviewBatchQueue").then((module) => ({ default: module.ReviewBatchQueue })),
+);
+
 const QUEUES = [
   { id: "governance", label: "Governance proposals" },
   { id: "parsed-lineage", label: "Parsed lineage edges" },
+  { id: "batch", label: "Batch review" },
 ] as const;
 
 type QueueId = (typeof QUEUES)[number]["id"];
@@ -779,7 +787,8 @@ type QueueId = (typeof QUEUES)[number]["id"];
 export function ReviewQueueScreen() {
   const [params, setParams] = useUrlState();
   const requested = params.get("queue");
-  const queue: QueueId = requested === "parsed-lineage" ? "parsed-lineage" : "governance";
+  const queue: QueueId =
+    requested === "parsed-lineage" || requested === "batch" ? requested : "governance";
 
   return (
     <div className="rqf">
@@ -824,6 +833,16 @@ export function ReviewQueueScreen() {
       >
         {queue === "governance" ? (
           <GovernanceReviewQueue />
+        ) : queue === "batch" ? (
+          <Suspense
+            fallback={
+              <div className="screenloading" role="status">
+                Loading batch review…
+              </div>
+            }
+          >
+            <ReviewBatchQueue />
+          </Suspense>
         ) : (
           /* A local boundary, so downloading the second queue's chunk replaces
              the panel rather than the whole screen -- the shell's own Suspense
