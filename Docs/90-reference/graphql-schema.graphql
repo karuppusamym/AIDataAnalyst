@@ -234,6 +234,131 @@ The `JSON` scalar type represents JSON values as specified by [ECMA-404](https:/
 """
 scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
 
+"""A typed edge of the merged lineage graph."""
+type LineageEdge {
+  id: String!
+  edgeSource: String!
+  sourceNodeId: String!
+  targetNodeId: String!
+  sourceLabel: String!
+  targetLabel: String!
+  status: String!
+  confidence: Float!
+  sourceColumns: [String!]!
+  targetColumns: [String!]!
+
+  """
+  What establishes the edge, exactly as the REST route serves it: never a value from the source, and never an approved join's recorded validation.
+  """
+  evidence: JSON!
+}
+
+"""A page of lineage edges, in edge id order."""
+type LineageEdgeConnection {
+  nodes: [LineageEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+A datasource's merged lineage graph -- declared keys, reviewed relationships, dbt, OpenLineage, view and procedure definitions and BI reports -- as `GET /v1/datasources/{id}/unified-lineage/graph` builds it, with its bounds and whether they cut anything.
+"""
+type LineageGraph {
+  datasourceId: ID!
+  countsBySource: JSON!
+  returnedNodeCount: Int!
+  returnedEdgeCount: Int!
+  nodeLimit: Int!
+  edgeLimit: Int!
+  truncated: Boolean!
+  truncationReasons: [String!]!
+
+  """The graph's nodes, a page at a time."""
+  nodes(first: Int! = 20, after: String = null): LineageNodeConnection
+
+  """The graph's edges, a page at a time."""
+  edges(first: Int! = 20, after: String = null): LineageEdgeConnection
+}
+
+"""
+Transitive upstream and downstream impact from one lineage node, as `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` computes it: one bounded traversal across every merged edge kind, with REST's truncation flags.
+"""
+type LineageImpact {
+  datasourceId: ID!
+  focusNodeId: String!
+  focusNodeKind: String!
+  focusLabel: String!
+  requestedDepth: Int!
+  nodeLimit: Int!
+  upstreamTruncated: Boolean!
+  downstreamTruncated: Boolean!
+
+  """What the focus node depends on, a page at a time."""
+  upstream(first: Int! = 20, after: String = null): LineageImpactNodeConnection
+
+  """What depends on the focus node, a page at a time."""
+  downstream(first: Int! = 20, after: String = null): LineageImpactNodeConnection
+}
+
+"""
+A node an impact traversal reached, as `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` returns it.
+"""
+type LineageImpactNode {
+  nodeId: String!
+  nodeKind: String!
+  label: String!
+  qualifiedName: String!
+
+  """Hops from the focus node."""
+  depth: Int!
+  contributingEdgeSources: [String!]!
+
+  """
+  PASSING, STALE, UNKNOWN or INCIDENT_OPEN for a table -- the Catalog's own states -- and NOT_APPLICABLE for any other node.
+  """
+  qualityState: String!
+}
+
+"""
+A page of one direction of an impact traversal, in the traversal's own (depth, nodeId) order.
+"""
+type LineageImpactNodeConnection {
+  nodes: [LineageImpactNode!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+A node of the merged lineage graph: a catalog table, or a synthetic node for a dbt resource, OpenLineage dataset or BI report not matched to one.
+"""
+type LineageNode {
+  id: String!
+  nodeKind: String!
+  label: String!
+  qualifiedName: String!
+  matchedTableId: ID
+  resolved: Boolean!
+  inboundEdgeCount: Int!
+  outboundEdgeCount: Int!
+}
+
+"""A page of lineage nodes, in `qualifiedName` order."""
+type LineageNodeConnection {
+  nodes: [LineageNode!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+Which relationship suggestions a lineage graph folds in: the unified-lineage graph route's `suggestion_status`.
+"""
+enum LineageSuggestionStatus {
+  ALL
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 """
 Governed execution (R11-GQL02): the only operations that run anything against a source. One execution field per operation.
 """
@@ -283,6 +408,16 @@ type Query {
   One context product version, as `GET /v1/context-product-versions/{id}` reads it -- envelope, role, retirement (`GONE`), purpose and quality -- and, for a consumer, recorded as a consumption on channel GRAPHQL.
   """
   contextProductVersion(id: ID!): ContextProductVersion
+
+  """
+  Transitive impact from one lineage node, as `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`: the same traversal, bounds and quality states. Also asks the datasource's workspace gate, as its `tables` do.
+  """
+  lineageImpact(datasourceId: ID!, nodeId: String!, depth: Int! = 5, nodeLimit: Int! = 200): LineageImpact
+
+  """
+  A datasource's merged lineage graph, as `GET /v1/datasources/{id}/unified-lineage/graph`: the same merge, review filter and bounds. Also asks the datasource's workspace gate, as its `tables` do.
+  """
+  lineageGraph(datasourceId: ID!, nodeLimit: Int! = 300, edgeLimit: Int! = 1500, suggestionStatus: LineageSuggestionStatus! = APPROVED, includePendingEdges: Boolean! = false): LineageGraph
 
   """One table by id, decided as its columns route decides it."""
   table(id: ID!): Table

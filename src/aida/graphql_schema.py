@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from datetime import datetime
+from enum import Enum
 from typing import Any, cast
 from uuid import UUID
 
@@ -70,12 +71,17 @@ from aida.graphql_reads import (
     column_business_description,
     get_context_product_version,
     get_datasource,
+    get_lineage_graph,
+    get_lineage_impact,
     get_table,
     list_columns,
     list_constraints,
     list_context_products,
     list_datasource_tables,
     list_datasources,
+    list_lineage_graph_edges,
+    list_lineage_graph_nodes,
+    list_lineage_impact_nodes,
     list_organization_tables,
     list_tables,
     referenced_table,
@@ -89,6 +95,11 @@ from aida.schemas import (
     MetadataColumnRead,
     MetadataConstraintRead,
     MetadataTableRead,
+    UnifiedLineageEdgeRead,
+    UnifiedLineageGraphRead,
+    UnifiedLineageImpactNodeRead,
+    UnifiedLineageImpactRead,
+    UnifiedLineageNodeRead,
 )
 from atlas.platform.context import get_correlation_id
 
@@ -540,6 +551,259 @@ class ContextProductConnection:
         )
 
 
+# --- unified lineage (R11-GQL01) ----------------------------------------------
+
+
+@strawberry.enum(
+    description="Which relationship suggestions a lineage graph folds in: the unified-lineage "
+    "graph route's `suggestion_status`."
+)
+class LineageSuggestionStatus(Enum):
+    ALL = "ALL"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+@strawberry.type(
+    description="A node an impact traversal reached, as "
+    "`GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` returns it."
+)
+class LineageImpactNode:
+    node_id: str
+    node_kind: str
+    label: str
+    qualified_name: str
+    depth: int = strawberry.field(description="Hops from the focus node.")
+    contributing_edge_sources: list[str]
+    quality_state: str = strawberry.field(
+        description="PASSING, STALE, UNKNOWN or INCIDENT_OPEN for a table -- the Catalog's "
+        "own states -- and NOT_APPLICABLE for any other node."
+    )
+
+    @classmethod
+    def of(cls, read: UnifiedLineageImpactNodeRead) -> LineageImpactNode:
+        return cls(
+            node_id=read.node_id,
+            node_kind=read.node_kind,
+            label=read.label,
+            qualified_name=read.qualified_name,
+            depth=read.depth,
+            contributing_edge_sources=list(read.contributing_edge_sources),
+            quality_state=read.quality_state,
+        )
+
+
+@strawberry.type(
+    description="A page of one direction of an impact traversal, in the traversal's own "
+    "(depth, nodeId) order."
+)
+class LineageImpactNodeConnection:
+    nodes: list[LineageImpactNode]
+    page_info: PageInfo
+    total_count: int | None
+
+    @classmethod
+    def of(cls, page: Page[UnifiedLineageImpactNodeRead]) -> LineageImpactNodeConnection:
+        return cls(
+            nodes=[LineageImpactNode.of(item) for item in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+
+@strawberry.type(
+    description=(
+        "Transitive upstream and downstream impact from one lineage node, as "
+        "`GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` computes it: one bounded "
+        "traversal across every merged edge kind, with REST's truncation flags."
+    )
+)
+class LineageImpact:
+    datasource_id: strawberry.ID
+    focus_node_id: str
+    focus_node_kind: str
+    focus_label: str
+    requested_depth: int
+    node_limit: int
+    upstream_truncated: bool
+    downstream_truncated: bool
+    read: strawberry.Private[UnifiedLineageImpactRead]
+
+    @classmethod
+    def of(cls, read: UnifiedLineageImpactRead) -> LineageImpact:
+        return cls(
+            datasource_id=_id(read.datasource_id),
+            focus_node_id=read.focus_node_id,
+            focus_node_kind=read.focus_node_kind,
+            focus_label=read.focus_label,
+            requested_depth=read.requested_depth,
+            node_limit=read.node_limit,
+            upstream_truncated=read.upstream_truncated,
+            downstream_truncated=read.downstream_truncated,
+            read=read,
+        )
+
+    @field_resolver("What the focus node depends on, a page at a time.")
+    async def upstream(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> LineageImpactNodeConnection | None:
+        page = await list_lineage_impact_nodes(
+            info.context, self.read, upstream=True, first=first, after=after
+        )
+        return LineageImpactNodeConnection.of(page)
+
+    @field_resolver("What depends on the focus node, a page at a time.")
+    async def downstream(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> LineageImpactNodeConnection | None:
+        page = await list_lineage_impact_nodes(
+            info.context, self.read, upstream=False, first=first, after=after
+        )
+        return LineageImpactNodeConnection.of(page)
+
+
+@strawberry.type(
+    description="A node of the merged lineage graph: a catalog table, or a synthetic node for "
+    "a dbt resource, OpenLineage dataset or BI report not matched to one."
+)
+class LineageNode:
+    id: str
+    node_kind: str
+    label: str
+    qualified_name: str
+    matched_table_id: strawberry.ID | None
+    resolved: bool
+    inbound_edge_count: int
+    outbound_edge_count: int
+
+    @classmethod
+    def of(cls, read: UnifiedLineageNodeRead) -> LineageNode:
+        return cls(
+            id=read.id,
+            node_kind=read.node_kind,
+            label=read.label,
+            qualified_name=read.qualified_name,
+            matched_table_id=_id(read.matched_table_id) if read.matched_table_id else None,
+            resolved=read.resolved,
+            inbound_edge_count=read.inbound_edge_count,
+            outbound_edge_count=read.outbound_edge_count,
+        )
+
+
+@strawberry.type(description="A typed edge of the merged lineage graph.")
+class LineageEdge:
+    id: str
+    edge_source: str
+    source_node_id: str
+    target_node_id: str
+    source_label: str
+    target_label: str
+    status: str
+    confidence: float
+    source_columns: list[str]
+    target_columns: list[str]
+    evidence: JSON = strawberry.field(
+        description="What establishes the edge, exactly as the REST route serves it: never a "
+        "value from the source, and never an approved join's recorded validation."
+    )
+
+    @classmethod
+    def of(cls, read: UnifiedLineageEdgeRead) -> LineageEdge:
+        return cls(
+            id=read.id,
+            edge_source=read.edge_source,
+            source_node_id=read.source_node_id,
+            target_node_id=read.target_node_id,
+            source_label=read.source_label,
+            target_label=read.target_label,
+            status=read.status,
+            confidence=read.confidence,
+            source_columns=list(read.source_columns),
+            target_columns=list(read.target_columns),
+            # The route's own serializer (R11-FP06) decides what evidence leaves.
+            evidence=cast("JSON", read.model_dump(mode="json")["evidence"]),
+        )
+
+
+@strawberry.type(description="A page of lineage nodes, in `qualifiedName` order.")
+class LineageNodeConnection:
+    nodes: list[LineageNode]
+    page_info: PageInfo
+    total_count: int | None
+
+    @classmethod
+    def of(cls, page: Page[UnifiedLineageNodeRead]) -> LineageNodeConnection:
+        return cls(
+            nodes=[LineageNode.of(item) for item in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+
+@strawberry.type(description="A page of lineage edges, in edge id order.")
+class LineageEdgeConnection:
+    nodes: list[LineageEdge]
+    page_info: PageInfo
+    total_count: int | None
+
+    @classmethod
+    def of(cls, page: Page[UnifiedLineageEdgeRead]) -> LineageEdgeConnection:
+        return cls(
+            nodes=[LineageEdge.of(item) for item in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+
+@strawberry.type(
+    description=(
+        "A datasource's merged lineage graph -- declared keys, reviewed relationships, dbt, "
+        "OpenLineage, view and procedure definitions and BI reports -- as "
+        "`GET /v1/datasources/{id}/unified-lineage/graph` builds it, with its bounds and "
+        "whether they cut anything."
+    )
+)
+class LineageGraph:
+    datasource_id: strawberry.ID
+    counts_by_source: JSON
+    returned_node_count: int
+    returned_edge_count: int
+    node_limit: int
+    edge_limit: int
+    truncated: bool
+    truncation_reasons: list[str]
+    read: strawberry.Private[UnifiedLineageGraphRead]
+
+    @classmethod
+    def of(cls, read: UnifiedLineageGraphRead) -> LineageGraph:
+        return cls(
+            datasource_id=_id(read.datasource_id),
+            counts_by_source=cast("JSON", dict(read.counts_by_source)),
+            returned_node_count=read.returned_node_count,
+            returned_edge_count=read.returned_edge_count,
+            node_limit=read.node_limit,
+            edge_limit=read.edge_limit,
+            truncated=read.truncated,
+            truncation_reasons=list(read.truncation_reasons),
+            read=read,
+        )
+
+    @field_resolver("The graph's nodes, a page at a time.")
+    async def nodes(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> LineageNodeConnection | None:
+        page = await list_lineage_graph_nodes(info.context, self.read, first=first, after=after)
+        return LineageNodeConnection.of(page)
+
+    @field_resolver("The graph's edges, a page at a time.")
+    async def edges(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> LineageEdgeConnection | None:
+        page = await list_lineage_graph_edges(info.context, self.read, first=first, after=after)
+        return LineageEdgeConnection.of(page)
+
+
 @strawberry.type(description="Metadata reads. Nothing here executes against a source.")
 class Query:
     @field_resolver("One datasource by id, as `GET /v1/datasources/{id}`.")
@@ -643,6 +907,49 @@ class Query:
         self, info: Info, id: strawberry.ID
     ) -> ContextProductVersion | None:
         return ContextProductVersion.of(await get_context_product_version(info.context, _uuid(id)))
+
+    @field_resolver(
+        "Transitive impact from one lineage node, as "
+        "`GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`: the same traversal, "
+        "bounds and quality states. Also asks the datasource's workspace gate, as its "
+        "`tables` do."
+    )
+    async def lineage_impact(
+        self,
+        info: Info,
+        datasource_id: strawberry.ID,
+        node_id: str,
+        depth: int = 5,
+        node_limit: int = 200,
+    ) -> LineageImpact | None:
+        read = await get_lineage_impact(
+            info.context, _uuid(datasource_id), node_id, depth=depth, node_limit=node_limit
+        )
+        return LineageImpact.of(read)
+
+    @field_resolver(
+        "A datasource's merged lineage graph, as "
+        "`GET /v1/datasources/{id}/unified-lineage/graph`: the same merge, review filter and "
+        "bounds. Also asks the datasource's workspace gate, as its `tables` do."
+    )
+    async def lineage_graph(
+        self,
+        info: Info,
+        datasource_id: strawberry.ID,
+        node_limit: int = 300,
+        edge_limit: int = 1_500,
+        suggestion_status: LineageSuggestionStatus = LineageSuggestionStatus.APPROVED,
+        include_pending_edges: bool = False,
+    ) -> LineageGraph | None:
+        read = await get_lineage_graph(
+            info.context,
+            _uuid(datasource_id),
+            node_limit=node_limit,
+            edge_limit=edge_limit,
+            suggestion_status=suggestion_status.value,
+            include_pending_edges=include_pending_edges,
+        )
+        return LineageGraph.of(read)
 
     @field_resolver("One table by id, decided as its columns route decides it.")
     async def table(self, info: Info, id: strawberry.ID) -> Table | None:

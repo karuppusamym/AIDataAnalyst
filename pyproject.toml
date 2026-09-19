@@ -431,6 +431,9 @@ source_modules = [
   # with them rather than being left behind on the thin handlers.
   "aida.unified_lineage_builder",
   "aida.knowledge_graph_neighborhood",
+  # R11-GQL01: the graph and impact builders, moved out of `unified_lineage_api` so
+  # GraphQL can serve the same reads; the ratchet moves with them.
+  "aida.unified_lineage_service",
 ]
 forbidden_modules = ["aida.query_gateway"]
 
@@ -497,6 +500,9 @@ source_modules = [
   "aida.knowledge_graph_neighborhood",
   "aida.portfolio_analytics_read_model",
   "aida.unified_lineage_builder",
+  # R11-GQL01: the builders `unified_lineage_api` re-exports; it imports them, never
+  # the reverse.
+  "aida.unified_lineage_service",
 ]
 forbidden_modules = [
   "aida.api",

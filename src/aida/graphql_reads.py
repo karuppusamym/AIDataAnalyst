@@ -17,6 +17,8 @@ GraphQL field                             REST route it answers for
 ``Column.businessDescription``            ``GET /v1/tables/{id}/column-documentation``
 ``contextProducts(projectId)``            ``GET /v1/projects/{id}/context-products``
 ``contextProductVersion(id)``             ``GET /v1/context-product-versions/{id}``
+``lineageImpact(dsId, nodeId)``           ``GET /v1/datasources/{id}/unified-lineage/impact/{node}``
+``lineageGraph(dsId)``                    ``GET /v1/datasources/{id}/unified-lineage/graph``
 ========================================  ===========================================
 
 The authorization pieces are the shared ones those routes call --
@@ -28,11 +30,15 @@ the live routes' `require_roles` closures and fails if either side moves. The
 REST handlers compose these same shared checks inline, which is why there was
 no route-only permission check to extract first.
 
-**One deliberate difference, stricter than REST.** An organization-wide
+**Two deliberate differences, both stricter than REST.** An organization-wide
 `tables` listing authorizes each datasource *before* it counts or pages, so a
 datasource the caller may not read contributes nothing to `totalCount` and
 never shortens a page. `GET /v1/organizations/{id}/catalog/rows` drops such rows
-after paging and counts them in `total`; the rows it returns are the same.
+after paging and counts them in `total`; the rows it returns are the same. And the
+lineage reads ask the datasource's workspace gate, as `DataSource.tables` does: the
+unified-lineage routes check only the role and the tenant, but a lineage graph
+names a datasource's tables, and a caller refused those tables here must not read
+their names off the graph instead.
 
 **Request-scoped, never shared.** A `ReadScope` is built per request, for one
 caller, and dropped with it. Its loaders batch and cache by object id, and the
@@ -60,7 +66,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -99,10 +105,21 @@ from aida.schemas import (
     MetadataColumnRead,
     MetadataConstraintRead,
     MetadataTableRead,
+    UnifiedLineageEdgeRead,
+    UnifiedLineageGraphRead,
+    UnifiedLineageImpactNodeRead,
+    UnifiedLineageImpactRead,
+    UnifiedLineageNodeRead,
 )
 from aida.scope_search import search_predicate
 from aida.security import enforce_organization
 from aida.security_types import SecurityContext
+from aida.unified_lineage_service import (
+    UNIFIED_LINEAGE_READER_ROLES,
+    LineageNodeNotFoundError,
+    build_unified_lineage_graph_payload,
+    build_unified_lineage_impact_payload,
+)
 from atlas.platform.config import Settings
 
 __all__ = [
@@ -117,12 +134,17 @@ __all__ = [
     "column_business_description",
     "get_context_product_version",
     "get_datasource",
+    "get_lineage_graph",
+    "get_lineage_impact",
     "get_table",
     "list_columns",
     "list_constraints",
     "list_context_products",
     "list_datasources",
     "list_datasource_tables",
+    "list_lineage_graph_edges",
+    "list_lineage_graph_nodes",
+    "list_lineage_impact_nodes",
     "list_organization_tables",
     "list_tables",
     "open_read_scope",
@@ -150,7 +172,12 @@ CATALOG_READ_ROLES: tuple[str, ...] = ("PlatformAdmin", "MetadataAdmin", "Analys
 #: so a DataAdmin can read a datasource here exactly as over REST and is refused
 #: its tables exactly as over REST.
 GRAPHQL_ENDPOINT_ROLES: tuple[str, ...] = tuple(
-    sorted(set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES) | set(CONTEXT_PRODUCT_READERS))
+    sorted(
+        set(DATASOURCE_READ_ROLES)
+        | set(CATALOG_READ_ROLES)
+        | set(CONTEXT_PRODUCT_READERS)
+        | set(UNIFIED_LINEAGE_READER_ROLES)
+    )
 )
 
 _READ_METADATA = "READ_METADATA"
@@ -937,3 +964,169 @@ async def get_context_product_version(
         except HTTPException as exc:
             raise _shared_refusal(exc) from exc
     return _version_read(product, version)
+
+
+# --- unified lineage (R11-GQL01) ------------------------------------------------
+
+#: The bounds the unified-lineage routes declare on their query parameters -- the same
+#: numbers, refused the same way (REST answers 422, a field `INVALID_ARGUMENT`).
+LINEAGE_DEPTH: tuple[int, int] = (1, 8)
+LINEAGE_NODE_LIMIT: tuple[int, int] = (5, 2_000)
+LINEAGE_EDGE_LIMIT: tuple[int, int] = (5, 10_000)
+LINEAGE_SUGGESTION_STATUSES: tuple[str, ...] = ("ALL", "PENDING", "APPROVED", "REJECTED")
+_SuggestionStatus = Literal["ALL", "PENDING", "APPROVED", "REJECTED"]
+
+
+def _in_range(value: int, bounds: tuple[int, int], reason: str) -> int:
+    low, high = bounds
+    if not low <= value <= high:
+        raise ReadRefused("INVALID_ARGUMENT", reason)
+    return value
+
+
+async def _lineage_datasource(scope: ReadScope, datasource_id: UUID) -> DataSource:
+    """What the unified-lineage routes decide before they build anything -- their role
+    gate, then `load_datasource_in_scope`: missing is NOT_FOUND, another tenant's is
+    FORBIDDEN -- and the datasource's workspace gate, which those routes do not ask and
+    `DataSource.tables` does. A lineage graph names the datasource's tables, so a caller
+    this facade refuses the tables must not read their names off the graph instead."""
+    _require_roles(scope, UNIFIED_LINEAGE_READER_ROLES)
+    row = await scope.datasources.load(datasource_id)
+    if row is None:
+        raise ReadRefused("NOT_FOUND")
+    _enforce_tenant(scope, row.organization_id)
+    await _authorize(scope, resource_type="datasource", resource_id=row.id, datasource_id=row.id)
+    return row
+
+
+def _list_page[T](
+    rows: Sequence[T],
+    *,
+    key: Callable[[T], tuple[Any, ...]],
+    coercers: Sequence[Callable[[str], Any]],
+    first: int,
+    after: str | None,
+) -> Page[T]:
+    """Keyset paging over rows a builder has already bounded and returned whole: the rows
+    after the cursor's key, in key order. The total is the whole list's, on the first page
+    only, as every other connection gives it."""
+    ordered = sorted(rows, key=key)
+    if after is not None:
+        last = _decode(after, coercers)
+        ordered = [row for row in ordered if key(row) > last]
+    page = ordered[:first]
+    return Page(
+        items=page,
+        total=len(rows) if after is None else None,
+        end_cursor=encode_cursor(*key(page[-1])) if page else None,
+        has_next_page=len(ordered) > first,
+    )
+
+
+async def get_lineage_impact(
+    scope: ReadScope, datasource_id: UUID, node_id: str, *, depth: int, node_limit: int
+) -> UnifiedLineageImpactRead:
+    """`GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`: the route's own builder
+    (`build_unified_lineage_impact_payload`) with the route's bounds and settings, so the
+    traversal, its truncation, the graph-store backend and its fallback, and each table's
+    quality state are REST's. An unknown node is NOT_FOUND, as the route's 404."""
+    _require_roles(scope, UNIFIED_LINEAGE_READER_ROLES)
+    _in_range(depth, LINEAGE_DEPTH, "DEPTH_OUT_OF_RANGE")
+    _in_range(node_limit, LINEAGE_NODE_LIMIT, "NODE_LIMIT_OUT_OF_RANGE")
+    datasource = await _lineage_datasource(scope, datasource_id)
+    async with scope.lock:
+        try:
+            return await build_unified_lineage_impact_payload(
+                scope.session,
+                datasource,
+                node_id,
+                depth=depth,
+                node_limit=node_limit,
+                settings=scope.settings,
+            )
+        except LineageNodeNotFoundError as exc:
+            raise ReadRefused("NOT_FOUND") from exc
+
+
+async def list_lineage_impact_nodes(
+    scope: ReadScope,
+    impact: UnifiedLineageImpactRead,
+    *,
+    upstream: bool,
+    first: int,
+    after: str | None,
+) -> Page[UnifiedLineageImpactNodeRead]:
+    """One direction of an impact read, a page at a time, in the traversal's own
+    `(depth, node_id)` order. Decided again before it pages, as every child field is; the
+    datasource's decision is memoized for this request, so asking again costs nothing."""
+    first = _page_size(scope, first)
+    await _lineage_datasource(scope, impact.datasource_id)
+    return _list_page(
+        impact.upstream if upstream else impact.downstream,
+        key=lambda row: (row.depth, row.node_id),
+        coercers=(int, str),
+        first=first,
+        after=after,
+    )
+
+
+async def get_lineage_graph(
+    scope: ReadScope,
+    datasource_id: UUID,
+    *,
+    node_limit: int,
+    edge_limit: int,
+    suggestion_status: str,
+    include_pending_edges: bool,
+) -> UnifiedLineageGraphRead:
+    """`GET /v1/datasources/{id}/unified-lineage/graph`: the route's own builder
+    (`build_unified_lineage_graph_payload`) with its bounds, its review filter and its
+    opt-in for proposed parsed edges, so the merge and its truncation are REST's."""
+    _require_roles(scope, UNIFIED_LINEAGE_READER_ROLES)
+    _in_range(node_limit, LINEAGE_NODE_LIMIT, "NODE_LIMIT_OUT_OF_RANGE")
+    _in_range(edge_limit, LINEAGE_EDGE_LIMIT, "EDGE_LIMIT_OUT_OF_RANGE")
+    if suggestion_status not in LINEAGE_SUGGESTION_STATUSES:
+        raise ReadRefused("INVALID_ARGUMENT", "SUGGESTION_STATUS_UNKNOWN")
+    datasource = await _lineage_datasource(scope, datasource_id)
+    async with scope.lock:
+        return await build_unified_lineage_graph_payload(
+            scope.session,
+            datasource,
+            node_limit=node_limit,
+            edge_limit=edge_limit,
+            suggestion_status=cast(_SuggestionStatus, suggestion_status),
+            settings=scope.settings,
+            include_pending_edges=include_pending_edges,
+        )
+
+
+async def list_lineage_graph_nodes(
+    scope: ReadScope, graph: UnifiedLineageGraphRead, *, first: int, after: str | None
+) -> Page[UnifiedLineageNodeRead]:
+    """A graph's nodes a page at a time, in REST's `qualified_name` order (the id breaks a
+    tie). Decided again before it pages, as every child field is."""
+    first = _page_size(scope, first)
+    await _lineage_datasource(scope, graph.datasource_id)
+    return _list_page(
+        graph.nodes,
+        key=lambda node: (node.qualified_name, node.id),
+        coercers=(str, str),
+        first=first,
+        after=after,
+    )
+
+
+async def list_lineage_graph_edges(
+    scope: ReadScope, graph: UnifiedLineageGraphRead, *, first: int, after: str | None
+) -> Page[UnifiedLineageEdgeRead]:
+    """A graph's edges a page at a time, in edge id order (REST returns them in merge order,
+    which no cursor can resume). Decided again before it pages, as every child field is."""
+    first = _page_size(scope, first)
+    await _lineage_datasource(scope, graph.datasource_id)
+    return _list_page(
+        graph.edges,
+        key=lambda edge: (edge.id, edge.source_node_id, edge.target_node_id),
+        coercers=(str, str, str),
+        first=first,
+        after=after,
+    )

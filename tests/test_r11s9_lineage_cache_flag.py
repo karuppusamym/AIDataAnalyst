@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from aida import unified_lineage_api
+from aida import unified_lineage_service
 from aida.config import Settings
 
 
@@ -41,14 +41,14 @@ def _datasource() -> SimpleNamespace:
 
 
 def _patch(monkeypatch: pytest.MonkeyPatch, cache: _Cache, *, builds: bool) -> None:
-    monkeypatch.setattr(unified_lineage_api, "get_lineage_cache", lambda _url: cache)
+    monkeypatch.setattr(unified_lineage_service, "get_lineage_cache", lambda _url: cache)
 
     async def _build(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
         if not builds:
             raise _Built
         return SimpleNamespace(nodes={}, links=[], counts_by_source={}, truncation_reasons=[])
 
-    monkeypatch.setattr(unified_lineage_api, "_build_unified_graph", _build)
+    monkeypatch.setattr(unified_lineage_service, "_build_unified_graph", _build)
 
 
 async def test_the_cache_is_never_touched_when_the_switch_is_off(
@@ -58,7 +58,7 @@ async def test_the_cache_is_never_touched_when_the_switch_is_off(
     _patch(monkeypatch, cache, builds=False)
 
     with pytest.raises(_Built):
-        await unified_lineage_api.build_unified_lineage_graph_payload(
+        await unified_lineage_service.build_unified_lineage_graph_payload(
             None,  # type: ignore[arg-type]
             _datasource(),  # type: ignore[arg-type]
             settings=Settings(lineage_cache_enabled=False, _env_file=None),
@@ -71,7 +71,7 @@ async def test_a_cached_graph_is_served_without_building_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     datasource = _datasource()
-    cached = unified_lineage_api.UnifiedLineageGraphRead(
+    cached = unified_lineage_service.UnifiedLineageGraphRead(
         datasource_id=datasource.id,
         nodes=[],
         edges=[],
@@ -86,7 +86,7 @@ async def test_a_cached_graph_is_served_without_building_it(
     cache = _Cache(cached=cached)
     _patch(monkeypatch, cache, builds=False)
 
-    result = await unified_lineage_api.build_unified_lineage_graph_payload(
+    result = await unified_lineage_service.build_unified_lineage_graph_payload(
         None,  # type: ignore[arg-type]
         datasource,  # type: ignore[arg-type]
         settings=Settings(lineage_cache_enabled=True, _env_file=None),
@@ -103,7 +103,7 @@ async def test_a_miss_builds_the_graph_and_stores_it_for_the_configured_time(
     _patch(monkeypatch, cache, builds=True)
     settings = Settings(lineage_cache_enabled=True, _env_file=None)
 
-    await unified_lineage_api.build_unified_lineage_graph_payload(
+    await unified_lineage_service.build_unified_lineage_graph_payload(
         None,  # type: ignore[arg-type]
         _datasource(),  # type: ignore[arg-type]
         settings=settings,

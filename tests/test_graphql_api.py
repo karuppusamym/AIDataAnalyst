@@ -83,6 +83,7 @@ from aida.models import (
     Workspace,
 )
 from aida.security_types import SecurityContext
+from aida.unified_lineage_service import UNIFIED_LINEAGE_READER_ROLES
 from aida.workspace_access import ENFORCE
 from atlas.platform.config import Settings, get_settings
 from atlas.platform.db import Base, get_session
@@ -509,6 +510,16 @@ def _route_roles(method: str, path: str) -> tuple[str, ...]:
         ("GET", "/v1/organizations/{organization_id}/catalog/rows", CATALOG_READ_ROLES),
         ("GET", "/v1/projects/{project_id}/context-products", CONTEXT_PRODUCT_READERS),
         ("GET", "/v1/context-product-versions/{version_id}", CONTEXT_PRODUCT_READERS),
+        (
+            "GET",
+            "/v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}",
+            UNIFIED_LINEAGE_READER_ROLES,
+        ),
+        (
+            "GET",
+            "/v1/datasources/{datasource_id}/unified-lineage/graph",
+            UNIFIED_LINEAGE_READER_ROLES,
+        ),
         ("POST", "/graphql", graphql_api.GRAPHQL_ROUTE_ROLES),
     ],
 )
@@ -519,7 +530,10 @@ def test_each_field_requires_the_roles_its_rest_route_declares(
     a REST route that narrows or widens its roles fails here until GraphQL follows."""
     assert _route_roles(method, path) == tuple(sorted(roles))
     assert set(GRAPHQL_ENDPOINT_ROLES) == (
-        set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES) | set(CONTEXT_PRODUCT_READERS)
+        set(DATASOURCE_READ_ROLES)
+        | set(CATALOG_READ_ROLES)
+        | set(CONTEXT_PRODUCT_READERS)
+        | set(UNIFIED_LINEAGE_READER_ROLES)
     )
     # R11-GQL02: the route also admits whoever may execute a governed tool or read an
     # execution receipt -- and nobody else. Each field still enforces its own set.
