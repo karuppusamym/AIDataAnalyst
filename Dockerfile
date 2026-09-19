@@ -39,6 +39,15 @@ COPY sdk ./sdk
 # image excludes lint/test/dev-only extras.
 RUN uv sync --frozen --no-dev
 
+# R11-D17: the commit this image was built from, published by /health/ready as
+# `build.commit`. It is a label for people, not what parity compares: the image is built
+# from the working tree, so it can hold uncommitted changes. The parity check compares
+# `build.source_digest` (src/aida/source_identity.py, a hash of the files the COPY lines
+# above ship) and uses this only to say how far behind a drifted image is. Declared after
+# `uv sync` so a new commit does not rebuild the dependency layer.
+ARG ATLAS_BUILD_COMMIT=unknown
+ENV ATLAS_BUILD_COMMIT=${ATLAS_BUILD_COMMIT}
+
 USER aida
 EXPOSE 8000
 

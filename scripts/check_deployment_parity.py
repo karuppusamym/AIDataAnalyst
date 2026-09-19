@@ -18,7 +18,7 @@ rebuilds, restarts or writes anything, and it never regenerates the OpenAPI
 baseline -- the committed baseline is the promise being checked, so
 regenerating it here would erase the finding instead of reporting it.
 
-Four comparisons, each naming what differs rather than counting it:
+Five comparisons, each naming what differs rather than counting it:
 
     1. **Migrations.** The deployed `alembic_version` against the source
        heads, with every unapplied revision named in apply order.
@@ -36,6 +36,15 @@ Four comparisons, each naming what differs rather than counting it:
        reviewed tree declares `footprint_metrics_interval_seconds`, so a
        deployed `Settings` without it cannot be running the reviewed
        scheduler, however healthy it looks.
+    5. **Code identity.** The deployment's `build.source_digest` readiness
+       signal against the same digest computed over this checkout
+       (`aida.source_identity`). Added for R11-D17: the four comparisons above
+       only see changes that move schema, routes or settings, and on 2026-09-19
+       this script printed "the deployment is running this tree" against an
+       image 40 minutes older than HEAD, missing two fixes. A commit hash would
+       not have been enough -- the image is built from the working tree, so it
+       can hold edits no commit names -- which is why the digest is compared and
+       `build.commit` is only used to say how far behind a drifted image is.
 
 **A skip is not a pass.** An unreachable deployment, an absent `docker`, a
 container that cannot be introspected: each is UNKNOWN, never MATCH. The exit
@@ -79,12 +88,21 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 # The source's own answer to "what settings does this code declare". Parsed from
 # the AST of `Settings`, which is why it needs neither the application nor a
 # configured environment to be importable -- and why one parser serves both this
 # gate and the configuration inventory instead of two drifting lists.
 from generate_configuration_inventory import _settings_fields  # noqa: E402
+
+# The same digest the deployment publishes, so the two sides cannot disagree about
+# what "the source" means. Standard library only; importing it constructs nothing.
+from aida.source_identity import (  # noqa: E402
+    UNKNOWN_DIGEST,
+    manifest_digest,
+    source_manifest,
+)
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_BASELINE = REPO_ROOT / "Docs" / "90-reference" / "openapi-baseline.json"
@@ -487,6 +505,154 @@ def compare_settings(
 
 
 # --------------------------------------------------------------------------- #
+# 5. Code identity: is the running code this tree's code?
+# --------------------------------------------------------------------------- #
+
+SOURCE_DIGEST_SIGNAL = "build.source_digest"
+BUILD_COMMIT_SIGNAL = "build.commit"
+
+#: How many differing files to name before summarising the rest. A rebuild after a
+#: week of work differs in hundreds; the first screenful says what kind of drift it is.
+MAX_NAMED_FILES = 25
+
+
+def _git(*argv: str) -> tuple[int, str]:
+    try:
+        completed = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            ["git", *argv],  # noqa: S607
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return -1, ""
+    return completed.returncode, completed.stdout.strip()
+
+
+def describe_build_commit(deployed: str) -> str:
+    """Where the image's commit sits relative to this checkout's HEAD, for a person to read.
+
+    Never used for the verdict: the digest decides, because the image is built from
+    a working tree and its commit cannot say what uncommitted edits it holds.
+    """
+    code, head = _git("rev-parse", "HEAD")
+    head_label = head[:12] if code == 0 and head else "HEAD"
+    if not deployed or deployed == "unknown":
+        return (
+            "the image does not name its commit (built without ATLAS_BUILD_COMMIT); "
+            f"this checkout is at {head_label}"
+        )
+    short = deployed[:12]
+    if code != 0 or not head:
+        return f"built from {short}; this checkout's HEAD could not be read"
+    if deployed == head:
+        return f"built from {short}, which is this checkout's HEAD"
+    if _git("cat-file", "-e", f"{deployed}^{{commit}}")[0] != 0:
+        return f"built from {short}, a commit this checkout does not contain"
+    if _git("merge-base", "--is-ancestor", deployed, head)[0] == 0:
+        code, count = _git("rev-list", "--count", f"{deployed}..{head}")
+        behind = f"{count} commit(s)" if code == 0 else "some commits"
+        return f"built from {short}, {behind} behind this checkout's HEAD ({head_label})"
+    return f"built from {short}, which is not an ancestor of this checkout's HEAD ({head_label})"
+
+
+def read_deployed_manifest(*, container: str, timeout: int = 60) -> dict[str, str] | None:
+    """The per-file manifest inside the running container, to name what differs.
+
+    Diagnostics only, and only where `docker exec` is the right door. An image older
+    than `aida.source_identity` cannot answer; that yields None, and the finding keeps
+    its verdict without the file list.
+    """
+    program = (
+        "import json;from aida.source_identity import application_root, source_manifest;"
+        "print(json.dumps(source_manifest(application_root())))"
+    )
+    try:
+        completed = subprocess.run(  # noqa: S603 -- fixed argv, no shell, no interpolation
+            ["docker", "exec", container, "python", "-c", program],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        manifest = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(manifest, dict) or not manifest:
+        return None
+    return {str(path): str(digest) for path, digest in manifest.items()}
+
+
+def name_differing_files(local: dict[str, str], deployed: dict[str, str]) -> tuple[str, ...]:
+    """Every file whose content differs, capped at `MAX_NAMED_FILES`, by path."""
+    shared = sorted(local.keys() & deployed.keys())
+    lines = [f"differs between the image and this tree: {path}"
+             for path in shared if local[path] != deployed[path]]
+    lines += [f"in this tree, not in the image: {path}"
+              for path in sorted(local.keys() - deployed.keys())]
+    lines += [f"in the image, not in this tree: {path}"
+              for path in sorted(deployed.keys() - local.keys())]
+    if len(lines) > MAX_NAMED_FILES:
+        return (*lines[:MAX_NAMED_FILES], f"... and {len(lines) - MAX_NAMED_FILES} more")
+    return tuple(lines)
+
+
+def compare_source_identity(
+    signals: dict[str, Any] | None,
+    local_digest: str,
+    *,
+    unreachable: str = "",
+    commit_line: str = "",
+    differing_files: tuple[str, ...] = (),
+) -> Finding:
+    name = "the deployment runs this tree's source"
+    if signals is None:
+        return Finding(name, UNKNOWN, unreachable or "readiness did not answer")
+    if local_digest == UNKNOWN_DIGEST:
+        return Finding(name, UNKNOWN, "could not digest this checkout's source")
+    deployed = str(signals.get(SOURCE_DIGEST_SIGNAL) or "")
+    context = (commit_line,) if commit_line else ()
+    if not deployed or deployed == UNKNOWN_DIGEST:
+        return Finding(
+            name,
+            UNKNOWN,
+            f"readiness does not publish {SOURCE_DIGEST_SIGNAL}"
+            if not deployed
+            else "the deployment could not digest its own source",
+            (
+                *context,
+                "an image built before R11-D17 does not publish it; schema, routes and "
+                "settings matching says nothing about code that moves none of them",
+            ),
+        )
+    detail = f"deployed={deployed[:12]} this tree={local_digest[:12]}"
+    if deployed == local_digest:
+        return Finding(name, MATCH, detail, context)
+    return Finding(
+        name,
+        DRIFT,
+        detail,
+        (
+            *context,
+            *(
+                differing_files
+                or (
+                    "run from a shell with `docker exec` access to the API container to "
+                    "have the differing files named",
+                )
+            ),
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
 
@@ -528,7 +694,8 @@ def run(args: argparse.Namespace) -> Report:
 
     print("\nReadiness")
     status, ready = http_get_json(report.base_url, "/health/ready", timeout=args.timeout)
-    if status != 200 or not isinstance(ready, dict):
+    readiness_answered = status == 200 and isinstance(ready, dict)
+    if not readiness_answered:
         report.record(
             Finding(
                 "readiness is 200",
@@ -558,6 +725,38 @@ def run(args: argparse.Namespace) -> Report:
         report.record(
             compare_settings(source_setting_names(), deployed_settings, unreachable=why)
         )
+
+    print("\nCode identity")
+    local_manifest = source_manifest(REPO_ROOT)
+    local_digest = manifest_digest(local_manifest)
+    signals: dict[str, Any] | None = None
+    commit_line = ""
+    differing: tuple[str, ...] = ()
+    if readiness_answered:
+        signals = dict(ready.get("signals") or {})
+        commit_line = describe_build_commit(str(signals.get(BUILD_COMMIT_SIGNAL) or ""))
+        deployed_digest = str(signals.get(SOURCE_DIGEST_SIGNAL) or "")
+        # Name the files only where `docker exec` is already the door this run uses for
+        # Settings -- not under --skip-settings or a --settings-json capture.
+        if (
+            deployed_digest not in ("", UNKNOWN_DIGEST, local_digest)
+            and not args.skip_settings
+            and args.settings_json is None
+        ):
+            deployed_manifest = read_deployed_manifest(
+                container=args.container, timeout=args.timeout
+            )
+            if deployed_manifest is not None:
+                differing = name_differing_files(local_manifest, deployed_manifest)
+    report.record(
+        compare_source_identity(
+            signals,
+            local_digest,
+            unreachable=f"readiness did not answer: HTTP {status}",
+            commit_line=commit_line,
+            differing_files=differing,
+        )
+    )
     return report
 
 

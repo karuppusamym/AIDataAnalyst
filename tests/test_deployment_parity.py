@@ -18,6 +18,7 @@ was nothing to reach.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ from check_deployment_parity import (  # noqa: E402
     DEFAULT_BASELINE,
     DRIFT,
     MATCH,
+    MAX_NAMED_FILES,
+    SOURCE_DIGEST_SIGNAL,
     UNKNOWN,
     Finding,
     Report,
@@ -36,12 +39,17 @@ from check_deployment_parity import (  # noqa: E402
     compare_openapi,
     compare_readiness,
     compare_settings,
+    compare_source_identity,
+    describe_build_commit,
     main,
+    name_differing_files,
     read_deployed_settings,
     resolve_database_url,
     source_heads_and_unapplied,
     source_setting_names,
 )
+
+from aida.source_identity import manifest_digest, source_manifest  # noqa: E402
 
 # The live/baseline shapes measured on 2026-09-16, reduced to what the
 # comparators read. A minimal fixture is deliberate: a comparator that needs a
@@ -395,3 +403,133 @@ def test_an_explicit_database_url_wins_over_the_environment(monkeypatch: Any) ->
     monkeypatch.setenv("AIDA_DATABASE_URL", "postgresql://from-env/aida")
     resolved = resolve_database_url("postgresql+asyncpg://explicit/aida")
     assert resolved == "postgresql+asyncpg://explicit/aida"
+
+
+# --------------------------------------------------------------------------- #
+# R11-D17: code identity -- the comparison the first four could not make
+# --------------------------------------------------------------------------- #
+
+_LOCAL_DIGEST = "a" * 64
+
+
+def test_an_equal_source_digest_is_a_match() -> None:
+    finding = compare_source_identity(
+        {SOURCE_DIGEST_SIGNAL: _LOCAL_DIGEST}, _LOCAL_DIGEST, commit_line="built from HEAD"
+    )
+    assert finding.outcome == MATCH
+    assert finding.lines == ("built from HEAD",)
+
+
+def test_a_different_source_digest_is_drift_and_names_the_files() -> None:
+    finding = compare_source_identity(
+        {SOURCE_DIGEST_SIGNAL: "b" * 64},
+        _LOCAL_DIGEST,
+        commit_line="built from b76842d, 2 commit(s) behind",
+        differing_files=("differs between the image and this tree: src/aida/sql_redaction.py",),
+    )
+    assert finding.outcome == DRIFT
+    assert finding.lines == (
+        "built from b76842d, 2 commit(s) behind",
+        "differs between the image and this tree: src/aida/sql_redaction.py",
+    )
+
+
+def test_drift_without_exec_access_says_how_to_get_the_file_list() -> None:
+    finding = compare_source_identity({SOURCE_DIGEST_SIGNAL: "b" * 64}, _LOCAL_DIGEST)
+    assert finding.outcome == DRIFT
+    assert "docker exec" in finding.lines[-1]
+
+
+def test_an_image_that_does_not_publish_its_digest_is_not_parity() -> None:
+    """The 2026-09-19 image: schema, routes and settings all matched, and it was
+    40 minutes stale. Without the signal the answer is "cannot tell"."""
+    finding = compare_source_identity({"delivery_backlog.detail": "pending=0"}, _LOCAL_DIGEST)
+    assert finding.outcome == UNKNOWN
+    assert SOURCE_DIGEST_SIGNAL in finding.detail
+
+
+def test_a_deployment_that_cannot_digest_itself_is_unknown() -> None:
+    finding = compare_source_identity({SOURCE_DIGEST_SIGNAL: "unknown"}, _LOCAL_DIGEST)
+    assert finding.outcome == UNKNOWN
+
+
+def test_no_readiness_answer_is_unknown() -> None:
+    finding = compare_source_identity(None, _LOCAL_DIGEST, unreachable="HTTP 0")
+    assert finding.outcome == UNKNOWN and finding.detail == "HTTP 0"
+
+
+def test_differing_files_are_named_by_path_and_capped() -> None:
+    local = {"src/a.py": "1", "src/b.py": "2", "src/new.py": "3"}
+    deployed = {"src/a.py": "1", "src/b.py": "9", "src/gone.py": "4"}
+    assert name_differing_files(local, deployed) == (
+        "differs between the image and this tree: src/b.py",
+        "in this tree, not in the image: src/new.py",
+        "in the image, not in this tree: src/gone.py",
+    )
+    many = {f"src/m{index:03}.py": "x" for index in range(MAX_NAMED_FILES + 5)}
+    capped = name_differing_files(many, {})
+    assert len(capped) == MAX_NAMED_FILES + 1
+    assert capped[-1] == "... and 5 more"
+
+
+def test_the_commit_label_places_the_image_in_this_history() -> None:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],  # noqa: S607
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert "is this checkout's HEAD" in describe_build_commit(head)
+    assert "ATLAS_BUILD_COMMIT" in describe_build_commit("unknown")
+    assert "does not contain" in describe_build_commit("0" * 40)
+    parent = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD~1"],  # noqa: S607
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if parent:  # a shallow CI checkout has no parent to place
+        assert "1 commit(s) behind" in describe_build_commit(parent)
+
+
+def _aligned_deployment(monkeypatch: Any, signals: dict[str, str]) -> None:
+    """A deployment matching this tree on everything the first four comparisons read."""
+    baseline = json.loads(DEFAULT_BASELINE.read_text(encoding="utf-8"))
+    heads, _ = source_heads_and_unapplied(frozenset())
+    ready = {
+        "status": "UP",
+        "version": "2.0.0",
+        "required": {"postgresql": "UP"},
+        "controls": {"workspace_authorization": "ENFORCE"},
+        "signals": {"delivery_backlog.detail": "pending=0", **signals},
+    }
+
+    def fake_get(_base_url: str, path: str, *, timeout: int = 30) -> tuple[int, Any]:
+        return 200, baseline if path == "/openapi.json" else ready
+
+    monkeypatch.setattr("check_deployment_parity.http_get_json", fake_get)
+    monkeypatch.setattr("check_deployment_parity.read_deployed_revisions", lambda _url: (heads, ""))
+    monkeypatch.setattr(
+        "check_deployment_parity.read_deployed_settings",
+        lambda **_kwargs: (source_setting_names(), ""),
+    )
+    monkeypatch.setattr("check_deployment_parity.read_deployed_manifest", lambda **_kwargs: None)
+
+
+def test_a_stale_image_with_matching_schema_routes_and_settings_is_not_parity(
+    monkeypatch: Any,
+) -> None:
+    """The regression itself: on 2026-09-19 every earlier comparison matched and the
+    script exited 0 with "running this tree". An image that cannot show its code
+    now leaves the verdict at "cannot tell"; one showing other code is drift."""
+    _aligned_deployment(monkeypatch, {})
+    assert main([]) == 2
+
+    _aligned_deployment(monkeypatch, {SOURCE_DIGEST_SIGNAL: "b" * 64})
+    assert main([]) == 1
+
+    here = manifest_digest(source_manifest(REPO_ROOT))
+    _aligned_deployment(monkeypatch, {SOURCE_DIGEST_SIGNAL: here})
+    assert main([]) == 0

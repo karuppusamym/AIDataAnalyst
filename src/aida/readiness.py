@@ -46,6 +46,7 @@ worker's logs.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -74,6 +75,7 @@ from aida.delivery_intents import (
 )
 from aida.models import DeliveryIntent, OutboxEvent
 from aida.schemas import HealthResponse
+from aida.source_identity import running_source_digest
 from atlas.platform.config import Settings
 
 UP = "UP"
@@ -488,6 +490,31 @@ async def _model_route_signals(settings: Settings) -> dict[str, str]:
     return signals
 
 
+#: R11-D17: what the running process is, published so a parity check can tell a stale image
+#: from a current one. Schema, API surface and settings cannot: a pure code change moves none
+#: of them, and on 2026-09-19 the parity check reported "running this tree" against an image
+#: 40 minutes older than HEAD for exactly that reason. The digest is the measurement; the
+#: commit is a label that tells a person which history the image came from.
+SOURCE_DIGEST_SIGNAL = "build.source_digest"
+BUILD_COMMIT_SIGNAL = "build.commit"
+_UNKNOWN_BUILD_COMMIT = "unknown"
+
+
+def build_commit() -> str:
+    """The commit named by the Dockerfile's `ATLAS_BUILD_COMMIT` build arg, or `"unknown"`.
+
+    A label, not a measurement: the image is built from the working tree, so it can hold
+    changes the commit does not, which is why parity compares `build.source_digest` and
+    only uses this to say how far behind a drifted image is. Read from the process
+    environment rather than `Settings` because it is provenance the build stamps into the
+    image, not configuration an operator chooses -- it has no default to document and no
+    place in the configuration inventory. A runtime environment entry would override the
+    baked value; that is harmless for a label nothing gates on.
+    """
+    value = (os.environ.get("ATLAS_BUILD_COMMIT") or "").strip()
+    return value or _UNKNOWN_BUILD_COMMIT
+
+
 async def evaluate_readiness(
     settings: Settings,
     *,
@@ -538,6 +565,9 @@ async def evaluate_readiness(
         signals[f"{probe.name}.duration_ms"] = f"{probe.duration_ms:.1f}"
     signals.update(posture.as_signals())
     signals.update(await _model_route_signals(settings))
+    # Hashes the shipped source once per process; off the event loop for that first call.
+    signals[SOURCE_DIGEST_SIGNAL] = await asyncio.to_thread(running_source_digest)
+    signals[BUILD_COMMIT_SIGNAL] = build_commit()
 
     return ReadinessResponse(
         status=UP if ready else DOWN,

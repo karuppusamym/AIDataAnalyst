@@ -71,6 +71,16 @@ name: aida-platform
 # from the environment with an off default instead of being hard-coded to true.
 # ---------------------------------------------------------------------------
 
+# R11-D17: every backend image records the commit it was built from, as a label
+# scripts/check_deployment_parity.py prints beside its source-digest comparison
+# ("built from b76842d, 2 commits behind HEAD"). Set it when building, e.g.
+#   ATLAS_BUILD_COMMIT=$(git rev-parse HEAD) docker compose --profile full up -d --build
+# Unset, it is "unknown". The parity verdict does not depend on it.
+x-backend-build: &backend-build
+  context: .
+  args:
+    ATLAS_BUILD_COMMIT: ${ATLAS_BUILD_COMMIT:-unknown}
+
 # Every AIDA_* setting in `.env` reaches the app services, and the explicit
 # `environment` block below still wins for anything it names.
 #
@@ -380,7 +390,7 @@ services:
     restart: "no"
 
   migrate:
-    build: .
+    build: *backend-build
     depends_on:
       postgres:
         condition: service_healthy
@@ -392,7 +402,7 @@ services:
     restart: "no"
 
   api:
-    build: .
+    build: *backend-build
     # No `redis` edge (R11-X9). Redis is behind `--profile cache`, and Compose
     # rejects the whole project -- "service api depends on undefined service
     # redis" -- if an enabled service depends on a service whose profile is
@@ -436,7 +446,7 @@ services:
   # catalog, knowledge graph and unified lineage render non-empty on a fresh
   # install. Never enabled by a plain `docker compose up`.
   seed:
-    build: .
+    build: *backend-build
     profiles: ["seed"]
     depends_on:
       api:
@@ -451,7 +461,7 @@ services:
     restart: "no"
 
   metadata-worker:
-    build: .
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -465,7 +475,7 @@ services:
     restart: unless-stopped
 
   fleet-scheduler:
-    build: .
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -491,7 +501,7 @@ services:
   # outbox row; only its start condition moved.
   outbox-publisher:
     profiles: ["events", "graph", "full"]
-    build: .
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -507,7 +517,7 @@ services:
   # graph reads from the `postgres` backend instead.
   graph-projector:
     profiles: ["graph", "full"]
-    build: .
+    build: *backend-build
     depends_on:
       migrate:
         condition: service_completed_successfully

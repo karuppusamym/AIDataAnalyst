@@ -26,7 +26,8 @@
 #                    compares a *running deployment* to this tree: the deployed
 #                    `alembic_version` against the source heads, the live
 #                    `/openapi.json` against the committed baseline, readiness,
-#                    and the deployed image's `Settings` field list. Manually
+#                    the deployed image's `Settings` field list, and (R11-D17)
+#                    a digest of the source the image ships. Manually
 #                    triggered with a `parity_base_url` input, because CI has
 #                    no deployment to reach; the source-side half is a blocking
 #                    step in `migrations` plus tests/test_deployment_parity.py.

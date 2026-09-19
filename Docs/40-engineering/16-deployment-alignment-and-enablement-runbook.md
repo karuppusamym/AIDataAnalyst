@@ -124,8 +124,13 @@ repeat that profile. For the measured stack (16 containers, including MinIO,
 the Temporal UI and the Redpanda console) that is:
 
 ```bash
-docker compose --profile full up -d --build
+ATLAS_BUILD_COMMIT=$(git rev-parse HEAD) docker compose --profile full up -d --build
 ```
+
+`ATLAS_BUILD_COMMIT` is optional. It labels the image with the commit it was
+built from, so a later parity run can say "built from b76842d, 2 commits
+behind" instead of only "different". Parity does not depend on it: see
+comparison 5 in section [3](#3-verify-parity-afterwards).
 
 Then confirm every container's `CreatedAt` moved. One that did not is a service
 whose profile you forgot.
@@ -177,7 +182,7 @@ it never regenerates the OpenAPI baseline — the committed baseline is the
 promise being checked, so regenerating it there would erase the finding instead
 of reporting it.
 
-Four comparisons, each naming what differs rather than counting it:
+Five comparisons, each naming what differs rather than counting it:
 
 1. **Migrations.** The deployed `alembic_version` against the source heads,
    with every unapplied revision named in apply order. A deployed revision this
@@ -195,6 +200,19 @@ Four comparisons, each naming what differs rather than counting it:
    the code while the API answers 200 to everything, and it shares its parser
    with `scripts/generate_configuration_inventory.py` so the two cannot
    disagree about what the source declares.
+5. **Code identity.** The `build.source_digest` readiness signal against the
+   same digest computed over this checkout — a SHA-256 over every file the
+   Dockerfile copies (`src/`, `sdk/`, `migrations/`, `pyproject.toml`,
+   `uv.lock`, `alembic.ini`), line endings normalised, bytecode ignored
+   (`aida.source_identity`). Where `docker exec` works it also names the files
+   that differ. Comparisons 1 to 4 only see a change that moves schema, routes
+   or settings: on 2026-09-19 they all matched, and the script printed "running
+   this tree", against an image 40 minutes older than HEAD that was missing two
+   fixes (R11-D17). A commit hash would not close that gap, because the image is
+   built from the working tree and can hold edits no commit names — so the
+   digest decides, and `build.commit` is only printed beside it. An image built
+   before this check existed publishes no digest and is reported UNKNOWN, never
+   MATCH. Not covered: the base image and the Dockerfile itself.
 
 ```bash
 # After the deploy. Expect: "Parity: the deployment is running this tree."
@@ -216,7 +234,11 @@ must not fail the build for that reason, while real drift still fails it.
 The comparison logic is covered by `tests/test_deployment_parity.py` against
 fixtures, including `test_an_unreachable_deployment_does_not_fail_a_ci_build`
 and `test_the_committed_baseline_does_not_drift_against_itself`, so the gate
-can be trusted not to be noise.
+can be trusted not to be noise — and by
+`test_a_stale_image_with_matching_schema_routes_and_settings_is_not_parity`,
+the 2026-09-19 false parity as a test. `tests/test_source_identity.py` pins the
+digest to the Dockerfile's COPY lines, so a new COPY cannot ship code the
+digest does not see.
 
 ## 4. Enable the maintenance loop
 
