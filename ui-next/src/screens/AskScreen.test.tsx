@@ -6,6 +6,7 @@ import type {
   AgentRunRead,
   ContextProductRead,
   DataSourceRead,
+  QueryLineageRead,
 } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 
@@ -27,6 +28,8 @@ const fetchAgentRuns =
 const fetchAgentRun = vi.fn<(agentRunId: string, signal?: AbortSignal) => Promise<AgentRunRead>>();
 const fetchAgentRunGroundingReceipts =
   vi.fn<(agentRunId: string, signal?: AbortSignal) => Promise<AgentRunGroundingReceiptsRead>>();
+const fetchQueryExecutionLineage =
+  vi.fn<(executionId: string, signal?: AbortSignal) => Promise<QueryLineageRead>>();
 const fetchContextProducts =
   vi.fn<(projectId: string, query?: unknown, signal?: AbortSignal) => Promise<PageOf<ContextProductRead>>>();
 
@@ -45,6 +48,8 @@ vi.mock("../lib/api", async (importOriginal) => {
       fetchAgentRunGroundingReceipts(agentRunId, signal),
     fetchContextProducts: (projectId: string, query?: unknown, signal?: AbortSignal) =>
       fetchContextProducts(projectId, query, signal),
+    fetchQueryExecutionLineage: (executionId: string, signal?: AbortSignal) =>
+      fetchQueryExecutionLineage(executionId, signal),
   };
 });
 
@@ -181,6 +186,7 @@ beforeEach(() => {
   fetchAgentRun.mockReset();
   fetchAgentRunGroundingReceipts.mockReset();
   fetchContextProducts.mockReset();
+  fetchQueryExecutionLineage.mockReset();
   fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
@@ -1047,5 +1053,120 @@ describe("AskScreen's result panel", () => {
     expect(
       await within(panel).findByText("version 3 · product not recorded on the run"),
     ).toBeInTheDocument();
+  });
+});
+
+
+/* ---------------------------------------------------------------------------
+   R11-UX16: an answer is three things -- its results, the query that produced
+   them, and the evidence behind it -- each in its own view, and each says what
+   a reopened run still has rather than implying it kept everything.
+--------------------------------------------------------------------------- */
+
+describe("AskScreen's answer views (R11-UX16)", () => {
+  async function openPastRun(run: AgentRunRead) {
+    fetchAgentRuns.mockResolvedValue({ items: [run], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(run);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    history.replaceState(null, "", `/?ds=ds_1&run=${run.id}`);
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    const panel = await screen.findByLabelText(`Answer for run ${run.id}`);
+    await waitFor(() => expect(within(panel).getByRole("tablist")).toBeInTheDocument());
+    return panel;
+  }
+
+  it("opens on Results and moves between views with the arrow keys", async () => {
+    const panel = await openPastRun(PAST_RUN);
+    const results = within(panel).getByRole("tab", { name: "Results" });
+    expect(results).toHaveAttribute("aria-selected", "true");
+    expect(within(panel).getByRole("tabpanel", { name: "Results" })).toBeVisible();
+
+    fetchQueryExecutionLineage.mockResolvedValue({
+      execution_id: "qe_past_1",
+      datasource_id: "ds_1",
+      status: "SUCCEEDED",
+      referenced_tables: ["orders_raw"],
+      referenced_columns: ["orders_raw.net_amount"],
+      column_lineage: [],
+      semantic_version: "sm_1",
+      policy_version: "pol_1",
+      normalized_sql: "SELECT SUM(net_amount) FROM orders_raw WHERE region = :redacted",
+      row_count: 3,
+      elapsed_ms: 12,
+    });
+    results.focus();
+    fireEvent.keyDown(results, { key: "ArrowRight" });
+
+    const query = within(panel).getByRole("tab", { name: "Query" });
+    expect(query).toHaveAttribute("aria-selected", "true");
+    expect(query).toHaveFocus();
+    fireEvent.keyDown(query, { key: "End" });
+    expect(within(panel).getByRole("tab", { name: "Evidence" })).toHaveFocus();
+    fireEvent.keyDown(within(panel).getByRole("tab", { name: "Evidence" }), { key: "ArrowRight" });
+    expect(results).toHaveFocus();
+  });
+
+  it("shows a reopened run the shape of the query it executed, and says the values are gone", async () => {
+    fetchQueryExecutionLineage.mockResolvedValue({
+      execution_id: "qe_past_1",
+      datasource_id: "ds_1",
+      status: "SUCCEEDED",
+      referenced_tables: ["orders_raw"],
+      referenced_columns: ["orders_raw.net_amount"],
+      column_lineage: [],
+      semantic_version: "sm_1",
+      policy_version: "pol_1",
+      normalized_sql: "SELECT SUM(net_amount) FROM orders_raw WHERE region = :redacted",
+      row_count: 3,
+      elapsed_ms: 12,
+    });
+    const panel = await openPastRun(PAST_RUN);
+    expect(fetchQueryExecutionLineage).not.toHaveBeenCalled();
+
+    fireEvent.click(within(panel).getByRole("tab", { name: "Query" }));
+
+    const view = within(panel).getByRole("tabpanel", { name: "Query" });
+    await waitFor(() =>
+      expect(within(view).getByLabelText("Executed query")).toHaveTextContent(":redacted"),
+    );
+    expect(fetchQueryExecutionLineage).toHaveBeenCalledWith("qe_past_1", expect.any(AbortSignal));
+    expect(within(view).getByText(/literals replaced/)).toBeInTheDocument();
+    expect(within(view).getByText(/values it returned are not retained/)).toBeInTheDocument();
+    expect(within(view).getByText("orders_raw")).toBeInTheDocument();
+
+    // Read once: leaving the view and coming back does not read it again.
+    fireEvent.click(within(panel).getByRole("tab", { name: "Evidence" }));
+    fireEvent.click(within(panel).getByRole("tab", { name: "Query" }));
+    expect(within(view).getByLabelText("Executed query")).toHaveTextContent(":redacted");
+    expect(fetchQueryExecutionLineage).toHaveBeenCalledTimes(1);
+  });
+
+  it("says plainly when no query ran for a run", async () => {
+    const panel = await openPastRun({
+      ...PAST_RUN,
+      id: "run_refused_1",
+      status: "REJECTED",
+      query_execution_id: null,
+      failure_reason: "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE",
+    });
+
+    fireEvent.click(within(panel).getByRole("tab", { name: "Query" }));
+
+    expect(
+      within(within(panel).getByRole("tabpanel", { name: "Query" })).getByText(/No query ran/),
+    ).toBeInTheDocument();
+    expect(fetchQueryExecutionLineage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the evidence in its own view", async () => {
+    const panel = await openPastRun(PAST_RUN);
+
+    fireEvent.click(within(panel).getByRole("tab", { name: "Evidence" }));
+
+    const view = within(panel).getByRole("tabpanel", { name: "Evidence" });
+    expect(view).toBeVisible();
+    expect(within(view).getByText("Provenance")).toBeInTheDocument();
+    expect(document.getElementById("answer-run_past_1-results")).toHaveAttribute("hidden");
   });
 });

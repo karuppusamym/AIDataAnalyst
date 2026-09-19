@@ -4301,6 +4301,9 @@ export interface QueryLineageRead {
   column_lineage: Record<string, unknown>[];
   semantic_version: string | null;
   policy_version: string;
+  normalized_sql?: string | null;
+  row_count?: number | null;
+  elapsed_ms?: number | null;
 }
 
 /** `/health/ready`'s body. */

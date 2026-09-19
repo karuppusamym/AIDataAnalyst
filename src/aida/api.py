@@ -1708,6 +1708,9 @@ async def get_query_lineage(
         column_lineage=execution.column_lineage,
         semantic_version=execution.semantic_version,
         policy_version=execution.policy_version,
+        normalized_sql=execution.normalized_sql,
+        row_count=execution.row_count,
+        elapsed_ms=execution.elapsed_ms,
     )
 
 

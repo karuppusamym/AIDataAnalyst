@@ -509,6 +509,12 @@ class QueryLineageRead(ApiModel):
     column_lineage: list[dict[str, Any]]
     semantic_version: str | None
     policy_version: str
+    #: R11-UX16: what a past run executed, so its Query view can show it after the response
+    #: that carried it is gone. The gateway stores the statement's shape with its literals
+    #: already replaced (`SqlValidationReport.normalized_sql`), so this carries no value.
+    normalized_sql: str | None = None
+    row_count: int | None = None
+    elapsed_ms: int | None = None
 
 
 class ToolExecutionResponse(ApiModel):

@@ -1,10 +1,12 @@
 import { SaveAnalysisTool } from "../components/SaveAnalysisTool";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
 import type {
   AgentAnalysisResponse,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
   ContextProductRead,
+  QueryLineageRead,
 } from "../lib/types";
 import type { AgentAskContextProductKind, AgentAskError, AgentAskErrorKind } from "../lib/api";
 import {
@@ -15,6 +17,7 @@ import {
   fetchAgentRunGroundingReceipts,
   fetchAgentRuns,
   fetchContextProducts,
+  fetchQueryExecutionLineage,
   runAgentAnalysis,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
@@ -386,6 +389,165 @@ function okfKnowledgeUsed(
  *  persisted on `AgentRunRead`, so this says so rather than fabricating
  *  one). Same open/close/permalink shape as `EvidencePane`/
  *  `LineageRefusalScreen`'s `RunEvidence`, over a different data source. */
+/** R11-UX16: the three things an answer is, each in its own view. */
+type AnswerView = "results" | "query" | "evidence";
+
+const ANSWER_VIEWS: readonly { id: AnswerView; label: string }[] = [
+  { id: "results", label: "Results" },
+  { id: "query", label: "Query" },
+  { id: "evidence", label: "Evidence" },
+];
+
+/** A tablist with the keyboard model the ARIA pattern expects: one tab stop, arrows move
+ *  between tabs (wrapping), Home and End jump to the ends. */
+function AnswerTabs({
+  runId,
+  view,
+  onChange,
+}: {
+  runId: string;
+  view: AnswerView;
+  onChange: (view: AnswerView) => void;
+}) {
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const last = ANSWER_VIEWS.length - 1;
+    const next =
+      event.key === "ArrowRight"
+        ? index === last
+          ? 0
+          : index + 1
+        : event.key === "ArrowLeft"
+          ? index === 0
+            ? last
+            : index - 1
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? last
+              : null;
+    if (next === null) return;
+    event.preventDefault();
+    onChange(ANSWER_VIEWS[next]!.id);
+    tabs.current[next]?.focus();
+  }
+  return (
+    <div role="tablist" aria-label="Answer views" className="ask__tabs">
+      {ANSWER_VIEWS.map((item, index) => (
+        <button
+          key={item.id}
+          ref={(element) => {
+            tabs.current[index] = element;
+          }}
+          type="button"
+          role="tab"
+          id={`answer-${runId}-${item.id}-tab`}
+          aria-controls={`answer-${runId}-${item.id}`}
+          aria-selected={view === item.id}
+          tabIndex={view === item.id ? 0 : -1}
+          className={`ask__tab${view === item.id ? " ask__tab--on" : ""}`}
+          onClick={() => onChange(item.id)}
+          onKeyDown={(event) => onKeyDown(event, index)}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+type PastQueryState =
+  | { kind: "loading" }
+  | { kind: "loaded"; lineage: QueryLineageRead }
+  | { kind: "error"; detail: string };
+
+/** A reopened run's executed query, read from the execution the run recorded. */
+function PastQuery({ executionId }: { executionId: string }) {
+  const [state, setState] = useState<PastQueryState>({ kind: "loading" });
+  useEffect(() => {
+    const active = new AbortController();
+    setState({ kind: "loading" });
+    fetchQueryExecutionLineage(executionId, active.signal)
+      .then((lineage) => {
+        if (!active.signal.aborted) setState({ kind: "loaded", lineage });
+      })
+      .catch((error: unknown) => {
+        if (active.signal.aborted) return;
+        setState({ kind: "error", detail: error instanceof Error ? error.message : String(error) });
+      });
+    return () => active.abort();
+  }, [executionId]);
+  if (state.kind === "loading") {
+    return (
+      <p className="evp__load" role="status">
+        Loading the query this run executed…
+      </p>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <p className="evp__error" role="alert">
+        The query this run executed could not be read ({state.detail}).
+      </p>
+    );
+  }
+  const { lineage } = state;
+  return (
+    <>
+      <p className="ask__noexplain">
+        The statement as it ran, with its literals replaced. The values it returned are not
+        retained.
+      </p>
+      {lineage.normalized_sql ? (
+        <pre className="ask__json" aria-label="Executed query">
+          {lineage.normalized_sql}
+        </pre>
+      ) : (
+        <p className="evp__load">The gateway recorded no statement shape for this execution.</p>
+      )}
+      <QueryFacts
+        tables={lineage.referenced_tables}
+        columns={lineage.referenced_columns}
+        rowCount={lineage.row_count ?? null}
+        elapsedMs={lineage.elapsed_ms ?? null}
+      />
+    </>
+  );
+}
+
+function QueryFacts({
+  tables,
+  columns,
+  rowCount,
+  elapsedMs,
+}: {
+  tables: string[];
+  columns: string[];
+  rowCount: number | null;
+  elapsedMs: number | null;
+}) {
+  return (
+    <dl className="ask__exec">
+      <div>
+        <dt>Tables</dt>
+        <dd>{tables.join(", ") || "—"}</dd>
+      </div>
+      <div>
+        <dt>Columns</dt>
+        <dd>{columns.join(", ") || "—"}</dd>
+      </div>
+      <div>
+        <dt>Rows</dt>
+        <dd>{rowCount ?? "—"}</dd>
+      </div>
+      <div>
+        <dt>Elapsed</dt>
+        <dd>{elapsedMs !== null ? `${elapsedMs} ms` : "—"}</dd>
+      </div>
+    </dl>
+  );
+}
+
 function AnswerPanel({
   runId,
   askResult,
@@ -413,6 +575,17 @@ function AnswerPanel({
   onClose: () => void;
 }) {
   const isFresh = askResult?.agent_run_id === runId;
+  const [view, setView] = useState<AnswerView>("results");
+  // A past run's query is read the first time its view opens, then kept: switching views
+  // must not re-read it.
+  const [queryOpened, setQueryOpened] = useState(false);
+  const openView = (next: AnswerView) => {
+    setView(next);
+    if (next === "query") setQueryOpened(true);
+  };
+  const queryExecutionId = isFresh
+    ? (askResult.execution?.execution_id ?? null)
+    : (detail?.query_execution_id ?? null);
   const status = isFresh ? askResult.status : (detail?.status ?? null);
   const generationSource = isFresh ? askResult.generation_source : (detail?.generation_source ?? null);
   const explanation = isFresh ? askResult.explanation : null;
@@ -506,6 +679,14 @@ function AnswerPanel({
           </div>
         ) : (
           <>
+            <AnswerTabs runId={runId} view={view} onChange={openView} />
+            <div
+              role="tabpanel"
+              id={`answer-${runId}-results`}
+              aria-labelledby={`answer-${runId}-results-tab`}
+              hidden={view !== "results"}
+              className="ask__view"
+            >
             {trustWarnings.length > 0 ? (
               <div className="ask__trustwarn" role="alert" aria-label="Quality trust warning">
                 <div className="ask__trustwarn_head">
@@ -575,7 +756,45 @@ function AnswerPanel({
                 ) : null}
               </dl>
             ) : null}
+            </div>
 
+            <div
+              role="tabpanel"
+              id={`answer-${runId}-query`}
+              aria-labelledby={`answer-${runId}-query-tab`}
+              hidden={view !== "query"}
+              className="ask__view"
+            >
+              <div className="evp__sub">Executed query</div>
+              {execution ? (
+                <>
+                  <pre className="ask__json" aria-label="Executed query">
+                    {execution.normalized_sql}
+                  </pre>
+                  <QueryFacts
+                    tables={execution.referenced_tables}
+                    columns={execution.referenced_columns}
+                    rowCount={execution.row_count}
+                    elapsedMs={execution.elapsed_ms}
+                  />
+                </>
+              ) : queryExecutionId !== null && !isFresh ? (
+                queryOpened ? <PastQuery executionId={queryExecutionId} /> : null
+              ) : (
+                <p className="evp__load">
+                  No query ran for this run{status ? ` (${status.toLowerCase()})` : ""}: it
+                  was answered or refused before anything reached the source.
+                </p>
+              )}
+            </div>
+
+            <div
+              role="tabpanel"
+              id={`answer-${runId}-evidence`}
+              aria-labelledby={`answer-${runId}-evidence-tab`}
+              hidden={view !== "evidence"}
+              className="ask__view"
+            >
             <div className="evp__sub">Provenance</div>
             <dl className="ask__exec">
               <div>
@@ -601,23 +820,6 @@ function AnswerPanel({
                 <dd>{modelRoute ?? (isFresh ? "shown on the saved run" : "governed tool · no model")}</dd>
               </div>
             </dl>
-
-            {execution?.normalized_sql ? (
-              <details className="ask__trace">
-                <summary>Executed query</summary>
-                <div className="ask__traceinner">
-                  <pre className="ask__json">{execution.normalized_sql}</pre>
-                  {execution.referenced_columns.length > 0 ? (
-                    <>
-                      <div className="evp__sub" style={{ marginTop: 10 }}>
-                        Referenced columns
-                      </div>
-                      <p className="evi__value">{execution.referenced_columns.join(", ")}</p>
-                    </>
-                  ) : null}
-                </div>
-              </details>
-            ) : null}
 
             <details className="ask__trace">
               <summary>How this was answered</summary>
@@ -742,6 +944,7 @@ function AnswerPanel({
                 )}
               </div>
             ) : null}
+            </div>
           </>
         )}
       </div>
@@ -1234,6 +1437,7 @@ export function AskScreen() {
       <div className="askscreen__main">
         {runId ? (
           <AnswerPanel
+            key={runId}
             runId={runId}
             askResult={askResult}
             askedAt={askedAt}

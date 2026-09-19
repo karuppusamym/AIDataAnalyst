@@ -612,3 +612,23 @@ async def test_history_is_refused_across_organizations(
     )
 
     assert response.status_code == 403
+
+
+async def test_a_past_execution_shows_what_ran_without_its_literals(
+    http: httpx.AsyncClient, scenario: _Scenario, executed: list[str]
+) -> None:
+    """R11-UX16: a reopened run's Query view reads the executed statement's stored shape."""
+    receipt_id = await _receipt(http, scenario, sql=ORDERS_SQL)
+    ran = await _run(http, scenario, receipt_id, sql=ORDERS_SQL)
+    execution_id = ran.json()["execution"]["execution_id"]
+
+    lineage = await http.get(
+        f"/v1/query-executions/{execution_id}/lineage", headers=_headers(scenario)
+    )
+
+    assert lineage.status_code == 200, lineage.text
+    body = lineage.json()
+    assert body["normalized_sql"] and "retail.orders" in body["normalized_sql"]
+    assert LITERAL not in body["normalized_sql"]
+    assert body["row_count"] == 1
+    assert body["elapsed_ms"] is not None

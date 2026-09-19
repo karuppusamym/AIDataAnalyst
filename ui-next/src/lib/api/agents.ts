@@ -26,6 +26,7 @@ import type {
   AgentRosterRead,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
+  QueryLineageRead,
   AiAssessmentTemplateRead,
   AiAssetVersionRead,
   AiRemediationRead,
@@ -158,6 +159,21 @@ export function fetchAgentRunGroundingReceipts(
       );
     },
   );
+}
+
+/** `GET /v1/query-executions/{id}/lineage` (`get_query_lineage`) -- R11-UX16: what a past
+ *  run executed, for its Query view once the response that carried it is gone: the
+ *  statement's shape as the gateway stored it (literals already replaced), the tables and
+ *  columns it read, and its row count. Never the values. Fixture mode has no executions,
+ *  so it refuses rather than inventing one. */
+export function fetchQueryExecutionLineage(
+  executionId: string,
+  signal?: AbortSignal,
+): Promise<QueryLineageRead> {
+  if (USE_FIXTURES) {
+    return Promise.reject(new Error("A past run's query is not available in fixture mode."));
+  }
+  return get<QueryLineageRead>(`/v1/query-executions/${executionId}/lineage`, signal);
 }
 
 /** AT-9 / row UX-15's error-mapping requirement: `run_agent_analysis` maps

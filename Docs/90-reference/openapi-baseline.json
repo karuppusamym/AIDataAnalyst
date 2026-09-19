@@ -25480,10 +25480,32 @@
             "title": "Datasource Id",
             "type": "string"
           },
+          "elapsed_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed Ms"
+          },
           "execution_id": {
             "format": "uuid",
             "title": "Execution Id",
             "type": "string"
+          },
+          "normalized_sql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Sql"
           },
           "policy_version": {
             "title": "Policy Version",
@@ -25502,6 +25524,17 @@
             },
             "title": "Referenced Tables",
             "type": "array"
+          },
+          "row_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Count"
           },
           "semantic_version": {
             "anyOf": [
