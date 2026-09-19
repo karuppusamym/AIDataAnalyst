@@ -133,6 +133,7 @@ shipped posture for anything that talks to the outside world or spends money.
 | `AIDA_DELIVERY_WORKER_ENABLED` | off | notifications actually leave the process (otherwise they queue) |
 | `AIDA_GOVERNANCE_NOTIFICATIONS_ENABLED` | off | review and approval events produce notifications to deliver |
 | `AIDA_MCP_BUDGET_ENABLED` | off | per-agent call budgets, counted in Redis |
+| `AIDA_GRAPHQL_BUDGET_ENABLED` | off | per-caller GraphQL request and execution budgets, counted in Redis; a refused request answers 429 `RATE_LIMITED` |
 | `AIDA_AGENT_QUERY_MEMORY_ENABLED` | off | Ask reuses prior authorized query shapes |
 | `AIDA_LINEAGE_CACHE_ENABLED` | off | lineage reads served from Redis |
 | `AIDA_LINEAGE_NEO4J_READ_ENABLED` | off | lineage reads served from the graph rather than SQL |

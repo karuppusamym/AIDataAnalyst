@@ -6,8 +6,9 @@ name: aida-platform
 # fleet-scheduler and the three sample-source containers. Everything else is
 # opt-in, because with default settings it does nothing:
 #
-#   cache        redis                         AIDA_LINEAGE_CACHE_ENABLED and
-#                                              AIDA_MCP_BUDGET_ENABLED both
+#   cache        redis                         AIDA_LINEAGE_CACHE_ENABLED,
+#                                              AIDA_MCP_BUDGET_ENABLED and
+#                                              AIDA_GRAPHQL_BUDGET_ENABLED all
 #                                              default to false (config.py), so
 #                                              nothing in the default stack
 #                                              opens a Redis connection.
@@ -120,10 +121,12 @@ x-app-environment: &app-environment
   # backing service -- see the PROFILES block at the top of this file:
   #   AIDA_LINEAGE_CACHE_ENABLED=true  docker compose --profile cache up -d
   #   AIDA_MCP_BUDGET_ENABLED=true     docker compose --profile cache up -d
+  #   AIDA_GRAPHQL_BUDGET_ENABLED=true docker compose --profile cache up -d
   #   AIDA_LINEAGE_NEO4J_READ_ENABLED=true docker compose --profile graph up -d
   AIDA_LINEAGE_CACHE_ENABLED: ${AIDA_LINEAGE_CACHE_ENABLED:-false}
   AIDA_LINEAGE_NEO4J_READ_ENABLED: ${AIDA_LINEAGE_NEO4J_READ_ENABLED:-false}
   AIDA_MCP_BUDGET_ENABLED: ${AIDA_MCP_BUDGET_ENABLED:-false}
+  AIDA_GRAPHQL_BUDGET_ENABLED: ${AIDA_GRAPHQL_BUDGET_ENABLED:-false}
   AIDA_NEO4J_URI: bolt://neo4j:7687
   AIDA_NEO4J_USER: neo4j
   AIDA_NEO4J_PASSWORD: aida-local-only
@@ -176,11 +179,11 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # Opt-in: `--profile cache`. Backs `aida/lineage_cache.py` and
-  # `aida/mcp_budget.py` only, both of which are off by default. The MCP rate
-  # limits themselves are unchanged and still enforced whenever
-  # AIDA_MCP_BUDGET_ENABLED is true -- this profile decides whether the store
-  # they need is running, not whether the limits exist.
+  # Opt-in: `--profile cache`. Backs `aida/lineage_cache.py`, `aida/mcp_budget.py`
+  # and the GraphQL budgets in `aida/request_budget.py` only, all off by default.
+  # The rate limits themselves are unchanged and still enforced whenever
+  # AIDA_MCP_BUDGET_ENABLED or AIDA_GRAPHQL_BUDGET_ENABLED is true -- this profile
+  # decides whether the store they need is running, not whether the limits exist.
   redis:
     profiles: ["cache", "full"]
     image: redis:7.4-alpine
