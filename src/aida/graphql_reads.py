@@ -19,6 +19,12 @@ GraphQL field                             REST route it answers for
 ``contextProductVersion(id)``             ``GET /v1/context-product-versions/{id}``
 ``lineageImpact(dsId, nodeId)``           ``GET /v1/datasources/{id}/unified-lineage/impact/{node}``
 ``lineageGraph(dsId)``                    ``GET /v1/datasources/{id}/unified-lineage/graph``
+``contextProductCoverage(versionId)``     ``GET /v1/context-product-versions/{id}/compile``
+                                          (its ``context.coverage`` and ``source_freshness``)
+``routineParseCoverage(dsId, routineId)`` ``GET /v1/datasources/{id}/procedures/{id}/``
+                                          ``parse-coverage``
+``triggerParseCoverage(dsId, triggerId)`` ``GET /v1/datasources/{id}/triggers/{id}/``
+                                          ``parse-coverage``
 ========================================  ===========================================
 
 The authorization pieces are the shared ones those routes call --
@@ -36,7 +42,8 @@ datasource the caller may not read contributes nothing to `totalCount` and
 never shortens a page. `GET /v1/organizations/{id}/catalog/rows` drops such rows
 after paging and counts them in `total`; the rows it returns are the same. (The
 lineage reads were a second until R11-D28: they ask the datasource's workspace gate,
-as `DataSource.tables` does, and the unified-lineage routes now ask it too.)
+as `DataSource.tables` does, and the unified-lineage routes now ask it too. The two
+parse-coverage reads ask it the same way, as their routes have since R11-D30.)
 
 **Request-scoped, never shared.** A `ReadScope` is built per request, for one
 caller, and dropped with it. Its loaders batch and cache by object id, and the
@@ -62,7 +69,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -74,28 +81,51 @@ from sqlalchemy.orm import InstrumentedAttribute, aliased
 from strawberry.dataloader import DataLoader
 
 from aida.authorization_gate import AuthorizationDenied, gate
+from aida.capability_states import parse_coverage_state
 from aida.catalog_read_model import _latest_approved_documentation
 from aida.column_documentation import current_descriptions_for_table
+from aida.context_compiler import coverage_section, freshness_section
+from aida.context_product_coverage import (
+    load_coverage_changes,
+    load_ontology_meaning,
+    load_pinned_meaning,
+    load_routine_references,
+    load_source_freshness,
+    load_view_coverage,
+    publication_time,
+)
+from aida.context_product_policy import (
+    evaluate_context_product_purpose,
+    evaluate_context_product_quality_from_db,
+)
 from aida.context_product_reads import (
     CONTEXT_PRODUCT_READERS,
+    _enforce_capability_envelope,
     _product_read,
     _version_read,
     context_product_listing,
     read_context_product_version,
 )
 from aida.description_withdrawal import latest_withdrawn_table_version
+from aida.envelope_models import MetadataRoutine, MetadataTrigger
+from aida.events import record_audit
 from aida.graphql_limits import DEFAULT_LIMITS, GraphQLLimits
 from aida.models import (
     AssetDocumentationVersion,
     ColumnDocumentationVersion,
     ContextProduct,
+    ContextProductConsumptionEdge,
+    ContextProductVersion,
     DataSource,
+    MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
+    MetadataSchema,
     MetadataTable,
     Organization,
 )
 from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
+from aida.procedure_lineage_models import RoutineParseCoverage, TriggerParseCoverage
 from aida.schemas import (
     ContextProductRead,
     ContextProductVersionRead,
@@ -103,6 +133,8 @@ from aida.schemas import (
     MetadataColumnRead,
     MetadataConstraintRead,
     MetadataTableRead,
+    RoutineParseCoverageRead,
+    TriggerParseCoverageRead,
     UnifiedLineageEdgeRead,
     UnifiedLineageGraphRead,
     UnifiedLineageImpactNodeRead,
@@ -119,25 +151,34 @@ from aida.unified_lineage_service import (
     build_unified_lineage_impact_payload,
 )
 from atlas.platform.config import Settings
+from atlas.platform.context import get_correlation_id
 
 __all__ = [
     "CATALOG_READ_ROLES",
+    "CONTEXT_COMPILER_LIFECYCLE_READERS",
+    "CONTEXT_COMPILER_ROLES",
+    "COVERAGE_CONSUMPTION_CHANNEL",
     "DATASOURCE_READ_ROLES",
     "GRAPHQL_ENDPOINT_ROLES",
     "ColumnDescription",
     "Page",
+    "ProductCoverage",
     "ReadRefused",
     "ReadScope",
     "TableDescription",
     "column_business_description",
+    "get_context_product_coverage",
     "get_context_product_version",
     "get_datasource",
     "get_lineage_graph",
     "get_lineage_impact",
+    "get_routine_parse_coverage",
     "get_table",
+    "get_trigger_parse_coverage",
     "list_columns",
     "list_constraints",
     "list_context_products",
+    "list_coverage_items",
     "list_datasources",
     "list_datasource_tables",
     "list_lineage_graph_edges",
@@ -166,15 +207,37 @@ DATASOURCE_READ_ROLES: tuple[str, ...] = (
 #: `/v1/tables/{id}/columns`, `/constraints`, `/description`, `/column-documentation`
 #: and the catalog rows read model.
 CATALOG_READ_ROLES: tuple[str, ...] = ("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+#: The roles `GET /v1/context-product-versions/{id}/compile` declares: the one REST route
+#: whose answer carries a version's coverage (the Atlas-native targets' `context.coverage`,
+#: and `generated_from.source_freshness` beside it), so the roles `contextProductCoverage`
+#: requires. `tests/test_graphql_coverage.py` reads them back from the live route.
+CONTEXT_COMPILER_ROLES: tuple[str, ...] = (
+    "PlatformAdmin",
+    "MetadataAdmin",
+    "DataProductOwner",
+    "DataSteward",
+    "AgentDeveloper",
+    "Analyst",
+)
+#: Who the compile route lets read a version whatever its status, purpose or quality -- its
+#: own set, not the version read's `CONTEXT_PRODUCT_LIFECYCLE_READERS`.
+CONTEXT_COMPILER_LIFECYCLE_READERS: frozenset[str] = frozenset(
+    {"PlatformAdmin", "MetadataAdmin", "DataProductOwner", "DataSteward"}
+)
+#: The consumption channel a coverage read records under, beside the compile route's
+#: `COMPILER` and `COMPILER_DOWNLOAD`.
+COVERAGE_CONSUMPTION_CHANNEL = "GRAPHQL_COVERAGE"
 #: The endpoint admits the union; each field then requires its own route's set,
 #: so a DataAdmin can read a datasource here exactly as over REST and is refused
-#: its tables exactly as over REST.
+#: its tables exactly as over REST. The parse-coverage routes declare the
+#: unified-lineage reader roles, member for member.
 GRAPHQL_ENDPOINT_ROLES: tuple[str, ...] = tuple(
     sorted(
         set(DATASOURCE_READ_ROLES)
         | set(CATALOG_READ_ROLES)
         | set(CONTEXT_PRODUCT_READERS)
         | set(UNIFIED_LINEAGE_READER_ROLES)
+        | set(CONTEXT_COMPILER_ROLES)
     )
 )
 
@@ -229,6 +292,24 @@ class ColumnDescription:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductCoverage:
+    """A version's coverage, rendered by the compiler's own helpers -- `coverage_section` and
+    `freshness_section`, which render the compile route's answer and MCP's resource read -- so
+    every entry has exactly the keys and order REST gives it. A section REST leaves out
+    because it is empty is an empty list here."""
+
+    version_id: UUID
+    product_key: str
+    version: int
+    status: str
+    routines: list[dict[str, Any]]
+    views: list[dict[str, Any]]
+    meaning: list[dict[str, Any]]
+    changed_since_published: list[dict[str, Any]]
+    source_freshness: list[dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
 class _ChildPageKey:
     """A page of a table's children. Hashable so the loader can batch and cache it."""
 
@@ -250,6 +331,9 @@ class ReadScope:
     limits: GraphQLLimits = DEFAULT_LIMITS
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     decisions: dict[tuple[str, str, UUID], str | None] = field(default_factory=dict)
+    #: A version's coverage, or the refusal, once per request: an alias asking again is
+    #: the same read, decided and recorded once.
+    coverage: dict[UUID, ProductCoverage | ReadRefused] = field(default_factory=dict)
     datasources: DataLoader[UUID, DataSource | None] = field(init=False)
     tables: DataLoader[UUID, MetadataTable | None] = field(init=False)
     column_pages: DataLoader[_ChildPageKey, Page[MetadataColumnRead]] = field(init=False)
@@ -1127,4 +1211,326 @@ async def list_lineage_graph_edges(
         coercers=(str, str, str),
         first=first,
         after=after,
+    )
+
+
+# --- coverage (R11-GQL01) ------------------------------------------------------
+
+
+async def _compiled_read_decision(
+    session: AsyncSession, context: SecurityContext, version_id: UUID
+) -> tuple[ContextProduct, ContextProductVersion, Any]:
+    """The decision `GET /v1/context-product-versions/{id}/compile` makes before it resolves
+    anything (`context_compiler_api._load_source`), check for check and in its order: the
+    version, its tenant, an ACTIVE product, the agent's capability envelope
+    (`_enforce_capability_envelope`, shared with every context-product door), then -- for
+    anyone outside the compiler's lifecycle readers -- PUBLISHED and a consumer role, purpose
+    and quality. Every "no" is the route's anti-enumeration 404 (NOT_FOUND here).
+
+    The composition lives in a route module, which a resolver may not import, so it is
+    composed here from the same shared checks; `tests/test_graphql_coverage.py` holds the two
+    together for every reader class and every refusal.
+    """
+    version = await session.get(ContextProductVersion, version_id)
+    if version is None:
+        raise ReadRefused("NOT_FOUND")
+    enforce_organization(context, version.organization_id)
+    product = await session.get(ContextProduct, version.product_id)
+    if product is None or product.lifecycle_status != "ACTIVE":
+        raise ReadRefused("NOT_FOUND")
+    await _enforce_capability_envelope(session, context, product, version)
+    lifecycle_reader = not context.roles.isdisjoint(CONTEXT_COMPILER_LIFECYCLE_READERS)
+    if not lifecycle_reader and (
+        version.status != "PUBLISHED" or context.roles.isdisjoint(version.allowed_consumer_roles)
+    ):
+        raise ReadRefused("NOT_FOUND")
+    purpose = evaluate_context_product_purpose(context.business_purpose, version.policy_summary)
+    if not lifecycle_reader and not purpose.allowed:
+        raise ReadRefused("NOT_FOUND")
+    quality = await evaluate_context_product_quality_from_db(
+        session,
+        organization_id=version.organization_id,
+        table_id_values=version.table_ids,
+        requirements=version.quality_requirements,
+    )
+    if not lifecycle_reader and not quality.allowed:
+        raise ReadRefused("NOT_FOUND")
+    return product, version, quality
+
+
+async def _resolved_coverage(
+    session: AsyncSession, version: ContextProductVersion
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """What the compile route resolves after its decision, minus the two sections that are not
+    coverage (negative knowledge and exemplars): the same loaders, the same unresolved-reference
+    refusals (REST's 409, CONFLICT here), rendered by the same `coverage_section` and
+    `freshness_section`."""
+    organization_id = version.organization_id
+    table_ids = [UUID(value) for value in version.table_ids]
+    if table_ids:
+        resolved = (
+            await session.execute(
+                select(MetadataTable.id)
+                .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+                .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+                .where(
+                    MetadataTable.id.in_(table_ids),
+                    MetadataTable.organization_id == organization_id,
+                )
+            )
+        ).all()
+        if len(resolved) != len(table_ids):
+            raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED")
+    routine_ids = list(version.routine_ids or [])
+    routines = await load_routine_references(
+        session, organization_id, routine_ids, version.table_ids
+    )
+    if len(routines) != len(routine_ids):
+        raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED")
+    views = await load_view_coverage(session, organization_id, version.table_ids)
+    sources = await load_source_freshness(session, organization_id, version.table_ids)
+    ontology_version_ids = list(version.ontology_version_ids or [])
+    ontology = await load_ontology_meaning(
+        session, organization_id, ontology_version_ids, version.table_ids, routine_ids
+    )
+    if len(ontology) != len(ontology_version_ids):
+        raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED")
+    meaning = await load_pinned_meaning(
+        session,
+        organization_id,
+        ontology_version_ids=ontology_version_ids,
+        semantic_model_version_ids=list(version.semantic_model_version_ids),
+        glossary_term_version_ids=list(version.glossary_term_version_ids),
+        scope_table_ids=version.table_ids,
+        scope_routine_ids=routine_ids,
+    )
+    changes = await load_coverage_changes(
+        session,
+        organization_id,
+        version.table_ids,
+        routine_ids,
+        since=publication_time(version),
+    )
+    return coverage_section(routines, views, meaning, changes), freshness_section(sources)
+
+
+async def get_context_product_coverage(scope: ReadScope, version_id: UUID) -> ProductCoverage:
+    """A context product version's coverage -- the routines and views it stands on, the meaning
+    it pins, what moved since it was published, and when each source behind it was last read --
+    decided as `GET /v1/context-product-versions/{id}/compile` decides it.
+
+    Recorded as that route records a compilation, less the artifact: an audit event on every
+    read, and for a PUBLISHED version a consumption edge, on channel `GRAPHQL_COVERAGE`. No
+    outbox event -- the route's `context.product_compiled.v1` names an artifact hash, and
+    nothing was compiled. Decided and recorded once per request, however many aliases ask.
+    """
+    _require_roles(scope, CONTEXT_COMPILER_ROLES)
+    # Checked and filled under the lock: sibling aliases resolve concurrently, and the second
+    # must wait for the first's answer rather than decide and record a second time.
+    async with scope.lock:
+        remembered = scope.coverage.get(version_id)
+        if remembered is None:
+            try:
+                remembered = await _product_coverage(scope, version_id)
+            except ReadRefused as refused:
+                remembered = refused
+            scope.coverage[version_id] = remembered
+    if isinstance(remembered, ReadRefused):
+        raise ReadRefused(remembered.code, remembered.reason)
+    return remembered
+
+
+async def _product_coverage(scope: ReadScope, version_id: UUID) -> ProductCoverage:
+    """Decide, resolve and record one version's coverage. The caller holds `scope.lock`."""
+    session = scope.session
+    try:
+        product, version, quality = await _compiled_read_decision(
+            session, scope.context, version_id
+        )
+    except HTTPException as exc:
+        raise _shared_refusal(exc) from exc
+    section, freshness = await _resolved_coverage(session, version)
+    correlation_id = get_correlation_id()
+    record_audit(
+        session,
+        replace(scope.context, organization_id=version.organization_id),
+        action="context_product.coverage_read",
+        resource_type="context_product_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={"channel": COVERAGE_CONSUMPTION_CHANNEL, "fingerprint": version.fingerprint},
+    )
+    if version.status == "PUBLISHED":
+        session.add(
+            ContextProductConsumptionEdge(
+                organization_id=version.organization_id,
+                context_product_version_id=version.id,
+                principal_id=scope.context.principal_id,
+                principal_type=scope.context.principal_type,
+                channel=COVERAGE_CONSUMPTION_CHANNEL,
+                correlation_id=correlation_id,
+                product_fingerprint=version.fingerprint,
+                policy_decision="ALLOW",
+                quality_snapshot=quality.snapshot(),
+            )
+        )
+    await session.commit()
+    return ProductCoverage(
+        version_id=version.id,
+        product_key=product.product_key,
+        version=version.version,
+        status=version.status,
+        routines=list(section["routines"]),
+        views=list(section["views"]),
+        meaning=list(section.get("meaning", [])),
+        changed_since_published=list(section.get("changed_since_published", [])),
+        source_freshness=freshness,
+    )
+
+
+#: Each coverage section's own order -- the one `coverage_section` and `freshness_section` sort
+#: it in -- which is also its cursor key.
+_COVERAGE_KEYS: dict[str, tuple[str, ...]] = {
+    "routines": ("id",),
+    "views": ("table_id",),
+    "meaning": ("kind", "version_id"),
+    "changed_since_published": ("subject_kind", "subject_id", "change"),
+    "source_freshness": ("datasource_id",),
+}
+CoverageSection = Literal[
+    "routines", "views", "meaning", "changed_since_published", "source_freshness"
+]
+
+
+async def list_coverage_items(
+    scope: ReadScope,
+    coverage: ProductCoverage,
+    section: CoverageSection,
+    *,
+    first: int,
+    after: str | None,
+) -> Page[dict[str, Any]]:
+    """One coverage section a page at a time, in REST's order. Decided again first, as every
+    child page is -- the answer is this request's own, so asking again costs nothing."""
+    first = _page_size(scope, first)
+    await get_context_product_coverage(scope, coverage.version_id)
+    columns = _COVERAGE_KEYS[section]
+    entries: list[dict[str, Any]] = getattr(coverage, section)
+    return _list_page(
+        entries,
+        key=lambda entry: tuple(str(entry[column]) for column in columns),
+        coercers=tuple(str for _ in columns),
+        first=first,
+        after=after,
+    )
+
+
+async def _parse_coverage_datasource(scope: ReadScope, datasource_id: UUID) -> DataSource:
+    """What the parse-coverage routes decide before they look a routine or trigger up
+    (`procedure_lineage_api._load_readable_datasource`, R11-D30), in their order: the role gate
+    (the procedure-lineage reader roles, which are the unified-lineage reader roles member for
+    member), the datasource in the caller's tenant, then its workspace gate (`READ_METADATA`,
+    as its tables route asks) -- so a refusal says nothing about which routines exist."""
+    _require_roles(scope, UNIFIED_LINEAGE_READER_ROLES)
+    row = await scope.datasources.load(datasource_id)
+    if row is None:
+        raise ReadRefused("NOT_FOUND")
+    _enforce_tenant(scope, row.organization_id)
+    await _authorize(scope, resource_type="datasource", resource_id=row.id, datasource_id=row.id)
+    return row
+
+
+def _reason_codes(stored: str) -> list[str]:
+    return stored.split(",") if stored else []
+
+
+async def get_routine_parse_coverage(
+    scope: ReadScope, datasource_id: UUID, routine_id: UUID
+) -> RoutineParseCoverageRead:
+    """`GET /v1/datasources/{id}/procedures/{routine_id}/parse-coverage`: a routine of another
+    datasource or tenant is NOT_FOUND, and one no parse has measured is NOT_FOUND with reason
+    `COVERAGE_NOT_MEASURED` -- "not measured" is not "fully understood", as the route says."""
+    datasource = await _parse_coverage_datasource(scope, datasource_id)
+    async with scope.lock:
+        routine = await scope.session.get(MetadataRoutine, routine_id)
+        if (
+            routine is None
+            or routine.datasource_id != datasource.id
+            or routine.organization_id != datasource.organization_id
+        ):
+            raise ReadRefused("NOT_FOUND")
+        coverage = (
+            await scope.session.scalars(
+                select(RoutineParseCoverage).where(
+                    RoutineParseCoverage.organization_id == datasource.organization_id,
+                    RoutineParseCoverage.datasource_id == datasource.id,
+                    RoutineParseCoverage.routine_id == routine_id,
+                )
+            )
+        ).first()
+    if coverage is None:
+        raise ReadRefused("NOT_FOUND", "COVERAGE_NOT_MEASURED")
+    return RoutineParseCoverageRead(
+        routine_id=coverage.routine_id,
+        state=parse_coverage_state(
+            parse_completed=coverage.parse_completed,
+            statement_count=coverage.statement_count,
+        ).value,
+        parse_completed=coverage.parse_completed,
+        is_read_only=coverage.is_read_only,
+        statement_count=coverage.statement_count,
+        unparsed_statement_count=coverage.unparsed_statement_count,
+        unparsed_reason_codes=_reason_codes(coverage.unparsed_reason_codes),
+        dialect=coverage.dialect,
+        confidence=coverage.confidence,
+        source_mapping_granularity=coverage.source_mapping_granularity,
+        parsed_at=coverage.parsed_at,
+        member_attribution=coverage.member_attribution,
+        member_fallback_reason=coverage.member_fallback_reason,
+    )
+
+
+async def get_trigger_parse_coverage(
+    scope: ReadScope, datasource_id: UUID, trigger_id: UUID
+) -> TriggerParseCoverageRead:
+    """`GET /v1/datasources/{id}/triggers/{trigger_id}/parse-coverage`, with the routine read's
+    contract: another datasource's or tenant's trigger is NOT_FOUND, and an unmeasured one is
+    NOT_FOUND with reason `COVERAGE_NOT_MEASURED`."""
+    datasource = await _parse_coverage_datasource(scope, datasource_id)
+    async with scope.lock:
+        trigger = await scope.session.get(MetadataTrigger, trigger_id)
+        if (
+            trigger is None
+            or trigger.datasource_id != datasource.id
+            or trigger.organization_id != datasource.organization_id
+        ):
+            raise ReadRefused("NOT_FOUND")
+        coverage = (
+            await scope.session.scalars(
+                select(TriggerParseCoverage).where(
+                    TriggerParseCoverage.organization_id == datasource.organization_id,
+                    TriggerParseCoverage.datasource_id == datasource.id,
+                    TriggerParseCoverage.trigger_id == trigger_id,
+                )
+            )
+        ).first()
+    if coverage is None:
+        raise ReadRefused("NOT_FOUND", "COVERAGE_NOT_MEASURED")
+    return TriggerParseCoverageRead(
+        trigger_id=coverage.trigger_id,
+        routine_id=coverage.routine_id,
+        state=parse_coverage_state(
+            parse_completed=coverage.parse_completed,
+            statement_count=coverage.statement_count,
+        ).value,
+        parse_completed=coverage.parse_completed,
+        is_read_only=coverage.is_read_only,
+        statement_count=coverage.statement_count,
+        unparsed_statement_count=coverage.unparsed_statement_count,
+        unparsed_reason_codes=_reason_codes(coverage.unparsed_reason_codes),
+        dialect=coverage.dialect,
+        confidence=coverage.confidence,
+        source_mapping_granularity=coverage.source_mapping_granularity,
+        parsed_at=coverage.parsed_at,
     )

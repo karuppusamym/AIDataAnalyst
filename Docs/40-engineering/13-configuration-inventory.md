@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**277 settings.** 0 are read nowhere. 63 more ship switched off, empty or zero.
+**290 settings.** 0 are read nowhere. 64 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -83,6 +83,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `portal_base_url` | `str | None` | `None` | 1 | Supplied: links in notifications are omitted when unset |
 | `mcp_budget_enabled` | `bool` | `False` | 1 | Opt-in: needs Redis for the budget buckets |
 | `graphql_budget_enabled` | `bool` | `False` | 1 | Opt-in: needs Redis for the budget buckets, as MCP's does |
+| `graphql_introspection_enabled` | `bool` | `False` | 1 | Off by design: R11-GQL01: clients discover the schema from the published SDL; on only for a development or staging explorer (PlatformAdmin and AgentDeveloper), and production refuses it |
 | `quality_seasonal_thresholds_enabled` | `bool` | `False` | 1 | Opt-in: changes VOLUME_CHANGE verdicts; an estate reviews it against its own history first |
 | `quality_seasonal_month_end_enabled` | `bool` | `False` | 1 | Opt-in: the month-end refinement of the seasonal baseline, reviewed the same way |
 | `quality_certification_expiry_enabled` | `bool` | `False` | 1 | Opt-in: opens incidents at write time; a reviewed opt-in, not a behaviour change on upgrade |
@@ -275,6 +276,19 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `graphql_budget_enabled` | `bool` | `False` | 1 |
 | `graphql_requests_per_minute` | `int` | `120` | 1 |
 | `graphql_executions_per_day` | `int` | `500` | 1 |
+| `graphql_max_request_bytes` | `int` | `32768` | 1 |
+| `graphql_max_tokens` | `int` | `2000` | 1 |
+| `graphql_max_depth` | `int` | `6` | 1 |
+| `graphql_max_aliases` | `int` | `50` | 1 |
+| `graphql_max_page_size` | `int` | `100` | 1 |
+| `graphql_max_nodes` | `int` | `500` | 1 |
+| `graphql_max_string_argument_length` | `int` | `512` | 1 |
+| `graphql_max_selection_visits` | `int` | `5000` | 1 |
+| `graphql_max_response_bytes` | `int` | `1048576` | 1 |
+| `graphql_deadline_seconds` | `float` | `10.0` | 1 |
+| `graphql_max_scope_datasources` | `int` | `200` | 1 |
+| `graphql_max_execution_rows` | `int` | `1000` | 1 |
+| `graphql_introspection_enabled` | `bool` | `False` | 1 |
 | `quality_seasonal_thresholds_enabled` | `bool` | `False` | 1 |
 | `quality_seasonal_min_samples` | `int` | `3` | 1 |
 | `quality_seasonal_zscore_threshold` | `float` | `3.0` | 1 |

@@ -344,6 +344,8 @@ def _graphql_rows() -> list[SurfaceRow]:
         "RECEIPT_READ_ROLES": set(governed_execution.RECEIPT_READ_ROLES),
         "CONTEXT_PRODUCT_READERS": set(context_product_reads.CONTEXT_PRODUCT_READERS),
         "UNIFIED_LINEAGE_READER_ROLES": set(unified_lineage_service.UNIFIED_LINEAGE_READER_ROLES),
+        # R11-GQL01: `contextProductCoverage` decides as the compile route, with its roles.
+        "CONTEXT_COMPILER_ROLES": set(graphql_reads.CONTEXT_COMPILER_ROLES),
     }
     module = "aida.graphql_schema"
     source_path = REPO_ROOT / "src" / "aida" / "graphql_schema.py"

@@ -1,7 +1,8 @@
 """The Atlas metadata GraphQL schema (R11-GQL01, design section 13A).
 
 Typed metadata reads -- datasources, tables, columns, constraints, approved
-descriptions and context products -- with cursor paging. Every resolver is a thin call into
+descriptions, context products, lineage and coverage (a context product's, and a
+routine's or trigger's parse coverage) -- with cursor paging. Every resolver is a thin call into
 `aida.graphql_reads`, which makes the decision the equivalent REST route makes;
 no resolver builds a query of its own, imports a router, or calls over HTTP.
 
@@ -15,9 +16,12 @@ carries a source value either -- no column default, partition bound, view or
 routine body, profile statistic or sample row; the metadata types expose what the
 REST reads expose and nothing more (`tests/test_graphql_api.py` scans for it).
 
-**One read records something.** `contextProductVersion` is the governed read REST's
+**Two reads record something.** `contextProductVersion` is the governed read REST's
 `GET /v1/context-product-versions/{id}` is: for a consumer it records the consumption
 edge, audit and outbox event (channel `GRAPHQL`), exactly as that route does for REST.
+`contextProductCoverage` is decided as the compile route decides, and recorded as it
+records a compilation less the artifact: an audit event, and for a PUBLISHED version a
+consumption edge on channel `GRAPHQL_COVERAGE`.
 
 **Refusals are per field.** A field the caller may not read resolves to `null`
 with an error whose `extensions.code` is stable and whose message is that code.
@@ -32,7 +36,7 @@ the generator enforces.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from datetime import datetime
 from enum import Enum
 from typing import Any, cast
@@ -41,8 +45,8 @@ from uuid import UUID
 import strawberry
 import structlog
 from graphql import GraphQLError
+from graphql.validation import NoSchemaIntrospectionCustomRule
 from strawberry.extensions import (
-    DisableIntrospection,
     MaxAliasesLimiter,
     MaxTokensLimiter,
     QueryDepthLimiter,
@@ -61,22 +65,27 @@ from aida.governed_execution import (
     load_receipt,
 )
 from aida.governed_execution_models import GovernedExecutionRequest
-from aida.graphql_limits import DEFAULT_LIMITS
+from aida.graphql_limits import LIMIT_CEILINGS
 from aida.graphql_reads import (
     ColumnDescription,
     Page,
+    ProductCoverage,
     ReadRefused,
     ReadScope,
     TableDescription,
     column_business_description,
+    get_context_product_coverage,
     get_context_product_version,
     get_datasource,
     get_lineage_graph,
     get_lineage_impact,
+    get_routine_parse_coverage,
     get_table,
+    get_trigger_parse_coverage,
     list_columns,
     list_constraints,
     list_context_products,
+    list_coverage_items,
     list_datasource_tables,
     list_datasources,
     list_lineage_graph_edges,
@@ -95,6 +104,8 @@ from aida.schemas import (
     MetadataColumnRead,
     MetadataConstraintRead,
     MetadataTableRead,
+    RoutineParseCoverageRead,
+    TriggerParseCoverageRead,
     UnifiedLineageEdgeRead,
     UnifiedLineageGraphRead,
     UnifiedLineageImpactNodeRead,
@@ -804,6 +815,365 @@ class LineageGraph:
         return LineageEdgeConnection.of(page)
 
 
+# --- coverage (R11-GQL01) -------------------------------------------------------
+
+
+def _ids(values: list[Any]) -> list[strawberry.ID]:
+    return [strawberry.ID(str(value)) for value in values]
+
+
+def _optional_id(value: Any) -> strawberry.ID | None:
+    return strawberry.ID(str(value)) if value is not None else None
+
+
+@strawberry.type(
+    description="A routine a context product names, and how completely Atlas understands it -- "
+    "an entry of the compiled product's `coverage.routines`. Never the body."
+)
+class CoveredRoutine:
+    id: strawberry.ID
+    qualified_name: str
+    routine_type: str
+    signature: str
+    status: str
+    definition_available: bool = strawberry.field(
+        description="Whether the redacted, screened body would be released on request."
+    )
+    lineage: str = strawberry.field(description="ACTIVE, PROPOSED or NONE.")
+    fully_parsed: bool
+    reads_table_ids: list[strawberry.ID] = strawberry.field(
+        description="Only tables the product itself covers; nothing outside it is named or "
+        "counted."
+    )
+    writes_table_ids: list[strawberry.ID]
+    definition_digest: str | None = strawberry.field(
+        description="SHA-256 of the stored value-free body; null when none is stored."
+    )
+    description: str | None = strawberry.field(
+        description="The approved description, and only an approved one."
+    )
+    description_state: str = strawberry.field(
+        description="APPROVED, PROPOSED, WITHDRAWN or NONE."
+    )
+
+    @classmethod
+    def of(cls, entry: dict[str, Any]) -> CoveredRoutine:
+        return cls(
+            id=strawberry.ID(str(entry["id"])),
+            qualified_name=entry["qualified_name"],
+            routine_type=entry["routine_type"],
+            signature=entry["signature"],
+            status=entry["status"],
+            definition_available=entry["definition_available"],
+            lineage=entry["lineage"],
+            fully_parsed=entry["fully_parsed"],
+            reads_table_ids=_ids(entry["reads_table_ids"]),
+            writes_table_ids=_ids(entry["writes_table_ids"]),
+            definition_digest=entry["definition_digest"],
+            description=entry["description"],
+            description_state=entry["description_state"],
+        )
+
+
+@strawberry.type(
+    description="A view or materialized view among a context product's tables, and what Atlas "
+    "holds of its definition -- an entry of `coverage.views`."
+)
+class CoveredView:
+    table_id: strawberry.ID
+    object_type: str
+    status: str
+    definition_available: bool
+    truncated: bool
+    lineage: str
+    definition_digest: str | None
+
+    @classmethod
+    def of(cls, entry: dict[str, Any]) -> CoveredView:
+        return cls(
+            table_id=strawberry.ID(str(entry["table_id"])),
+            object_type=entry["object_type"],
+            status=entry["status"],
+            definition_available=entry["definition_available"],
+            truncated=entry["truncated"],
+            lineage=entry["lineage"],
+            definition_digest=entry["definition_digest"],
+        )
+
+
+@strawberry.type(
+    description="An ontology, semantic model or glossary term version a context product pins, "
+    "whether it still stands, and what it speaks about within the product -- an entry of "
+    "`coverage.meaning`."
+)
+class CoveredMeaning:
+    kind: str = strawberry.field(description="ONTOLOGY, SEMANTIC_MODEL or GLOSSARY_TERM.")
+    version_id: strawberry.ID
+    key: str | None
+    version: int
+    status: str
+    current: bool
+    table_ids: list[strawberry.ID]
+    routine_ids: list[strawberry.ID]
+
+    @classmethod
+    def of(cls, entry: dict[str, Any]) -> CoveredMeaning:
+        return cls(
+            kind=entry["kind"],
+            version_id=strawberry.ID(str(entry["version_id"])),
+            key=entry["key"],
+            version=entry["version"],
+            status=entry["status"],
+            current=entry["current"],
+            table_ids=_ids(entry["table_ids"]),
+            routine_ids=_ids(entry["routine_ids"]),
+        )
+
+
+@strawberry.type(
+    description="Something a published context product covers that moved after it was "
+    "published -- an entry of `coverage.changed_since_published`. Its presence is the product "
+    "saying it is stale."
+)
+class CoverageChange:
+    subject_kind: str
+    subject_id: strawberry.ID
+    change: str
+    change_class: str | None
+
+    @classmethod
+    def of(cls, entry: dict[str, Any]) -> CoverageChange:
+        return cls(
+            subject_kind=entry["subject_kind"],
+            subject_id=strawberry.ID(str(entry["subject_id"])),
+            change=entry["change"],
+            change_class=entry["change_class"],
+        )
+
+
+@strawberry.type(
+    description="When a source behind a context product was last read, and last read in full "
+    "-- an entry of the compile route's `generated_from.source_freshness`."
+)
+class SourceFreshness:
+    datasource_id: strawberry.ID
+    table_ids: list[strawberry.ID]
+    last_scan_completed_at: str | None = strawberry.field(
+        description="ISO-8601, exactly as the compile route renders it."
+    )
+    last_full_scan_completed_at: str | None
+
+    @classmethod
+    def of(cls, entry: dict[str, Any]) -> SourceFreshness:
+        return cls(
+            datasource_id=strawberry.ID(str(entry["datasource_id"])),
+            table_ids=_ids(entry["table_ids"]),
+            last_scan_completed_at=entry["last_scan_completed_at"],
+            last_full_scan_completed_at=entry["last_full_scan_completed_at"],
+        )
+
+
+@strawberry.type(description="A page of covered routines, in id order.")
+class CoveredRoutineConnection:
+    nodes: list[CoveredRoutine]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(description="A page of covered views, in table id order.")
+class CoveredViewConnection:
+    nodes: list[CoveredView]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(description="A page of pinned meaning, in (kind, versionId) order.")
+class CoveredMeaningConnection:
+    nodes: list[CoveredMeaning]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(description="A page of changes since publication, in (kind, id, change) order.")
+class CoverageChangeConnection:
+    nodes: list[CoverageChange]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(description="A page of source freshness, in datasource id order.")
+class SourceFreshnessConnection:
+    nodes: list[SourceFreshness]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(
+    description=(
+        "What a context product version covers and how completely -- the compiled product's "
+        "`coverage` section and the freshness beside it, as "
+        "`GET /v1/context-product-versions/{id}/compile` resolves them, decided as that route "
+        "decides. Reading it is recorded as that route records a compilation: an audit event, "
+        "and for a PUBLISHED version a consumption on channel GRAPHQL_COVERAGE."
+    )
+)
+class ContextProductCoverage:
+    version_id: strawberry.ID
+    product_key: str
+    version: int
+    status: str
+    read: strawberry.Private[ProductCoverage]
+
+    @classmethod
+    def of(cls, read: ProductCoverage) -> ContextProductCoverage:
+        return cls(
+            version_id=_id(read.version_id),
+            product_key=read.product_key,
+            version=read.version,
+            status=read.status,
+            read=read,
+        )
+
+    @field_resolver("The routines the version names, a page at a time.")
+    async def routines(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> CoveredRoutineConnection | None:
+        page = await list_coverage_items(
+            info.context, self.read, "routines", first=first, after=after
+        )
+        return CoveredRoutineConnection(
+            nodes=[CoveredRoutine.of(entry) for entry in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+    @field_resolver("The views and materialized views among the version's tables.")
+    async def views(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> CoveredViewConnection | None:
+        page = await list_coverage_items(info.context, self.read, "views", first=first, after=after)
+        return CoveredViewConnection(
+            nodes=[CoveredView.of(entry) for entry in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+    @field_resolver("The ontology, semantic model and glossary term versions the version pins.")
+    async def meaning(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> CoveredMeaningConnection | None:
+        page = await list_coverage_items(
+            info.context, self.read, "meaning", first=first, after=after
+        )
+        return CoveredMeaningConnection(
+            nodes=[CoveredMeaning.of(entry) for entry in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+    @field_resolver("What the version covers that moved after it was published.")
+    async def changed_since_published(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> CoverageChangeConnection | None:
+        page = await list_coverage_items(
+            info.context, self.read, "changed_since_published", first=first, after=after
+        )
+        return CoverageChangeConnection(
+            nodes=[CoverageChange.of(entry) for entry in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+    @field_resolver("When each source behind the version's tables was last read.")
+    async def source_freshness(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> SourceFreshnessConnection | None:
+        page = await list_coverage_items(
+            info.context, self.read, "source_freshness", first=first, after=after
+        )
+        return SourceFreshnessConnection(
+            nodes=[SourceFreshness.of(entry) for entry in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+
+@strawberry.type(
+    description="How completely one routine's body was understood, as last measured -- "
+    "`GET /v1/datasources/{id}/procedures/{routine_id}/parse-coverage`."
+)
+class RoutineParseCoverage:
+    routine_id: strawberry.ID
+    state: str = strawberry.field(description="SUPPORTED, PARTIAL or UNAVAILABLE.")
+    parse_completed: bool
+    is_read_only: bool
+    statement_count: int
+    unparsed_statement_count: int
+    unparsed_reason_codes: list[str]
+    dialect: str
+    confidence: str
+    source_mapping_granularity: str
+    parsed_at: datetime
+    member_attribution: str | None
+    member_fallback_reason: str | None
+
+    @classmethod
+    def of(cls, read: RoutineParseCoverageRead) -> RoutineParseCoverage:
+        return cls(
+            routine_id=_id(read.routine_id),
+            state=read.state,
+            parse_completed=read.parse_completed,
+            is_read_only=read.is_read_only,
+            statement_count=read.statement_count,
+            unparsed_statement_count=read.unparsed_statement_count,
+            unparsed_reason_codes=list(read.unparsed_reason_codes),
+            dialect=read.dialect,
+            confidence=read.confidence,
+            source_mapping_granularity=read.source_mapping_granularity,
+            parsed_at=read.parsed_at,
+            member_attribution=read.member_attribution,
+            member_fallback_reason=read.member_fallback_reason,
+        )
+
+
+@strawberry.type(
+    description="How completely one trigger's body was understood, as last measured -- "
+    "`GET /v1/datasources/{id}/triggers/{trigger_id}/parse-coverage`."
+)
+class TriggerParseCoverage:
+    trigger_id: strawberry.ID
+    routine_id: strawberry.ID | None = strawberry.field(
+        description="The routine the body was read from (a PostgreSQL trigger's function)."
+    )
+    state: str
+    parse_completed: bool
+    is_read_only: bool
+    statement_count: int
+    unparsed_statement_count: int
+    unparsed_reason_codes: list[str]
+    dialect: str
+    confidence: str
+    source_mapping_granularity: str
+    parsed_at: datetime
+
+    @classmethod
+    def of(cls, read: TriggerParseCoverageRead) -> TriggerParseCoverage:
+        return cls(
+            trigger_id=_id(read.trigger_id),
+            routine_id=_optional_id(read.routine_id),
+            state=read.state,
+            parse_completed=read.parse_completed,
+            is_read_only=read.is_read_only,
+            statement_count=read.statement_count,
+            unparsed_statement_count=read.unparsed_statement_count,
+            unparsed_reason_codes=list(read.unparsed_reason_codes),
+            dialect=read.dialect,
+            confidence=read.confidence,
+            source_mapping_granularity=read.source_mapping_granularity,
+            parsed_at=read.parsed_at,
+        )
+
+
 @strawberry.type(description="Metadata reads. Nothing here executes against a source.")
 class Query:
     @field_resolver("One datasource by id, as `GET /v1/datasources/{id}`.")
@@ -950,6 +1320,47 @@ class Query:
             include_pending_edges=include_pending_edges,
         )
         return LineageGraph.of(read)
+
+    @field_resolver(
+        "A context product version's coverage -- the routines and views it stands on, the "
+        "meaning it pins, what moved since it was published, and each source's freshness -- as "
+        "`GET /v1/context-product-versions/{id}/compile` resolves and decides it. Recorded as "
+        "a read: an audit event, and a consumption for a PUBLISHED version."
+    )
+    async def context_product_coverage(
+        self, info: Info, version_id: strawberry.ID
+    ) -> ContextProductCoverage | None:
+        return ContextProductCoverage.of(
+            await get_context_product_coverage(info.context, _uuid(version_id))
+        )
+
+    @field_resolver(
+        "How completely a routine's body was understood, as "
+        "`GET /v1/datasources/{id}/procedures/{routine_id}/parse-coverage` decides and reads "
+        "it, workspace gate included. NOT_FOUND with reason COVERAGE_NOT_MEASURED when no "
+        "parse has measured it."
+    )
+    async def routine_parse_coverage(
+        self, info: Info, datasource_id: strawberry.ID, routine_id: strawberry.ID
+    ) -> RoutineParseCoverage | None:
+        read = await get_routine_parse_coverage(
+            info.context, _uuid(datasource_id), _uuid(routine_id)
+        )
+        return RoutineParseCoverage.of(read)
+
+    @field_resolver(
+        "How completely a trigger's body was understood, as "
+        "`GET /v1/datasources/{id}/triggers/{trigger_id}/parse-coverage` decides and reads "
+        "it, workspace gate included. NOT_FOUND with reason COVERAGE_NOT_MEASURED when no "
+        "parse has measured it."
+    )
+    async def trigger_parse_coverage(
+        self, info: Info, datasource_id: strawberry.ID, trigger_id: strawberry.ID
+    ) -> TriggerParseCoverage | None:
+        read = await get_trigger_parse_coverage(
+            info.context, _uuid(datasource_id), _uuid(trigger_id)
+        )
+        return TriggerParseCoverage.of(read)
 
     @field_resolver("One table by id, decided as its columns route decides it.")
     async def table(self, info: Info, id: strawberry.ID) -> Table | None:
@@ -1198,23 +1609,46 @@ class _MetadataSchema(strawberry.Schema):
                 _log.info("graphql.field_refused", **fields)
 
 
+class _ScopedIntrospection(SchemaExtension):
+    """Introspection only where this request's admission allowed it.
+
+    The endpoint decides per caller (`graphql_limits.introspection_decision`) and refuses a
+    disallowed document before execution; this is the backstop for any other way into
+    `metadata_schema.execute`. It adds graphql-core's no-introspection rule -- what
+    strawberry's `DisableIntrospection` adds -- unless the context is a `ReadScope` whose
+    limits allow introspection, so a context of any other kind never introspects.
+    """
+
+    def on_operation(self) -> Iterator[None]:
+        scope = self.execution_context.context
+        allowed = isinstance(scope, ReadScope) and scope.limits.allow_introspection
+        if not allowed:
+            self.execution_context.validation_rules = (
+                *self.execution_context.validation_rules,
+                NoSchemaIntrospectionCustomRule,
+            )
+        yield
+
+
 def _backstops() -> list[Callable[[], SchemaExtension]]:
     """Strawberry's own limiters, set no tighter than the endpoint's admission
     check. The endpoint refuses first; these guard `metadata_schema.execute`
     against a caller that reaches it by any other route.
 
+    Set at `LIMIT_CEILINGS`, the largest value a deployment may configure each limit
+    to, so a raised `graphql_*` setting is never undone by a backstop that still holds
+    the default. Introspection is decided per request (`_ScopedIntrospection`).
+
     Factories, not instances: strawberry builds a fresh extension per request
     from each, so no extension state is ever shared between two callers.
     """
-    limits = DEFAULT_LIMITS
-    extensions: list[Callable[[], SchemaExtension]] = [
-        lambda: MaxTokensLimiter(max_token_count=limits.max_tokens),
-        lambda: MaxAliasesLimiter(max_alias_count=limits.max_aliases),
-        lambda: QueryDepthLimiter(max_depth=limits.max_depth),
+    ceilings = LIMIT_CEILINGS
+    return [
+        lambda: MaxTokensLimiter(max_token_count=ceilings.max_tokens),
+        lambda: MaxAliasesLimiter(max_alias_count=ceilings.max_aliases),
+        lambda: QueryDepthLimiter(max_depth=ceilings.max_depth),
+        _ScopedIntrospection,
     ]
-    if not limits.allow_introspection:
-        extensions.append(DisableIntrospection)
-    return extensions
 
 
 metadata_schema = _MetadataSchema(

@@ -55,7 +55,7 @@ that still genuinely lives in the file is not use of the shim.
 
 ## Register
 
-14 shims, 1194 shim-to-caller-file relationships across 582 distinct files, 0 shim(s) with a measured caller count of zero.
+14 shims, 1196 shim-to-caller-file relationships across 584 distinct files, 0 shim(s) with a measured caller count of zero.
 
 | Shim | Kind | Replacement path | Owner area | Callers | Import stmts | String refs |
 |---|---|---|---|---:|---:|---:|
@@ -63,7 +63,7 @@ that still genuinely lives in the file is not use of the shim.
 | [`aida.config`](#aidaconfig) | python | `atlas.platform.config` | Platform infrastructure | 266 | 276 | 1 |
 | [`aida.context`](#aidacontext) | python | `atlas.platform.context` | Platform infrastructure | 72 | 72 | 0 |
 | [`aida.logging`](#aidalogging) | python | `atlas.platform.logging` | Platform infrastructure | 5 | 5 | 0 |
-| [`aida.models`](#aidamodels) | python-partial | `atlas.modules.<context>.models` (re-exported classes only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 461 | 572 | 2 |
+| [`aida.models`](#aidamodels) | python-partial | `atlas.modules.<context>.models` (re-exported classes only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 463 | 575 | 2 |
 | [`aida.schemas`](#aidaschemas) | python-partial | `atlas.modules.<context>.schemas` (re-exported DTOs only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 23 | 23 | 0 |
 | [`aida.catalog_read_model`](#aidacatalogreadmodel) | python | `atlas.modules.catalog.service` / `.repository` | Bounded context: catalog | 12 | 12 | 0 |
 | [`aida.catalog_bulk_actions`](#aidacatalogbulkactions) | python | `atlas.modules.catalog.service` | Bounded context: catalog | 6 | 6 | 0 |
@@ -135,8 +135,8 @@ caller today.
 - **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md
 - **Re-exports** — 49 name(s) from `atlas.modules.catalog.models`, `atlas.modules.connectivity.models`, `atlas.modules.identity_tenancy.models`, `atlas.modules.ingestion.models`, `atlas.modules.observability_audit.models`, `atlas.modules.profiling.models`, `atlas.platform.db`
-- **Callers** — 461 file(s), 572 import statement(s)
-  - By source root: `scripts` 12, `src/aida` 171, `src/atlas` 7, `tests` 271
+- **Callers** — 463 file(s), 575 import statement(s)
+  - By source root: `scripts` 12, `src/aida` 171, `src/atlas` 7, `tests` 273
 - **String references** — 2 file(s): `tests/test_lineage_edge_kind_vocabulary.py`, `tests/test_profiling_exception_policy.py`
 - **Named in import-linter contracts** — `catalog module privacy`, `connectivity module privacy`, `identity_tenancy module privacy`, `ingestion module privacy`, `observability_audit module privacy`, `profiling module privacy`
 - **Removal condition** *(hand-written)* — **Not removable as a file at all** until every remaining class in it has moved to a context -- it is a partial shim, not a shim. The re-export *block* can go when no caller imports a re-exported name and the `aida.models` entry disappears from every `allowed_importers` list in `pyproject.toml`. Note that `Base.metadata` must keep seeing all of these classes for Alembic autogenerate to be correct, so removing the block requires `migrations/env.py` to import the context model modules directly.

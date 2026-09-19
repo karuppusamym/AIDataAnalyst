@@ -37,12 +37,26 @@ connection never returns more than `first` nodes.
 This module deliberately knows nothing about Atlas' types beyond one naming
 convention: a type whose name ends in `Connection` is a page, and its `nodes`
 field is the list the page size multiplies.
+
+**Where the numbers come from.** `DEFAULT_LIMITS` is the design's initial budget.
+A deployment tunes it through the `graphql_*` settings, read per request by
+`limits_from_settings`; every setting is bounded, and its upper bound is the
+matching `LIMIT_CEILINGS` value, which is where strawberry's backstop limiters
+sit -- so no valid configuration makes a backstop refuse what admission passed.
+
+**Introspection policy** (`introspection_decision`): off unless
+`graphql_introspection_enabled`, which production refuses at startup; when on,
+served only to `GRAPHQL_INTROSPECTION_ROLES`, and anyone else is refused
+`INTROSPECTION_FORBIDDEN`. The published SDL is the supported discovery path in
+every environment. Hiding the schema is not authorization: each field is decided
+on its own whatever this policy says.
 """
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from graphql import (
     BooleanValueNode,
@@ -73,14 +87,21 @@ from graphql import (
     validate,
 )
 
+if TYPE_CHECKING:
+    from atlas.platform.config import Settings
+
 __all__ = [
     "DEFAULT_LIMITS",
     "DocumentCost",
     "DocumentRefused",
     "EXECUTION_ERROR_CODES",
+    "GRAPHQL_INTROSPECTION_ROLES",
     "GraphQLLimits",
+    "LIMIT_CEILINGS",
     "REFUSAL_CODES",
     "admit_document",
+    "introspection_decision",
+    "limits_from_settings",
 ]
 
 
@@ -91,8 +112,9 @@ class GraphQLLimits:
     The design's initial values (depth 6, 50 aliases, page size at most 100,
     500 returned objects) plus the bounds it names without numbers: request and
     response bytes, scalar argument length and a resolver deadline. Frozen and
-    passed explicitly rather than read from settings, so a test can prove a
-    limit by lowering it and nothing can loosen one at runtime.
+    passed explicitly -- built once per request from settings by
+    `limits_from_settings` -- so a test can prove a limit by lowering it and
+    nothing can loosen one while a request runs.
     """
 
     max_request_bytes: int = 32_768
@@ -119,9 +141,74 @@ class GraphQLLimits:
     #: Hiding the schema is not treated as authorization -- every field is
     #: authorized on its own regardless of this flag.
     allow_introspection: bool = False
+    #: The code a refused introspection carries: `INTROSPECTION_DISABLED` when the
+    #: deployment serves none, `INTROSPECTION_FORBIDDEN` when it serves some but not
+    #: to this caller (`introspection_decision`).
+    introspection_refusal: str = "INTROSPECTION_DISABLED"
 
 
 DEFAULT_LIMITS = GraphQLLimits()
+
+#: The largest value each limit may be configured to: the upper bound of its `graphql_*`
+#: setting (`tests/test_graphql_settings.py` holds the two together). strawberry's backstop
+#: limiters are set here, so a deployment that raises a limit is never refused by a backstop
+#: that still holds the old number.
+LIMIT_CEILINGS = GraphQLLimits(
+    max_request_bytes=1_048_576,
+    max_tokens=20_000,
+    max_depth=12,
+    max_aliases=200,
+    max_page_size=500,
+    max_nodes=10_000,
+    max_string_argument_length=4_096,
+    max_selection_visits=50_000,
+    max_response_bytes=16_777_216,
+    deadline_seconds=120.0,
+    max_scope_datasources=5_000,
+    max_execution_rows=10_000,
+)
+
+#: Who may introspect when a deployment turns introspection on: the people who build against
+#: the Agent Gateway. Everyone else reads the published SDL.
+GRAPHQL_INTROSPECTION_ROLES: tuple[str, ...] = ("AgentDeveloper", "PlatformAdmin")
+
+
+def introspection_decision(settings: Settings, roles: AbstractSet[str]) -> tuple[bool, str]:
+    """Whether this caller may introspect here, and the refusal code if not.
+
+    Off unless `graphql_introspection_enabled` -- which production refuses at startup, and
+    which is also ignored here in production, so a settings object built around that
+    validator cannot turn it on -- and then only for `GRAPHQL_INTROSPECTION_ROLES`.
+    """
+    if not settings.graphql_introspection_enabled or settings.environment == "production":
+        return False, "INTROSPECTION_DISABLED"
+    if set(roles).isdisjoint(GRAPHQL_INTROSPECTION_ROLES):
+        return False, "INTROSPECTION_FORBIDDEN"
+    return True, "INTROSPECTION_DISABLED"
+
+
+def limits_from_settings(
+    settings: Settings, *, roles: AbstractSet[str] = frozenset()
+) -> GraphQLLimits:
+    """One request's budget: the deployment's `graphql_*` settings, and the introspection
+    decision for this caller. With default settings this is `DEFAULT_LIMITS`."""
+    allowed, refusal = introspection_decision(settings, roles)
+    return GraphQLLimits(
+        max_request_bytes=settings.graphql_max_request_bytes,
+        max_tokens=settings.graphql_max_tokens,
+        max_depth=settings.graphql_max_depth,
+        max_aliases=settings.graphql_max_aliases,
+        max_page_size=settings.graphql_max_page_size,
+        max_nodes=settings.graphql_max_nodes,
+        max_string_argument_length=settings.graphql_max_string_argument_length,
+        max_selection_visits=settings.graphql_max_selection_visits,
+        max_response_bytes=settings.graphql_max_response_bytes,
+        deadline_seconds=settings.graphql_deadline_seconds,
+        max_scope_datasources=settings.graphql_max_scope_datasources,
+        max_execution_rows=settings.graphql_max_execution_rows,
+        allow_introspection=allowed,
+        introspection_refusal=refusal,
+    )
 
 #: Every code a refused document can carry, with the HTTP status it is answered
 #: with. Stable: clients and the published reference page key on these strings.
@@ -141,6 +228,8 @@ REFUSAL_CODES: dict[str, int] = {
     "RATE_LIMITED": 429,
     "FRAGMENT_CYCLE": 400,
     "INTROSPECTION_DISABLED": 400,
+    # Introspection is on in this deployment, but not for this caller's roles.
+    "INTROSPECTION_FORBIDDEN": 403,
     "DEPTH_LIMIT_EXCEEDED": 400,
     "ALIAS_LIMIT_EXCEEDED": 400,
     "PAGE_SIZE_EXCEEDED": 400,
@@ -158,7 +247,10 @@ EXECUTION_ERROR_CODES: dict[str, str] = {
         "the caller may not read this object; `extensions.reason` carries the value-free "
         "reason code the equivalent REST route puts in its 403"
     ),
-    "NOT_FOUND": "no such object (the REST route answers 404)",
+    "NOT_FOUND": (
+        "no such object (the REST route answers 404); reason COVERAGE_NOT_MEASURED when the "
+        "routine or trigger exists but no parse has measured it"
+    ),
     "GONE": (
         "the context product version was retired and this caller read it before; "
         "re-pin to the current published version (the REST route answers 410)"
@@ -169,8 +261,9 @@ EXECUTION_ERROR_CODES: dict[str, str] = {
     "VALIDATION_FAILED": "a variable did not coerce to its declared type",
     "CONFLICT": (
         "R11-GQL02: the idempotency key was already used with different inputs, or the "
-        "tool cannot run now (a quality hold, an unpublished version); `extensions.reason` "
-        "says which"
+        "tool cannot run now (a quality hold, an unpublished version); for "
+        "`contextProductCoverage`, the version names a table, routine or ontology version "
+        "that no longer resolves (the REST route answers 409); `extensions.reason` says which"
     ),
     "REJECTED": "R11-GQL02: the gateway or parameter binding refused the execution",
     "EXECUTION_FAILED": "R11-GQL02: the source failed the execution; the receipt says so",
@@ -212,6 +305,10 @@ class DocumentCost:
     selections_visited: int
     #: "query" or "mutation": the endpoint dispatches an admitted document on it.
     operation_type: str = "query"
+    #: The response keys of admitted `__schema`/`__type` fields. What they return is the
+    #: schema itself -- bounded by the schema, not by data -- so the endpoint leaves them out
+    #: of the returned-object count; the response byte ceiling still holds them.
+    introspection_keys: tuple[str, ...] = ()
 
 
 def admit_document(
@@ -300,6 +397,7 @@ def admit_document(
         estimated_nodes=walk.nodes,
         selections_visited=walk.visits,
         operation_type="mutation" if operation.operation is OperationType.MUTATION else "query",
+        introspection_keys=tuple(walk.introspection_keys),
     )
 
 
@@ -411,6 +509,7 @@ class _Walk:
         self.aliases = 0
         self.nodes = 0
         self.visits = 0
+        self.introspection_keys: list[str] = []
 
     def selection_set(
         self,
@@ -474,11 +573,17 @@ class _Walk:
                     "ALIAS_LIMIT_EXCEEDED",
                     f"the document uses more than {self.limits.max_aliases} aliases",
                 )
-        if name in _INTROSPECTION_FIELDS and not self.limits.allow_introspection:
-            raise DocumentRefused(
-                "INTROSPECTION_DISABLED",
-                "introspection is disabled; the schema is published as a versioned artifact",
-            )
+        if name in _INTROSPECTION_FIELDS:
+            if not self.limits.allow_introspection:
+                refusal = self.limits.introspection_refusal
+                raise DocumentRefused(
+                    refusal,
+                    "introspection is disabled; the schema is published as a versioned artifact"
+                    if refusal == "INTROSPECTION_DISABLED"
+                    else "introspection is served to PlatformAdmin and AgentDeveloper only; "
+                    "the schema is published as a versioned artifact",
+                )
+            self.introspection_keys.append(node.alias.value if node.alias else name)
         if name.startswith("__"):
             return  # __typename, and introspection when allowed: no data objects
         definition = parent.fields.get(name)

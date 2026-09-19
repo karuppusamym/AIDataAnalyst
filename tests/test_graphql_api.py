@@ -529,11 +529,14 @@ def test_each_field_requires_the_roles_its_rest_route_declares(
     """The role sets are read back from the closures FastAPI wired into the live routes, so
     a REST route that narrows or widens its roles fails here until GraphQL follows."""
     assert _route_roles(method, path) == tuple(sorted(roles))
+    # The coverage reads (tests/test_graphql_coverage.py) add the compile route's roles; the
+    # parse-coverage routes declare the unified-lineage reader roles, already in the union.
     assert set(GRAPHQL_ENDPOINT_ROLES) == (
         set(DATASOURCE_READ_ROLES)
         | set(CATALOG_READ_ROLES)
         | set(CONTEXT_PRODUCT_READERS)
         | set(UNIFIED_LINEAGE_READER_ROLES)
+        | set(graphql_reads.CONTEXT_COMPILER_ROLES)
     )
     # R11-GQL02: the route also admits whoever may execute a governed tool or read an
     # execution receipt -- and nobody else. Each field still enforces its own set.
@@ -1559,6 +1562,13 @@ async def test_the_estimate_bounds_what_is_returned(
     assert 0 < cost["returnedObjects"] <= cost["estimatedNodes"] <= DEFAULT_LIMITS.max_nodes
 
 
+def _limit_settings(monkeypatch: pytest.MonkeyPatch, **limits: Any) -> None:
+    """The endpoint reads its limits from `Settings` per request (`limits_from_settings`);
+    this serves it settings with `limits` changed, for the rest of the test."""
+    changed = Settings(_env_file=None).model_copy(update=limits)
+    monkeypatch.setitem(app.dependency_overrides, get_settings, lambda: changed)
+
+
 async def test_the_deadline_bounds_execution(
     http: httpx.AsyncClient, estate: Estate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1566,7 +1576,8 @@ async def test_the_deadline_bounds_execution(
         await asyncio.sleep(1)
 
     monkeypatch.setattr(graphql_reads, "gate", _slow)
-    monkeypatch.setattr(graphql_api, "DEFAULT_LIMITS", GraphQLLimits(deadline_seconds=0.05))
+    # Below the setting's validated floor on purpose: `model_copy` does not validate.
+    _limit_settings(monkeypatch, graphql_deadline_seconds=0.05)
     body = (
         await _gql(
             http,
@@ -1582,7 +1593,7 @@ async def test_the_deadline_bounds_execution(
 async def test_an_oversized_response_is_withheld(
     http: httpx.AsyncClient, estate: Estate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(graphql_api, "DEFAULT_LIMITS", GraphQLLimits(max_response_bytes=300))
+    _limit_settings(monkeypatch, graphql_max_response_bytes=300)
     body = (
         await _gql(
             http,

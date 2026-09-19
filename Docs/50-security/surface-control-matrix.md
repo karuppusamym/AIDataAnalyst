@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **540**
-- By family: BULK 11, EXPORT 8, GRAPHQL 23, JOB 29, MCP 9, REST 459, SDK 1
+- Surfaces covered: **548**
+- By family: BULK 11, EXPORT 8, GRAPHQL 31, JOB 29, MCP 9, REST 459, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -80,12 +80,18 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/audit-events/export.jsonl` | EXPORT | `aida.audit_export_api.export_audit_events` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GRAPHQL Column.businessDescription` | GRAPHQL | `aida.graphql_schema.Column.business_description` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Constraint.referencedTable` | GRAPHQL | `aida.graphql_schema.Constraint.referenced_table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL ContextProductCoverage.changedSincePublished` | GRAPHQL | `aida.graphql_schema.ContextProductCoverage.changed_since_published` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GRAPHQL ContextProductCoverage.meaning` | GRAPHQL | `aida.graphql_schema.ContextProductCoverage.meaning` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GRAPHQL ContextProductCoverage.routines` | GRAPHQL | `aida.graphql_schema.ContextProductCoverage.routines` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GRAPHQL ContextProductCoverage.sourceFreshness` | GRAPHQL | `aida.graphql_schema.ContextProductCoverage.source_freshness` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GRAPHQL ContextProductCoverage.views` | GRAPHQL | `aida.graphql_schema.ContextProductCoverage.views` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `GRAPHQL DataSource.tables` | GRAPHQL | `aida.graphql_schema.DataSource.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL LineageGraph.edges` | GRAPHQL | `aida.graphql_schema.LineageGraph.edges` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL LineageGraph.nodes` | GRAPHQL | `aida.graphql_schema.LineageGraph.nodes` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL LineageImpact.downstream` | GRAPHQL | `aida.graphql_schema.LineageImpact.downstream` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL LineageImpact.upstream` | GRAPHQL | `aida.graphql_schema.LineageImpact.upstream` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Mutation.executeGovernedTool` | GRAPHQL | `aida.graphql_schema.Mutation.execute_governed_tool` | AgentDeveloper, Analyst, PlatformAdmin, ToolConsumer | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL Query.contextProductCoverage` | GRAPHQL | `aida.graphql_schema.Query.context_product_coverage` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `GRAPHQL Query.contextProductVersion` | GRAPHQL | `aida.graphql_schema.Query.context_product_version` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GRAPHQL Query.contextProducts` | GRAPHQL | `aida.graphql_schema.Query.context_products` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GRAPHQL Query.datasource` | GRAPHQL | `aida.graphql_schema.Query.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
@@ -94,13 +100,15 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL Query.governedExecutions` | GRAPHQL | `aida.graphql_schema.Query.governed_executions` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |
 | `GRAPHQL Query.lineageGraph` | GRAPHQL | `aida.graphql_schema.Query.lineage_graph` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.lineageImpact` | GRAPHQL | `aida.graphql_schema.Query.lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Query.routineParseCoverage` | GRAPHQL | `aida.graphql_schema.Query.routine_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.table` | GRAPHQL | `aida.graphql_schema.Query.table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.tables` | GRAPHQL | `aida.graphql_schema.Query.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
+| `GRAPHQL Query.triggerParseCoverage` | GRAPHQL | `aida.graphql_schema.Query.trigger_parse_coverage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Table.columns` | GRAPHQL | `aida.graphql_schema.Table.columns` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Table.constraints` | GRAPHQL | `aida.graphql_schema.Table.constraints` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Table.datasource` | GRAPHQL | `aida.graphql_schema.Table.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Table.description` | GRAPHQL | `aida.graphql_schema.Table.description` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
-| `POST /graphql` | GRAPHQL | `aida.graphql_api.graphql_query` | AgentDeveloper, Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Reviewer, SemanticAdmin, ToolConsumer, Viewer | yes | no | mutating verb, no write found | no | not cancellable |
+| `POST /graphql` | GRAPHQL | `aida.graphql_api.graphql_query` | AgentDeveloper, Analyst, Auditor, DataAdmin, DataProductOwner, DataSteward, MetadataAdmin, MetadataReviewer, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Reviewer, SemanticAdmin, ToolConsumer, Viewer | yes | no | mutating verb, no write found | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}/grounding-receipts` | JOB | `aida.api.get_agent_run_grounding_receipts` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}` | JOB | `aida.api.get_agent_run` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/ai/runtime-status` | JOB | `aida.api.ai_runtime_status` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | no | no | read | no | not cancellable |

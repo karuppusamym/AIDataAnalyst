@@ -89,6 +89,33 @@ type ContextProductConnection {
 }
 
 """
+What a context product version covers and how completely -- the compiled product's `coverage` section and the freshness beside it, as `GET /v1/context-product-versions/{id}/compile` resolves them, decided as that route decides. Reading it is recorded as that route records a compilation: an audit event, and for a PUBLISHED version a consumption on channel GRAPHQL_COVERAGE.
+"""
+type ContextProductCoverage {
+  versionId: ID!
+  productKey: String!
+  version: Int!
+  status: String!
+
+  """The routines the version names, a page at a time."""
+  routines(first: Int! = 20, after: String = null): CoveredRoutineConnection
+
+  """The views and materialized views among the version's tables."""
+  views(first: Int! = 20, after: String = null): CoveredViewConnection
+
+  """
+  The ontology, semantic model and glossary term versions the version pins.
+  """
+  meaning(first: Int! = 20, after: String = null): CoveredMeaningConnection
+
+  """What the version covers that moved after it was published."""
+  changedSincePublished(first: Int! = 20, after: String = null): CoverageChangeConnection
+
+  """When each source behind the version's tables was last read."""
+  sourceFreshness(first: Int! = 20, after: String = null): SourceFreshnessConnection
+}
+
+"""
 One version of a context product, as `GET /v1/context-product-versions/{id}` returns it: what it names and who may ask through it. Reading it through `contextProductVersion` is a governed consumption, recorded as REST records its own.
 """
 type ContextProductVersion {
@@ -111,6 +138,105 @@ type ContextProductVersion {
   publishedAt: DateTime
   supportWindowEndsAt: DateTime
   supersededByVersionId: ID
+}
+
+"""
+Something a published context product covers that moved after it was published -- an entry of `coverage.changed_since_published`. Its presence is the product saying it is stale.
+"""
+type CoverageChange {
+  subjectKind: String!
+  subjectId: ID!
+  change: String!
+  changeClass: String
+}
+
+"""A page of changes since publication, in (kind, id, change) order."""
+type CoverageChangeConnection {
+  nodes: [CoverageChange!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+An ontology, semantic model or glossary term version a context product pins, whether it still stands, and what it speaks about within the product -- an entry of `coverage.meaning`.
+"""
+type CoveredMeaning {
+  """ONTOLOGY, SEMANTIC_MODEL or GLOSSARY_TERM."""
+  kind: String!
+  versionId: ID!
+  key: String
+  version: Int!
+  status: String!
+  current: Boolean!
+  tableIds: [ID!]!
+  routineIds: [ID!]!
+}
+
+"""A page of pinned meaning, in (kind, versionId) order."""
+type CoveredMeaningConnection {
+  nodes: [CoveredMeaning!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+A routine a context product names, and how completely Atlas understands it -- an entry of the compiled product's `coverage.routines`. Never the body.
+"""
+type CoveredRoutine {
+  id: ID!
+  qualifiedName: String!
+  routineType: String!
+  signature: String!
+  status: String!
+
+  """Whether the redacted, screened body would be released on request."""
+  definitionAvailable: Boolean!
+
+  """ACTIVE, PROPOSED or NONE."""
+  lineage: String!
+  fullyParsed: Boolean!
+
+  """
+  Only tables the product itself covers; nothing outside it is named or counted.
+  """
+  readsTableIds: [ID!]!
+  writesTableIds: [ID!]!
+
+  """SHA-256 of the stored value-free body; null when none is stored."""
+  definitionDigest: String
+
+  """The approved description, and only an approved one."""
+  description: String
+
+  """APPROVED, PROPOSED, WITHDRAWN or NONE."""
+  descriptionState: String!
+}
+
+"""A page of covered routines, in id order."""
+type CoveredRoutineConnection {
+  nodes: [CoveredRoutine!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+A view or materialized view among a context product's tables, and what Atlas holds of its definition -- an entry of `coverage.views`.
+"""
+type CoveredView {
+  tableId: ID!
+  objectType: String!
+  status: String!
+  definitionAvailable: Boolean!
+  truncated: Boolean!
+  lineage: String!
+  definitionDigest: String
+}
+
+"""A page of covered views, in table id order."""
+type CoveredViewConnection {
+  nodes: [CoveredView!]!
+  pageInfo: PageInfo!
+  totalCount: Int
 }
 
 """A registered source system, as `GET /v1/datasources/{id}` returns it."""
@@ -419,6 +545,21 @@ type Query {
   """
   lineageGraph(datasourceId: ID!, nodeLimit: Int! = 300, edgeLimit: Int! = 1500, suggestionStatus: LineageSuggestionStatus! = APPROVED, includePendingEdges: Boolean! = false): LineageGraph
 
+  """
+  A context product version's coverage -- the routines and views it stands on, the meaning it pins, what moved since it was published, and each source's freshness -- as `GET /v1/context-product-versions/{id}/compile` resolves and decides it. Recorded as a read: an audit event, and a consumption for a PUBLISHED version.
+  """
+  contextProductCoverage(versionId: ID!): ContextProductCoverage
+
+  """
+  How completely a routine's body was understood, as `GET /v1/datasources/{id}/procedures/{routine_id}/parse-coverage` decides and reads it, workspace gate included. NOT_FOUND with reason COVERAGE_NOT_MEASURED when no parse has measured it.
+  """
+  routineParseCoverage(datasourceId: ID!, routineId: ID!): RoutineParseCoverage
+
+  """
+  How completely a trigger's body was understood, as `GET /v1/datasources/{id}/triggers/{trigger_id}/parse-coverage` decides and reads it, workspace gate included. NOT_FOUND with reason COVERAGE_NOT_MEASURED when no parse has measured it.
+  """
+  triggerParseCoverage(datasourceId: ID!, triggerId: ID!): TriggerParseCoverage
+
   """One table by id, decided as its columns route decides it."""
   table(id: ID!): Table
 
@@ -426,6 +567,46 @@ type Query {
   Tables the caller may read. With `datasourceId`, as `GET /v1/datasources/{id}/tables`; without it, across the caller's organization, with unreadable datasources removed before counting and paging.
   """
   tables(datasourceId: ID = null, first: Int! = 20, after: String = null, q: String = null, objectType: String = null, status: String! = "ACTIVE"): TableConnection
+}
+
+"""
+How completely one routine's body was understood, as last measured -- `GET /v1/datasources/{id}/procedures/{routine_id}/parse-coverage`.
+"""
+type RoutineParseCoverage {
+  routineId: ID!
+
+  """SUPPORTED, PARTIAL or UNAVAILABLE."""
+  state: String!
+  parseCompleted: Boolean!
+  isReadOnly: Boolean!
+  statementCount: Int!
+  unparsedStatementCount: Int!
+  unparsedReasonCodes: [String!]!
+  dialect: String!
+  confidence: String!
+  sourceMappingGranularity: String!
+  parsedAt: DateTime!
+  memberAttribution: String
+  memberFallbackReason: String
+}
+
+"""
+When a source behind a context product was last read, and last read in full -- an entry of the compile route's `generated_from.source_freshness`.
+"""
+type SourceFreshness {
+  datasourceId: ID!
+  tableIds: [ID!]!
+
+  """ISO-8601, exactly as the compile route renders it."""
+  lastScanCompletedAt: String
+  lastFullScanCompletedAt: String
+}
+
+"""A page of source freshness, in datasource id order."""
+type SourceFreshnessConnection {
+  nodes: [SourceFreshness!]!
+  pageInfo: PageInfo!
+  totalCount: Int
 }
 
 """A table, view or other relation, as the catalog records it."""
@@ -462,4 +643,24 @@ type TableConnection {
   Computed on the first page only, and only over what the caller may read.
   """
   totalCount: Int
+}
+
+"""
+How completely one trigger's body was understood, as last measured -- `GET /v1/datasources/{id}/triggers/{trigger_id}/parse-coverage`.
+"""
+type TriggerParseCoverage {
+  triggerId: ID!
+
+  """The routine the body was read from (a PostgreSQL trigger's function)."""
+  routineId: ID
+  state: String!
+  parseCompleted: Boolean!
+  isReadOnly: Boolean!
+  statementCount: Int!
+  unparsedStatementCount: Int!
+  unparsedReasonCodes: [String!]!
+  dialect: String!
+  confidence: String!
+  sourceMappingGranularity: String!
+  parsedAt: DateTime!
 }

@@ -17,7 +17,9 @@ What happens to a request, in order:
    HTTP batching, which is refused, as are unknown keys.
 2. `aida.graphql_limits.admit_document` bounds the document -- operation name,
    single operation, token count, fragment cycles, depth, aliases, page sizes,
-   argument lengths, an upper bound on returned objects -- and validates it.
+   argument lengths, an upper bound on returned objects, introspection -- and
+   validates it. The budget is the deployment's `graphql_*` settings, with the
+   introspection decision for this caller (`limits_from_settings`).
    A refusal here answers 400 (413 for the byte ceiling) with a stable code, and
    no statement has reached the database.
 3. The admitted document executes against `metadata_schema` under a deadline,
@@ -60,7 +62,12 @@ from aida.governed_execution import (
     TOOL_EXECUTION_ROLES,
     execution_deadline,
 )
-from aida.graphql_limits import DEFAULT_LIMITS, DocumentCost, DocumentRefused, admit_document
+from aida.graphql_limits import (
+    DocumentCost,
+    DocumentRefused,
+    admit_document,
+    limits_from_settings,
+)
 from aida.graphql_reads import GRAPHQL_ENDPOINT_ROLES, open_read_scope
 from aida.graphql_schema import error_code, metadata_schema
 from aida.request_budget import (
@@ -251,11 +258,15 @@ def _operation_digest(name: str | None) -> str | None:
     return hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
 
 
-def _count_objects(data: dict[str, Any] | None) -> int:
+def _count_objects(data: dict[str, Any] | None, *, schema_keys: tuple[str, ...] = ()) -> int:
     """How many objects a response actually holds: every JSON object beneath `data`
-    (the root itself is not a returned object, just as the estimate does not count it)."""
+    (the root itself is not a returned object, just as the estimate does not count it).
+    `schema_keys` are admitted introspection fields, whose answer is the schema itself,
+    bounded by the schema rather than by data; the byte ceiling still holds them."""
     count = 0
-    pending: list[Any] = list((data or {}).values())
+    pending: list[Any] = [
+        value for key, value in (data or {}).items() if key not in schema_keys
+    ]
     while pending:
         current = pending.pop()
         if isinstance(current, dict):
@@ -287,7 +298,7 @@ async def graphql_query(
     version through `aida.governed_execution`, once per caller-scoped key.
     """
     organization_id = context.require_organization()
-    limits = DEFAULT_LIMITS
+    limits = limits_from_settings(settings, roles=context.roles)
     correlation_id = get_correlation_id()
     started = perf_counter()
     operation_digest: str | None = None
@@ -387,7 +398,7 @@ async def graphql_query(
         if reason is not None:
             extensions["reason"] = reason
         errors.append({"message": code, "path": error.path, "extensions": extensions})
-    returned = _count_objects(result.data)
+    returned = _count_objects(result.data, schema_keys=cost.introspection_keys)
     content: dict[str, Any] = {"data": result.data}
     if errors:
         content["errors"] = errors

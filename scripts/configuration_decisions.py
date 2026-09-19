@@ -111,6 +111,12 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "portal_base_url": (SUPPLIED, "links in notifications are omitted when unset"),
     "mcp_budget_enabled": (OPT_IN, "needs Redis for the budget buckets"),
     "graphql_budget_enabled": (OPT_IN, "needs Redis for the budget buckets, as MCP's does"),
+    "graphql_introspection_enabled": (
+        OFF_BY_DESIGN,
+        "R11-GQL01: clients discover the schema from the published SDL; on only for a "
+        "development or staging explorer (PlatformAdmin and AgentDeveloper), and production "
+        "refuses it",
+    ),
     "okf_import_enabled": (
         OFF_BY_DESIGN,
         "R11-OKF03: imported OKF edits become pending proposals only; the import stays off "

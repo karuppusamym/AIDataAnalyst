@@ -632,6 +632,31 @@ class Settings(BaseSettings):
     #: Execution mutations (R11-GQL02) per caller per day; a replay of an idempotency key counts
     #: too, because it is still a request the platform has to answer.
     graphql_executions_per_day: int = Field(default=500, ge=1, le=1_000_000)
+    # --- GraphQL demand limits (R11-GQL01) ---------------------------------------
+    # The budget `aida.graphql_limits.admit_document` holds every document to before a resolver
+    # runs, and the endpoint holds every response to after. Defaults are the design's initial
+    # values (section 13: depth 6, 50 aliases, pages of at most 100, 500 returned objects) and the
+    # bounds it named without numbers; each upper bound is the ceiling strawberry's own backstop
+    # limiters are set to, so no valid setting can make a backstop refuse what admission passed.
+    # `tests/test_graphql_settings.py` pins the defaults to `graphql_limits.DEFAULT_LIMITS`.
+    graphql_max_request_bytes: int = Field(default=32_768, ge=4_096, le=1_048_576)
+    graphql_max_tokens: int = Field(default=2_000, ge=500, le=20_000)
+    graphql_max_depth: int = Field(default=6, ge=4, le=12)
+    graphql_max_aliases: int = Field(default=50, ge=1, le=200)
+    #: At least the schema's default page (20), so a field's default can always be admitted.
+    graphql_max_page_size: int = Field(default=100, ge=20, le=500)
+    graphql_max_nodes: int = Field(default=500, ge=100, le=10_000)
+    graphql_max_string_argument_length: int = Field(default=512, ge=256, le=4_096)
+    graphql_max_selection_visits: int = Field(default=5_000, ge=500, le=50_000)
+    graphql_max_response_bytes: int = Field(default=1_048_576, ge=65_536, le=16_777_216)
+    graphql_deadline_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    graphql_max_scope_datasources: int = Field(default=200, ge=1, le=5_000)
+    graphql_max_execution_rows: int = Field(default=1_000, ge=1, le=10_000)
+    #: Schema introspection. Off: the SDL is published under `Docs/90-reference/` and that is how
+    #: a client discovers the schema. On, it is served to PlatformAdmin and AgentDeveloper only,
+    #: in development, test or staging -- production refuses the setting. Hiding the schema is
+    #: never authorization: every field decides on its own whatever this says.
+    graphql_introspection_enabled: bool = False
     # --- Data quality (DQ-6) -------------------------------------------------
     #
     # Off by default so a tenant that has not reviewed the feature keeps today's
@@ -1265,6 +1290,25 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AIDA_ENVIRONMENT must be set explicitly; it no longer defaults "
                 "silently to 'development' outside of tests"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def reject_incoherent_graphql_limits(self) -> "Settings":
+        # R11-GQL01: a page the node budget could never admit would make every connection
+        # field's largest page unusable, and a response ceiling below the request ceiling
+        # would refuse an echo of the caller's own document. Introspection is a development
+        # convenience; production discovers the schema from the published SDL.
+        if self.graphql_max_page_size > self.graphql_max_nodes:
+            raise ValueError("graphql_max_page_size must not exceed graphql_max_nodes")
+        if self.graphql_max_response_bytes < self.graphql_max_request_bytes:
+            raise ValueError(
+                "graphql_max_response_bytes must be at least graphql_max_request_bytes"
+            )
+        if self.environment == "production" and self.graphql_introspection_enabled:
+            raise ValueError(
+                "GraphQL introspection is forbidden in production; clients read the "
+                "published schema (Docs/90-reference/graphql-schema.graphql)"
             )
         return self
 

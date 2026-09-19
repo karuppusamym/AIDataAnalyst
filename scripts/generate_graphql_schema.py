@@ -9,8 +9,9 @@ compare them byte for byte (the same contract as
   printed from `aida.graphql_schema.metadata_schema`, under a header naming the
   schema version (`GRAPHQL_SCHEMA_VERSION`).
 * `Docs/90-reference/graphql-schema.md` -- the reference page: endpoint,
-  demand limits (`aida.graphql_limits.DEFAULT_LIMITS`) and every stable error
-  code (`REFUSAL_CODES`, `EXECUTION_ERROR_CODES`).
+  demand limits (`aida.graphql_limits.DEFAULT_LIMITS`, their `graphql_*`
+  settings and `LIMIT_CEILINGS`), the introspection policy, and every stable
+  error code (`REFUSAL_CODES`, `EXECUTION_ERROR_CODES`).
 
 **Compatibility is checked here, not through OpenAPI.** The OpenAPI baseline
 sees one opaque `POST /graphql`; it cannot see a field removed or an argument
@@ -41,6 +42,8 @@ from graphql import build_schema, find_breaking_changes  # noqa: E402
 from aida.graphql_limits import (  # noqa: E402
     DEFAULT_LIMITS,
     EXECUTION_ERROR_CODES,
+    GRAPHQL_INTROSPECTION_ROLES,
+    LIMIT_CEILINGS,
     REFUSAL_CODES,
 )
 from aida.graphql_schema import GRAPHQL_SCHEMA_VERSION, metadata_schema  # noqa: E402
@@ -65,60 +68,119 @@ def render_sdl() -> str:
 
 
 def render_markdown() -> str:
-    limits = DEFAULT_LIMITS
+    limits, ceilings = DEFAULT_LIMITS, LIMIT_CEILINGS
     before, during, after = "before execution", "while resolving", "after execution"
+    # (limit, default, ceiling, setting, when, code)
     limit_rows = [
-        ("Request body", f"{limits.max_request_bytes} bytes", before, "REQUEST_TOO_LARGE"),
-        ("Document tokens", str(limits.max_tokens), before, "DOCUMENT_TOO_LARGE"),
-        ("Field depth", str(limits.max_depth), before, "DEPTH_LIMIT_EXCEEDED"),
-        ("Aliases (fragments expanded)", str(limits.max_aliases), before, "ALIAS_LIMIT_EXCEEDED"),
-        ("Page size (`first`)", f"1 to {limits.max_page_size}", before, "PAGE_SIZE_EXCEEDED"),
+        (
+            "Request body",
+            f"{limits.max_request_bytes} bytes",
+            str(ceilings.max_request_bytes),
+            "graphql_max_request_bytes",
+            before,
+            "REQUEST_TOO_LARGE",
+        ),
+        (
+            "Document tokens",
+            str(limits.max_tokens),
+            str(ceilings.max_tokens),
+            "graphql_max_tokens",
+            before,
+            "DOCUMENT_TOO_LARGE",
+        ),
+        (
+            "Field depth",
+            str(limits.max_depth),
+            str(ceilings.max_depth),
+            "graphql_max_depth",
+            before,
+            "DEPTH_LIMIT_EXCEEDED",
+        ),
+        (
+            "Aliases (fragments expanded)",
+            str(limits.max_aliases),
+            str(ceilings.max_aliases),
+            "graphql_max_aliases",
+            before,
+            "ALIAS_LIMIT_EXCEEDED",
+        ),
+        (
+            "Page size (`first`)",
+            f"1 to {limits.max_page_size}",
+            str(ceilings.max_page_size),
+            "graphql_max_page_size",
+            before,
+            "PAGE_SIZE_EXCEEDED",
+        ),
         (
             "Returned objects (an upper bound, estimated)",
             str(limits.max_nodes),
+            str(ceilings.max_nodes),
+            "graphql_max_nodes",
             before,
             "NODE_BUDGET_EXCEEDED",
         ),
         (
             "String argument or variable",
             f"{limits.max_string_argument_length} characters",
+            str(ceilings.max_string_argument_length),
+            "graphql_max_string_argument_length",
             before,
             "ARGUMENT_TOO_LONG",
         ),
         (
             "Selections visited while measuring",
             str(limits.max_selection_visits),
+            str(ceilings.max_selection_visits),
+            "graphql_max_selection_visits",
             before,
             "DOCUMENT_TOO_COMPLEX",
         ),
         (
             "Introspection",
             "enabled" if limits.allow_introspection else "disabled",
+            "see below",
+            "graphql_introspection_enabled",
             before,
-            "INTROSPECTION_DISABLED",
+            "INTROSPECTION_DISABLED / INTROSPECTION_FORBIDDEN",
         ),
         (
             "Datasources an organization-wide `tables` listing may decide",
             str(limits.max_scope_datasources),
+            str(ceilings.max_scope_datasources),
+            "graphql_max_scope_datasources",
             during,
             "SCOPE_TOO_BROAD",
         ),
-        ("Resolver deadline", f"{limits.deadline_seconds:g} seconds", during, "DEADLINE_EXCEEDED"),
+        (
+            "Resolver deadline",
+            f"{limits.deadline_seconds:g} seconds",
+            f"{ceilings.deadline_seconds:g}",
+            "graphql_deadline_seconds",
+            during,
+            "DEADLINE_EXCEEDED",
+        ),
         (
             "Execution mutation row limit (`maxRows`, required)",
             f"1 to {limits.max_execution_rows}",
+            str(ceilings.max_execution_rows),
+            "graphql_max_execution_rows",
             during,
             "INVALID_ARGUMENT",
         ),
         (
             "Execution mutation deadline",
             "the gateway's statement timeout plus 15 seconds",
+            "-",
+            "`query_timeout_seconds`",
             during,
             "DEADLINE_EXCEEDED",
         ),
         (
             "Response body, and returned objects counted",
             f"{limits.max_response_bytes} bytes",
+            str(ceilings.max_response_bytes),
+            "graphql_max_response_bytes",
             after,
             "RESPONSE_TOO_LARGE",
         ),
@@ -144,19 +206,48 @@ def render_markdown() -> str:
         "- Authenticated and role-gated like the REST catalog reads. Each field is",
         "  decided exactly as the REST route it answers for decides it -- the mapping",
         "  is in the docstring of `aida.graphql_reads`.",
+        "- Two queries record the read, as their REST routes do: `contextProductVersion`",
+        "  (a consumer's consumption, audit and outbox event, channel `GRAPHQL`) and",
+        "  `contextProductCoverage` (decided as the compile route decides; an audit event,",
+        "  and for a PUBLISHED version a consumption on channel `GRAPHQL_COVERAGE`).",
         "- One named operation per request (`operationName` is required); HTTP",
         "  batching and multi-operation documents are refused.",
         "- Cursors are the same opaque keyset cursors the REST list routes return.",
+        "- Worked, tested operations for agents and SDKs:",
+        "  [graphql-examples.md](graphql-examples.md).",
         "",
         "## Demand limits",
         "",
         "A limit checked before execution refuses the document before any resolver",
-        "runs, so a refused document costs its parse and nothing else.",
+        "runs, so a refused document costs its parse and nothing else. Each limit is a",
+        "setting (`AIDA_` + the name, upper-cased), validated between a floor and the",
+        "ceiling shown; strawberry's backstop limiters sit at the ceilings, so raising a",
+        "limit is never undone by a backstop.",
         "",
-        "| Limit | Value | Checked | Code |",
-        "|---|---|---|---|",
+        "| Limit | Default | Ceiling | Setting | Checked | Code |",
+        "|---|---|---|---|---|---|",
     ]
-    lines += [f"| {name} | {value} | {when} | `{code}` |" for name, value, when, code in limit_rows]
+    lines += [
+        f"| {name} | {value} | {ceiling} | `{setting.strip('`')}` | {when} | "
+        + " / ".join(f"`{part}`" for part in code.split(" / "))
+        + " |"
+        for name, value, ceiling, setting, when, code in limit_rows
+    ]
+    lines += [
+        "",
+        "## Introspection",
+        "",
+        "Off by default in every environment: clients discover the schema from the",
+        "published SDL beside this page. With `graphql_introspection_enabled` on, it is",
+        "served in development, test and staging to "
+        + " and ".join(f"`{role}`" for role in sorted(GRAPHQL_INTROSPECTION_ROLES))
+        + " only;",
+        "anyone else is refused `INTROSPECTION_FORBIDDEN`, and production refuses the",
+        "setting at startup. An admitted `__schema`/`__type` answer is not counted",
+        "against the returned-object budget (it is the schema, not data); the response",
+        "byte ceiling still applies. Hiding the schema is not authorization: every",
+        "field is decided on its own either way.",
+    ]
     lines += [
         "",
         "## Refusal codes (document refused, no `data`)",
