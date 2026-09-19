@@ -78,6 +78,7 @@ code itself: never SQL, a credential or an object name.
 |---|---|
 | `FORBIDDEN` | the caller may not read this object; `extensions.reason` carries the value-free reason code the equivalent REST route puts in its 403 |
 | `NOT_FOUND` | no such object (the REST route answers 404) |
+| `GONE` | the context product version was retired and this caller read it before; re-pin to the current published version (the REST route answers 410) |
 | `INVALID_ARGUMENT` | an argument is out of range; `extensions.reason` says which rule |
 | `INVALID_CURSOR` | `after` is not a cursor this field issued |
 | `SCOPE_TOO_BROAD` | an organization-wide listing spans too many datasources; name one |

@@ -328,7 +328,7 @@ def _graphql_rows() -> list[SurfaceRow]:
     """
     import ast
 
-    from aida import governed_execution, graphql_reads
+    from aida import context_product_reads, governed_execution, graphql_reads
 
     role_sets = {
         "DATASOURCE_READ_ROLES": set(graphql_reads.DATASOURCE_READ_ROLES),
@@ -337,6 +337,7 @@ def _graphql_rows() -> list[SurfaceRow]:
         # `aida.governed_execution`, with their own role sets.
         "TOOL_EXECUTION_ROLES": set(governed_execution.TOOL_EXECUTION_ROLES),
         "RECEIPT_READ_ROLES": set(governed_execution.RECEIPT_READ_ROLES),
+        "CONTEXT_PRODUCT_READERS": set(context_product_reads.CONTEXT_PRODUCT_READERS),
     }
     module = "aida.graphql_schema"
     source_path = REPO_ROOT / "src" / "aida" / "graphql_schema.py"

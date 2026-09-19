@@ -217,14 +217,53 @@ def _called_names(node: ast.AST) -> set[str]:
     return names
 
 
+def _breadth_first(
+    module: str,
+    function: str,
+    hit: Callable[[str, str, ast.FunctionDef | ast.AsyncFunctionDef], bool],
+    *,
+    max_depth: int,
+    skip: frozenset[str] = frozenset(),
+) -> bool:
+    """True when some function within `max_depth` calls of `module.function` satisfies `hit`.
+
+    Breadth-first with one visited set: every function is examined once, at its shortest
+    distance from the start. That is the answer the earlier depth-first walk over simple paths
+    gave -- a shortest path is always a simple path, so a function within `max_depth` along some
+    simple path is within it along its shortest one -- without re-exploring every subtree once
+    per path that reaches it, which made a *negative* answer exponential in the fan-out (a
+    resolver calling into a wide service took the surface matrix from about a minute to over ten).
+    """
+    start = (module, function)
+    seen = {start}
+    frontier = [start]
+    depth = 0
+    while frontier and depth <= max_depth:
+        following: list[tuple[str, str]] = []
+        for current_module, current_function in frontier:
+            node = _definition(current_module, current_function)
+            if node is None:
+                continue
+            if hit(current_module, current_function, node):
+                return True
+            for name in sorted(_called_names(node)):
+                if name in skip:
+                    continue
+                for candidate in _candidates(current_module, name):
+                    if candidate not in seen:
+                        seen.add(candidate)
+                        following.append(candidate)
+        frontier = following
+        depth += 1
+    return False
+
+
 def reaches_call(
     module: str,
     function: str,
     targets: frozenset[str],
     *,
     max_depth: int = 6,
-    _seen: frozenset[tuple[str, str]] | None = None,
-    _depth: int = 0,
 ) -> bool:
     """True when `module.function` can reach a call to any name in `targets`.
 
@@ -234,29 +273,12 @@ def reaches_call(
     is generous relative to the deepest handler -> helper -> service chain in the
     codebase (three hops).
     """
-    seen = _seen or frozenset()
-    key = (module, function)
-    if key in seen or _depth > max_depth:
-        return False
-    node = _definition(module, function)
-    if node is None:
-        return False
-    called = _called_names(node)
-    if called & targets:
-        return True
-    seen = seen | {key}
-    for name in sorted(called):
-        for candidate_module, candidate_name in _candidates(module, name):
-            if reaches_call(
-                candidate_module,
-                candidate_name,
-                targets,
-                max_depth=max_depth,
-                _seen=seen,
-                _depth=_depth + 1,
-            ):
-                return True
-    return False
+    return _breadth_first(
+        module,
+        function,
+        lambda _module, _function, node: bool(_called_names(node) & targets),
+        max_depth=max_depth,
+    )
 
 
 def references_name(module: str, function: str, names: frozenset[str]) -> bool:
@@ -282,32 +304,16 @@ def reaches_reference(
     names: frozenset[str],
     *,
     max_depth: int = 6,
-    _seen: frozenset[tuple[str, str]] | None = None,
-    _depth: int = 0,
 ) -> bool:
     """`references_name`, followed transitively through the call graph."""
-    seen = _seen or frozenset()
-    key = (module, function)
-    if key in seen or _depth > max_depth:
-        return False
-    node = _definition(module, function)
-    if node is None:
-        return False
-    if references_name(module, function, names):
-        return True
-    seen = seen | {key}
-    for name in sorted(_called_names(node)):
-        for candidate_module, candidate_name in _candidates(module, name):
-            if reaches_reference(
-                candidate_module,
-                candidate_name,
-                names,
-                max_depth=max_depth,
-                _seen=seen,
-                _depth=_depth + 1,
-            ):
-                return True
-    return False
+    return _breadth_first(
+        module,
+        function,
+        lambda current_module, current_function, _node: references_name(
+            current_module, current_function, names
+        ),
+        max_depth=max_depth,
+    )
 
 
 _SESSION_WRITE_METHODS = frozenset({"add", "add_all", "delete", "merge", "commit"})
@@ -365,30 +371,12 @@ def reaches_session_write(
     function: str,
     *,
     max_depth: int = 6,
-    _seen: frozenset[tuple[str, str]] | None = None,
-    _depth: int = 0,
 ) -> bool:
     """True when `module.function` can reach a session write, transitively."""
-    seen = _seen or frozenset()
-    key = (module, function)
-    if key in seen or _depth > max_depth:
-        return False
-    node = _definition(module, function)
-    if node is None:
-        return False
-    if _writes_via_session(node):
-        return True
-    seen = seen | {key}
-    for name in sorted(_called_names(node)):
-        if name in NON_GOVERNED_WRITERS:
-            continue
-        for candidate_module, candidate_name in _candidates(module, name):
-            if reaches_session_write(
-                candidate_module,
-                candidate_name,
-                max_depth=max_depth,
-                _seen=seen,
-                _depth=_depth + 1,
-            ):
-                return True
-    return False
+    return _breadth_first(
+        module,
+        function,
+        lambda _module, _function, node: _writes_via_session(node),
+        max_depth=max_depth,
+        skip=NON_GOVERNED_WRITERS,
+    )

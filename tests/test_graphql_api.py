@@ -46,6 +46,7 @@ from structlog.testing import capture_logs
 
 import aida.models  # noqa: F401 - registers every mapped table on Base.metadata
 from aida import graphql_api, graphql_reads
+from aida.context_product_reads import CONTEXT_PRODUCT_READERS
 from aida.governed_execution import RECEIPT_OVERSIGHT_ROLES, TOOL_EXECUTION_ROLES
 from aida.graphql_limits import (
     DEFAULT_LIMITS,
@@ -506,6 +507,8 @@ def _route_roles(method: str, path: str) -> tuple[str, ...]:
         ("GET", "/v1/tables/{table_id}/description", CATALOG_READ_ROLES),
         ("GET", "/v1/tables/{table_id}/column-documentation", CATALOG_READ_ROLES),
         ("GET", "/v1/organizations/{organization_id}/catalog/rows", CATALOG_READ_ROLES),
+        ("GET", "/v1/projects/{project_id}/context-products", CONTEXT_PRODUCT_READERS),
+        ("GET", "/v1/context-product-versions/{version_id}", CONTEXT_PRODUCT_READERS),
         ("POST", "/graphql", graphql_api.GRAPHQL_ROUTE_ROLES),
     ],
 )
@@ -515,7 +518,9 @@ def test_each_field_requires_the_roles_its_rest_route_declares(
     """The role sets are read back from the closures FastAPI wired into the live routes, so
     a REST route that narrows or widens its roles fails here until GraphQL follows."""
     assert _route_roles(method, path) == tuple(sorted(roles))
-    assert set(GRAPHQL_ENDPOINT_ROLES) == set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES)
+    assert set(GRAPHQL_ENDPOINT_ROLES) == (
+        set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES) | set(CONTEXT_PRODUCT_READERS)
+    )
     # R11-GQL02: the route also admits whoever may execute a governed tool or read an
     # execution receipt -- and nobody else. Each field still enforces its own set.
     assert set(graphql_api.GRAPHQL_ROUTE_ROLES) == (

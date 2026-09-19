@@ -1,7 +1,7 @@
 """The Atlas metadata GraphQL schema (R11-GQL01, design section 13A).
 
-Typed metadata reads -- datasources, tables, columns, constraints and approved
-descriptions -- with cursor paging. Every resolver is a thin call into
+Typed metadata reads -- datasources, tables, columns, constraints, approved
+descriptions and context products -- with cursor paging. Every resolver is a thin call into
 `aida.graphql_reads`, which makes the decision the equivalent REST route makes;
 no resolver builds a query of its own, imports a router, or calls over HTTP.
 
@@ -14,6 +14,10 @@ rows by construction. There is no subscription. No type a query can reach
 carries a source value either -- no column default, partition bound, view or
 routine body, profile statistic or sample row; the metadata types expose what the
 REST reads expose and nothing more (`tests/test_graphql_api.py` scans for it).
+
+**One read records something.** `contextProductVersion` is the governed read REST's
+`GET /v1/context-product-versions/{id}` is: for a consumer it records the consumption
+edge, audit and outbox event (channel `GRAPHQL`), exactly as that route does for REST.
 
 **Refusals are per field.** A field the caller may not read resolves to `null`
 with an error whose `extensions.code` is stable and whose message is that code.
@@ -64,10 +68,12 @@ from aida.graphql_reads import (
     ReadScope,
     TableDescription,
     column_business_description,
+    get_context_product_version,
     get_datasource,
     get_table,
     list_columns,
     list_constraints,
+    list_context_products,
     list_datasource_tables,
     list_datasources,
     list_organization_tables,
@@ -77,6 +83,8 @@ from aida.graphql_reads import (
 )
 from aida.models import MetadataTable
 from aida.schemas import (
+    ContextProductRead,
+    ContextProductVersionRead,
     DataSourceSummaryRead,
     MetadataColumnRead,
     MetadataConstraintRead,
@@ -441,6 +449,97 @@ class ConstraintConnection:
         )
 
 
+@strawberry.type(
+    description=(
+        "One version of a context product, as `GET /v1/context-product-versions/{id}` returns it: "
+        "what it names and who may ask through it. Reading it through `contextProductVersion` "
+        "is a governed consumption, recorded as REST records its own."
+    )
+)
+class ContextProductVersion:
+    id: strawberry.ID
+    product_id: strawberry.ID
+    product_key: str
+    version: int
+    status: str
+    name: str
+    description: str
+    purpose: str
+    owner_type: str
+    owner_principal: str
+    table_ids: list[strawberry.ID]
+    eligible_tool_version_ids: list[strawberry.ID]
+    routine_ids: list[strawberry.ID]
+    allowed_consumer_roles: list[str]
+    lineage_depth: int
+    fingerprint: str
+    published_at: datetime | None
+    support_window_ends_at: datetime | None
+    superseded_by_version_id: strawberry.ID | None
+
+    @classmethod
+    def of(cls, read: ContextProductVersionRead) -> ContextProductVersion:
+        return cls(
+            id=_id(read.id),
+            product_id=_id(read.product_id),
+            product_key=read.product_key,
+            version=read.version,
+            status=read.status,
+            name=read.name,
+            description=read.description,
+            purpose=read.purpose,
+            owner_type=read.owner_type,
+            owner_principal=read.owner_principal,
+            table_ids=[_id(value) for value in read.table_ids],
+            eligible_tool_version_ids=[_id(value) for value in read.eligible_tool_version_ids],
+            routine_ids=[_id(value) for value in read.routine_ids],
+            allowed_consumer_roles=list(read.allowed_consumer_roles),
+            lineage_depth=read.lineage_depth,
+            fingerprint=read.fingerprint,
+            published_at=read.published_at,
+            support_window_ends_at=read.support_window_ends_at,
+            superseded_by_version_id=(
+                _id(read.superseded_by_version_id) if read.superseded_by_version_id else None
+            ),
+        )
+
+
+@strawberry.type(
+    description="A context product in a project listing, with the version that listing shows."
+)
+class ContextProduct:
+    id: strawberry.ID
+    project_id: strawberry.ID
+    product_key: str
+    lifecycle_status: str
+    latest_version: ContextProductVersion
+
+    @classmethod
+    def of(cls, read: ContextProductRead) -> ContextProduct:
+        return cls(
+            id=_id(read.id),
+            project_id=_id(read.project_id),
+            product_key=read.product_key,
+            lifecycle_status=read.lifecycle_status,
+            latest_version=ContextProductVersion.of(read.latest_version),
+        )
+
+
+@strawberry.type(description="A page of context products, in `productKey` order.")
+class ContextProductConnection:
+    nodes: list[ContextProduct]
+    page_info: PageInfo
+    total_count: int | None
+
+    @classmethod
+    def of(cls, page: Page[ContextProductRead]) -> ContextProductConnection:
+        return cls(
+            nodes=[ContextProduct.of(item) for item in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+
 @strawberry.type(description="Metadata reads. Nothing here executes against a source.")
 class Query:
     @field_resolver("One datasource by id, as `GET /v1/datasources/{id}`.")
@@ -516,6 +615,34 @@ class Query:
             except ExecutionRefused as refused:
                 raise ReadRefused(refused.code, refused.reason) from refused
         return GovernedExecutionReceipt.of(record)
+
+    @field_resolver(
+        "A project's context products, as `GET /v1/projects/{id}/context-products`: the "
+        "lifecycle view, or with `askable` only the published products a role of the caller's "
+        "may ask through; a contracted agent sees only what its envelope names."
+    )
+    async def context_products(
+        self,
+        info: Info,
+        project_id: strawberry.ID,
+        askable: bool = False,
+        first: int = _DEFAULT_PAGE,
+        after: str | None = None,
+    ) -> ContextProductConnection | None:
+        page = await list_context_products(
+            info.context, _uuid(project_id), askable=askable, first=first, after=after
+        )
+        return ContextProductConnection.of(page)
+
+    @field_resolver(
+        "One context product version, as `GET /v1/context-product-versions/{id}` reads it -- "
+        "envelope, role, retirement (`GONE`), purpose and quality -- and, for a consumer, "
+        "recorded as a consumption on channel GRAPHQL."
+    )
+    async def context_product_version(
+        self, info: Info, id: strawberry.ID
+    ) -> ContextProductVersion | None:
+        return ContextProductVersion.of(await get_context_product_version(info.context, _uuid(id)))
 
     @field_resolver("One table by id, decided as its columns route decides it.")
     async def table(self, info: Info, id: strawberry.ID) -> Table | None:

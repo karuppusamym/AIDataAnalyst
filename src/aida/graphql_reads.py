@@ -15,6 +15,8 @@ GraphQL field                             REST route it answers for
 ``Table.constraints``                     ``GET /v1/tables/{id}/constraints``
 ``Table.description``                     ``GET /v1/tables/{id}/description``
 ``Column.businessDescription``            ``GET /v1/tables/{id}/column-documentation``
+``contextProducts(projectId)``            ``GET /v1/projects/{id}/context-products``
+``contextProductVersion(id)``             ``GET /v1/context-product-versions/{id}``
 ========================================  ===========================================
 
 The authorization pieces are the shared ones those routes call --
@@ -70,11 +72,19 @@ from strawberry.dataloader import DataLoader
 from aida.authorization_gate import AuthorizationDenied, gate
 from aida.catalog_read_model import _latest_approved_documentation
 from aida.column_documentation import current_descriptions_for_table
+from aida.context_product_reads import (
+    CONTEXT_PRODUCT_READERS,
+    _product_read,
+    _version_read,
+    context_product_listing,
+    read_context_product_version,
+)
 from aida.description_withdrawal import latest_withdrawn_table_version
 from aida.graphql_limits import DEFAULT_LIMITS, GraphQLLimits
 from aida.models import (
     AssetDocumentationVersion,
     ColumnDocumentationVersion,
+    ContextProduct,
     DataSource,
     MetadataColumn,
     MetadataConstraint,
@@ -83,6 +93,8 @@ from aida.models import (
 )
 from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
 from aida.schemas import (
+    ContextProductRead,
+    ContextProductVersionRead,
     DataSourceSummaryRead,
     MetadataColumnRead,
     MetadataConstraintRead,
@@ -103,10 +115,12 @@ __all__ = [
     "ReadScope",
     "TableDescription",
     "column_business_description",
+    "get_context_product_version",
     "get_datasource",
     "get_table",
     "list_columns",
     "list_constraints",
+    "list_context_products",
     "list_datasources",
     "list_datasource_tables",
     "list_organization_tables",
@@ -136,7 +150,7 @@ CATALOG_READ_ROLES: tuple[str, ...] = ("PlatformAdmin", "MetadataAdmin", "Analys
 #: so a DataAdmin can read a datasource here exactly as over REST and is refused
 #: its tables exactly as over REST.
 GRAPHQL_ENDPOINT_ROLES: tuple[str, ...] = tuple(
-    sorted(set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES))
+    sorted(set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES) | set(CONTEXT_PRODUCT_READERS))
 )
 
 _READ_METADATA = "READ_METADATA"
@@ -847,3 +861,79 @@ async def referenced_table(
         if refused.code == "NOT_FOUND":
             return None
         raise
+
+
+# --- context products (R11-GQL01) ---------------------------------------------
+
+
+def _shared_refusal(exc: HTTPException) -> ReadRefused:
+    """A refusal from a decision REST shares (`aida.context_product_reads`), with its meaning.
+
+    Its `detail` is never forwarded: some are prose, and the anti-enumeration 404 is the same
+    answer for "no such product" and "not yours to see" -- a field refusal must not tell them
+    apart either.
+    """
+    if exc.status_code == 404:
+        return ReadRefused("NOT_FOUND")
+    if exc.status_code == 403:
+        return ReadRefused("FORBIDDEN", "CROSS_ORGANIZATION")
+    if exc.status_code == 410:
+        return ReadRefused("GONE", "CONTEXT_PRODUCT_VERSION_RETIRED")
+    return ReadRefused("CONFLICT", "CONTEXT_PRODUCT_UNAVAILABLE")
+
+
+async def list_context_products(
+    scope: ReadScope,
+    project_id: UUID,
+    *,
+    askable: bool,
+    first: int,
+    after: str | None,
+) -> Page[ContextProductRead]:
+    """`GET /v1/projects/{id}/context-products`: the same listing decision
+    (`context_product_listing`) -- lifecycle view, or with `askable` only what the caller could
+    ask through, and for a contracted agent only what its envelope names -- in the same
+    `product_key` order, paged by keyset instead of offset."""
+    _require_roles(scope, CONTEXT_PRODUCT_READERS)
+    first = _page_size(scope, first)
+    async with scope.lock:
+        try:
+            listing = await context_product_listing(
+                scope.session, scope.context, project_id=project_id, askable=askable
+            )
+        except HTTPException as exc:
+            raise _shared_refusal(exc) from exc
+        statement = listing.statement.order_by(ContextProduct.product_key)
+        total: int | None = None
+        if after is not None:
+            (last_key,) = _decode(after, [str])
+            statement = statement.where(ContextProduct.product_key > last_key)
+        else:
+            total = int(await scope.session.scalar(listing.count_statement) or 0)
+        rows = list((await scope.session.execute(statement.limit(first + 1))).all())
+    has_next = len(rows) > first
+    rows = rows[:first]
+    return Page(
+        items=[_product_read(product, version) for product, version in rows],
+        total=total,
+        end_cursor=encode_cursor(rows[-1][0].product_key) if rows else None,
+        has_next_page=has_next,
+    )
+
+
+async def get_context_product_version(
+    scope: ReadScope, version_id: UUID
+) -> ContextProductVersionRead:
+    """`GET /v1/context-product-versions/{id}`: the governed read itself
+    (`read_context_product_version`) -- envelope, role, pinned-version eligibility, the
+    retirement signal, purpose and quality -- and, for a consumer, the consumption edge,
+    audit and outbox event, recorded under channel `GRAPHQL`."""
+    _require_roles(scope, CONTEXT_PRODUCT_READERS)
+    async with scope.lock:
+        try:
+            product, version = await read_context_product_version(
+                scope.session, scope.context, version_id, channel="GRAPHQL"
+            )
+        except HTTPException as exc:
+            raise _shared_refusal(exc) from exc
+    return _version_read(product, version)

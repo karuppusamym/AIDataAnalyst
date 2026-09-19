@@ -70,6 +70,49 @@ type ConstraintConnection {
   totalCount: Int
 }
 
+"""
+A context product in a project listing, with the version that listing shows.
+"""
+type ContextProduct {
+  id: ID!
+  projectId: ID!
+  productKey: String!
+  lifecycleStatus: String!
+  latestVersion: ContextProductVersion!
+}
+
+"""A page of context products, in `productKey` order."""
+type ContextProductConnection {
+  nodes: [ContextProduct!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+One version of a context product, as `GET /v1/context-product-versions/{id}` returns it: what it names and who may ask through it. Reading it through `contextProductVersion` is a governed consumption, recorded as REST records its own.
+"""
+type ContextProductVersion {
+  id: ID!
+  productId: ID!
+  productKey: String!
+  version: Int!
+  status: String!
+  name: String!
+  description: String!
+  purpose: String!
+  ownerType: String!
+  ownerPrincipal: String!
+  tableIds: [ID!]!
+  eligibleToolVersionIds: [ID!]!
+  routineIds: [ID!]!
+  allowedConsumerRoles: [String!]!
+  lineageDepth: Int!
+  fingerprint: String!
+  publishedAt: DateTime
+  supportWindowEndsAt: DateTime
+  supersededByVersionId: ID
+}
+
 """A registered source system, as `GET /v1/datasources/{id}` returns it."""
 type DataSource {
   id: ID!
@@ -230,6 +273,16 @@ type Query {
   One governed execution receipt (R11-GQL02): the caller's own, or any in the organization for PlatformAdmin and Auditor. Never rows.
   """
   governedExecution(id: ID!): GovernedExecutionReceipt
+
+  """
+  A project's context products, as `GET /v1/projects/{id}/context-products`: the lifecycle view, or with `askable` only the published products a role of the caller's may ask through; a contracted agent sees only what its envelope names.
+  """
+  contextProducts(projectId: ID!, askable: Boolean! = false, first: Int! = 20, after: String = null): ContextProductConnection
+
+  """
+  One context product version, as `GET /v1/context-product-versions/{id}` reads it -- envelope, role, retirement (`GONE`), purpose and quality -- and, for a consumer, recorded as a consumption on channel GRAPHQL.
+  """
+  contextProductVersion(id: ID!): ContextProductVersion
 
   """One table by id, decided as its columns route decides it."""
   table(id: ID!): Table

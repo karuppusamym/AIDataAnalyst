@@ -159,6 +159,10 @@ EXECUTION_ERROR_CODES: dict[str, str] = {
         "reason code the equivalent REST route puts in its 403"
     ),
     "NOT_FOUND": "no such object (the REST route answers 404)",
+    "GONE": (
+        "the context product version was retired and this caller read it before; "
+        "re-pin to the current published version (the REST route answers 410)"
+    ),
     "INVALID_ARGUMENT": "an argument is out of range; `extensions.reason` says which rule",
     "INVALID_CURSOR": "`after` is not a cursor this field issued",
     "SCOPE_TOO_BROAD": "an organization-wide listing spans too many datasources; name one",

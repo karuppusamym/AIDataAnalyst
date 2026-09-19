@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **515**
-- By family: BULK 11, EXPORT 7, GRAPHQL 15, JOB 27, MCP 9, REST 445, SDK 1
+- Surfaces covered: **517**
+- By family: BULK 11, EXPORT 7, GRAPHQL 17, JOB 27, MCP 9, REST 445, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -81,6 +81,8 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL Constraint.referencedTable` | GRAPHQL | `aida.graphql_schema.Constraint.referenced_table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL DataSource.tables` | GRAPHQL | `aida.graphql_schema.DataSource.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Mutation.executeGovernedTool` | GRAPHQL | `aida.graphql_schema.Mutation.execute_governed_tool` | AgentDeveloper, Analyst, PlatformAdmin, ToolConsumer | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL Query.contextProductVersion` | GRAPHQL | `aida.graphql_schema.Query.context_product_version` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
+| `GRAPHQL Query.contextProducts` | GRAPHQL | `aida.graphql_schema.Query.context_products` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GRAPHQL Query.datasource` | GRAPHQL | `aida.graphql_schema.Query.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.datasources` | GRAPHQL | `aida.graphql_schema.Query.datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.governedExecution` | GRAPHQL | `aida.graphql_schema.Query.governed_execution` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |
@@ -91,7 +93,7 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL Table.constraints` | GRAPHQL | `aida.graphql_schema.Table.constraints` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Table.datasource` | GRAPHQL | `aida.graphql_schema.Table.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Table.description` | GRAPHQL | `aida.graphql_schema.Table.description` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
-| `POST /graphql` | GRAPHQL | `aida.graphql_api.graphql_query` | AgentDeveloper, Analyst, Auditor, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, ToolConsumer, Viewer | yes | no | mutating verb, no write found | no | not cancellable |
+| `POST /graphql` | GRAPHQL | `aida.graphql_api.graphql_query` | AgentDeveloper, Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Reviewer, SemanticAdmin, ToolConsumer, Viewer | yes | no | mutating verb, no write found | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}/grounding-receipts` | JOB | `aida.api.get_agent_run_grounding_receipts` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/agent-runs/{agent_run_id}` | JOB | `aida.api.get_agent_run` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/ai/runtime-status` | JOB | `aida.api.ai_runtime_status` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
