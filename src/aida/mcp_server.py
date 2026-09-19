@@ -1892,6 +1892,24 @@ async def _handle_native_lineage_tool_call(
             "isError": True,
             "content": [{"type": "text", "text": "Datasource not accessible."}],
         }
+    try:
+        # R11-D28: the datasource's workspace gate, as every catalog read of it asks --
+        # each of these tools names its tables. A refusal reads exactly like a datasource
+        # that does not exist.
+        await gate(
+            session,
+            context,
+            settings=settings or get_settings(),
+            action="READ_METADATA",
+            resource_type="datasource",
+            resource_id=str(datasource.id),
+            datasource_id=datasource.id,
+        )
+    except AuthorizationDenied:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Datasource not accessible."}],
+        }
 
     payload: UnifiedLineageGraphRead | UnifiedLineageImpactRead | dict[str, Any]
     try:

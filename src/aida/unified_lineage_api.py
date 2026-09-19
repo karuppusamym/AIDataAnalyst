@@ -39,15 +39,17 @@ is fabricated for an edge it alone establishes (see
 `mcp_server.py::_transformation_detail`).
 """
 
-from typing import Literal
+from collections.abc import Callable, Coroutine
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.authorization_gate import AuthorizationDenied, gate, gate_read
 from aida.config import Settings, get_settings
 from aida.db import get_session
-from aida.models import DataDomain
+from aida.models import DataDomain, DataSource
 from aida.resource_scope import load_datasource_in_scope
 from aida.schemas import (
     DomainLineageGraphRead,
@@ -59,7 +61,7 @@ from aida.security import SecurityContext, enforce_organization, require_roles
 # R11-GQL01: the builders, the reader roles and the not-found error live in
 # `aida.unified_lineage_service`, so GraphQL can serve the same reads without importing
 # a router. Re-exported here for the importers this module already had.
-from aida.unified_lineage_service import (  # noqa: F401
+from aida.unified_lineage_service import (
     UNIFIED_LINEAGE_READER_ROLES,
     LineageNodeNotFoundError,
     _build_unified_graph,
@@ -67,6 +69,17 @@ from aida.unified_lineage_service import (  # noqa: F401
     build_unified_lineage_graph_payload,
     build_unified_lineage_impact_payload,
 )
+
+# The names this module re-exports, listed so a type checker treats them as exported
+# (implicit re-export is off); what the module defines itself is public as before.
+__all__ = [
+    "LineageNodeNotFoundError",
+    "UNIFIED_LINEAGE_READER_ROLES",
+    "_build_unified_graph",
+    "build_domain_unified_lineage_graph_payload",
+    "build_unified_lineage_graph_payload",
+    "build_unified_lineage_impact_payload",
+]
 
 router = APIRouter(prefix="/v1", tags=["unified-lineage"])
 
@@ -79,6 +92,32 @@ async def _load_domain(
         raise HTTPException(status_code=404, detail="data domain not found")
     enforce_organization(context, domain.organization_id)
     return domain
+
+
+def _workspace_admits(
+    session: AsyncSession, context: SecurityContext, settings: Settings
+) -> Callable[[DataSource], Coroutine[Any, Any, bool]]:
+    """R11-D28: the question a domain graph asks of each datasource it would federate --
+    does the caller's workspace gate admit `READ_METADATA` on it, as every catalog read of
+    that datasource asks. A refusal withholds the datasource rather than failing the graph:
+    the rest of the domain is still an answer."""
+
+    async def admits(datasource: DataSource) -> bool:
+        try:
+            await gate(
+                session,
+                context,
+                settings=settings,
+                action="READ_METADATA",
+                resource_type="datasource",
+                resource_id=str(datasource.id),
+                datasource_id=datasource.id,
+            )
+        except AuthorizationDenied:
+            return False
+        return True
+
+    return admits
 
 
 @router.get(
@@ -111,9 +150,21 @@ async def get_unified_lineage_graph(
     plan: one node/edge set spanning every lineage source instead of
     separate, unlinked workbenches. Also served as the native MCP tool
     `atlas__get_lineage_graph` (`mcp_server.py`).
+
+    R11-D28: the datasource's workspace gate is asked, as its tables route asks it -- the
+    graph names those tables.
     """
 
     datasource = await load_datasource_in_scope(session, context, datasource_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
     return await build_unified_lineage_graph_payload(
         session,
         datasource,
@@ -145,9 +196,20 @@ async def get_unified_lineage_impact(
     if this node changed" -- the gap called out against Collibra's impact
     analysis view. Also served as the native MCP tool
     `atlas__get_lineage_impact` (`mcp_server.py`).
+
+    R11-D28: the datasource's workspace gate is asked, as its tables route asks it.
     """
 
     datasource = await load_datasource_in_scope(session, context, datasource_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
     try:
         return await build_unified_lineage_impact_payload(
             session,
@@ -190,6 +252,10 @@ async def get_domain_unified_lineage_graph(
     sources sharing a governance boundary, without opening an unbounded
     org-wide graph (ADR-0010's bounded/lazy/value-free contract still
     applies at this wider scope; see build_domain_unified_lineage_graph_payload).
+
+    R11-D28: each datasource of the domain is admitted by the caller's workspace gate or
+    withheld -- it contributes no node and no edge, and is counted in
+    `withheld_datasource_count`, never named.
     """
 
     domain = await _load_domain(session, context, domain_id)
@@ -201,4 +267,5 @@ async def get_domain_unified_lineage_graph(
         suggestion_status=suggestion_status,
         settings=settings,
         include_pending_edges=include_pending_edges,
+        admits=_workspace_admits(session, context, settings),
     )

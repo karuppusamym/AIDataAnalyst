@@ -1285,6 +1285,9 @@ class DomainLineageGraphRead(ApiModel):
     truncated: bool = False
     truncation_reasons: list[str] = Field(default_factory=list)
     withheld_cross_boundary_domain_ids: list[UUID] = Field(default_factory=list)
+    # R11-D28: datasources of this domain the caller's workspace gate refused. They
+    # contribute nothing to the graph and are counted, never named.
+    withheld_datasource_count: int = 0
 
 
 class UnifiedLineageImpactNodeRead(ApiModel):

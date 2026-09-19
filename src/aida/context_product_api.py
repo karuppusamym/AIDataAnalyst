@@ -13,7 +13,7 @@ from aida.context import get_correlation_id
 
 # The read decisions REST shares with GraphQL (R11-GQL01); re-imported so every existing
 # caller of these names is unchanged.
-from aida.context_product_reads import (  # noqa: F401
+from aida.context_product_reads import (
     CONTEXT_PRODUCT_AUTHORS,
     CONTEXT_PRODUCT_LIFECYCLE_READERS,
     CONTEXT_PRODUCT_READERS,
@@ -67,6 +67,25 @@ from aida.schemas import (
     Page,
 )
 from aida.security import SecurityContext, require_roles
+
+# The names this module re-exports, listed so a type checker treats them as exported
+# (implicit re-export is off); what the module defines itself is public as before.
+__all__ = [
+    "CONTEXT_PRODUCT_AUTHORS",
+    "CONTEXT_PRODUCT_LIFECYCLE_READERS",
+    "CONTEXT_PRODUCT_READERS",
+    "_can_read_context_product_version",
+    "_can_read_lifecycle",
+    "_definition_from_version",
+    "_enforce_capability_envelope",
+    "_envelope_listing_clause",
+    "_product_read",
+    "_product_scope",
+    "_version_read",
+    "_version_scope",
+    "context_product_listing",
+    "read_context_product_version",
+]
 
 router = APIRouter(prefix="/v1", tags=["context-products"])
 

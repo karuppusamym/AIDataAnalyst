@@ -19,8 +19,9 @@ about who may read it.
 """
 
 from collections import Counter
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import and_, or_, select
@@ -199,6 +200,7 @@ async def build_domain_unified_lineage_graph_payload(
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = "APPROVED",
     settings: Settings | None = None,
     include_pending_edges: bool = False,
+    admits: Callable[[DataSource], Coroutine[Any, Any, bool]] | None = None,
 ) -> DomainLineageGraphRead:
     """Federate the per-datasource unified lineage graph (above) across every
     datasource in one data_domain (ADR-0017 SS3, SS6).
@@ -216,6 +218,12 @@ async def build_domain_unified_lineage_graph_payload(
     unique across two unrelated datasources that happen to share a
     namespace -- prefixing removes the false-merge risk rather than hoping
     it doesn't occur.
+
+    R11-D28: `admits` is asked of each datasource before it is built. One it
+    refuses contributes nothing -- no node, no edge, no cross-source candidate,
+    since those are drawn from the contributing datasources only -- and is
+    counted in `withheld_datasource_count`, never named. The route passes the
+    caller's workspace gate; `None` admits every datasource of the domain.
     """
 
     datasources = (
@@ -231,8 +239,12 @@ async def build_domain_unified_lineage_graph_payload(
     counts_by_source: dict[str, int] = {}
     truncation_reasons: list[str] = []
     contributing_datasource_ids: list[UUID] = []
+    withheld_datasource_count = 0
 
     for datasource in datasources:
+        if admits is not None and not await admits(datasource):
+            withheld_datasource_count += 1
+            continue
         if len(merged_nodes) >= node_limit or len(merged_edges) >= edge_limit:
             truncation_reasons.append("DOMAIN_DATASOURCE_LIMIT")
             break
@@ -512,6 +524,7 @@ async def build_domain_unified_lineage_graph_payload(
         truncated=bool(truncation_reasons),
         truncation_reasons=truncation_reasons,
         withheld_cross_boundary_domain_ids=sorted(withheld_cross_boundary_domain_ids, key=str),
+        withheld_datasource_count=withheld_datasource_count,
     )
 
 
