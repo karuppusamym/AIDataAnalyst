@@ -22,6 +22,7 @@ import pytest
 from aida.dbt_artifacts import _redact_compiled_sql
 from aida.envelope_models import AVAILABLE, MetadataRoutine
 from aida.ingest_screening import CLEAN
+from aida.procedure_lineage import parse_procedure_lineage
 from aida.routine_lineage_edges import RoutineNotEligibleError, require_eligible_routine_body
 from aida.sql_redaction import (
     VALUE_FREE_REDACTION_STATUSES,
@@ -235,3 +236,67 @@ def test_a_lexically_redacted_body_is_eligible_for_lineage() -> None:
 def test_a_body_that_could_not_be_stored_is_still_refused() -> None:
     with pytest.raises(RoutineNotEligibleError, match="not PARSED or LEXICAL"):
         require_eligible_routine_body(_routine("UNPARSED", None))
+
+
+# ---------------------------------------------------------------------------
+# Dynamic SQL must survive redaction (found 2026-09-19).
+#
+# T-SQL `END EXEC(@sql);` with no semicolon after `END` parses as one sqlglot
+# `Command` that re-renders as just `END`. The stored body lost its dynamic SQL,
+# passed the value scan trivially (text that is gone contains no values), was
+# labelled PARSED, and the lineage parser then reported a fully understood routine
+# whose real behaviour is decided at runtime. Each test below checks both halves,
+# because a fix that kept the marker by relaxing redaction would be strictly worse:
+# the construct survives, AND a value planted beside it is still removed.
+# ---------------------------------------------------------------------------
+
+_TSQL_DYNAMIC = (
+    "CREATE PROCEDURE dbo.p AS BEGIN\n"
+    f"IF @x = {SENTINEL_NUMBER} BEGIN INSERT INTO dbo.a (k) VALUES ('{SENTINEL}'); END\n"
+    "EXEC(@sql);\n"
+    "DELETE FROM dbo.b WHERE b.k = 1;\n"
+    "END"
+)
+
+
+def test_dynamic_sql_after_an_unterminated_end_survives_redaction() -> None:
+    result = redact_for_storage(_TSQL_DYNAMIC, dialect="tsql")
+
+    assert result is not None
+    # Not PARSED: sqlglot could not model this text, so it must not claim to have.
+    assert result.status == "LEXICAL"
+    assert result.status in VALUE_FREE_REDACTION_STATUSES
+    stored = result.redacted or ""
+    assert "EXEC" in stored.upper()
+    assert "@SQL" in stored.upper()
+    # ...and redaction is no weaker for it.
+    assert SENTINEL not in stored
+    assert SENTINEL_NUMBER not in stored
+    assert not contains_value_shaped_text(stored, dialect="tsql")
+
+
+def test_a_routine_whose_dynamic_sql_was_dropped_no_longer_reads_as_understood() -> None:
+    """The consequence that made this a defect rather than a formatting quirk."""
+    stored = redact_for_storage(_TSQL_DYNAMIC, dialect="tsql").redacted
+
+    parsed = parse_procedure_lineage(stored, dialect="tsql")
+
+    assert parsed.is_fully_parsed is False
+    reasons = {
+        str(edge.unparsed_reason).split(":")[0]
+        for edge in parsed.edges
+        if getattr(edge, "unparsed_reason", None)
+    }
+    assert "DYNAMIC_SQL" in reasons
+
+
+@pytest.mark.parametrize("dialect", ["bigquery", "snowflake"])
+def test_execute_immediate_keeps_its_marker_and_loses_its_literal(dialect: str) -> None:
+    """The same path, found by measuring the fix against the adversarial corpus."""
+    result = redact_for_storage(f"EXECUTE IMMEDIATE 'SELECT {SENTINEL_NUMBER}'", dialect=dialect)
+
+    assert result is not None
+    assert result.status == "LEXICAL"
+    stored = result.redacted or ""
+    assert "IMMEDIATE" in stored.upper()
+    assert SENTINEL_NUMBER not in stored

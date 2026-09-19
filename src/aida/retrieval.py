@@ -887,6 +887,16 @@ async def hybrid_retrieve(
                             "metric_id": str(metric.id),
                             "metric_slug": metric.slug,
                             "bound_term_ids": bound_term_ids,
+                            # The version a context product pins is the semantic *model*
+                            # version, and `ContextProductScope.admits` decides a metric on
+                            # exactly this key. Without it every metric hit read as `None`,
+                            # which is in no pinned set -- so a product that pinned a model
+                            # refused every metric, including the ones in the model it
+                            # pinned. Found 2026-09-19; the old test passed only because it
+                            # built this metadata by hand instead of retrieving it.
+                            "semantic_model_version_id": str(
+                                metric_version.semantic_model_version_id
+                            ),
                             # _model_context (agent_orchestrator.py) reads table_id or
                             # source_table_id off every hit to decide which tables to hydrate
                             # into the model's SQL-generation context; without this a metric
@@ -947,6 +957,12 @@ async def hybrid_retrieve(
                         reason_codes=["BM25_GLOSSARY_TERM", "SEMANTIC_OBJECT_BOUND"],
                         metadata={
                             "term_id": str(term.id),
+                            # A context product pins glossary *versions*, and
+                            # `ContextProductScope.admits` decides a term on this key.
+                            # Missing, every term hit read as `None` and a product that
+                            # pinned terms refused all of them -- see the semantic-model
+                            # note on the metric hit above, same defect, same date.
+                            "term_version_id": str(term_version.id),
                             "term_key": term.term_key,
                             "bound_semantic_object_ids": [str(m.id) for m in bound_metrics],
                         },

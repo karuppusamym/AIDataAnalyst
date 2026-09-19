@@ -110,6 +110,25 @@ def _redact_precisely(sql: str, *, dialect: str) -> str | None:
         # Replacing that literal would store a placeholder where the routine was, so the
         # lexical pass keeps the program and removes the values inside it.
         return None
+    if statement is not None and any(isinstance(node, exp.Command) for node in statement.walk()):
+        # A `Command` is text sqlglot could not model, and its re-render is not
+        # guaranteed to be the text it was built from. This is the rule the module
+        # docstring already states ("`Command` ... text is scrubbed lexically and labelled
+        # `LEXICAL`"), but it was only enforced indirectly, through the value scan below --
+        # and a render that *drops* text passes a value scan trivially, because text that
+        # is gone contains no values.
+        #
+        # Found 2026-09-19: T-SQL `END EXEC(@sql);` with no semicolon after `END` parses as
+        # one `Command` that re-renders as just `END`, so the stored body lost its dynamic
+        # SQL and the lineage parser reported a fully understood routine whose real
+        # behaviour is decided at runtime. BigQuery and Snowflake `EXECUTE IMMEDIATE` take
+        # the same path. Measured over the adversarial corpus before this line was added:
+        # it moves exactly 2 of 104 PARSED bodies to LEXICAL, both `EXECUTE IMMEDIATE`, and
+        # nothing else -- a check keyed on lost words instead flipped 16, mostly cosmetic.
+        #
+        # Returning None costs precision, never value-freedom: the caller falls back to the
+        # lexical scrub, and LEXICAL is in `VALUE_FREE_REDACTION_STATUSES`.
+        return None
     redacted = statement.transform(
         lambda node: exp.Placeholder(this="redacted") if isinstance(node, exp.Literal) else node
     ).sql(dialect=dialect, pretty=True)

@@ -37,9 +37,11 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import aida.models  # noqa: F401 -- registers every table on Base.metadata
+from aida.agent_orchestrator import ContextProductScope
 from aida.config import Settings
 from aida.db import Base
 from aida.main import app
@@ -684,3 +686,83 @@ async def test_a_binding_that_never_activated_does_not_leak_into_retrieval(
     )
     metric_hits = [h for h in hits if h.object_type == "SEMANTIC_METRIC"]
     assert not metric_hits, "a PENDING_APPROVAL binding must not participate in retrieval"
+
+
+def _pinning_scope(*, glossary: list[str], models: list[str]) -> ContextProductScope:
+    return ContextProductScope(
+        version_id=uuid4(),
+        version=1,
+        table_ids=frozenset(),
+        tool_version_ids=frozenset(),
+        routine_ids=frozenset(),
+        ontology_version_ids=frozenset(),
+        glossary_term_version_ids=frozenset(glossary),
+        semantic_model_version_ids=frozenset(models),
+    )
+
+
+async def test_a_product_that_pins_meaning_admits_the_meaning_it_pinned(
+    scenario: _Scenario,
+) -> None:
+    """Pinned glossary and semantic-model meaning, decided on hits retrieval really produces.
+
+    Found 2026-09-19: GLOSSARY_TERM and SEMANTIC_METRIC hits did not carry the version
+    ids `ContextProductScope.admits` decides them on, so each read as `None`, which is in
+    no pinned set. A product that pinned a glossary term or a semantic model therefore
+    refused **every** hit of that kind -- including the ones it pinned -- and pinning
+    meaning silently disabled the very meaning it was meant to select.
+
+    The earlier test (`test_meaning_is_pinned_where_the_product_pins_it`) passed throughout
+    because it built the hit's metadata by hand, so it tested the rule and never the data
+    the rule is fed. This one retrieves the hits for real, which is the only way the gap
+    between the two shows.
+    """
+    term = await scenario.approved_term(
+        term_key="pinned-topline",
+        display_name="Pinned Topline Figure",
+        definition="The headline figure a pinned product answers from.",
+        synonyms=[],
+    )
+    metric = await scenario.published_metric(
+        slug="pinned_topline",
+        name="Pinned Topline Figure",
+        description="The headline figure a pinned product answers from.",
+    )
+    # Glossary retrieval joins through an ACTIVE binding by design (SM-2: a term is
+    # retrieved to surface what it is bound to), so an unbound term is never a hit.
+    await scenario.binding(term_id=term.id, metric_id=metric.id)
+    term_version_id = str(
+        await scenario.db.scalar(
+            select(GlossaryTermVersion.id).where(GlossaryTermVersion.term_id == term.id)
+        )
+    )
+    model_version_id = str(
+        await scenario.db.scalar(
+            select(SemanticMetricVersion.semantic_model_version_id).where(
+                SemanticMetricVersion.metric_id == metric.id
+            )
+        )
+    )
+
+    hits = await hybrid_retrieve(
+        scenario.db,
+        datasource=scenario.datasource,
+        question="pinned topline figure",
+        settings=Settings(_env_file=None),
+    )
+    term_hit = next(h for h in hits if h.object_type == "GLOSSARY_TERM")
+    metric_hit = next(h for h in hits if h.object_type == "SEMANTIC_METRIC")
+
+    # The retrieved hits now carry what the rule reads.
+    assert term_hit.metadata["term_version_id"] == term_version_id
+    assert metric_hit.metadata["semantic_model_version_id"] == model_version_id
+
+    # A product pinning exactly this meaning admits it -- the case that was broken.
+    pinned = _pinning_scope(glossary=[term_version_id], models=[model_version_id])
+    assert pinned.admits(term_hit)
+    assert pinned.admits(metric_hit)
+
+    # And pinning still narrows: a product pinning *other* versions refuses these.
+    elsewhere = _pinning_scope(glossary=[str(uuid4())], models=[str(uuid4())])
+    assert not elsewhere.admits(term_hit)
+    assert not elsewhere.admits(metric_hit)
