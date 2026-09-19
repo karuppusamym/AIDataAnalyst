@@ -18,6 +18,7 @@ from aida.agent_contracts import (
 )
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
+from aida.context_product_execution_scope import ContextProductExecutionScope
 from aida.db import get_session
 from aida.edition_entitlements import evaluate_entitlement
 from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
@@ -968,8 +969,15 @@ async def execute_tool_version(
     context: SecurityContext,
     session: AsyncSession,
     settings: Settings,
+    *,
+    context_product_scope: ContextProductExecutionScope | None = None,
 ) -> ToolExecutionResponse:
-    """Shared governed execution path for HTTP callers and persisted tool plans."""
+    """Shared governed execution path for HTTP callers, persisted tool plans and GraphQL.
+
+    `context_product_scope` (R11-GQL02) holds the rendered statement to a published product's
+    tables at the gateway, exactly as Ask and the direct-SQL route are held; the REST route
+    passes none, so its behaviour is unchanged.
+    """
     if context.roles.isdisjoint({"PlatformAdmin", "Analyst", "AgentDeveloper", "ToolConsumer"}):
         raise HTTPException(status_code=403, detail="tool execution role is required")
     version = await session.get(GovernedToolVersion, version_id)
@@ -1073,6 +1081,7 @@ async def execute_tool_version(
             sql=rendered.sql,
             requested_limit=body.max_rows,
             semantic_version=semantic_version,
+            context_product_scope=context_product_scope,
         )
     except QueryRejected as exc:
         tool_execution.status = "REJECTED"

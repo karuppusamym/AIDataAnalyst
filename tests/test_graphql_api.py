@@ -46,6 +46,7 @@ from structlog.testing import capture_logs
 
 import aida.models  # noqa: F401 - registers every mapped table on Base.metadata
 from aida import graphql_api, graphql_reads
+from aida.governed_execution import RECEIPT_OVERSIGHT_ROLES, TOOL_EXECUTION_ROLES
 from aida.graphql_limits import (
     DEFAULT_LIMITS,
     EXECUTION_ERROR_CODES,
@@ -505,7 +506,7 @@ def _route_roles(method: str, path: str) -> tuple[str, ...]:
         ("GET", "/v1/tables/{table_id}/description", CATALOG_READ_ROLES),
         ("GET", "/v1/tables/{table_id}/column-documentation", CATALOG_READ_ROLES),
         ("GET", "/v1/organizations/{organization_id}/catalog/rows", CATALOG_READ_ROLES),
-        ("POST", "/graphql", GRAPHQL_ENDPOINT_ROLES),
+        ("POST", "/graphql", graphql_api.GRAPHQL_ROUTE_ROLES),
     ],
 )
 def test_each_field_requires_the_roles_its_rest_route_declares(
@@ -515,6 +516,11 @@ def test_each_field_requires_the_roles_its_rest_route_declares(
     a REST route that narrows or widens its roles fails here until GraphQL follows."""
     assert _route_roles(method, path) == tuple(sorted(roles))
     assert set(GRAPHQL_ENDPOINT_ROLES) == set(DATASOURCE_READ_ROLES) | set(CATALOG_READ_ROLES)
+    # R11-GQL02: the route also admits whoever may execute a governed tool or read an
+    # execution receipt -- and nobody else. Each field still enforces its own set.
+    assert set(graphql_api.GRAPHQL_ROUTE_ROLES) == (
+        set(GRAPHQL_ENDPOINT_ROLES) | set(TOOL_EXECUTION_ROLES) | set(RECEIPT_OVERSIGHT_ROLES)
+    )
 
 
 def _module_imports(path: Path) -> set[str]:
@@ -1340,7 +1346,7 @@ def _refused_documents(
         (
             "mutation",
             {"operationName": "M", "query": "mutation M { __typename }"},
-            "OPERATION_NOT_SUPPORTED",
+            "EXECUTION_ROOT_INVALID",
             400,
         ),
         (
@@ -1727,9 +1733,29 @@ def test_the_schema_exposes_no_value_bearing_field() -> None:
         for field_name in named.fields
         if field_name in _VALUE_BEARING_FIELD_NAMES
     }
-    assert exposed == set()
-    assert metadata_schema._schema.mutation_type is None
+    # R11-GQL02: the one value-bearing field is the execution mutation's result rows,
+    # and no query can reach its type -- a receipt is what a query returns.
+    assert exposed == {"GovernedExecutionResult.rows"}
+    reachable_from_query = _types_reachable(metadata_schema._schema.query_type)
+    assert "GovernedExecutionResult" not in reachable_from_query
+    mutation = metadata_schema._schema.mutation_type
+    assert mutation is not None
+    assert set(mutation.fields) == {"executeGovernedTool"}
     assert metadata_schema._schema.subscription_type is None
+
+
+def _types_reachable(root: Any) -> set[str]:
+    from graphql import GraphQLObjectType, get_named_type
+
+    seen: set[str] = set()
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, GraphQLObjectType) or current.name in seen:
+            continue
+        seen.add(current.name)
+        pending.extend(get_named_type(field.type) for field in current.fields.values())
+    return seen
 
 
 async def test_no_source_value_body_or_forbidden_name_reaches_a_response_or_a_log(

@@ -25,6 +25,7 @@ import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
@@ -35,6 +36,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncSession
+from strawberry.types.graphql import OperationType
 
 from aida.api import run_agent_analysis
 from aida.asset_description_api import (
@@ -50,6 +52,8 @@ from aida.connectors.sqlserver import SqlServerConnector
 from aida.context_product_api import create_context_product, submit_context_product_version
 from aida.context_rebuild import CONTEXT_REBUILD_PRINCIPAL, run_context_rebuild
 from aida.envelope_models import MetadataViewDefinition
+from aida.graphql_reads import open_read_scope
+from aida.graphql_schema import metadata_schema
 from aida.ingestion import persist_envelope_extensions
 from aida.lineage_agent import run_lineage_agent
 from aida.models import (
@@ -397,6 +401,47 @@ async def _ask(
     return str(response.plan_evidence["selected_tool_version_id"]), float(rows[0]["net_revenue"])
 
 
+_GQL02_RUN = """
+mutation Run($request: ExecuteGovernedToolInput!) {
+  executeGovernedTool(request: $request) {
+    replayed
+    receipt { status queryExecutionId rowCount outcomeCode contextProductVersionId }
+    result { columns rows }
+  }
+}
+"""
+
+
+async def _graphql_execute(
+    session: AsyncSession,
+    org_id: UUID,
+    tool_version_id: UUID,
+    analyst: SecurityContext,
+    settings: Settings,
+    *,
+    key: str,
+) -> Any:
+    """R11-GQL02: run the tool through the GraphQL execution mutation, as `POST /graphql` does."""
+    scope = open_read_scope(
+        session=session, context=analyst, settings=settings, organization_id=org_id
+    )
+    return await metadata_schema.execute(
+        _GQL02_RUN,
+        variable_values={
+            "request": {
+                "toolVersionId": str(tool_version_id),
+                "idempotencyKey": key,
+                "maxRows": 10,
+                "parameters": {"customer_id": 1},
+                "contextProductKey": "customer-revenue",
+            }
+        },
+        context_value=scope,
+        operation_name="Run",
+        allowed_operation_types=(OperationType.MUTATION,),
+    )
+
+
 async def _hold(session: AsyncSession, view: MetadataTable) -> DataQualityIncident | None:
     return await session.scalar(
         select(DataQualityIncident)
@@ -562,6 +607,29 @@ async def test_the_footprint_journey(
             executions_before | {result.execution.execution_id}
         )
 
+        # R11-GQL02: the same approved tool through the GraphQL execution mutation, through
+        # the product -- one execution on the real source, and a retry with the same key
+        # reads the receipt instead of the source.
+        gql_before = set(await session.scalars(select(QueryExecution.id)))
+        executed = await _graphql_execute(
+            session, org.id, first_tool.id, analyst, settings, key="journey-gql02-0001"
+        )
+        assert executed.errors is None, executed.errors
+        outcome = executed.data["executeGovernedTool"]
+        assert outcome["replayed"] is False
+        assert outcome["receipt"]["status"] == "COMPLETED"
+        assert outcome["receipt"]["contextProductVersionId"] == str(first_product.id)
+        revenue_column = outcome["result"]["columns"].index("net_revenue")
+        assert float(outcome["result"]["rows"][0][revenue_column]) == 150.0
+        replayed = await _graphql_execute(
+            session, org.id, first_tool.id, analyst, settings, key="journey-gql02-0001"
+        )
+        assert replayed.errors is None, replayed.errors
+        assert replayed.data["executeGovernedTool"]["replayed"] is True
+        assert replayed.data["executeGovernedTool"]["result"] is None
+        gql_after = set(await session.scalars(select(QueryExecution.id)))
+        assert len(gql_after - gql_before) == 1, "one execution for one key"
+
         # 6. Change the source's logic, and read the source again.
         await source.execute(source.redefine_view)
         rescan = await _scan(session, datasource, source)
@@ -587,6 +655,14 @@ async def test_the_footprint_journey(
         with pytest.raises(HTTPException) as held:
             await _revenue(session, first_tool.id, analyst, settings)
         assert held.value.status_code == 409
+        # R11-GQL02: the hold decides the GraphQL mutation exactly as it decides REST.
+        held_gql = await _graphql_execute(
+            session, org.id, first_tool.id, analyst, settings, key="journey-gql02-0002"
+        )
+        assert held_gql.data["executeGovernedTool"] is None
+        assert [error.original_error.reason for error in held_gql.errors or ()] == [
+            "QUALITY_HOLD"
+        ]
         with pytest.raises(HTTPException) as asked:
             await _ask(session, datasource, analyst, settings)
         assert asked.value.status_code == 422

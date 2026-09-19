@@ -35183,7 +35183,7 @@
     },
     "/graphql": {
       "post": {
-        "description": "Serve one metadata query. Nothing here executes against a source.",
+        "description": "Serve one metadata query, or one governed execution mutation.\n\nA query executes nothing against a source. A mutation runs an approved tool\nversion through `aida.governed_execution`, once per caller-scoped key.",
         "operationId": "graphql_query_graphql_post",
         "parameters": [
           {
@@ -35326,7 +35326,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Metadata GraphQL (read-only; one named query operation per request)",
+        "summary": "Metadata GraphQL: one named operation per request -- a read-only query, or the single governed-execution mutation",
         "tags": [
           "graphql"
         ]

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from aida import (  # noqa: F401
     change_signal_models,
     envelope_models,
+    governed_execution_models,
     graph_store,
     models,
     okf_store_models,

@@ -323,15 +323,20 @@ def _graphql_rows() -> list[SurfaceRow]:
     script being touched.
 
     Roles are derived too: a resolver requires every role set it reaches in
-    `aida.graphql_reads`, so its effective set is their intersection.
+    `aida.graphql_reads` or `aida.governed_execution`, so its effective set is
+    their intersection.
     """
     import ast
 
-    from aida import graphql_reads
+    from aida import governed_execution, graphql_reads
 
     role_sets = {
         "DATASOURCE_READ_ROLES": set(graphql_reads.DATASOURCE_READ_ROLES),
         "CATALOG_READ_ROLES": set(graphql_reads.CATALOG_READ_ROLES),
+        # R11-GQL02: the execution mutation and the receipt read decide in
+        # `aida.governed_execution`, with their own role sets.
+        "TOOL_EXECUTION_ROLES": set(governed_execution.TOOL_EXECUTION_ROLES),
+        "RECEIPT_READ_ROLES": set(governed_execution.RECEIPT_READ_ROLES),
     }
     module = "aida.graphql_schema"
     source_path = REPO_ROOT / "src" / "aida" / "graphql_schema.py"

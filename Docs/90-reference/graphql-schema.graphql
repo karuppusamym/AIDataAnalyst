@@ -105,6 +105,95 @@ type DataSourceConnection {
 """Date with time (isoformat)"""
 scalar DateTime
 
+"""One governed execution request (R11-GQL02)."""
+input ExecuteGovernedToolInput {
+  """A PUBLISHED governed tool version. Nothing else can be executed here."""
+  toolVersionId: ID!
+
+  """
+  8-128 characters of `A-Z a-z 0-9 . _ : -`, chosen by the caller. Sending the same key again with the same inputs returns the first request's receipt and executes nothing; the same key with different inputs is refused.
+  """
+  idempotencyKey: String!
+
+  """
+  The row limit, required and explicit; at most the endpoint's execution cap.
+  """
+  maxRows: Int!
+
+  """The tool version's typed parameters, as a JSON object."""
+  parameters: JSON = null
+
+  """
+  Execute through this published context product: the tool must be eligible in it and read only its tables.
+  """
+  contextProductKey: String = null
+}
+
+"""What an execution mutation answered."""
+type GovernedExecutionOutcome {
+  receipt: GovernedExecutionReceipt!
+
+  """
+  True when this key had already been used: nothing executed for this request.
+  """
+  replayed: Boolean!
+  result: GovernedExecutionResult
+
+  """
+  WARN when an upstream dependency has an open, non-critical quality incident.
+  """
+  qualityGateAction: String
+}
+
+"""
+The durable record of one requested governed execution. Never rows: a receipt is what can be read again.
+"""
+type GovernedExecutionReceipt {
+  id: ID!
+
+  """
+  PENDING (running, or ended without the platform learning its outcome -- never retried as a new execution), COMPLETED, REJECTED or FAILED.
+  """
+  status: String!
+  toolVersionId: ID!
+  toolExecutionId: ID
+  queryExecutionId: ID
+  contextProductVersionId: ID
+  rowCount: Int
+
+  """A stable refusal or failure code; never a message."""
+  outcomeCode: String
+  createdAt: DateTime!
+  completedAt: DateTime
+}
+
+"""
+The rows one execution returned, after the gateway masked them. Present only in the response of the request that executed; never stored, never replayed.
+"""
+type GovernedExecutionResult {
+  columns: [String!]!
+
+  """One array per row, in `columns` order."""
+  rows: JSON!
+  maskedColumns: [String!]!
+  appliedRowLimit: Int
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
+"""
+Governed execution (R11-GQL02): the only operations that run anything against a source. One execution field per operation.
+"""
+type Mutation {
+  """
+  Execute one approved tool version once for this caller and idempotency key, through the same governed path as `POST /v1/tool-versions/{version_id}/execute`.
+  """
+  executeGovernedTool(request: ExecuteGovernedToolInput!): GovernedExecutionOutcome
+}
+
 """Where a page ends and whether another follows it."""
 type PageInfo {
   hasNextPage: Boolean!
@@ -124,6 +213,11 @@ type Query {
   The caller's organization's datasources, as `GET /v1/organizations/{id}/datasources`.
   """
   datasources(first: Int! = 20, after: String = null, q: String = null, status: String = null): DataSourceConnection
+
+  """
+  One governed execution receipt (R11-GQL02): the caller's own, or any in the organization for PlatformAdmin and Auditor. Never rows.
+  """
+  governedExecution(id: ID!): GovernedExecutionReceipt
 
   """One table by id, decided as its columns route decides it."""
   table(id: ID!): Table

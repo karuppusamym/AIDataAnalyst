@@ -5,11 +5,14 @@ descriptions -- with cursor paging. Every resolver is a thin call into
 `aida.graphql_reads`, which makes the decision the equivalent REST route makes;
 no resolver builds a query of its own, imports a router, or calls over HTTP.
 
-**Reads only, and never source SQL.** The schema has no mutation and no
-subscription, and no field reaches a connector or the query gateway: governed
-execution is R11-GQL02's explicit mutation, not a computed field here. No field
+**Queries never reach a source.** No `Query` field reaches a connector or the query
+gateway. Governed execution is one explicit mutation, `executeGovernedTool`
+(R11-GQL02, `aida.governed_execution`): an approved tool version through the same
+path as REST, once per caller-scoped idempotency key. Its rows appear only in that
+mutation's response; the `governedExecution` query returns the receipt, which has no
+rows by construction. There is no subscription. No type a query can reach
 carries a source value either -- no column default, partition bound, view or
-routine body, profile statistic or sample row; the types below expose what the
+routine body, profile statistic or sample row; the metadata types expose what the
 REST reads expose and nothing more (`tests/test_graphql_api.py` scans for it).
 
 **Refusals are per field.** A field the caller may not read resolves to `null`
@@ -27,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import strawberry
@@ -40,10 +43,18 @@ from strawberry.extensions import (
     QueryDepthLimiter,
     SchemaExtension,
 )
+from strawberry.scalars import JSON
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types import ExecutionContext
 from strawberry.types.field import StrawberryField
 
+from aida.governed_execution import (
+    ExecutionOutcome,
+    ExecutionRefused,
+    execute_governed_tool,
+    load_receipt,
+)
+from aida.governed_execution_models import GovernedExecutionRequest
 from aida.graphql_limits import DEFAULT_LIMITS
 from aida.graphql_reads import (
     ColumnDescription,
@@ -70,6 +81,7 @@ from aida.schemas import (
     MetadataConstraintRead,
     MetadataTableRead,
 )
+from atlas.platform.context import get_correlation_id
 
 __all__ = ["GRAPHQL_SCHEMA_VERSION", "metadata_schema"]
 
@@ -448,6 +460,26 @@ class Query:
         page = await list_datasources(info.context, first=first, after=after, q=q, status=status)
         return DataSourceConnection.of(page)
 
+    @field_resolver(
+        "One governed execution receipt (R11-GQL02): the caller's own, or any in the "
+        "organization for PlatformAdmin and Auditor. Never rows."
+    )
+    async def governed_execution(
+        self, info: Info, id: strawberry.ID
+    ) -> GovernedExecutionReceipt | None:
+        scope = info.context
+        async with scope.lock:
+            try:
+                record = await load_receipt(
+                    scope.session,
+                    scope.context,
+                    organization_id=scope.organization_id,
+                    record_id=_uuid(id),
+                )
+            except ExecutionRefused as refused:
+                raise ReadRefused(refused.code, refused.reason) from refused
+        return GovernedExecutionReceipt.of(record)
+
     @field_resolver("One table by id, decided as its columns route decides it.")
     async def table(self, info: Info, id: strawberry.ID) -> Table | None:
         return Table.of_row(await get_table(info.context, _uuid(id)))
@@ -482,6 +514,168 @@ class Query:
                 info.context, first=first, after=after, q=q, object_type=object_type, status=status
             )
         return TableConnection.of(page)
+
+
+# --- governed execution (R11-GQL02) -------------------------------------------
+
+
+@strawberry.input(description="One governed execution request (R11-GQL02).")
+class ExecuteGovernedToolInput:
+    tool_version_id: strawberry.ID = strawberry.field(
+        description="A PUBLISHED governed tool version. Nothing else can be executed here."
+    )
+    idempotency_key: str = strawberry.field(
+        description=(
+            "8-128 characters of `A-Z a-z 0-9 . _ : -`, chosen by the caller. Sending the same "
+            "key again with the same inputs returns the first request's receipt and executes "
+            "nothing; the same key with different inputs is refused."
+        )
+    )
+    max_rows: int = strawberry.field(
+        description="The row limit, required and explicit; at most the endpoint's execution cap."
+    )
+    parameters: JSON | None = strawberry.field(
+        default=None, description="The tool version's typed parameters, as a JSON object."
+    )
+    context_product_key: str | None = strawberry.field(
+        default=None,
+        description=(
+            "Execute through this published context product: the tool must be eligible in it "
+            "and read only its tables."
+        ),
+    )
+
+
+@strawberry.type(
+    description=(
+        "The durable record of one requested governed execution. Never rows: a receipt is "
+        "what can be read again."
+    )
+)
+class GovernedExecutionReceipt:
+    id: strawberry.ID
+    status: str = strawberry.field(
+        description=(
+            "PENDING (running, or ended without the platform learning its outcome -- never "
+            "retried as a new execution), COMPLETED, REJECTED or FAILED."
+        )
+    )
+    tool_version_id: strawberry.ID
+    tool_execution_id: strawberry.ID | None
+    query_execution_id: strawberry.ID | None
+    context_product_version_id: strawberry.ID | None
+    row_count: int | None
+    outcome_code: str | None = strawberry.field(
+        description="A stable refusal or failure code; never a message."
+    )
+    created_at: datetime
+    completed_at: datetime | None
+
+    @classmethod
+    def of(cls, record: GovernedExecutionRequest) -> GovernedExecutionReceipt:
+        def optional(value: UUID | None) -> strawberry.ID | None:
+            return _id(value) if value is not None else None
+
+        return cls(
+            id=_id(record.id),
+            status=record.status,
+            tool_version_id=_id(record.tool_version_id),
+            tool_execution_id=optional(record.tool_execution_id),
+            query_execution_id=optional(record.query_execution_id),
+            context_product_version_id=optional(record.context_product_version_id),
+            row_count=record.row_count,
+            outcome_code=record.outcome_code,
+            created_at=record.created_at,
+            completed_at=record.completed_at,
+        )
+
+
+@strawberry.type(
+    description=(
+        "The rows one execution returned, after the gateway masked them. Present only in the "
+        "response of the request that executed; never stored, never replayed."
+    )
+)
+class GovernedExecutionResult:
+    columns: list[str]
+    rows: JSON = strawberry.field(description="One array per row, in `columns` order.")
+    masked_columns: list[str]
+    applied_row_limit: int | None
+
+
+@strawberry.type(description="What an execution mutation answered.")
+class GovernedExecutionOutcome:
+    receipt: GovernedExecutionReceipt
+    replayed: bool = strawberry.field(
+        description="True when this key had already been used: nothing executed for this request."
+    )
+    result: GovernedExecutionResult | None
+    quality_gate_action: str | None = strawberry.field(
+        description="WARN when an upstream dependency has an open, non-critical quality incident."
+    )
+
+    @classmethod
+    def of(cls, outcome: ExecutionOutcome) -> GovernedExecutionOutcome:
+        response = outcome.response
+        result: GovernedExecutionResult | None = None
+        gate: str | None = None
+        if response is not None:
+            execution = response.execution
+            columns = list(execution.rows[0].keys()) if execution.rows else []
+            result = GovernedExecutionResult(
+                columns=columns,
+                rows=cast(
+                    "JSON", [[row.get(column) for column in columns] for row in execution.rows]
+                ),
+                masked_columns=list(execution.masked_columns),
+                applied_row_limit=execution.applied_row_limit,
+            )
+            gate = str(response.quality_gate["action"]) if response.quality_gate else None
+        return cls(
+            receipt=GovernedExecutionReceipt.of(outcome.record),
+            replayed=outcome.replayed,
+            result=result,
+            quality_gate_action=gate,
+        )
+
+
+@strawberry.type(
+    description=(
+        "Governed execution (R11-GQL02): the only operations that run anything against a "
+        "source. One execution field per operation."
+    )
+)
+class Mutation:
+    @field_resolver(
+        "Execute one approved tool version once for this caller and idempotency key, through "
+        "the same governed path as `POST /v1/tool-versions/{version_id}/execute`."
+    )
+    async def execute_governed_tool(
+        self, info: Info, request: ExecuteGovernedToolInput
+    ) -> GovernedExecutionOutcome | None:
+        scope = info.context
+        if not 1 <= request.max_rows <= scope.limits.max_execution_rows:
+            raise ReadRefused("INVALID_ARGUMENT", "MAX_ROWS_OUT_OF_RANGE")
+        parameters: Any = request.parameters if request.parameters is not None else {}
+        if not isinstance(parameters, dict):
+            raise ReadRefused("INVALID_ARGUMENT", "PARAMETERS_NOT_AN_OBJECT")
+        async with scope.lock:
+            try:
+                outcome = await execute_governed_tool(
+                    scope.session,
+                    scope.settings,
+                    context=scope.context,
+                    organization_id=scope.organization_id,
+                    tool_version_id=_uuid(request.tool_version_id),
+                    parameters=parameters,
+                    max_rows=request.max_rows,
+                    context_product_key=request.context_product_key,
+                    idempotency_key=request.idempotency_key,
+                    correlation_id=get_correlation_id(),
+                )
+            except ExecutionRefused as refused:
+                raise ReadRefused(refused.code, refused.reason) from refused
+        return GovernedExecutionOutcome.of(outcome)
 
 
 def error_code(error: GraphQLError) -> tuple[str, str | None]:
@@ -545,6 +739,7 @@ def _backstops() -> list[Callable[[], SchemaExtension]]:
 
 metadata_schema = _MetadataSchema(
     query=Query,
+    mutation=Mutation,
     extensions=_backstops(),
     config=StrawberryConfig(disable_field_suggestions=True),
 )

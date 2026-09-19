@@ -1,4 +1,5 @@
-"""`POST /graphql` -- the metadata GraphQL endpoint (R11-GQL01, design section 13A).
+"""`POST /graphql` -- the metadata GraphQL endpoint (R11-GQL01, design section 13A),
+with one explicit governed-execution mutation (R11-GQL02, design section 13B).
 
 Authenticated and role-gated exactly like the REST catalog reads: the route
 admits the union of the roles those reads declare (`GRAPHQL_ENDPOINT_ROLES`),
@@ -17,7 +18,12 @@ What happens to a request, in order:
    A refusal here answers 400 (413 for the byte ceiling) with a stable code, and
    no statement has reached the database.
 3. The admitted document executes against `metadata_schema` under a deadline,
-   with a request-scoped `ReadScope` as its context.
+   with a request-scoped `ReadScope` as its context. A query is executed with only
+   the query operation type allowed; an admitted mutation -- exactly one execution
+   field -- with only the mutation type allowed, under a deadline sized to the
+   gateway's own statement timeout rather than the read deadline. A mutation the
+   deadline interrupts leaves its receipt PENDING: the outcome is unknown, and a
+   retry with the same idempotency key reads the receipt rather than executing.
 4. The response is measured: over the byte budget, the data is withheld and a
    stable code is returned instead.
 
@@ -25,8 +31,9 @@ Errors carry a stable `extensions.code` (and, for a refusal, the value-free
 reason code the REST route would have put in its 403), a correlation id, and no
 message of their own: never SQL, a credential or an object name. Query
 telemetry is one structured log line per request, separate from any execution
-audit -- this endpoint executes nothing against a source, so there is no
-execution to audit (a read of metadata is not audited over REST either).
+audit: a query executes nothing against a source, so there is nothing to audit (a
+read of metadata is not audited over REST either), and the execution mutation is
+audited once, by the governed tool path it calls.
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from strawberry.types.graphql import OperationType
 
+from aida.governed_execution import RECEIPT_OVERSIGHT_ROLES, TOOL_EXECUTION_ROLES
 from aida.graphql_limits import DEFAULT_LIMITS, DocumentCost, DocumentRefused, admit_document
 from aida.graphql_reads import GRAPHQL_ENDPOINT_ROLES, open_read_scope
 from aida.graphql_schema import error_code, metadata_schema
@@ -60,6 +68,18 @@ _log = structlog.get_logger(__name__)
 # `extensions` is part of the GraphQL-over-HTTP request shape and some clients always
 # send it; it is accepted and ignored (no persisted queries, no client-set behaviour).
 _ALLOWED_KEYS = frozenset({"query", "operationName", "variables", "extensions"})
+
+#: Who may reach the endpoint: the metadata read roles, plus those who may execute a
+#: governed tool or read an execution receipt (R11-GQL02). Every field still requires
+#: its own role set -- reaching the endpoint grants nothing a field does not.
+GRAPHQL_ROUTE_ROLES: tuple[str, ...] = tuple(
+    sorted(
+        set(GRAPHQL_ENDPOINT_ROLES) | set(TOOL_EXECUTION_ROLES) | set(RECEIPT_OVERSIGHT_ROLES)
+    )
+)
+#: Seconds beyond the gateway's statement timeout a mutation may take: admission,
+#: authorization, quality gate and masking around the statement itself.
+_EXECUTION_DEADLINE_MARGIN_SECONDS = 15.0
 
 
 class GraphQLErrorRead(BaseModel):
@@ -206,16 +226,23 @@ def _count_objects(data: dict[str, Any] | None) -> int:
 @router.post(
     "/graphql",
     response_model=GraphQLResponseRead,
-    summary="Metadata GraphQL (read-only; one named query operation per request)",
+    summary=(
+        "Metadata GraphQL: one named operation per request -- a read-only query, or the "
+        "single governed-execution mutation"
+    ),
     openapi_extra={"requestBody": _REQUEST_BODY_SCHEMA},
 )
 async def graphql_query(
     request: Request,
-    context: SecurityContext = Depends(require_roles(*GRAPHQL_ENDPOINT_ROLES)),
+    context: SecurityContext = Depends(require_roles(*GRAPHQL_ROUTE_ROLES)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    """Serve one metadata query. Nothing here executes against a source."""
+    """Serve one metadata query, or one governed execution mutation.
+
+    A query executes nothing against a source. A mutation runs an approved tool
+    version through `aida.governed_execution`, once per caller-scoped key.
+    """
     organization_id = context.require_organization()
     limits = DEFAULT_LIMITS
     correlation_id = get_correlation_id()
@@ -253,14 +280,22 @@ async def graphql_query(
         "aliases": cost.aliases,
         "estimatedNodes": cost.estimated_nodes,
     }
+    mutation = cost.operation_type == "mutation"
+    deadline = (
+        settings.query_timeout_seconds + _EXECUTION_DEADLINE_MARGIN_SECONDS
+        if mutation
+        else limits.deadline_seconds
+    )
     try:
-        async with asyncio.timeout(limits.deadline_seconds):
+        async with asyncio.timeout(deadline):
             result = await metadata_schema.execute(
                 parsed.query,
                 variable_values=parsed.variables,
                 context_value=scope,
                 operation_name=parsed.operation_name,
-                allowed_operation_types=(OperationType.QUERY,),
+                allowed_operation_types=(
+                    (OperationType.MUTATION,) if mutation else (OperationType.QUERY,)
+                ),
             )
     except TimeoutError:
         _telemetry(

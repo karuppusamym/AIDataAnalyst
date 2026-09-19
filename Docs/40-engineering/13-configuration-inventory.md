@@ -164,7 +164,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `default_query_row_limit` | `int` | `5000` | 8 |
 | `hard_query_row_limit` | `int` | `100000` | 8 |
 | `sql_guard_allowed_functions` | `list[str]` | `list` | 5 |
-| `query_timeout_seconds` | `int` | `60` | 5 |
+| `query_timeout_seconds` | `int` | `60` | 6 |
 | `query_gateway_lob_max_concurrent` | `int` | `8` | 1 |
 | `query_gateway_lob_queue_timeout_seconds` | `float` | `5.0` | 1 |
 | `max_postgres_plan_cost` | `float` | `1000000.0` | 3 via `max_query_estimate_cost` |

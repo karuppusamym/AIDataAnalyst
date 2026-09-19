@@ -11,8 +11,10 @@ The checks, in the order they run, each cheaper than the next:
 1. An operation name is required, and the document may hold exactly one
    operation, whose name must match. Multi-operation ambiguity is refused even
    when a name would disambiguate it: one document, one operation, one thing to
-   budget. Only `query` operations are admitted -- this facade has no mutation
-   (execution is R11-GQL02) and no subscription.
+   budget. `query` operations are admitted, and a `mutation` only when it selects
+   exactly one execution field (R11-GQL02) -- counted after fragments are expanded,
+   so an alias, a second field or a spread cannot hide a second execution. There
+   is no subscription.
 2. The document is parsed with a token ceiling, so an oversized document stops
    being parsed rather than being parsed and then refused.
 3. Fragment spreads are checked for cycles before anything walks them.
@@ -107,6 +109,11 @@ class GraphQLLimits:
     #: authorize before it is refused as too broad. Each one is a gate decision,
     #: so this bounds the authorization work a single field can cause.
     max_scope_datasources: int = 200
+    #: R11-GQL02: the most rows one execution mutation may ask for. Rows come back in
+    #: the mutation's response once and are not retained, so this keeps a response
+    #: inside `max_response_bytes` for ordinary widths rather than executing a query
+    #: whose answer would then be withheld.
+    max_execution_rows: int = 1_000
     #: Introspection is off by default: the schema is published as a versioned
     #: artifact under `Docs/90-reference/`, which is how a client discovers it.
     #: Hiding the schema is not treated as authorization -- every field is
@@ -128,6 +135,7 @@ REFUSAL_CODES: dict[str, int] = {
     "MULTIPLE_OPERATIONS": 400,
     "OPERATION_NOT_FOUND": 400,
     "OPERATION_NOT_SUPPORTED": 400,
+    "EXECUTION_ROOT_INVALID": 400,
     "FRAGMENT_CYCLE": 400,
     "INTROSPECTION_DISABLED": 400,
     "DEPTH_LIMIT_EXCEEDED": 400,
@@ -152,6 +160,13 @@ EXECUTION_ERROR_CODES: dict[str, str] = {
     "INVALID_CURSOR": "`after` is not a cursor this field issued",
     "SCOPE_TOO_BROAD": "an organization-wide listing spans too many datasources; name one",
     "VALIDATION_FAILED": "a variable did not coerce to its declared type",
+    "CONFLICT": (
+        "R11-GQL02: the idempotency key was already used with different inputs, or the "
+        "tool cannot run now (a quality hold, an unpublished version); `extensions.reason` "
+        "says which"
+    ),
+    "REJECTED": "R11-GQL02: the gateway or parameter binding refused the execution",
+    "EXECUTION_FAILED": "R11-GQL02: the source failed the execution; the receipt says so",
     "INTERNAL_ERROR": "an unexpected failure; the message is withheld, the correlation id is not",
     "DEADLINE_EXCEEDED": "execution passed the resolver deadline; no data is returned",
     "RESPONSE_TOO_LARGE": "the response passed the byte or object budget; no data is returned",
@@ -188,6 +203,8 @@ class DocumentCost:
     aliases: int
     estimated_nodes: int
     selections_visited: int
+    #: "query" or "mutation": the endpoint dispatches an admitted document on it.
+    operation_type: str = "query"
 
 
 def admit_document(
@@ -232,9 +249,9 @@ def admit_document(
         raise DocumentRefused(
             "OPERATION_NOT_FOUND", "operationName does not name the operation in the document"
         )
-    if operation.operation is not OperationType.QUERY:
+    if operation.operation not in (OperationType.QUERY, OperationType.MUTATION):
         raise DocumentRefused(
-            "OPERATION_NOT_SUPPORTED", "only query operations are served by this endpoint"
+            "OPERATION_NOT_SUPPORTED", "only query and mutation operations are served here"
         )
 
     fragments = {
@@ -251,10 +268,16 @@ def admit_document(
         for definition in operation.variable_definitions or ()
     }
     walk = _Walk(schema, fragments, variable_values, defaults, limits)
-    query_type = schema.query_type
-    if query_type is None:  # pragma: no cover - a schema without Query cannot be built
-        raise DocumentRefused("OPERATION_NOT_SUPPORTED", "the schema serves no queries")
-    walk.selection_set(operation.selection_set, query_type, depth=0, multiplier=1, page=None)
+    if operation.operation is OperationType.MUTATION:
+        root_type = schema.mutation_type
+        if root_type is None:
+            raise DocumentRefused("OPERATION_NOT_SUPPORTED", "the schema serves no mutations")
+        _require_one_execution_root(operation.selection_set, fragments)
+    else:
+        root_type = schema.query_type
+        if root_type is None:  # pragma: no cover - a schema without Query cannot be built
+            raise DocumentRefused("OPERATION_NOT_SUPPORTED", "the schema serves no queries")
+    walk.selection_set(operation.selection_set, root_type, depth=0, multiplier=1, page=None)
 
     errors: list[GraphQLError] = validate(schema, document, specified_rules, max_errors=10)
     if errors:
@@ -269,7 +292,39 @@ def admit_document(
         aliases=walk.aliases,
         estimated_nodes=walk.nodes,
         selections_visited=walk.visits,
+        operation_type="mutation" if operation.operation is OperationType.MUTATION else "query",
     )
+
+
+def _require_one_execution_root(
+    selection_set: SelectionSetNode, fragments: dict[str, FragmentDefinitionNode]
+) -> None:
+    """A mutation selects exactly one field at its root, and it is not `__typename`.
+
+    Counted with fragments and inline fragments expanded, and regardless of `@skip` or
+    `@include`: a directive decided by a variable must not be the difference between one
+    execution and two. Runs after the cycle check, so the expansion terminates.
+    """
+    roots: list[str] = []
+    pending: list[SelectionSetNode] = [selection_set]
+    while pending:
+        current = pending.pop()
+        for selection in current.selections:
+            if isinstance(selection, FieldNode):
+                roots.append(selection.name.value)
+            elif isinstance(selection, InlineFragmentNode):
+                pending.append(selection.selection_set)
+            elif isinstance(selection, FragmentSpreadNode):
+                fragment = fragments.get(selection.name.value)
+                if fragment is not None:
+                    pending.append(fragment.selection_set)
+        if len(roots) > 1:
+            break
+    if len(roots) != 1 or roots[0].startswith("__"):
+        raise DocumentRefused(
+            "EXECUTION_ROOT_INVALID",
+            "a mutation must select exactly one execution field: one execution per request",
+        )
 
 
 def _refuse_fragment_cycles(fragments: dict[str, FragmentDefinitionNode]) -> None:
