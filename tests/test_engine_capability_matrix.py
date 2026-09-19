@@ -530,10 +530,18 @@ def test_source_mapping_is_statement_ranges_and_says_it_is_partial(matrix) -> No
     mapping = matrix.source_mapping
     assert mapping.state == CapabilityState.PARTIAL.value
     assert mapping.reason == "PARSER_DEGRADES_EXPLICITLY"
-    assert mapping.granularity == "statement_ordinal, statement_range, statement_range_status"
+    # R11-FP07 token grain, 2026-09-19: the two token ranges joined the record.
+    assert mapping.granularity == (
+        "source_token_range, statement_ordinal, statement_range, statement_range_status, "
+        "target_token_range"
+    )
     assert "R11-D16" in mapping.rationale
-    for phrase in ("line", "column", "statement_text_digest", "NOT_LOCATED", "GAP_STATEMENT"):
+    for phrase in (
+        "line", "column", "statement_text_digest", "NOT_LOCATED", "GAP_STATEMENT",
+        "source_token_range", "exactly one token",
+    ):
         assert phrase in mapping.evidence + mapping.rationale, phrase
+    assert "not token grain" not in mapping.rationale
 
 
 def test_a_package_body_is_parsed_per_member_with_a_named_fallback(matrix) -> None:
@@ -562,7 +570,10 @@ def test_adding_a_positional_field_would_change_the_source_mapping_record() -> N
             for token in ("ordinal", "line", "offset", "range", "position", "span")
         )
     ]
-    assert positional == ["statement_ordinal", "statement_range", "statement_range_status"], (
+    assert positional == [
+        "statement_ordinal", "statement_range", "statement_range_status",
+        "source_token_range", "target_token_range",
+    ], (
         "a positional field landed or left; regenerate the matrix and revisit the "
         "source-mapping decision rather than leaving the published record stale"
     )

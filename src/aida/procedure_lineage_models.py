@@ -99,6 +99,18 @@ class StatementRangeColumns:
     )
     #: SHA-256 of the stored body the offsets index; NULL when not located.
     statement_text_digest: Mapped[str | None] = mapped_column(String(64))
+    #: R11-FP07 token grain (2026-09-19): inside that statement, where the edge's
+    #: source and target are named -- half-open offsets into the same stored body,
+    #: and `procedure_token_ranges.TokenRangeKind` (COLUMN or TABLE). NULL, all
+    #: three per side, when that end is not exactly one token of the statement.
+    #: Lines and columns are not stored: they follow from the offsets and the body
+    #: `statement_text_digest` pins.
+    source_token_start_offset: Mapped[int | None] = mapped_column(Integer)
+    source_token_end_offset: Mapped[int | None] = mapped_column(Integer)
+    source_token_kind: Mapped[str | None] = mapped_column(String(10))
+    target_token_start_offset: Mapped[int | None] = mapped_column(Integer)
+    target_token_end_offset: Mapped[int | None] = mapped_column(Integer)
+    target_token_kind: Mapped[str | None] = mapped_column(String(10))
 
 
 class DeepProcedureLineageEdge(StatementRangeColumns, Base, TimestampMixin):

@@ -2923,6 +2923,17 @@ class StatementRangeRead(ApiModel):
     end_column: int
 
 
+class TokenRangeRead(ApiModel):
+    """R11-FP07 token grain: where, inside its statement, one end of an edge is
+    named -- `COLUMN` (a column reference, or the name a target column is given)
+    or `TABLE` (a table reference, without its alias). Half-open code-point
+    offsets into the same stored body as the statement range. Positions only."""
+
+    kind: str
+    start_offset: int
+    end_offset: int
+
+
 class DeepProcedureLineageEdgeRead(ApiModel):
     """One edge from the procedure-aware parser (N3) -- richer than a flat
     `view_lineage_edge`/`procedure_lineage_edge` row: carries the statement it
@@ -2958,6 +2969,12 @@ class DeepProcedureLineageEdgeRead(ApiModel):
     statement_range: StatementRangeRead | None = None
     statement_range_status: str | None = None
     statement_text_digest: str | None = None
+    #: R11-FP07 token grain: the token inside that statement naming the edge's
+    #: source and its target; null where it is not exactly one token (the same
+    #: table named twice, a column read twice in one expression, a transitive
+    #: edge's source, anything read from a called routine or never parsed).
+    source_token_range: TokenRangeRead | None = None
+    target_token_range: TokenRangeRead | None = None
     #: R11-FP03: for an Oracle package, the member subprogram this edge belongs to,
     #: the grain it is attributed at, and the captured member routine when exactly
     #: one matches.

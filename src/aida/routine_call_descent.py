@@ -152,6 +152,10 @@ def _at_call_site(
             else StatementRangeStatus.NOT_LOCATED.value
         ),
         statement_text_digest=call.statement_text_digest,
+        # Token grain likewise: the callee's tokens index the callee's body, and the
+        # call names neither end of the edge, so both are unlocated here.
+        source_token_range=None,
+        target_token_range=None,
         package_member=call.package_member,
         member_attribution=call.member_attribution,
     )

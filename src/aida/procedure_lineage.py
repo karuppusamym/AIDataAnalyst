@@ -128,6 +128,19 @@ bound to a statement of this text (a body that could not be reached, the
 body-level unresolved-trigger-subject marker) carries no range and says
 `NOT_LOCATED` -- a missing range is never a range of zero.
 
+Token ranges (R11-FP07, 2026-09-19). Inside that statement, each edge also
+says where its two ends are named -- `source_token_range` (the column reference
+it reads, or for a table-grain edge the table reference) and
+`target_token_range` (the column it writes, or the write target) -- in the same
+text, as `aida.procedure_token_ranges.TokenRange`. Here sqlglot's identifier
+positions *are* used, because they are proved first: each rewrite below keeps
+the statement's tail in place (clauses sqlglot cannot read are blanked with
+spaces, not cut), and every identifier of the parsed statement must slice out
+of the stored text unchanged before any token of it is recorded. A token is
+recorded only when exactly one reference in the statement can be the edge's
+evidence; two candidates -- the same table named twice, one column read twice
+in one expression -- record NULL, never a guess.
+
 Oracle package members (R11-FP03, 2026-09-18). A stored PACKAGE is its spec and
 its body joined, and it used to be parsed as one body: every member's reads and
 writes were the package's, and the `PACKAGE BODY ... AS PROCEDURE p IS BEGIN`
@@ -157,6 +170,11 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Final
 
+from aida.procedure_token_ranges import (
+    TokenRange,
+    locate_edge_tokens,
+    remember_parsed_text,
+)
 from aida.sql_lineage_parser import (
     _SQLGLOT_AVAILABLE,
     _SQLGLOT_DIALECT_MAP,
@@ -372,9 +390,11 @@ class StatementRange:
 class _Locator:
     """Offsets to lines and columns over one text, computed once per parse."""
 
-    __slots__ = ("_length", "_line_starts")
+    __slots__ = ("_length", "_line_starts", "text")
 
     def __init__(self, text: str) -> None:
+        #: The text itself, which R11-FP07's token ranges are verified against.
+        self.text = text
         self._length = len(text)
         self._line_starts = [0, *(index + 1 for index, ch in enumerate(text) if ch == "\n")]
 
@@ -495,6 +515,11 @@ class ProcedureLineageEdgeRecord:
     statement_range: StatementRange | None = None
     statement_range_status: str = StatementRangeStatus.NOT_LOCATED.value
     statement_text_digest: str | None = None
+    # R11-FP07 token grain: where, inside that statement and in the same text, the
+    # edge's source and target are named (`aida.procedure_token_ranges`). `None`
+    # wherever the reference is not exactly one token of this statement.
+    source_token_range: TokenRange | None = None
+    target_token_range: TokenRange | None = None
     # R11-FP03: for an Oracle package's parse, the member this edge belongs to and
     # the grain it is attributed at (`MemberAttribution`). Both `None` on an edge
     # from any other routine.
@@ -1579,6 +1604,9 @@ def _parse_local_query(
             f"{UnparsedReason.UNSUPPORTED_STATEMENT_SHAPE.value}: "
             f"PL/pgSQL expression is not a query ({sql[:120]!r})",
         )
+    # R11-FP07: `sql` is `SELECT ` plus a suffix of the statement, so its tail is
+    # the statement's tail -- what `procedure_token_ranges` aligns on.
+    remember_parsed_text(node, sql)
     return _local_statement(ordinal, node, dialect, context, subject)
 
 
@@ -1616,8 +1644,15 @@ def _classify_plpgsql_statement(
         return _parse_local_query(
             ordinal, f"SELECT {match.group('expr')}", dialect, sqlglot_dialect, context, subject
         ), ""
-    remainder = _PLPGSQL_INTO_STRICT_RE.sub("INTO", remainder)
-    return None, _PLPGSQL_RETURNING_INTO_RE.sub(r"\g<returning>", remainder)
+    # R11-FP07: both rewrites blank what they remove rather than cutting it, so
+    # every character after it keeps its offset (`procedure_token_ranges`).
+    remainder = _PLPGSQL_INTO_STRICT_RE.sub(
+        lambda match: "INTO" + " " * (len(match.group(0)) - len("INTO")), remainder
+    )
+    return None, _PLPGSQL_RETURNING_INTO_RE.sub(
+        lambda match: match.group("returning") + " " * (match.end() - match.end("returning")),
+        remainder,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1742,7 +1777,12 @@ def _classify_and_extract(
         return results
 
     if dialect == "postgres":
-        remainder = _PG_TEMP_ON_COMMIT_RE.sub(r"\g<head>", remainder, count=1)
+        # Blanked, not cut: R11-FP07's token ranges need every later offset kept.
+        remainder = _PG_TEMP_ON_COMMIT_RE.sub(
+            lambda match: match.group("head") + " " * (match.end() - match.end("head")),
+            remainder,
+            count=1,
+        )
     if plpgsql:
         plpgsql_statement, remainder = _classify_plpgsql_statement(
             ordinal, remainder, dialect, sqlglot_dialect, peeled.control_flow_context, subject
@@ -1789,6 +1829,7 @@ def _classify_and_extract(
             )
         )
         return results
+    remember_parsed_text(node, remainder)  # R11-FP07: what its positions index
 
     if isinstance(node, exp.Command):
         results.append(
@@ -2097,6 +2138,9 @@ def _propagate_intermediate_hops(
                         statement_range=e.statement_range,
                         statement_range_status=e.statement_range_status,
                         statement_text_digest=e.statement_text_digest,
+                        # Its target is named in `e`'s statement; its source is
+                        # read in another one, so no source token is carried.
+                        target_token_range=e.target_token_range,
                         package_member=e.package_member,
                         member_attribution=e.member_attribution,
                     )
@@ -2156,6 +2200,27 @@ def _attributed(
     """
     if statement.node is None or not statement.edges:
         return statement
+    only = _single_source(statement, subject)
+    if only is None:
+        return statement
+    return replace(
+        statement,
+        edges=tuple(
+            edge
+            if edge.source_resolved or edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+            else replace(edge, source_table=only, source_resolved=True)
+            for edge in statement.edges
+        ),
+    )
+
+
+def _single_source(
+    statement: ParsedStatement, subject: Mapping[str, str] | None = None
+) -> str | None:
+    """The one table `statement` reads, when it reads exactly one -- the source
+    `_attributed` gives its unqualified columns. `None` otherwise."""
+    if statement.node is None:
+        return None
     bound = {name.lower(): table for name, table in (subject or {}).items() if table}
     names = {
         bound.get(raw.lower(), raw)
@@ -2166,16 +2231,35 @@ def _attributed(
     }
     names.discard("")
     names.discard(statement.target_table or "")
-    if len(names) != 1:
+    return next(iter(names)) if len(names) == 1 else None
+
+
+def _tokens_located(statement: ParsedStatement, context: _WalkContext) -> ParsedStatement:
+    """R11-FP07 token grain: each edge's source and target token inside its
+    statement, where exactly one can be proved (`aida.procedure_token_ranges`).
+
+    Run on the *attributed* statement, so an unqualified column counts as reading
+    the table `_attributed` gave it -- two records of one fact, one qualified and
+    one attributed, then compete for it rather than each claiming its own token.
+    Only a located statement is narrowed: a token range refines a statement range
+    and never stands without one, and it is searched for inside exactly that span."""
+    where = statement.statement_range
+    if where is None or statement.node is None or not statement.edges:
         return statement
-    only = next(iter(names))
+    tokens = locate_edge_tokens(
+        statement.node,
+        statement.edges,
+        text=context.locator.text,
+        start=where.start_offset,
+        end=where.end_offset,
+        aliases=_collect_table_aliases_with_temp(statement.node, context.subject)[0],
+        unqualified_source=_single_source(statement, context.subject),
+    )
     return replace(
         statement,
         edges=tuple(
-            edge
-            if edge.source_resolved or edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
-            else replace(edge, source_table=only, source_resolved=True)
-            for edge in statement.edges
+            replace(edge, source_token_range=source, target_token_range=target)
+            for edge, (source, target) in zip(statement.edges, tokens, strict=True)
         ),
     )
 
@@ -2246,7 +2330,7 @@ def _walk_span(
             context.locator,
             context.digest,
         ):
-            statement = _attributed(parsed, context.subject)
+            statement = _tokens_located(_attributed(parsed, context.subject), context)
             statements.append(statement)
             ordinal += 1
             for marker in _table_function_markers(statement, context.dialect, context.digest):

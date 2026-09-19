@@ -1304,10 +1304,14 @@ def _source_mapping_coverage() -> SourceMappingCoverage:
     `statement_range_status`; this cell was UNSUPPORTED until then, and its own tripwire
     (`test_adding_a_positional_field_would_change_the_source_mapping_record`) is what
     made the change visible here rather than leaving the published record stale.
+    R11-FP07 token grain (2026-09-19) added `source_token_range` and
+    `target_token_range`, and the same tripwire moved this cell again.
 
     PARTIAL, not SUPPORTED: a range exists per *statement*, into the stored redacted
     body, and a fact no statement of that text holds is NOT_LOCATED with NULL positions
-    -- the cell degrades per statement rather than being uniformly available.
+    -- the cell degrades per statement rather than being uniformly available. The
+    token ranges inside it degrade per edge end: NULL wherever the reference is not
+    exactly one token of the statement.
     """
     positional = sorted(
         {
@@ -1350,19 +1354,27 @@ def _source_mapping_coverage() -> SourceMappingCoverage:
             "redacted body, pinned by statement_text_digest (SHA-256 of that text); "
             "persisted on deep_procedure_lineage_edge and trigger_lineage_edge; NULL "
             "positions with NOT_LOCATED where no statement of the text holds the fact, "
-            "never a range of zero"
+            "never a range of zero; inside that statement, source_token_range and "
+            "target_token_range (COLUMN or TABLE, half-open offsets into the same body) "
+            "name the token each end of the fact was read from, NULL where it is not "
+            "exactly one token"
         ),
         rationale=(
             "Ranges index the text Atlas holds and parsed -- body_sql_redacted, the text "
             "a steward is shown -- never the customer's source bytes, which Atlas does not "
             "keep (R11-D16): a PARSED redaction re-renders the body, so a raw-text offset "
             "would point at the wrong place, and the digest lets a reader prove a range "
-            "still indexes the stored body. Statement grain, from the parser's own "
-            "splitter and control-flow peel, not token grain: sqlglot's positions are "
-            "relative to the peeled, sometimes rewritten, remainder. An unparsed statement "
-            "reads GAP_STATEMENT with the span of the text it could not read. PARTIAL "
-            "because a fact with no statement of the text is NOT_LOCATED rather than "
-            "approximated."
+            "still indexes the stored body. Statement ranges come from the parser's own "
+            "splitter and control-flow peel. Token ranges come from sqlglot's identifier "
+            "positions, which are relative to the peeled, sometimes rewritten, remainder: "
+            "every rewrite keeps the statement's tail in place, and every identifier must "
+            "slice out of the stored body unchanged before any token of that statement is "
+            "recorded. A token is recorded only when exactly one reference can be the "
+            "fact's evidence -- the same table named twice, or a column read twice in one "
+            "expression, is NULL rather than the first occurrence. An unparsed statement "
+            "reads GAP_STATEMENT with the span of the text it could not read, and no "
+            "token. PARTIAL because a fact with no statement of the text is NOT_LOCATED, "
+            "and an end with no single token is NULL, rather than approximated."
         ),
     )
 

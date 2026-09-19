@@ -363,7 +363,8 @@ async def reconcile_decided_edges(
 def apply_statement_range(
     row: DeepProcedureLineageEdge | TriggerLineageEdge, edge: ProcedureLineageEdgeRecord
 ) -> None:
-    """Copy `edge`'s statement range onto `row` (R11-FP07).
+    """Copy `edge`'s statement range, and its source and target token ranges, onto
+    `row` (R11-FP07).
 
     Positions and the digest of the text they index -- never the text. An edge
     with no range writes NULL positions and its NOT_LOCATED status, never zeros.
@@ -379,6 +380,16 @@ def apply_statement_range(
         edge.statement_range_status if where else StatementRangeStatus.NOT_LOCATED.value
     )
     row.statement_text_digest = edge.statement_text_digest if where else None
+    # R11-FP07 token grain: a token range refines the statement range and indexes
+    # the same text, so it is written only alongside one.
+    source = edge.source_token_range if where else None
+    target = edge.target_token_range if where else None
+    row.source_token_start_offset = source.start_offset if source else None
+    row.source_token_end_offset = source.end_offset if source else None
+    row.source_token_kind = source.kind if source else None
+    row.target_token_start_offset = target.start_offset if target else None
+    row.target_token_end_offset = target.end_offset if target else None
+    row.target_token_kind = target.kind if target else None
 
 
 async def resolve_routine_table_ids(

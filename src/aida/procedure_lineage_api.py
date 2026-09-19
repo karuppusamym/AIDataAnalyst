@@ -35,6 +35,7 @@ from aida.procedure_lineage_models import (
     RoutineParseCoverage,
     TriggerParseCoverage,
 )
+from aida.procedure_token_ranges import TokenRange
 from aida.resource_scope import load_datasource_in_scope
 from aida.routine_call_descent import descend_routine_calls
 from aida.routine_lineage_edges import (
@@ -50,6 +51,7 @@ from aida.schemas import (
     ProcedureCapabilityMatrixRead,
     RoutineParseCoverageRead,
     StatementRangeRead,
+    TokenRangeRead,
     TriggerParseCoverageRead,
 )
 from aida.security import SecurityContext, require_roles
@@ -109,9 +111,29 @@ def _edge_read(edge: ProcedureLineageEdgeRecord) -> DeepProcedureLineageEdgeRead
         ),
         statement_range_status=edge.statement_range_status,
         statement_text_digest=edge.statement_text_digest,
+        source_token_range=_token_read(edge.source_token_range),
+        target_token_range=_token_read(edge.target_token_range),
         package_member=edge.package_member,
         member_attribution=edge.member_attribution,
     )
+
+
+def _token_read(token: TokenRange | None) -> TokenRangeRead | None:
+    if token is None:
+        return None
+    return TokenRangeRead(
+        kind=token.kind, start_offset=token.start_offset, end_offset=token.end_offset
+    )
+
+
+def _row_token(
+    kind: str | None, start_offset: int | None, end_offset: int | None
+) -> TokenRangeRead | None:
+    """A stored row's token range for one end of the edge, or None -- all three
+    columns or none (R11-FP07 token grain)."""
+    if kind is None or start_offset is None or end_offset is None:
+        return None
+    return TokenRangeRead(kind=kind, start_offset=start_offset, end_offset=end_offset)
 
 
 def _row_range(row: DeepProcedureLineageEdge) -> StatementRangeRead | None:
@@ -273,6 +295,16 @@ async def list_deep_procedure_lineage(
             statement_range=_row_range(row),
             statement_range_status=row.statement_range_status,
             statement_text_digest=row.statement_text_digest,
+            source_token_range=_row_token(
+                row.source_token_kind,
+                row.source_token_start_offset,
+                row.source_token_end_offset,
+            ),
+            target_token_range=_row_token(
+                row.target_token_kind,
+                row.target_token_start_offset,
+                row.target_token_end_offset,
+            ),
             package_member=row.package_member,
             member_attribution=row.member_attribution,
             member_routine_id=row.member_routine_id,
