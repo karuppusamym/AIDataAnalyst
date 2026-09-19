@@ -111,6 +111,11 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "portal_base_url": (SUPPLIED, "links in notifications are omitted when unset"),
     "mcp_budget_enabled": (OPT_IN, "needs Redis for the budget buckets"),
     "graphql_budget_enabled": (OPT_IN, "needs Redis for the budget buckets, as MCP's does"),
+    "okf_import_enabled": (
+        OFF_BY_DESIGN,
+        "R11-OKF03: imported OKF edits become pending proposals only; the import stays off "
+        "until the row's hostile-content, round-trip and review-journey evidence is accepted",
+    ),
     "quality_seasonal_thresholds_enabled": (
         OPT_IN,
         "changes VOLUME_CHANGE verdicts; an estate reviews it against its own history first",

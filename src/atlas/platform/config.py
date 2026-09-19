@@ -923,6 +923,11 @@ class Settings(BaseSettings):
     # the schema metadata the knowledge explains. 48,000 is the selection's hard ceiling.
     okf_context_default_max_chars: int = Field(default=16_000, ge=1_000, le=48_000)
     okf_context_ask_max_chars: int = Field(default=8_000, ge=1_000, le=48_000)
+    # R11-OKF03: importing an edited OKF bundle as pending proposals (`aida.okf_import_api`).
+    # Off until the row is accepted: both import routes refuse with OKF_IMPORT_DISABLED before
+    # reading the upload. Its limits are code constants in `aida.okf_import_bundle`, not
+    # settings, so a hostile archive cannot wait for an operator to raise one.
+    okf_import_enabled: bool = False
     # R11-SQL01: how long a validated SQL draft's receipt may be run on. Short on purpose: a
     # receipt proves the statement passed validation *then*; Run re-validates in full anyway,
     # and a stale receipt is refused rather than trusted.

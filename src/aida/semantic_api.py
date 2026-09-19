@@ -1398,7 +1398,12 @@ async def compose_governance_review_diff(
     after: dict[str, Any] | None = None
     message: str | None = None
 
-    if review.object_type in {"CONTEXT_PRODUCT_VERSION", "MODEL_IMPORT_BATCH", "ONTOLOGY_VERSION"}:
+    if review.object_type in {
+        "CONTEXT_PRODUCT_VERSION",
+        "MODEL_IMPORT_BATCH",
+        "OKF_IMPORT_BATCH",
+        "ONTOLOGY_VERSION",
+    }:
         from aida.review_detail_snapshots import detail_snapshots
 
         before, after, message = await detail_snapshots(session, review)
@@ -2944,6 +2949,9 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "DOCUMENT_CLAIM": _decide_document_claim,
     "DESCRIPTION_WITHDRAWAL": _decide_description_withdrawal,
     "MODEL_IMPORT_BATCH": _decide_model_import_batch,
+    # R11-OKF03: an OKF import's description batch is the same batch store, applied by the same
+    # adapter; only its review type differs, so its tier is pinned at T2 (`review_risk_tiers`).
+    "OKF_IMPORT_BATCH": _decide_model_import_batch,
     "SEMANTIC_METRIC_PROPOSAL": _decide_semantic_metric_proposal,
     "COLUMN_CLASSIFICATION_PROMOTION": _decide_column_classification_promotion,
     "QUERY_HISTORY_METRIC_CANDIDATE": _decide_query_history_metric_candidate,

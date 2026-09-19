@@ -127,6 +127,10 @@ _TIERS: Final[Mapping[str, str]] = {
     # correctable; silently un-publishing good language is neither, and an
     # agent should never be the one to do it unattended.
     "DESCRIPTION_WITHDRAWAL": TIER_T2,
+    # R11-OKF03: descriptions imported from an edited OKF bundle. The same batch
+    # store and apply path as a workbook import, but the text came from a file
+    # anyone may have edited, so it is T2 at every size -- no agent decides it.
+    "OKF_IMPORT_BATCH": TIER_T2,
     # --- T2: published meaning and executable capability ------------------
     "SEMANTIC_MODEL_VERSION": TIER_T2,
     "SEMANTIC_METRIC": TIER_T2,

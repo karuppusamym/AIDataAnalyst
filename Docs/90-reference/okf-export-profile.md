@@ -189,7 +189,8 @@ documents, the counts and the manifest's pin list.
 OKF's `verified` family and Atlas's draft / approval / withdrawal states are separate mappings.
 
 * An imported `verified` claim is evidence supplied by its author and never an Atlas approval.
-  This profile is export-only; import is R11-OKF03 and is not enabled.
+  Import (R11-OKF03, disabled by default) reports it as a claim and discards it; what an
+  edited bundle can and cannot bring back is the [OKF import reference](okf-import-contract.md).
 * Document-level `verified` is emitted **only** where every asserted statement in the document is
   covered by a recorded Atlas approval event. For a catalog object it never is: its columns,
   dependencies and coverage are captured rather than reviewed. Those documents therefore carry no
