@@ -20,7 +20,9 @@ same datasource, that lineage is known, and this reads it.
   sources to whatever the caller writes.
 * **The gap marker** goes only when the callee was fully parsed, all the way down. Otherwise it
   stays and names why: NOT_CAPTURED, AMBIGUOUS, BODY_WITHHELD, CYCLE, DEPTH_LIMIT, CALLEE_LIMIT or
-  CALLEE_NOT_FULLY_PARSED.
+  CALLEE_NOT_FULLY_PARSED. A gap that already names its outcome is left as it is: the parser
+  writes one for a call between members of one Oracle package, which it read through itself
+  (R11-FP03).
 
 Only lineage uses this. Tool generation still refuses a routine with a nested call: reading a call
 through proves what it touches, not that invoking it is safe. Bodies are the stored value-free text,
@@ -29,6 +31,7 @@ and nothing is executed.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Final
@@ -91,6 +94,13 @@ _PREFIXES: Final = {
     KIND_CALL: f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: ",
     KIND_TABLE_FUNCTION: f"{UnparsedReason.TABLE_FUNCTION_READ.value}: ",
 }
+#: R11-FP03: a gap whose outcome is already written after the name -- `name (CODE)`.
+#: The parser writes one for a call between members of one package, which it resolved
+#: against that package's own members. Resolving the name again here, against the
+#: schema's routines, would ignore PL/SQL's scoping (a member shadows a schema-level
+#: routine of the same name) and would find the member's routine, which is captured
+#: with no body of its own -- BODY_WITHHELD, for a body that was right there and read.
+_DECIDED_RE: Final = re.compile(r"\s\([A-Z_]+\)$")
 
 
 def called_routine(edge: ProcedureLineageEdgeRecord) -> tuple[str, str] | None:
@@ -229,7 +239,7 @@ def _descend(
     edges: list[ProcedureLineageEdgeRecord] = []
     for edge in result.edges:
         called = called_routine(edge)
-        if called is None:
+        if called is None or _DECIDED_RE.search(edge.unparsed_reason or ""):
             edges.append(edge)
             continue
         kind, name = called

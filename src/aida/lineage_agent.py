@@ -123,6 +123,7 @@ from aida.routine_lineage_edges import (
     record_routine_parse_coverage,
     record_trigger_parse_coverage,
     require_eligible_routine_body,
+    resolve_package_member_ids,
     resolve_routine_table_ids,
     routine_edge_key,
     routine_edge_row,
@@ -715,6 +716,13 @@ async def _propose_procedure_lineage(
             confidence=confidence,
         )
     table_ids = await resolve_routine_table_ids(session, datasource_id, fresh)
+    # R11-FP03: an Oracle package's edges name the captured member routine each
+    # belongs to, exactly as a person's parse records them (`persist_routine_edges`).
+    # Without it the agent's proposals kept the member's name and grain but not its
+    # id, so they could not be found from the member they are about.
+    member_routine_ids = await resolve_package_member_ids(
+        session, datasource=datasource, package=routine, result=result
+    )
     rows = [
         routine_edge_row(
             edge,
@@ -727,6 +735,7 @@ async def _propose_procedure_lineage(
             # agent's edge is decided by a person. See the module docstring.
             review_status="PROPOSED",
             created_by=run.principal_id,
+            member_routine_ids=member_routine_ids,
         )
         for edge in fresh
     ]

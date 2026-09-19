@@ -113,18 +113,32 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
         "_SUBPROGRAM_DECLARATION_RE"
     ),
     "RETURN <expression> (PL/SQL; no subquery is allowed there)": "_PLSQL_RETURN_RE",
+    # R11-FP03 (2026-09-19): PL/SQL calls, and declaration sections.
+    "PL/SQL call statement p(x); / pkg.p; (nested call; a sibling package member is read "
+    "through)": "_PLSQL_CALL_STATEMENT_RE",
+    "CURSOR c IS <query> declaration (PL/SQL; read into routine-local state)": (
+        "_PLSQL_CURSOR_DECLARATION_RE"
+    ),
+    "TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL)": (
+        "_PLSQL_LINEAGE_FREE_DECLARATION_RE"
+    ),
 }
 
 # Regex-recognised constructs that end in an explicit UNPARSED marker rather than
 # extracted lineage.
 _EXPLICIT_UNPARSED_REGEXES: Final[frozenset[str]] = frozenset(
-    {"_DYNAMIC_SQL_RE", "_NESTED_CALL_RE", "_PLPGSQL_EXECUTE_RE"}
+    {"_DYNAMIC_SQL_RE", "_NESTED_CALL_RE", "_PLPGSQL_EXECUTE_RE", "_PLSQL_CALL_STATEMENT_RE"}
 )
 
 # Regex-recognised constructs that are genuinely lineage-free: recognised and
 # correctly skipped, not a gap.
 _NO_LINEAGE_REGEXES: Final[frozenset[str]] = frozenset(
-    {"_NO_LINEAGE_KEYWORDS_RE", "_SUBPROGRAM_DECLARATION_RE", "_PLSQL_RETURN_RE"}
+    {
+        "_NO_LINEAGE_KEYWORDS_RE",
+        "_SUBPROGRAM_DECLARATION_RE",
+        "_PLSQL_RETURN_RE",
+        "_PLSQL_LINEAGE_FREE_DECLARATION_RE",
+    }
 )
 
 

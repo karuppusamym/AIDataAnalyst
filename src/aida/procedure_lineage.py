@@ -155,9 +155,33 @@ carry `package_member` and `member_attribution=MEMBER`. The package's own code
 that do not balance (a truncated body), a member header this scanner cannot
 read -- the whole text is parsed exactly as before and every edge says
 `PACKAGE_FALLBACK`, with the reason on the result: never a silent mix of
-member-grain and package-grain facts. A member's declaration section is not
-walked, which is the treatment every standalone routine's declaration section
-already gets from `_extract_body`.
+member-grain and package-grain facts.
+
+PL/SQL calls and declaration sections (R11-FP03, 2026-09-19). Three silent gaps
+the member split left:
+
+* **A bare call statement.** PL/SQL calls a procedure by naming it --
+  `p(x);`, `pkg.p;` -- with no CALL or EXEC, and sqlglot read that as a lone
+  expression with no table in it, so the statement was classed lineage-free. It
+  is now a NESTED_PROCEDURE_CALL gap like `CALL p()` (`_PLSQL_CALL_STATEMENT_RE`),
+  which `aida.routine_call_descent` reads through where the callee is captured.
+  Assignments, NULL/COMMIT/RETURN/RAISE, collection methods and Oracle's own
+  housekeeping calls (DBMS_OUTPUT, RAISE_APPLICATION_ERROR, ...) stay
+  lineage-free; a call into DBMS_SQL is dynamic SQL.
+* **A call between members of one package.** A sibling member's body is in the
+  text being parsed, and a member's own routine is captured with no body, so
+  catalog descent could never read it. The parse reads it through instead
+  (`_member_calls_read_through`): the callee is found among the package's own
+  members -- an overload by the arguments as written, never guessed -- and its
+  lineage is the caller's at the call, as descent does across routines. A local
+  subprogram of the same name shadows the member, as PL/SQL resolves it.
+* **Declaration sections.** A routine's, a member's, a nested subprogram's and
+  the package's own declarations are walked (`_consume_declarations`): a
+  `CURSOR c IS <query>` is read into routine-local state, the declarations PL/SQL
+  admits otherwise are lineage-free and produce no statement, and one this
+  reader does not recognise is reported. A standalone routine is read the way a
+  member is (`_oracle_block`), because taking its body from the first BEGIN in
+  the text took a nested subprogram's body instead of its own.
 """
 
 from __future__ import annotations
@@ -460,6 +484,16 @@ class PackageSplitFailure(StrEnum):
     UNREADABLE_MEMBER = "UNREADABLE_MEMBER"
 
 
+#: R11-FP03: why a call between members of one package was not read through, written
+#: after the callee as `name (CODE)` -- the same words, and the same shape,
+#: `aida.routine_call_descent` uses for a call across routines (restated because that
+#: module imports this one). No single member accepts the call as written -- two
+#: overloads the text cannot tell apart, or none with those parameters:
+MEMBER_CALL_AMBIGUOUS: Final[str] = "AMBIGUOUS"
+#: The member called, or one it calls in turn, has a gap of its own:
+MEMBER_CALL_NOT_FULLY_PARSED: Final[str] = "CALLEE_NOT_FULLY_PARSED"
+
+
 @dataclass(frozen=True, slots=True)
 class PackageMember:
     """One member subprogram a package body defines, as the parse found it.
@@ -470,7 +504,8 @@ class PackageMember:
     lets `routine_lineage_edges.resolve_package_member_ids` tell two overloads
     of one name apart against the captured members' parameters.
     `first_ordinal`/`last_ordinal` bound the statements walked from this
-    member's body; both `None` for a member whose body holds none.
+    member -- its declarations, nested subprograms and body since R11-FP03's
+    second pass, and the calls it makes; both `None` for a member with none.
     """
 
     name: str
@@ -528,6 +563,17 @@ class ProcedureLineageEdgeRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CallSite:
+    """R11-FP03: a PL/SQL call statement as written -- the name it calls, and for each
+    argument the parameter it is passed to by name (`p_id => x`), or `None` when it is
+    passed by position. Never an argument's value (INV-6): names are all that telling
+    two overloads apart needs."""
+
+    callee: str
+    argument_names: tuple[str | None, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedStatement:
     """One top-level statement chunk of a procedure body, after control-flow
     peeling and classification -- the unit `find_single_read_only_result_statement`
@@ -546,6 +592,9 @@ class ParsedStatement:
     edges: tuple[ProcedureLineageEdgeRecord, ...]
     #: R11-FP07: this statement's span in the parsed text; `None` until located.
     statement_range: StatementRange | None = None
+    #: R11-FP03: a PL/SQL call statement's callee and argument names, which a split
+    #: package resolves against its own members; `None` on anything else.
+    call_site: CallSite | None = None
 
 
 @dataclass(slots=True)
@@ -929,6 +978,9 @@ class _PeelResult:
     remainder_offset: int = 0
     #: ... and where `cursor_loop_source_sql` starts, when there is one.
     cursor_offset: int | None = None
+    #: R11-FP03: an END was peeled off this chunk, so a lone name left after it is
+    #: the END's label (`END refresh;`, `END LOOP outer;`) -- not a PL/SQL call.
+    follows_end: bool = False
 
 
 def _peel_control_flow_prefix(chunk: str) -> _PeelResult:
@@ -948,6 +1000,7 @@ def _peel_control_flow_prefix(chunk: str) -> _PeelResult:
     context: str | None = None
     cursor_sql: str | None = None
     cursor_offset: int | None = None
+    follows_end = False
     for _ in range(_MAX_PEEL_ITERATIONS):
         # A comment between two headers (`IF x BEGIN -- why` then the statement) is
         # not the statement; skipping it keeps each header visible to the next peel
@@ -1021,13 +1074,16 @@ def _peel_control_flow_prefix(chunk: str) -> _PeelResult:
         if match := _BARE_END_MID_RE.match(remainder):
             consumed += match.end()
             remainder = remainder[match.end() :]
+            follows_end = True
             continue
         if _STRUCTURAL_ONLY_RE.match(remainder):
             remainder = ""
             break
         break
     lead = len(remainder) - len(remainder.lstrip())
-    return _PeelResult(remainder.strip(), context, cursor_sql, consumed + lead, cursor_offset)
+    return _PeelResult(
+        remainder.strip(), context, cursor_sql, consumed + lead, cursor_offset, follows_end
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1065,6 +1121,62 @@ _SUBPROGRAM_DECLARATION_RE = re.compile(
 #: packaged function returning a constant carry a PARSE_ERROR marker. Oracle only:
 #: T-SQL's `RETURN (SELECT ...)` does read a table and is parsed as before.
 _PLSQL_RETURN_RE = re.compile(r"^\s*RETURN\b", re.IGNORECASE)
+#: R11-FP03: a PL/SQL call statement. PL/SQL calls a procedure by naming it -- `p;`,
+#: `p(x)`, `pkg.p(a => 1)`, `schema.pkg.p(x)`, `p@link(x)` -- with no CALL or EXEC,
+#: so sqlglot reads the statement as a lone function or column expression with no
+#: table in it, and every such call used to be classed lineage-free: a body that
+#: calls a writer read as fully parsed and read-only. Oracle only -- T-SQL needs
+#: EXEC and PL/pgSQL PERFORM or CALL, so a bare name there is not a call. That the
+#: argument list is one balanced group is checked by `_plsql_call`, quote-aware.
+_PLSQL_CALL_STATEMENT_RE = re.compile(
+    r"^\s*(?P<callee>[A-Za-z][\w$#]*(?:\s*\.\s*[A-Za-z][\w$#]*){0,2}"
+    r"(?:\s*@\s*[A-Za-z][\w$#]*(?:\.[A-Za-z][\w$#]*)*)?)"
+    r"\s*(?P<arguments>\(.*\))?\s*$",
+    re.DOTALL,
+)
+#: What an END's label leaves once `_BARE_END_MID_RE` has peeled the END: a lone
+#: name, the very shape of a call with no arguments (`_PeelResult.follows_end`).
+_PLSQL_END_LABEL_RE = re.compile(r"^\s*[A-Za-z][\w$#]*\s*$")
+#: Words a PL/SQL statement may consist of alone that name no subprogram.
+_PLSQL_STATEMENT_WORDS: Final = frozenset(
+    {"NULL", "BEGIN", "END", "ELSE", "LOOP", "RETURN", "EXIT", "CONTINUE", "RAISE",
+     "COMMIT", "ROLLBACK", "TRUE", "FALSE"}
+)
+#: Oracle-supplied subprograms whose call moves no table data: raising an error, and
+#: the output, session, instrumentation and statistics packages. `DBMS_OUTPUT` is
+#: already lineage-free by keyword (`_NO_LINEAGE_KEYWORDS_RE`); it is here for the
+#: `SYS.`-qualified spelling. A call into anything else Oracle supplies stays a
+#: nested call -- `DBMS_MVIEW.REFRESH` writes a materialized view, `UTL_FILE` writes
+#: files -- because an unknown callee is a gap, never a clean statement.
+_PLSQL_LINEAGE_FREE_ROUTINES: Final = frozenset({"RAISE_APPLICATION_ERROR"})
+_PLSQL_LINEAGE_FREE_PACKAGES: Final = frozenset(
+    {"DBMS_OUTPUT", "DBMS_APPLICATION_INFO", "DBMS_LOCK", "DBMS_SESSION", "DBMS_STATS"}
+)
+#: Oracle's dynamic-SQL package: a call into it runs a string built at runtime.
+_PLSQL_DYNAMIC_SQL_PACKAGES: Final = frozenset({"DBMS_SQL"})
+#: Collection methods written as statements (`v.EXTEND;`, `v.DELETE(1);`): they resize
+#: a variable, never a table.
+_PLSQL_COLLECTION_METHODS: Final = frozenset({"DELETE", "EXTEND", "TRIM"})
+#: R11-FP03: a PL/SQL cursor declaration -- `CURSOR c [(params)] [RETURN type] IS
+#: <query>`, or a cursor spec with no IS and no query. Its query is a read that used
+#: to be dropped silently, because no declaration section was walked. `DECLARE` may
+#: lead it where a nested block's first declaration reached the splitter glued to
+#: its DECLARE -- which otherwise classed the chunk lineage-free by that keyword.
+_PLSQL_CURSOR_DECLARATION_RE = re.compile(
+    r"^\s*(?:DECLARE\s+)?CURSOR\s+[A-Za-z][\w$#]*", re.IGNORECASE
+)
+#: R11-FP03: every other declaration a PL/SQL declaration section holds -- TYPE,
+#: SUBTYPE and PRAGMA, and item declarations: `v NUMBER := 0`, `c CONSTANT ...`,
+#: `e EXCEPTION`, `r ops.orders%ROWTYPE`, `n ops.orders.id%TYPE`. None reads a table.
+#: PL/SQL admits no subquery in a default (PLS-00405), and a `%TYPE`/`%ROWTYPE`
+#: anchor takes a table's *structure* -- its column list and types -- not its rows:
+#: no data flows from the table, so recording it as a read would put the routine in
+#: every "who reads this table?" answer it has no part in. That is a dependency on
+#: the table's definition, which this lineage does not model.
+_PLSQL_LINEAGE_FREE_DECLARATION_RE = re.compile(
+    r'^\s*(?:(?:TYPE|SUBTYPE|PRAGMA)\b|(?:"[^"]+"|[A-Za-z][\w$#]*)\s+[A-Za-z"])',
+    re.IGNORECASE,
+)
 
 # PL/pgSQL (FP-07). Applied only to a routine `_is_plpgsql` recognises, because
 # each gives a keyword a meaning it does not have in T-SQL or PL/SQL: `EXECUTE
@@ -1756,6 +1868,14 @@ def _classify_and_extract(
         # Purely structural (BEGIN/END/ELSE/...) -- genuinely no lineage.
         return results
 
+    if dialect == "oracle" and _PLSQL_CURSOR_DECLARATION_RE.match(remainder):
+        # R11-FP03: ahead of the keyword check, which reads a leading DECLARE as
+        # lineage-free and would drop the cursor's query with it.
+        results.append(
+            _cursor_declaration(ordinal, remainder, dialect, sqlglot_dialect, subject)
+        )
+        return results
+
     if _NO_LINEAGE_KEYWORDS_RE.match(remainder) or (
         dialect == "oracle"
         and (_SUBPROGRAM_DECLARATION_RE.match(remainder) or _PLSQL_RETURN_RE.match(remainder))
@@ -1807,6 +1927,18 @@ def _classify_and_extract(
                 ordinal, dialect, peeled.control_flow_context,
                 f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: {callee}",
             )
+        )
+        return results
+
+    if dialect == "oracle" and peeled.follows_end and _PLSQL_END_LABEL_RE.match(remainder):
+        # R11-FP03: `END refresh;`, `END LOOP outer;` -- the END's label, which reads
+        # nothing, and is exactly what the call statement `refresh;` looks like.
+        results.append(_lineage_free(ordinal, peeled.control_flow_context))
+        return results
+
+    if dialect == "oracle" and (call := _plsql_call(remainder)) is not None:
+        results.append(
+            _plsql_call_statement(ordinal, call, dialect, peeled.control_flow_context)
         )
         return results
 
@@ -2065,6 +2197,141 @@ def _unparsed_statement(
         unparsed_reason=reason, control_flow_context=control_flow_context,
         target_table=None, is_intermediate_target=False, node=None, edges=(edge,),
     )
+
+
+# ---------------------------------------------------------------------------
+# Step 4b (R11-FP03): PL/SQL call statements and cursor declarations.
+# ---------------------------------------------------------------------------
+
+#: The `control_flow_context` of a cursor declaration's read.
+CURSOR_DECLARATION_CONTEXT: Final[str] = "CURSOR_DECLARATION"
+#: ... and of a declaration this reader could not recognise.
+DECLARATION_CONTEXT: Final[str] = "DECLARATION"
+
+
+def _lineage_free(ordinal: int, context: str | None) -> ParsedStatement:
+    return ParsedStatement(
+        ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=True,
+        unparsed_reason=None, control_flow_context=context,
+        target_table=None, is_intermediate_target=False, node=None, edges=(),
+    )
+
+
+def _plsql_call(text: str) -> CallSite | None:
+    """`text` as a PL/SQL call statement, or None when it is not one."""
+    match = _PLSQL_CALL_STATEMENT_RE.match(text)
+    if match is None:
+        return None
+    callee = re.sub(r"\s+", "", match.group("callee"))
+    if callee.split(".", 1)[0].upper() in _PLSQL_STATEMENT_WORDS:
+        return None
+    arguments = match.group("arguments")
+    if arguments is None:
+        return CallSite(callee, ())
+    inner = _parenthesised(arguments)
+    if inner is None:
+        return None
+    return CallSite(
+        callee,
+        tuple(_argument_name(piece) for piece in _top_level_pieces(inner) if piece.strip()),
+    )
+
+
+def _parenthesised(text: str) -> str | None:
+    """What is inside `text` when all of it is one balanced parenthesised group --
+    quote- and comment-aware -- or None (`p(a)(b)`, or a group that never closes)."""
+    depth = 0
+    for start, _end, kind in _scan_tokens(text):
+        if kind != "other":
+            continue
+        depth += 1 if text[start] == "(" else -1
+        if depth == 0:
+            return text[1:start] if start == len(text) - 1 else None
+    return None
+
+
+def _argument_name(piece: str) -> str | None:
+    """The parameter one argument is passed to by name (`p_id => x`), or None when it
+    is passed by position. The value is never looked at."""
+    match = re.match(r"\s*([A-Za-z][\w$#]*)\s*=>", piece)
+    return match.group(1) if match else None
+
+
+def _plsql_call_statement(
+    ordinal: int, call: CallSite, dialect: str, context: str | None
+) -> ParsedStatement:
+    """A PL/SQL call statement: a nested call naming its callee, as `CALL p()` is --
+    unless the callee is one Oracle supplies that moves no table data, a collection
+    method, or Oracle's dynamic-SQL package."""
+    parts = call.callee.split("@", 1)[0].upper().split(".")
+    if len(parts) > 1 and parts[0] == "SYS":
+        parts = parts[1:]
+    if (
+        (len(parts) == 1 and parts[0] in _PLSQL_LINEAGE_FREE_ROUTINES)
+        or (len(parts) == 2 and parts[0] in _PLSQL_LINEAGE_FREE_PACKAGES)
+        or (len(parts) > 1 and parts[-1] in _PLSQL_COLLECTION_METHODS)
+    ):
+        return _lineage_free(ordinal, context)
+    if len(parts) == 2 and parts[0] in _PLSQL_DYNAMIC_SQL_PACKAGES:
+        return _unparsed_statement(
+            ordinal, dialect, context,
+            f"{UnparsedReason.DYNAMIC_SQL.value}: {parts[0]} runs a string built at runtime",
+        )
+    marker = _unparsed_statement(
+        ordinal, dialect, context,
+        f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: {call.callee}",
+    )
+    return replace(marker, call_site=call)
+
+
+def _cursor_query(text: str) -> str | None:
+    """The query a cursor declaration's IS introduces -- empty when nothing follows
+    it -- or None for a cursor spec, which has no IS."""
+    depth = 0
+    for start, end, kind in _scan_tokens(text):
+        if kind == "other":
+            depth += 1 if text[start] == "(" else -1
+        elif kind == "word" and depth == 0 and text[start:end].upper() == "IS":
+            return text[end:].strip()
+    return None
+
+
+def _cursor_declaration(
+    ordinal: int,
+    text: str,
+    dialect: str,
+    sqlglot_dialect: str,
+    subject: Mapping[str, str] | None = None,
+) -> ParsedStatement:
+    """A cursor declaration's query, read as what it is: the rows the cursor fetches
+    into routine-local state. Its edges go to `PROCEDURE_LOCAL_TARGET`, as `SELECT
+    ... INTO v` does -- never a table write, never the routine's result. A cursor spec
+    names a query declared elsewhere in the same text, which is read there.
+    """
+    context = CURSOR_DECLARATION_CONTEXT
+    query = _cursor_query(text)
+    if query is None:
+        return _lineage_free(ordinal, context)
+    if not _SQLGLOT_AVAILABLE:
+        return _unparsed_statement(
+            ordinal, dialect, context,
+            f"{UnparsedReason.PARSE_ERROR.value}: sqlglot library is not available",
+        )
+    try:
+        node = sqlglot.parse_one(query, dialect=sqlglot_dialect, error_level=ErrorLevel.RAISE)
+    except Exception as exc:  # sqlglot raises a broad ParseError/TokenError family
+        return _unparsed_statement(
+            ordinal, dialect, context, f"{UnparsedReason.PARSE_ERROR.value}: {exc!s}"[:300]
+        )
+    if not isinstance(node, exp.Select | exp.Union):
+        return _unparsed_statement(
+            ordinal, dialect, context,
+            f"{UnparsedReason.UNSUPPORTED_STATEMENT_SHAPE.value}: "
+            "a cursor declaration whose IS introduces no query",
+        )
+    # R11-FP07: the query is the declaration's tail, which is what token ranges align on.
+    remember_parsed_text(node, query)
+    return _local_statement(ordinal, node, dialect, context, subject)
 
 
 # ---------------------------------------------------------------------------
@@ -2364,14 +2631,31 @@ class _MemberSpan:
     #: no PL/SQL body (an external implementation).
     body_start: int
     body_end: int
+    #: R11-FP03: its declaration section in order -- each declaration's span, or a
+    #: subprogram defined there (`_consume_declarations`).
+    declarations: tuple[_Declaration, ...] = ()
+    #: Per parameter, whether it has a default and so may be left out of a call.
+    parameter_defaults: tuple[bool, ...] = ()
+
+
+#: One item of a PL/SQL declaration section: a declaration's `(start, end)` span in
+#: the text, without its `;`, or a subprogram defined there.
+_Declaration = tuple[int, int] | _MemberSpan
 
 
 @dataclass(frozen=True, slots=True)
 class _PackageLayout:
     members: tuple[_MemberSpan, ...]
-    #: The package's own code to walk: spec declarations, the body's
-    #: package-level declarations, and the initialization block.
+    #: The package's own statements to walk: the initialization block, and anything
+    #: after the package's END.
     package_segments: tuple[tuple[int, int], ...]
+    #: R11-FP03: the package's own declarations -- the spec's, and the body's outside
+    #: every member -- read by `_walk_declaration`, not as statements.
+    package_declarations: tuple[tuple[int, int], ...] = ()
+    #: The package's name as the body's header spells it, and its schema when the
+    #: header qualifies it: what a call qualified with the package is matched on.
+    name: str | None = None
+    schema: str | None = None
 
 
 def _is_package_text(sql: str, dialect: str) -> bool:
@@ -2381,9 +2665,29 @@ def _is_package_text(sql: str, dialect: str) -> bool:
 def _parameter_names(text: str) -> tuple[str, ...]:
     """The parameter names of a subprogram header's parameter list, in order.
 
-    Splits on commas outside parentheses, quotes and comments, and keeps each
-    piece's first identifier. A default expression is never kept -- it can be a
-    literal (INV-6), and the name is all resolution needs."""
+    Keeps each parameter's first identifier. A default expression is never kept --
+    it can be a literal (INV-6), and the name is all resolution needs."""
+    return tuple(name for name, _default in _parameters(text))
+
+
+def _parameters(text: str) -> tuple[tuple[str, bool], ...]:
+    """Each parameter of a header's parameter list: its name, and whether it has a
+    default (`DEFAULT x` or `:= x`) -- whether a call may leave it out. Whether is
+    read with the list's literals and comments blanked, so a default's text can
+    never be mistaken for the keyword."""
+    parameters: list[tuple[str, bool]] = []
+    for piece in _top_level_pieces(text):
+        match = re.match(r"\s*([A-Za-z_][\w$#]*)", piece)
+        if match:
+            code = re.sub(r"'(?:[^']|'')*'|--[^\n]*|/\*.*?\*/", " ", piece, flags=re.DOTALL)
+            default = ":=" in code or re.search(r"\bDEFAULT\b", code, re.IGNORECASE) is not None
+            parameters.append((match.group(1), default))
+    return tuple(parameters)
+
+
+def _top_level_pieces(text: str) -> list[str]:
+    """`text` split on its commas outside parentheses, quotes and comments -- a
+    parameter list, or a call's argument list."""
     pieces: list[str] = []
     depth = 0
     piece_start = 0
@@ -2411,12 +2715,7 @@ def _parameter_names(text: str) -> tuple[str, ...]:
             piece_start = index + 1
         index += 1
     pieces.append(text[piece_start:])
-    names: list[str] = []
-    for piece in pieces:
-        match = re.match(r"\s*([A-Za-z_][\w$#]*)", piece)
-        if match:
-            names.append(match.group(1))
-    return tuple(names)
+    return pieces
 
 
 def _statement_end(tokens: list[_Token], index: int) -> int | None:
@@ -2445,24 +2744,62 @@ def _header_end(tokens: list[_Token], index: int) -> int | None:
     return None
 
 
-def _declarations_end(tokens: list[_Token], index: int, stop: int) -> int | None:
-    """The index of the END closing a declaration list that starts at `index`,
-    before `stop` -- CASE expressions in a default open and close their own
-    level, so only a depth-0 END ends the list."""
+def _consume_declarations(
+    sql: str, tokens: list[_Token], index: int, stop: int
+) -> tuple[list[_Declaration], int] | PackageSplitFailure:
+    """Read a PL/SQL declaration section from token `index` (just past the IS, AS or
+    DECLARE that opens it) up to `stop`: each declaration's span and each subprogram
+    defined there, in order, and the index of the BEGIN or END that closes it.
+
+    A declaration ends at its `;` outside parentheses and CASE expressions -- a
+    default may hold either -- and a subprogram is consumed whole, so the `;`s
+    inside it end nothing here. A declaration its `;` never closed ends at the
+    BEGIN or END that closes the section, and is kept, so what could not be read
+    is reported rather than dropped.
+    """
+    declarations: list[_Declaration] = []
+    piece = tokens[index - 1][1]  # where the next declaration's text may begin
+    first: int | None = None  # its first character, once a token of it is seen
     depth = 0
-    while index < stop:
-        text = tokens[index][2]
-        following = tokens[index + 1][2] if index + 1 < len(tokens) else None
-        if text == "CASE":
+    cases = 0
+    at = index
+    while at < stop:
+        start, end, text = tokens[at]
+        if first is None:
+            if text in ("BEGIN", "END"):
+                return declarations, at
+            if text in ("PROCEDURE", "FUNCTION"):
+                consumed = _consume_subprogram(sql, tokens, at)
+                if isinstance(consumed, PackageSplitFailure):
+                    return consumed
+                member, at = consumed
+                if member is not None:
+                    declarations.append(member)
+                piece = tokens[at - 1][1]
+                continue
+            if text == ";":  # an empty declaration
+                piece = end
+                at += 1
+                continue
+            # A quoted name leaves no token of its own, so the text, not the token,
+            # says where the declaration begins.
+            first = _skip_trivia(sql, piece, start)
+        if text == "(":
             depth += 1
-        elif text == "END":
-            if depth == 0:
-                return index
+        elif text == ")":
             depth -= 1
-            if following == "CASE":
-                index += 1
-        index += 1
-    return None
+        elif text == "CASE":
+            cases += 1
+        elif text == "END" and cases:
+            cases -= 1
+        elif depth == 0 and text == ";":
+            declarations.append((first, start))
+            first, piece = None, end
+        elif depth == 0 and text in ("BEGIN", "END"):
+            declarations.append((first, start))
+            return declarations, at
+        at += 1
+    return PackageSplitFailure.UNBALANCED_BLOCKS
 
 
 def _consume_subprogram(
@@ -2472,7 +2809,9 @@ def _consume_subprogram(
 
     Returns the member (None for a forward declaration, which ends at its `;`)
     and the index just past it. A nested subprogram in the member's declaration
-    section is consumed recursively and belongs to the member that contains it.
+    section is consumed recursively and belongs to the member that contains it;
+    since R11-FP03's second pass it is kept, with every other declaration, in
+    `declarations`, which `_walk_unit` walks.
     """
     keyword = tokens[index]
     at = index + 1
@@ -2484,13 +2823,15 @@ def _consume_subprogram(
         return PackageSplitFailure.UNREADABLE_MEMBER
     name = sql[tokens[at][0] : tokens[at][1]]
     at += 1
-    parameter_names: tuple[str, ...] = ()
+    parameters: tuple[tuple[str, bool], ...] = ()
     if at < len(tokens) and tokens[at][2] == "(":
         close = _matching_paren_token(tokens, at)
         if close is None:
             return PackageSplitFailure.UNBALANCED_BLOCKS
-        parameter_names = _parameter_names(sql[tokens[at][1] : tokens[close][0]])
+        parameters = _parameters(sql[tokens[at][1] : tokens[close][0]])
         at = close + 1
+    parameter_names = tuple(parameter for parameter, _default in parameters)
+    parameter_defaults = tuple(default for _parameter, default in parameters)
     depth = 0
     while at < len(tokens):
         text = tokens[at][2]
@@ -2515,29 +2856,16 @@ def _consume_subprogram(
         return (
             _MemberSpan(
                 name, keyword[2], parameter_names, keyword[0], tokens[at][1],
-                tokens[at][0], tokens[at][0],
+                tokens[at][0], tokens[at][0], parameter_defaults=parameter_defaults,
             ),
             at + 1,
         )
-    depth = 0
-    while at < len(tokens):
-        text = tokens[at][2]
-        if depth == 0 and text in ("PROCEDURE", "FUNCTION"):
-            nested = _consume_subprogram(sql, tokens, at)
-            if isinstance(nested, PackageSplitFailure):
-                return nested
-            at = nested[1]
-            continue
-        if depth == 0 and text == "BEGIN":
-            break
-        if text == "CASE":
-            depth += 1
-        elif text == "END" and depth > 0:
-            depth -= 1
-        at += 1
-    else:
+    section = _consume_declarations(sql, tokens, at, len(tokens))
+    if isinstance(section, PackageSplitFailure):
+        return section
+    declarations, begin = section
+    if tokens[begin][2] != "BEGIN":
         return PackageSplitFailure.UNBALANCED_BLOCKS
-    begin = at
     close = _matching_end(tokens, begin)
     if close is None:
         return PackageSplitFailure.UNBALANCED_BLOCKS
@@ -2552,6 +2880,8 @@ def _consume_subprogram(
         end=tokens[after - 1][1],
         body_start=tokens[begin][1],
         body_end=tokens[close][0],
+        declarations=tuple(declarations),
+        parameter_defaults=parameter_defaults,
     )
     return member, after
 
@@ -2591,6 +2921,7 @@ def _package_layout(sql: str) -> _PackageLayout | PackageSplitFailure:
     if body is None:
         return PackageSplitFailure.NO_PACKAGE_BODY
     segments: list[tuple[int, int]] = []
+    declarations: list[tuple[int, int]] = []
 
     # The spec, when the text carries one: its declarations are package-level code.
     spec = next((index for index in range(body) if tokens[index][2] == "PACKAGE"), None)
@@ -2598,69 +2929,67 @@ def _package_layout(sql: str) -> _PackageLayout | PackageSplitFailure:
         opened = _header_end(tokens, spec + 1)
         if opened is None:
             return PackageSplitFailure.UNBALANCED_BLOCKS
-        closed = _declarations_end(tokens, opened, body)
-        if closed is None:
-            return PackageSplitFailure.UNBALANCED_BLOCKS
-        after = _statement_end(tokens, closed + 1)
+        section = _consume_declarations(sql, tokens, opened, body)
+        if isinstance(section, PackageSplitFailure):
+            return section
+        items, closed = section
+        after = _statement_end(tokens, closed + 1) if tokens[closed][2] == "END" else None
         if after is None or any(
             tokens[index][2] not in _PACKAGE_HEADER_WORDS for index in range(after, body)
         ):
             return PackageSplitFailure.UNBALANCED_BLOCKS
-        segments.append((tokens[opened - 1][1], tokens[closed][0]))
+        # A spec declares its subprograms; one that defines a body is not a spec.
+        if any(isinstance(item, _MemberSpan) for item in items):
+            return PackageSplitFailure.UNBALANCED_BLOCKS
+        declarations.extend(item for item in items if not isinstance(item, _MemberSpan))
 
     opened = _header_end(tokens, body + 2)
     if opened is None:
         return PackageSplitFailure.UNBALANCED_BLOCKS
-    members: list[_MemberSpan] = []
-    segment_start = tokens[opened - 1][1]
-    index = opened
-    depth = 0
-    closing: int | None = None
-    while index < len(tokens):
-        start, end, text = tokens[index]
-        following = tokens[index + 1][2] if index + 1 < len(tokens) else None
-        if depth == 0 and text in ("PROCEDURE", "FUNCTION"):
-            consumed = _consume_subprogram(sql, tokens, index)
-            if isinstance(consumed, PackageSplitFailure):
-                return consumed
-            member, index = consumed
-            if member is not None:
-                segments.append((segment_start, member.start))
-                members.append(member)
-                segment_start = member.end
-            continue
-        if depth == 0 and text == "BEGIN":
-            # The initialization block, closed by the package's own END.
-            close = _matching_end(tokens, index)
-            if close is None:
-                return PackageSplitFailure.UNBALANCED_BLOCKS
-            segments.append((segment_start, start))
-            segments.append((end, tokens[close][0]))
-            closing = close
-            break
-        if depth == 0 and text == "END":
-            segments.append((segment_start, start))
-            closing = index
-            break
-        if text == "CASE":
-            depth += 1
-        elif text == "END":
-            depth -= 1
-            if following == "CASE":
-                index += 1
-        index += 1
-    if closing is None:
-        return PackageSplitFailure.UNBALANCED_BLOCKS
+    section = _consume_declarations(sql, tokens, opened, len(tokens))
+    if isinstance(section, PackageSplitFailure):
+        return section
+    items, closing = section
+    members = [item for item in items if isinstance(item, _MemberSpan)]
+    declarations.extend(item for item in items if not isinstance(item, _MemberSpan))
+    if tokens[closing][2] == "BEGIN":
+        # The initialization block, closed by the package's own END.
+        close = _matching_end(tokens, closing)
+        if close is None:
+            return PackageSplitFailure.UNBALANCED_BLOCKS
+        segments.append((tokens[closing][1], tokens[close][0]))
+        closing = close
     tail = _statement_end(tokens, closing + 1)
     if tail is None:
         return PackageSplitFailure.UNBALANCED_BLOCKS
     if tail < len(tokens):
         # Anything after the package's own END is walked, never dropped.
         segments.append((tokens[tail][0], len(sql)))
+    schema, name = _package_name(sql, tokens, body)
     return _PackageLayout(
         members=tuple(members),
         package_segments=tuple((start, end) for start, end in segments if end > start),
+        package_declarations=tuple(
+            (start, end) for start, end in declarations if end > start
+        ),
+        name=name,
+        schema=schema,
     )
+
+
+def _package_name(sql: str, tokens: list[_Token], body: int) -> tuple[str | None, str | None]:
+    """`(schema, name)` of the package as its body's header spells them -- the schema
+    None when the header does not qualify the name, both None for a quoted name."""
+    at = body + 2
+    if at >= len(tokens) or '"' in sql[tokens[body + 1][1] : tokens[at][0]]:
+        return None, None
+    first = sql[tokens[at][0] : tokens[at][1]]
+    dot = _skip_trivia(sql, tokens[at][1], len(sql))
+    if not sql.startswith(".", dot):
+        return None, first
+    if at + 1 >= len(tokens) or '"' in sql[dot : tokens[at + 1][0]]:
+        return None, None
+    return first, sql[tokens[at + 1][0] : tokens[at + 1][1]]
 
 
 def _attributed_to(
@@ -2688,37 +3017,402 @@ class _Walk:
     members: tuple[PackageMember, ...] = ()
 
 
-def _walk_package(sql: str, layout: _PackageLayout, context: _WalkContext) -> _Walk:
-    units: list[tuple[int, int, _MemberSpan | None]] = [
-        (start, end, None) for start, end in layout.package_segments
-    ] + [(member.body_start, member.body_end, member) for member in layout.members]
-    units.sort(key=lambda unit: unit[0])
+def _walk_declaration(
+    sql: str, start: int, end: int, ordinal: int, context: _WalkContext
+) -> tuple[list[ParsedStatement], int]:
+    """One declaration of a PL/SQL declaration section (R11-FP03).
+
+    A cursor's query is read, as the statement the chunk classifier makes of it. A
+    cursor spec, and every other declaration PL/SQL admits there, is lineage-free
+    (`_PLSQL_LINEAGE_FREE_DECLARATION_RE` says why) and produces no statement at
+    all, so the statements after it keep the ordinals they always had. Anything
+    else -- including an item declaration holding a query, which PL/SQL itself
+    refuses -- is reported as a gap located at the declaration, never dropped.
+    """
+    text = sql[start:end]
+    if _PLSQL_CURSOR_DECLARATION_RE.match(text):
+        if _cursor_query(text) is None:
+            return [], ordinal
+        return _walk_span(sql, start, end, ordinal, context)
+    if _PLSQL_LINEAGE_FREE_DECLARATION_RE.match(text) and not any(
+        kind == "word" and text[first:last].upper() == "SELECT"
+        for first, last, kind in _scan_tokens(text)
+    ):
+        return [], ordinal
+    last = end
+    while last > start and sql[last - 1].isspace():
+        last -= 1
+    marker = _unparsed_statement(
+        ordinal,
+        context.dialect,
+        DECLARATION_CONTEXT,
+        f"{UnparsedReason.UNSUPPORTED_STATEMENT_SHAPE.value}: unrecognised PL/SQL declaration",
+    )
+    return [_located(marker, context.locator.span(start, last), context.digest)], ordinal + 1
+
+
+def _walk_unit(
+    sql: str,
+    unit: _MemberSpan,
+    ordinal: int,
+    context: _WalkContext,
+    scope: frozenset[str] = frozenset(),
+) -> tuple[list[ParsedStatement], int]:
+    """A subprogram's declarations -- its nested subprograms included -- then its
+    own body, in text order (R11-FP03).
+
+    A nested subprogram's statements are this unit's: it can only run when this
+    unit calls it. So a call to a subprogram declared here or in a unit enclosing
+    this one (`scope`) adds nothing and is no gap -- and it is settled here, first,
+    because PL/SQL resolves the name to that local subprogram before any package
+    member or schema-level routine of the same name.
+    """
+    local = scope | {
+        item.name.lower() for item in unit.declarations if isinstance(item, _MemberSpan)
+    }
     statements: list[ParsedStatement] = []
-    groups: list[list[ParsedStatement]] = []
-    members: list[PackageMember] = []
-    ordinal = 0
-    for start, end, member in units:
-        walked, ordinal = _walk_span(sql, start, end, ordinal, context)
-        if member is None:
-            group = [_attributed_to(s, None, MemberAttribution.PACKAGE_LEVEL) for s in walked]
+    for item in unit.declarations:
+        if isinstance(item, _MemberSpan):
+            walked, ordinal = _walk_unit(sql, item, ordinal, context, local)
         else:
-            group = [_attributed_to(s, member.name, MemberAttribution.MEMBER) for s in walked]
-            ordinals = [statement.ordinal for statement in group]
-            members.append(
-                PackageMember(
-                    name=member.name,
-                    kind=member.kind,
-                    parameter_names=member.parameter_names,
-                    start_offset=member.start,
-                    end_offset=member.end,
-                    first_ordinal=min(ordinals) if ordinals else None,
-                    last_ordinal=max(ordinals) if ordinals else None,
+            walked, ordinal = _walk_declaration(sql, item[0], item[1], ordinal, context)
+        statements.extend(walked)
+    walked, ordinal = _walk_span(sql, unit.body_start, unit.body_end, ordinal, context)
+    statements.extend(walked)
+    return [_resolved_locally(statement, local) for statement in statements], ordinal
+
+
+def _resolved_locally(statement: ParsedStatement, local: frozenset[str]) -> ParsedStatement:
+    call = statement.call_site
+    if (
+        call is None
+        or not statement.is_unparsed
+        or "." in call.callee
+        or call.callee.lower() not in local
+    ):
+        return statement
+    return replace(
+        statement, is_unparsed=False, is_no_lineage=True, unparsed_reason=None, edges=()
+    )
+
+
+def _oracle_block(sql: str) -> _MemberSpan | None:
+    """A standalone Oracle routine or anonymous block, read as a package member is
+    read: its declarations and nested subprograms, then its own BEGIN ... END.
+
+    `_extract_body_span` takes the text between the first BEGIN and its END. For a
+    routine whose declaration section defines a subprogram, that is the nested
+    subprogram's body: the routine's own statements were never seen, and it read
+    as fully parsed. None when the text is not one of these shapes or does not read
+    as one -- a quoted name, an external implementation, a block that does not
+    close -- and the caller keeps that older reading.
+    """
+    tokens: list[_Token] = [
+        (start, end, sql[start:end].upper()) for start, end, _kind in _scan_tokens(sql)
+    ]
+    if not tokens:
+        return None
+    if _ORACLE_SOURCE_HEADER_RE.match(sql):
+        keyword = next(
+            (
+                index
+                for index, token in enumerate(tokens[:6])
+                if token[2] in ("PROCEDURE", "FUNCTION")
+            ),
+            None,
+        )
+        if keyword is None:
+            return None
+        consumed = _consume_subprogram(sql, tokens, keyword)
+        if isinstance(consumed, PackageSplitFailure) or consumed[0] is None:
+            return None
+        unit = consumed[0]
+        return unit if unit.body_end > unit.body_start else None
+    # An anonymous block with declarations: what ALL_TRIGGERS.TRIGGER_BODY holds for an
+    # Oracle trigger that has any, or the same after a CREATE TRIGGER header.
+    opened: int | None = None
+    if tokens[0][2] == "DECLARE":
+        opened = 1
+    elif _HEADER_RE.match(sql) and "TRIGGER" in (token[2] for token in tokens[:4]):
+        depth = 0
+        for index, (_start, _end, text) in enumerate(tokens):
+            if text == "(":
+                depth += 1
+            elif text == ")":
+                depth -= 1
+            elif depth == 0 and text in ("DECLARE", "BEGIN", "COMPOUND"):
+                opened = index + 1 if text == "DECLARE" else None
+                break
+    if opened is None:
+        return None
+    section = _consume_declarations(sql, tokens, opened, len(tokens))
+    if isinstance(section, PackageSplitFailure) or tokens[section[1]][2] != "BEGIN":
+        return None
+    declarations, begin = section
+    close = _matching_end(tokens, begin)
+    if close is None:
+        return None
+    return _MemberSpan(
+        name="",
+        kind="BLOCK",
+        parameter_names=(),
+        start=tokens[0][0],
+        end=tokens[close][1],
+        body_start=tokens[begin][1],
+        body_end=tokens[close][0],
+        declarations=tuple(declarations),
+    )
+
+
+def _accepts(member: _MemberSpan, call: CallSite) -> bool:
+    """Whether `member`'s parameter list accepts `call`'s arguments as written.
+
+    PL/SQL's mixed notation: positional arguments first, then named ones, and every
+    parameter with no default given one way or the other. Only names and counts are
+    compared -- the types the text does not state are not guessed at, so two
+    overloads that differ only by type both accept, and the call is ambiguous."""
+    names = [name.lower() for name in member.parameter_names]
+    defaults = member.parameter_defaults or (False,) * len(names)
+    positional = 0
+    while positional < len(call.argument_names) and call.argument_names[positional] is None:
+        positional += 1
+    named: list[str] = []
+    for argument in call.argument_names[positional:]:
+        if argument is None:
+            return False  # a positional argument after a named one
+        named.append(argument.lower())
+    if positional > len(names) or len(set(named)) != len(named):
+        return False
+    if any(name not in names[positional:] for name in named):
+        return False
+    return all(
+        index < positional or names[index] in named or defaults[index]
+        for index in range(len(names))
+    )
+
+
+def _member_call_target(call: CallSite, layout: _PackageLayout) -> int | str | None:
+    """The member of this package `call` invokes: its index in `layout.members`,
+    `MEMBER_CALL_AMBIGUOUS` when no single member accepts the call as written, or
+    None when the call is not into this package -- a schema-level routine, another
+    package's, a remote one -- which is left to catalog descent."""
+    if "@" in call.callee:
+        return None
+    parts = [part.lower() for part in call.callee.split(".")]
+    package = (layout.name or "").lower()
+    schema = (layout.schema or "").lower()
+    if len(parts) == 1:
+        name = parts[0]
+    elif len(parts) == 2 and package and parts[0] == package:
+        name = parts[1]
+    elif len(parts) == 3 and package and schema and parts[:2] == [schema, package]:
+        name = parts[2]
+    else:
+        return None
+    named = [
+        index for index, member in enumerate(layout.members) if member.name.lower() == name
+    ]
+    if not named:
+        return None
+    accepting = [index for index in named if _accepts(layout.members[index], call)]
+    return accepting[0] if len(accepting) == 1 else MEMBER_CALL_AMBIGUOUS
+
+
+_CONFIDENCE_RANK: Final = {
+    Confidence.LOW.value: 0, Confidence.PARTIAL.value: 1, Confidence.FULL.value: 2
+}
+
+
+def _read_through(
+    call: ProcedureLineageEdgeRecord, edge: ProcedureLineageEdgeRecord, callee: str
+) -> ProcedureLineageEdgeRecord:
+    """`edge`, read from a member this one calls, as the caller's fact at the call.
+
+    Built from the call's own marker edge, so everything that says where the fact
+    is -- ordinal, range, digest, member and grain -- is the call's, and nothing
+    that indexes the callee's statement comes with it. At most PARTIAL, because a
+    parameter can steer the callee's branches, and a callee's result set stays in
+    the callee: a PL/SQL call returns none. `aida.routine_call_descent` does the
+    same across routines."""
+    target, intermediate, write = edge.target_table, edge.is_intermediate, edge.is_write
+    if target == PROCEDURE_RESULT_TARGET:
+        target, intermediate, write = PROCEDURE_LOCAL_TARGET, True, False
+    return replace(
+        call,
+        source_table=edge.source_table,
+        source_column=edge.source_column,
+        target_table=target,
+        target_column=edge.target_column,
+        transformation_type=edge.transformation_type,
+        confidence=(
+            edge.confidence
+            if _CONFIDENCE_RANK.get(edge.confidence, 0) < _CONFIDENCE_RANK[Confidence.PARTIAL.value]
+            else Confidence.PARTIAL.value
+        ),
+        source_resolved=edge.source_resolved,
+        is_write=write,
+        is_intermediate=intermediate,
+        control_flow_context=call.control_flow_context or edge.control_flow_context,
+        unparsed_reason=None,
+        via_temp_table=edge.via_temp_table,
+        via_routine=callee,
+        statement_range_status=(
+            StatementRangeStatus.CALL_SITE.value
+            if call.statement_range is not None
+            else StatementRangeStatus.NOT_LOCATED.value
+        ),
+    )
+
+
+def _member_calls_read_through(
+    walked: list[tuple[int | None, list[ParsedStatement]]], layout: _PackageLayout
+) -> list[tuple[int | None, list[ParsedStatement]]]:
+    """Each call between members of this package, read through at the call.
+
+    `walked` is each unit's statements with the member it belongs to (an index in
+    `layout.members`, None for package-level code). A call resolves to a member by
+    `_member_call_target`; the callee's lineage is its own statements' edges and
+    those of every member it reaches in turn -- never re-entering the calling member,
+    whose own facts are already its own, which is also what ends a recursive walk.
+    The call's gap marker goes only when all of that was fully parsed; otherwise it
+    stays, naming why in `aida.routine_call_descent`'s words, next to what was read.
+    """
+    targets: dict[tuple[int, int], int | str] = {}
+    calls: dict[int, set[int]] = {index: set() for index, _group in walked if index is not None}
+    for position, (member, group) in enumerate(walked):
+        for offset, statement in enumerate(group):
+            if statement.call_site is None or not statement.is_unparsed:
+                continue
+            target = _member_call_target(statement.call_site, layout)
+            if target is None:
+                continue
+            targets[(position, offset)] = target
+            if member is not None and isinstance(target, int):
+                calls[member].add(target)
+    if not targets:
+        return walked
+
+    own: dict[int, list[ProcedureLineageEdgeRecord]] = {}
+    gap: dict[int, bool] = {}
+    for position, (member, group) in enumerate(walked):
+        if member is None:
+            continue
+        own[member] = [
+            edge
+            for statement in group
+            for edge in statement.edges
+            if edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE
+        ]
+        gap[member] = any(
+            statement.is_unparsed
+            and not isinstance(targets.get((position, offset)), int)
+            for offset, statement in enumerate(group)
+        )
+
+    result: list[tuple[int | None, list[ParsedStatement]]] = []
+    for position, (member, group) in enumerate(walked):
+        statements = list(group)
+        for offset, statement in enumerate(group):
+            target = targets.get((position, offset))
+            if target is None:
+                continue
+            marker = statement.edges[0]
+            if not isinstance(target, int):
+                reason = f"{marker.unparsed_reason} ({target})"
+                statements[offset] = replace(
+                    statement,
+                    unparsed_reason=reason,
+                    edges=(replace(marker, unparsed_reason=reason),),
                 )
+                continue
+            reached: list[int] = []
+            frontier = [] if target == member else [target]
+            seen = set(frontier)
+            while frontier:
+                index = frontier.pop()
+                reached.append(index)
+                for onward in sorted(calls.get(index, ())):
+                    if onward != member and onward not in seen:
+                        seen.add(onward)
+                        frontier.append(onward)
+            callee = layout.members[target].name
+            via = f"{layout.name}.{callee}" if layout.name else callee
+            spliced = [
+                _read_through(marker, edge, via)
+                for index in sorted(reached)
+                for edge in own.get(index, [])
+            ]
+            complete = not any(gap.get(index, False) for index in reached)
+            written = any(edge.is_write for edge in spliced)
+            if complete:
+                statements[offset] = replace(
+                    statement,
+                    is_unparsed=False,
+                    is_no_lineage=not spliced,
+                    is_write=written,
+                    unparsed_reason=None,
+                    edges=tuple(spliced),
+                )
+            else:
+                reason = f"{marker.unparsed_reason} ({MEMBER_CALL_NOT_FULLY_PARSED})"
+                statements[offset] = replace(
+                    statement,
+                    is_write=written,
+                    unparsed_reason=reason,
+                    edges=(*spliced, replace(marker, unparsed_reason=reason)),
+                )
+        result.append((member, statements))
+    return result
+
+
+def _walk_package(sql: str, layout: _PackageLayout, context: _WalkContext) -> _Walk:
+    #: (start, kind, span or member index): the package's own declarations and
+    #: statements, and its members, walked in text order.
+    units: list[tuple[int, str, tuple[int, int] | int]] = sorted(
+        [(start, "declaration", (start, end)) for start, end in layout.package_declarations]
+        + [(start, "code", (start, end)) for start, end in layout.package_segments]
+        + [(member.start, "member", index) for index, member in enumerate(layout.members)],
+        key=lambda unit: unit[0],
+    )
+    walked: list[tuple[int | None, list[ParsedStatement]]] = []
+    ordinal = 0
+    for _start, kind, where in units:
+        if isinstance(where, int):
+            member = layout.members[where]
+            statements, ordinal = _walk_unit(sql, member, ordinal, context)
+            attributed = [
+                _attributed_to(s, member.name, MemberAttribution.MEMBER) for s in statements
+            ]
+            walked.append((where, attributed))
+            continue
+        start, end = where
+        if kind == "declaration":
+            statements, ordinal = _walk_declaration(sql, start, end, ordinal, context)
+        else:
+            statements, ordinal = _walk_span(sql, start, end, ordinal, context)
+        attributed = [_attributed_to(s, None, MemberAttribution.PACKAGE_LEVEL) for s in statements]
+        walked.append((None, attributed))
+    walked = _member_calls_read_through(walked, layout)
+    members: list[PackageMember] = []
+    for index, group in walked:
+        if index is None:
+            continue
+        member = layout.members[index]
+        ordinals = [statement.ordinal for statement in group]
+        members.append(
+            PackageMember(
+                name=member.name,
+                kind=member.kind,
+                parameter_names=member.parameter_names,
+                start_offset=member.start,
+                end_offset=member.end,
+                first_ordinal=min(ordinals) if ordinals else None,
+                last_ordinal=max(ordinals) if ordinals else None,
             )
-        statements.extend(group)
-        groups.append(group)
+        )
+    groups = [group for _index, group in walked]
     return _Walk(
-        statements=statements,
+        statements=[statement for group in groups for statement in group],
         groups=groups,
         digest=context.digest,
         member_attribution=MemberAttribution.MEMBER.value,
@@ -2745,8 +3439,14 @@ def _walk(sql: str, dialect: str, subject: Mapping[str, str] | None) -> _Walk:
         if isinstance(layout, _PackageLayout):
             return _walk_package(sql, layout, context)
         fallback = layout
-    start, end = _extract_body_span(sql, dialect)
-    statements, _next = _walk_span(sql, start, end, 0, context)
+    # R11-FP03: a standalone routine or block is read with its declaration section;
+    # a package that could not be split keeps the whole-body reading it always had.
+    block = _oracle_block(sql) if dialect == "oracle" and fallback is None else None
+    if block is not None:
+        statements, _next = _walk_unit(sql, block, 0, context)
+    else:
+        start, end = _extract_body_span(sql, dialect)
+        statements, _next = _walk_span(sql, start, end, 0, context)
     if fallback is None:
         return _Walk(statements=statements, groups=[statements], digest=context.digest)
     # R11-FP03: the package could not be split, so it is parsed as the one body it
