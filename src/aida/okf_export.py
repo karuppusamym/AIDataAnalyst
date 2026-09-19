@@ -2693,6 +2693,40 @@ def _renderer_frame(snapshot: OkfSnapshot) -> str:
     )
 
 
+class _Budget:
+    """R11-OKF02: the bundle limits, applied while documents are produced.
+
+    `_assemble_bundle` stays the last word, but on its own it only sees the documents after
+    every one of them has been built in memory -- the final check proves the output is bounded,
+    not the work. This refuses a plan with too many documents before any is rendered, and stops
+    at the first document that takes the bundle over its byte budget, whether that document was
+    rendered or carried from the prior publication. The scope-level refusal before the snapshot
+    is loaded lives in `aida.okf_store._refuse_oversized_scope`.
+    """
+
+    def __init__(self, planned: int) -> None:
+        if planned > MAX_DOCUMENTS:
+            raise OkfExportError(
+                f"{planned} documents are planned, over the {MAX_DOCUMENTS}-document bundle "
+                "limit. Refused before any document was rendered."
+            )
+        self.total = 0
+
+    def admit(self, document: OkfDocument) -> OkfDocument:
+        if document.byte_length > MAX_DOCUMENT_BYTES:
+            raise OkfExportError(
+                f"{document.path} is {document.byte_length} bytes, over the "
+                f"{MAX_DOCUMENT_BYTES}-byte document limit"
+            )
+        self.total += document.byte_length
+        if self.total > MAX_BUNDLE_BYTES:
+            raise OkfExportError(
+                f"the bundle passed the {MAX_BUNDLE_BYTES}-byte limit while it was being "
+                "rendered; refused there rather than after every document was built"
+            )
+        return document
+
+
 def export_okf_bundle(
     snapshot: OkfSnapshot, *, history: Sequence[OkfLogEntry] = ()
 ) -> OkfBundle:
@@ -2709,7 +2743,10 @@ def export_okf_bundle(
     """
     _validate_snapshot_shape(snapshot)
     plan = [*_plan(snapshot), *_log_plan(snapshot, history)]
-    documents = [document for item in plan if (document := item.render()) is not None]
+    budget = _Budget(len(plan))
+    documents = [
+        budget.admit(document) for item in plan if (document := item.render()) is not None
+    ]
     return _assemble_bundle(snapshot, documents)
 
 
@@ -2764,7 +2801,11 @@ def export_okf_bundle_incremental(
     documents: list[OkfDocument] = []
     rendered: list[str] = []
     carried: list[str] = []
-    for item in _plan(snapshot):
+    plan = _plan(snapshot)
+    # The logs are planned after the content (their entry depends on it): the root log and
+    # one per source.
+    budget = _Budget(len(plan) + 1 + len(snapshot.sources))
+    for item in plan:
         stored = prior_documents.get(item.path)
         earlier = prior_plan.get(item.path)
         must_render = (
@@ -2784,7 +2825,7 @@ def export_okf_bundle_incremental(
             assert stored is not None
             document = OkfDocument(path=item.path, text=stored)
             carried.append(item.path)
-        documents.append(document)
+        documents.append(budget.admit(document))
 
     content = {document.path: document.text for document in documents}
     prior_content = {
@@ -2815,7 +2856,7 @@ def export_okf_bundle_incremental(
     for item in _log_plan(snapshot, history):
         document = item.render()
         if document is not None:
-            documents.append(document)
+            documents.append(budget.admit(document))
             rendered.append(item.path)
     bundle = _assemble_bundle(snapshot, documents)
     final = {document.path: document.text for document in bundle.documents}
