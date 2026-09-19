@@ -2074,6 +2074,12 @@ export interface DeepProcedureLineageEdgeRead {
   via_temp_table?: string | null;
   via_routine?: string | null;
   review_status?: string | null;
+  statement_range?: StatementRangeRead | null;
+  statement_range_status?: string | null;
+  statement_text_digest?: string | null;
+  package_member?: string | null;
+  member_attribution?: string | null;
+  member_routine_id?: string | null;
 }
 
 export interface DeepProcedureLineageParseResponse {
@@ -2086,6 +2092,9 @@ export interface DeepProcedureLineageParseResponse {
   is_fully_parsed: boolean;
   is_read_only: boolean;
   persisted_edge_count?: number;
+  statement_text_digest?: string | null;
+  member_attribution?: string | null;
+  member_fallback_reason?: string | null;
 }
 
 export interface DelegationCreate {
@@ -4736,6 +4745,8 @@ export interface RoutineParseCoverageRead {
   confidence: string;
   source_mapping_granularity: string;
   parsed_at: string;
+  member_attribution?: string | null;
+  member_fallback_reason?: string | null;
 }
 
 /** R11-C8: the answers that relied on a sampled decision while it stood. */
@@ -5040,6 +5051,16 @@ export interface SqlValidationResponse {
   referenced_columns: string[];
   violations: string[];
   applied_row_limit: number | null;
+}
+
+/** R11-FP07: a statement's span in the stored body. Half-open code-point */
+export interface StatementRangeRead {
+  start_offset: number;
+  end_offset: number;
+  start_line: number;
+  start_column: number;
+  end_line: number;
+  end_column: number;
 }
 
 export interface StewardAgentRunRequest {

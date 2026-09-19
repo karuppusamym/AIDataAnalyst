@@ -12490,6 +12490,40 @@
             "title": "Is Write",
             "type": "boolean"
           },
+          "member_attribution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Attribution"
+          },
+          "member_routine_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Routine Id"
+          },
+          "package_member": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Package Member"
+          },
           "review_status": {
             "anyOf": [
               {
@@ -12516,6 +12550,38 @@
           "statement_ordinal": {
             "title": "Statement Ordinal",
             "type": "integer"
+          },
+          "statement_range": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StatementRangeRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "statement_range_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Range Status"
+          },
+          "statement_text_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Text Digest"
           },
           "target_column": {
             "title": "Target Column",
@@ -12612,6 +12678,28 @@
             "title": "Is Read Only",
             "type": "boolean"
           },
+          "member_attribution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Attribution"
+          },
+          "member_fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Fallback Reason"
+          },
           "persisted_edge_count": {
             "default": 0,
             "title": "Persisted Edge Count",
@@ -12624,6 +12712,17 @@
           "statement_count": {
             "title": "Statement Count",
             "type": "integer"
+          },
+          "statement_text_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Text Digest"
           }
         },
         "required": [
@@ -28015,6 +28114,28 @@
             "title": "Is Read Only",
             "type": "boolean"
           },
+          "member_attribution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Attribution"
+          },
+          "member_fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Member Fallback Reason"
+          },
           "parse_completed": {
             "title": "Parse Completed",
             "type": "boolean"
@@ -29979,6 +30100,46 @@
           "applied_row_limit"
         ],
         "title": "SqlValidationResponse",
+        "type": "object"
+      },
+      "StatementRangeRead": {
+        "additionalProperties": false,
+        "description": "R11-FP07: a statement's span in the stored body. Half-open code-point\noffsets; 1-based lines and columns, the end being the statement's last\ncharacter. Positions only -- never an excerpt.",
+        "properties": {
+          "end_column": {
+            "title": "End Column",
+            "type": "integer"
+          },
+          "end_line": {
+            "title": "End Line",
+            "type": "integer"
+          },
+          "end_offset": {
+            "title": "End Offset",
+            "type": "integer"
+          },
+          "start_column": {
+            "title": "Start Column",
+            "type": "integer"
+          },
+          "start_line": {
+            "title": "Start Line",
+            "type": "integer"
+          },
+          "start_offset": {
+            "title": "Start Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_offset",
+          "end_offset",
+          "start_line",
+          "start_column",
+          "end_line",
+          "end_column"
+        ],
+        "title": "StatementRangeRead",
         "type": "object"
       },
       "StewardAgentRunRequest": {
