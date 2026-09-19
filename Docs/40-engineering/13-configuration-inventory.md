@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**276 settings.** 0 are read nowhere. 62 more ship switched off, empty or zero.
+**277 settings.** 0 are read nowhere. 63 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -94,6 +94,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 | Supplied: the entitlement webhook credential |
 | `dq_itsm_webhook_url` | `str | None` | `None` | 2 | Supplied: the ITSM target; setting it is the opt-in (R11-S9 retired the separate switch) |
 | `dq_itsm_webhook_token` | `SecretStr | None` | `None` | 2 | Supplied: the ITSM webhook credential |
+| `okf_import_enabled` | `bool` | `False` | 1 | Off by design: R11-OKF03: imported OKF edits become pending proposals only; the import stays off until the row's hostile-content, round-trip and review-journey evidence is accepted |
 | `agent_query_memory_enabled` | `bool` | `False` | 1 | Opt-in: changes what grounds a generated prompt; the SQL still passes the gateway |
 | `model_generation_enabled` | `bool` | `False` | 7 | Opt-in: requires an approved model route, checked at startup |
 | `model_route` | `str | None` | `None` | 14 | Supplied: the approved route generation uses |
@@ -327,6 +328,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `agent_retrieval_scan_limit` | `int` | `5000` | 9 |
 | `okf_context_default_max_chars` | `int` | `16000` | 2 |
 | `okf_context_ask_max_chars` | `int` | `8000` | 1 |
+| `okf_import_enabled` | `bool` | `False` | 1 |
 | `sql_draft_receipt_ttl_minutes` | `int` | `15` | 1 |
 | `agent_tool_match_threshold` | `float` | `0.55` | 1 |
 | `agent_query_memory_enabled` | `bool` | `False` | 1 |

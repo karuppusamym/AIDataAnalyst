@@ -1089,6 +1089,58 @@ export interface CertificationRevokeRequest {
   column_id?: string | null;
 }
 
+/** Full evidence and diff for one row, fetched on demand when a reviewer opens it. */
+export interface ChangeQueueDetailRead {
+  item: ChangeQueueItemRead;
+  evidence: EvidenceItemRead[];
+  diff: GovernanceReviewDiffRead | null;
+}
+
+export interface ChangeQueueDetailsRead {
+  items: ChangeQueueDetailRead[];
+}
+
+export interface ChangeQueueFilterRead {
+  status: string | null;
+  object_types: string[];
+  families: string[];
+  change_kinds: string[];
+  object_id: string | null;
+  table_id: string | null;
+  decidable_only: boolean;
+}
+
+/** One queue row: enough to triage and select it, not its full evidence. */
+export interface ChangeQueueItemRead {
+  review_id: string;
+  object_type: string;
+  object_id: string;
+  review_family: string;
+  change_kind: string;
+  status: string;
+  requested_by: string;
+  created_at: string;
+  risk_tier: string;
+  confidence: number | null;
+  diffable: boolean;
+  evidence_count: number;
+  evidence_preview: EvidenceItemRead[];
+  evidence_fingerprint: string;
+  decide_blocker: string | null;
+  approve_gate: string | null;
+  target_unavailable: boolean;
+}
+
+export interface ChangeQueuePageRead {
+  organization_id: string;
+  filters: ChangeQueueFilterRead;
+  generated_at: string;
+  limit: number;
+  next_cursor: string | null;
+  total: number | null;
+  items: ChangeQueueItemRead[];
+}
+
 export interface ChangeSignalRead {
   id: string;
   analysis_run_id: string | null;
@@ -3597,6 +3649,80 @@ export interface OkfDocumentRead {
   content: string;
 }
 
+export interface OkfImportBaseRead {
+  publication_id: string;
+  sequence: number;
+  is_current: boolean;
+  bundle_content_digest: string;
+  content_snapshot_digest: string;
+}
+
+export interface OkfImportBatchRead {
+  batch_id: string;
+  datasource_id: string;
+  governance_review_id: string;
+  change_count: number;
+}
+
+/** One edit and its decision. `current_value`/`proposed_value` are for the importing user's */
+export interface OkfImportItemRead {
+  item_id: string;
+  path: string;
+  family: string;
+  kind: string;
+  field: string;
+  outcome: string;
+  reason_code?: string | null;
+  target_type?: string | null;
+  target_id?: string | null;
+  target_label?: string | null;
+  datasource_id?: string | null;
+  ontology_key?: string | null;
+  concept_key?: string | null;
+  expected_version?: number | null;
+  current_version?: number | null;
+  current_value?: string | null;
+  proposed_value?: string | null;
+  added_aliases: string[];
+  detail?: string | null;
+}
+
+export interface OkfImportMeaningRead {
+  ontology_version_id: string;
+  ontology_key: string;
+  version: number;
+  base_version: number;
+  governance_review_id: string;
+  concept_count: number;
+}
+
+/** A change that is not proposed: refused, unsupported, a claim, tolerated or ignored. */
+export interface OkfImportNoteRead {
+  path?: string | null;
+  outcome: string;
+  reason_code: string;
+  field?: string | null;
+  detail?: string | null;
+}
+
+export interface OkfImportPreviewRead {
+  context_product_version_id: string;
+  import_enabled: boolean;
+  archive_sha256: string;
+  preview_digest: string;
+  base_publication: OkfImportBaseRead;
+  counts: Record<string, number>;
+  items: OkfImportItemRead[];
+  notes: OkfImportNoteRead[];
+  authority: string;
+}
+
+export interface OkfImportRead {
+  preview: OkfImportPreviewRead;
+  description_batches: OkfImportBatchRead[];
+  meaning_versions: OkfImportMeaningRead[];
+}
+
 /** One catalog object's document, as one context product's stored bundle holds it. */
 export interface OkfObjectKnowledgeItemRead {
   context_product_version_id: string;
@@ -3955,6 +4081,22 @@ export interface PlanStepCreate {
   expected_cost?: number;
 }
 
+/** R11-REV01: how this playbook's action is actually applied -- per action, not a */
+export interface PlaybookActionAutomationRead {
+  action: string;
+  subject_type: string;
+  has_automatic_branch: boolean;
+  automatic_branch_enabled: boolean;
+  automatic_when: string;
+  automatic_path: string;
+  automatic_principal: string;
+  involves_model: boolean;
+  reviewed_operation_type: string;
+  compensating_operation_when_reviewed: string;
+  compensating_operation_when_automatic: string | null;
+  automatic_correction_reason: string | null;
+}
+
 export interface PlaybookCreate {
   name: string;
   action: "TAG" | "CLASSIFY" | "OWN" | "CERTIFY";
@@ -3966,6 +4108,32 @@ export interface PlaybookCreate {
   schedule_interval_minutes: number;
   auto_apply_max_items?: number;
   enabled?: boolean;
+}
+
+export interface PlaybookDryRunItemRead {
+  subject_type: string;
+  subject_id: string;
+  qualified_name: string;
+  current_value: string | null;
+  proposed_value: string | null;
+  change: string;
+  evidence_version: string;
+}
+
+/** R11-REV01: what a run would do now, without doing it. */
+export interface PlaybookDryRunRead {
+  playbook_id: string;
+  action: string;
+  enabled: boolean;
+  rule_version: string;
+  evaluated_at: string;
+  matched_count: number;
+  tables_truncated: boolean;
+  columns_truncated: boolean;
+  auto_apply_max_items: number;
+  predicted_disposition: string;
+  automation: PlaybookActionAutomationRead;
+  items: PlaybookDryRunItemRead[];
 }
 
 export interface PlaybookRead {
@@ -4549,6 +4717,110 @@ export interface ReviewAuditSampleRead {
   human_principal_id: string | null;
   human_rationale: string | null;
   resolved_at: string | null;
+}
+
+export interface ReviewBatchCorrectionRead {
+  kind: string;
+  available: boolean;
+  method: string | null;
+  path: string | null;
+  subject_type: string | null;
+  subject_id: string | null;
+  reason_code: string | null;
+}
+
+/** Exactly one of: `items` (explicit, accumulated across queue pages) or `filter` (a */
+export interface ReviewBatchCreate {
+  items?: ReviewBatchSelectionWrite[] | null;
+  filter?: ReviewBatchFilterWrite | null;
+}
+
+export interface ReviewBatchDecisionCreate {
+  decision: "APPROVE" | "REJECT";
+  reason?: string | null;
+  rationale_by_review_id?: Record<string, string> | null;
+}
+
+export interface ReviewBatchDecisionMemberRead {
+  review_id: string;
+  position: number;
+  object_type: string | null;
+  review_family: string | null;
+  frozen_status: string | null;
+  evidence_fingerprint: string | null;
+  eligibility: string;
+  exclusion_code: string | null;
+  approve_gate_code: string | null;
+  outcome: string;
+  reason_code: string | null;
+  decided_at: string | null;
+  correction: ReviewBatchCorrectionRead;
+  detail?: string | null;
+}
+
+export interface ReviewBatchDecisionRead {
+  batch: ReviewBatchRead;
+  overall: string;
+  applied_count: number;
+  refused_count: number;
+  skipped_count: number;
+  members: ReviewBatchDecisionMemberRead[];
+}
+
+export interface ReviewBatchFilterWrite {
+  status?: string;
+  object_types?: string[];
+  families?: ("DESCRIPTION" | "SEMANTIC" | "STEWARDSHIP" | "PUBLICATION" | "ACCESS" | "OTHER")[];
+  change_kinds?: string[];
+  object_id?: string | null;
+  table_id?: string | null;
+  decidable_only?: boolean;
+}
+
+export interface ReviewBatchItemPageRead {
+  batch_id: string;
+  next_cursor: string | null;
+  items: ReviewBatchItemRead[];
+}
+
+export interface ReviewBatchItemRead {
+  review_id: string;
+  position: number;
+  object_type: string | null;
+  review_family: string | null;
+  frozen_status: string | null;
+  evidence_fingerprint: string | null;
+  eligibility: string;
+  exclusion_code: string | null;
+  approve_gate_code: string | null;
+  outcome: string;
+  reason_code: string | null;
+  decided_at: string | null;
+  correction: ReviewBatchCorrectionRead;
+}
+
+export interface ReviewBatchRead {
+  id: string;
+  organization_id: string;
+  created_by: string;
+  selection_mode: string;
+  selection_truncated: boolean;
+  status: string;
+  item_count: number;
+  eligible_count: number;
+  selection_fingerprint: string;
+  decision: string | null;
+  decided_at: string | null;
+  created_at: string;
+  exclusion_counts: Record<string, number>;
+  approve_gate_counts: Record<string, number>;
+  outcome_counts: Record<string, number>;
+  excluded_count: number;
+}
+
+export interface ReviewBatchSelectionWrite {
+  review_id: string;
+  evidence_fingerprint?: string | null;
 }
 
 /** One governance-review-queue proposal: its own review/decision fields */

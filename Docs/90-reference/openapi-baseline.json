@@ -6582,6 +6582,314 @@
         "title": "CertificationRevokeRequest",
         "type": "object"
       },
+      "ChangeQueueDetailRead": {
+        "additionalProperties": false,
+        "description": "Full evidence and diff for one row, fetched on demand when a reviewer opens it.",
+        "properties": {
+          "diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GovernanceReviewDiffRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemRead"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "item": {
+            "$ref": "#/components/schemas/ChangeQueueItemRead"
+          }
+        },
+        "required": [
+          "item",
+          "evidence",
+          "diff"
+        ],
+        "title": "ChangeQueueDetailRead",
+        "type": "object"
+      },
+      "ChangeQueueDetailsRead": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeQueueDetailRead"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "ChangeQueueDetailsRead",
+        "type": "object"
+      },
+      "ChangeQueueFilterRead": {
+        "additionalProperties": false,
+        "properties": {
+          "change_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Change Kinds",
+            "type": "array"
+          },
+          "decidable_only": {
+            "title": "Decidable Only",
+            "type": "boolean"
+          },
+          "families": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Families",
+            "type": "array"
+          },
+          "object_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Id"
+          },
+          "object_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Object Types",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "table_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Id"
+          }
+        },
+        "required": [
+          "status",
+          "object_types",
+          "families",
+          "change_kinds",
+          "object_id",
+          "table_id",
+          "decidable_only"
+        ],
+        "title": "ChangeQueueFilterRead",
+        "type": "object"
+      },
+      "ChangeQueueItemRead": {
+        "additionalProperties": false,
+        "description": "One queue row: enough to triage and select it, not its full evidence.\n\n`evidence_fingerprint` is the version a selection binds to; send it back when freezing\na batch and a member that changed in between is excluded as `STALE_EVIDENCE`.\n`decide_blocker` is why this caller may not decide the row at all (NOT_PENDING,\nMAKER_CHECKER, UNSUPPORTED_TYPE, TARGET_UNAVAILABLE); `approve_gate` is why batch\n*approval* would be refused even so (EVIDENCE_NOT_SHOWN, INDIVIDUAL_DECISION_REQUIRED).",
+        "properties": {
+          "approve_gate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approve Gate"
+          },
+          "change_kind": {
+            "title": "Change Kind",
+            "type": "string"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decide_blocker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decide Blocker"
+          },
+          "diffable": {
+            "title": "Diffable",
+            "type": "boolean"
+          },
+          "evidence_count": {
+            "title": "Evidence Count",
+            "type": "integer"
+          },
+          "evidence_fingerprint": {
+            "title": "Evidence Fingerprint",
+            "type": "string"
+          },
+          "evidence_preview": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemRead"
+            },
+            "title": "Evidence Preview",
+            "type": "array"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          },
+          "review_family": {
+            "title": "Review Family",
+            "type": "string"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          },
+          "risk_tier": {
+            "title": "Risk Tier",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_unavailable": {
+            "title": "Target Unavailable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "review_id",
+          "object_type",
+          "object_id",
+          "review_family",
+          "change_kind",
+          "status",
+          "requested_by",
+          "created_at",
+          "risk_tier",
+          "confidence",
+          "diffable",
+          "evidence_count",
+          "evidence_preview",
+          "evidence_fingerprint",
+          "decide_blocker",
+          "approve_gate",
+          "target_unavailable"
+        ],
+        "title": "ChangeQueueItemRead",
+        "type": "object"
+      },
+      "ChangeQueuePageRead": {
+        "additionalProperties": false,
+        "properties": {
+          "filters": {
+            "$ref": "#/components/schemas/ChangeQueueFilterRead"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeQueueItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          }
+        },
+        "required": [
+          "organization_id",
+          "filters",
+          "generated_at",
+          "limit",
+          "next_cursor",
+          "total",
+          "items"
+        ],
+        "title": "ChangeQueuePageRead",
+        "type": "object"
+      },
       "ChangeSignalRead": {
         "additionalProperties": false,
         "properties": {
@@ -21652,6 +21960,440 @@
         "title": "OkfDocumentRead",
         "type": "object"
       },
+      "OkfImportBaseRead": {
+        "additionalProperties": false,
+        "properties": {
+          "bundle_content_digest": {
+            "title": "Bundle Content Digest",
+            "type": "string"
+          },
+          "content_snapshot_digest": {
+            "title": "Content Snapshot Digest",
+            "type": "string"
+          },
+          "is_current": {
+            "title": "Is Current",
+            "type": "boolean"
+          },
+          "publication_id": {
+            "format": "uuid",
+            "title": "Publication Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "publication_id",
+          "sequence",
+          "is_current",
+          "bundle_content_digest",
+          "content_snapshot_digest"
+        ],
+        "title": "OkfImportBaseRead",
+        "type": "object"
+      },
+      "OkfImportBatchRead": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "format": "uuid",
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "change_count": {
+            "title": "Change Count",
+            "type": "integer"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "governance_review_id": {
+            "format": "uuid",
+            "title": "Governance Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "batch_id",
+          "datasource_id",
+          "governance_review_id",
+          "change_count"
+        ],
+        "title": "OkfImportBatchRead",
+        "type": "object"
+      },
+      "OkfImportItemRead": {
+        "additionalProperties": false,
+        "description": "One edit and its decision. `current_value`/`proposed_value` are for the importing user's\nreview of the preview; nothing here is persisted except by an apply, as a pending proposal.",
+        "properties": {
+          "added_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Added Aliases",
+            "type": "array"
+          },
+          "concept_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concept Key"
+          },
+          "current_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Value"
+          },
+          "current_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version"
+          },
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "family": {
+            "title": "Family",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "item_id": {
+            "title": "Item Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "ontology_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ontology Key"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "proposed_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed Value"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "target_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Label"
+          },
+          "target_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Type"
+          }
+        },
+        "required": [
+          "item_id",
+          "path",
+          "family",
+          "kind",
+          "field",
+          "outcome",
+          "added_aliases"
+        ],
+        "title": "OkfImportItemRead",
+        "type": "object"
+      },
+      "OkfImportMeaningRead": {
+        "additionalProperties": false,
+        "properties": {
+          "base_version": {
+            "title": "Base Version",
+            "type": "integer"
+          },
+          "concept_count": {
+            "title": "Concept Count",
+            "type": "integer"
+          },
+          "governance_review_id": {
+            "format": "uuid",
+            "title": "Governance Review Id",
+            "type": "string"
+          },
+          "ontology_key": {
+            "title": "Ontology Key",
+            "type": "string"
+          },
+          "ontology_version_id": {
+            "format": "uuid",
+            "title": "Ontology Version Id",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ontology_version_id",
+          "ontology_key",
+          "version",
+          "base_version",
+          "governance_review_id",
+          "concept_count"
+        ],
+        "title": "OkfImportMeaningRead",
+        "type": "object"
+      },
+      "OkfImportNoteRead": {
+        "additionalProperties": false,
+        "description": "A change that is not proposed: refused, unsupported, a claim, tolerated or ignored.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "reason_code"
+        ],
+        "title": "OkfImportNoteRead",
+        "type": "object"
+      },
+      "OkfImportPreviewRead": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_sha256": {
+            "title": "Archive Sha256",
+            "type": "string"
+          },
+          "authority": {
+            "title": "Authority",
+            "type": "string"
+          },
+          "base_publication": {
+            "$ref": "#/components/schemas/OkfImportBaseRead"
+          },
+          "context_product_version_id": {
+            "format": "uuid",
+            "title": "Context Product Version Id",
+            "type": "string"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "import_enabled": {
+            "title": "Import Enabled",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "notes": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportNoteRead"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "preview_digest": {
+            "title": "Preview Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context_product_version_id",
+          "import_enabled",
+          "archive_sha256",
+          "preview_digest",
+          "base_publication",
+          "counts",
+          "items",
+          "notes",
+          "authority"
+        ],
+        "title": "OkfImportPreviewRead",
+        "type": "object"
+      },
+      "OkfImportRead": {
+        "additionalProperties": false,
+        "properties": {
+          "description_batches": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportBatchRead"
+            },
+            "title": "Description Batches",
+            "type": "array"
+          },
+          "meaning_versions": {
+            "items": {
+              "$ref": "#/components/schemas/OkfImportMeaningRead"
+            },
+            "title": "Meaning Versions",
+            "type": "array"
+          },
+          "preview": {
+            "$ref": "#/components/schemas/OkfImportPreviewRead"
+          }
+        },
+        "required": [
+          "preview",
+          "description_batches",
+          "meaning_versions"
+        ],
+        "title": "OkfImportRead",
+        "type": "object"
+      },
       "OkfObjectKnowledgeItemRead": {
         "additionalProperties": false,
         "description": "One catalog object's document, as one context product's stored bundle holds it.",
@@ -23634,6 +24376,90 @@
         "title": "PlanStepCreate",
         "type": "object"
       },
+      "PlaybookActionAutomationRead": {
+        "additionalProperties": false,
+        "description": "R11-REV01: how this playbook's action is actually applied -- per action, not a\nblanket claim about playbooks. See `aida.playbook_dry_run`.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "automatic_branch_enabled": {
+            "title": "Automatic Branch Enabled",
+            "type": "boolean"
+          },
+          "automatic_correction_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Automatic Correction Reason"
+          },
+          "automatic_path": {
+            "title": "Automatic Path",
+            "type": "string"
+          },
+          "automatic_principal": {
+            "title": "Automatic Principal",
+            "type": "string"
+          },
+          "automatic_when": {
+            "title": "Automatic When",
+            "type": "string"
+          },
+          "compensating_operation_when_automatic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compensating Operation When Automatic"
+          },
+          "compensating_operation_when_reviewed": {
+            "title": "Compensating Operation When Reviewed",
+            "type": "string"
+          },
+          "has_automatic_branch": {
+            "title": "Has Automatic Branch",
+            "type": "boolean"
+          },
+          "involves_model": {
+            "title": "Involves Model",
+            "type": "boolean"
+          },
+          "reviewed_operation_type": {
+            "title": "Reviewed Operation Type",
+            "type": "string"
+          },
+          "subject_type": {
+            "title": "Subject Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "subject_type",
+          "has_automatic_branch",
+          "automatic_branch_enabled",
+          "automatic_when",
+          "automatic_path",
+          "automatic_principal",
+          "involves_model",
+          "reviewed_operation_type",
+          "compensating_operation_when_reviewed",
+          "compensating_operation_when_automatic",
+          "automatic_correction_reason"
+        ],
+        "title": "PlaybookActionAutomationRead",
+        "type": "object"
+      },
       "PlaybookCreate": {
         "additionalProperties": false,
         "properties": {
@@ -23718,6 +24544,139 @@
           "schedule_interval_minutes"
         ],
         "title": "PlaybookCreate",
+        "type": "object"
+      },
+      "PlaybookDryRunItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "title": "Change",
+            "type": "string"
+          },
+          "current_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Value"
+          },
+          "evidence_version": {
+            "title": "Evidence Version",
+            "type": "string"
+          },
+          "proposed_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed Value"
+          },
+          "qualified_name": {
+            "title": "Qualified Name",
+            "type": "string"
+          },
+          "subject_id": {
+            "format": "uuid",
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "subject_type": {
+            "title": "Subject Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id",
+          "qualified_name",
+          "current_value",
+          "proposed_value",
+          "change",
+          "evidence_version"
+        ],
+        "title": "PlaybookDryRunItemRead",
+        "type": "object"
+      },
+      "PlaybookDryRunRead": {
+        "additionalProperties": false,
+        "description": "R11-REV01: what a run would do now, without doing it.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "auto_apply_max_items": {
+            "title": "Auto Apply Max Items",
+            "type": "integer"
+          },
+          "automation": {
+            "$ref": "#/components/schemas/PlaybookActionAutomationRead"
+          },
+          "columns_truncated": {
+            "title": "Columns Truncated",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybookDryRunItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "matched_count": {
+            "title": "Matched Count",
+            "type": "integer"
+          },
+          "playbook_id": {
+            "format": "uuid",
+            "title": "Playbook Id",
+            "type": "string"
+          },
+          "predicted_disposition": {
+            "title": "Predicted Disposition",
+            "type": "string"
+          },
+          "rule_version": {
+            "title": "Rule Version",
+            "type": "string"
+          },
+          "tables_truncated": {
+            "title": "Tables Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "playbook_id",
+          "action",
+          "enabled",
+          "rule_version",
+          "evaluated_at",
+          "matched_count",
+          "tables_truncated",
+          "columns_truncated",
+          "auto_apply_max_items",
+          "predicted_disposition",
+          "automation",
+          "items"
+        ],
+        "title": "PlaybookDryRunRead",
         "type": "object"
       },
       "PlaybookRead": {
@@ -27055,6 +28014,733 @@
           "resolved_at"
         ],
         "title": "ReviewAuditSampleRead",
+        "type": "object"
+      },
+      "ReviewBatchCorrectionRead": {
+        "additionalProperties": false,
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id"
+          },
+          "subject_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Type"
+          }
+        },
+        "required": [
+          "kind",
+          "available",
+          "method",
+          "path",
+          "subject_type",
+          "subject_id",
+          "reason_code"
+        ],
+        "title": "ReviewBatchCorrectionRead",
+        "type": "object"
+      },
+      "ReviewBatchCreate": {
+        "additionalProperties": false,
+        "description": "Exactly one of: `items` (explicit, accumulated across queue pages) or `filter` (a\nsnapshot of the filtered queue at freeze time, capped at REVIEW_BATCH_MAX_ITEMS and\nreported as truncated when the cap cut it).",
+        "properties": {
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewBatchFilterWrite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "items": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ReviewBatchSelectionWrite"
+                },
+                "maxItems": 1000,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Items"
+          }
+        },
+        "title": "ReviewBatchCreate",
+        "type": "object"
+      },
+      "ReviewBatchDecisionCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "rationale_by_review_id": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "maxProperties": 1000,
+                "propertyNames": {
+                  "format": "uuid"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale By Review Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ReviewBatchDecisionCreate",
+        "type": "object"
+      },
+      "ReviewBatchDecisionMemberRead": {
+        "additionalProperties": false,
+        "properties": {
+          "approve_gate_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approve Gate Code"
+          },
+          "correction": {
+            "$ref": "#/components/schemas/ReviewBatchCorrectionRead"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "eligibility": {
+            "title": "Eligibility",
+            "type": "string"
+          },
+          "evidence_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Fingerprint"
+          },
+          "exclusion_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exclusion Code"
+          },
+          "frozen_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frozen Status"
+          },
+          "object_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "review_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Family"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "position",
+          "object_type",
+          "review_family",
+          "frozen_status",
+          "evidence_fingerprint",
+          "eligibility",
+          "exclusion_code",
+          "approve_gate_code",
+          "outcome",
+          "reason_code",
+          "decided_at",
+          "correction"
+        ],
+        "title": "ReviewBatchDecisionMemberRead",
+        "type": "object"
+      },
+      "ReviewBatchDecisionRead": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_count": {
+            "title": "Applied Count",
+            "type": "integer"
+          },
+          "batch": {
+            "$ref": "#/components/schemas/ReviewBatchRead"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewBatchDecisionMemberRead"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "overall": {
+            "title": "Overall",
+            "type": "string"
+          },
+          "refused_count": {
+            "title": "Refused Count",
+            "type": "integer"
+          },
+          "skipped_count": {
+            "title": "Skipped Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "batch",
+          "overall",
+          "applied_count",
+          "refused_count",
+          "skipped_count",
+          "members"
+        ],
+        "title": "ReviewBatchDecisionRead",
+        "type": "object"
+      },
+      "ReviewBatchFilterWrite": {
+        "additionalProperties": false,
+        "properties": {
+          "change_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Change Kinds",
+            "type": "array"
+          },
+          "decidable_only": {
+            "default": true,
+            "title": "Decidable Only",
+            "type": "boolean"
+          },
+          "families": {
+            "items": {
+              "enum": [
+                "DESCRIPTION",
+                "SEMANTIC",
+                "STEWARDSHIP",
+                "PUBLICATION",
+                "ACCESS",
+                "OTHER"
+              ],
+              "type": "string"
+            },
+            "title": "Families",
+            "type": "array"
+          },
+          "object_id": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Id"
+          },
+          "object_types": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Object Types",
+            "type": "array"
+          },
+          "status": {
+            "default": "PENDING",
+            "maxLength": 30,
+            "title": "Status",
+            "type": "string"
+          },
+          "table_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Id"
+          }
+        },
+        "title": "ReviewBatchFilterWrite",
+        "type": "object"
+      },
+      "ReviewBatchItemPageRead": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "format": "uuid",
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewBatchItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "batch_id",
+          "next_cursor",
+          "items"
+        ],
+        "title": "ReviewBatchItemPageRead",
+        "type": "object"
+      },
+      "ReviewBatchItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "approve_gate_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approve Gate Code"
+          },
+          "correction": {
+            "$ref": "#/components/schemas/ReviewBatchCorrectionRead"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "eligibility": {
+            "title": "Eligibility",
+            "type": "string"
+          },
+          "evidence_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Fingerprint"
+          },
+          "exclusion_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exclusion Code"
+          },
+          "frozen_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frozen Status"
+          },
+          "object_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "review_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Family"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "position",
+          "object_type",
+          "review_family",
+          "frozen_status",
+          "evidence_fingerprint",
+          "eligibility",
+          "exclusion_code",
+          "approve_gate_code",
+          "outcome",
+          "reason_code",
+          "decided_at",
+          "correction"
+        ],
+        "title": "ReviewBatchItemRead",
+        "type": "object"
+      },
+      "ReviewBatchRead": {
+        "additionalProperties": false,
+        "properties": {
+          "approve_gate_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Approve Gate Counts",
+            "type": "object"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "eligible_count": {
+            "title": "Eligible Count",
+            "type": "integer"
+          },
+          "excluded_count": {
+            "readOnly": true,
+            "title": "Excluded Count",
+            "type": "integer"
+          },
+          "exclusion_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Exclusion Counts",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "item_count": {
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "outcome_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Outcome Counts",
+            "type": "object"
+          },
+          "selection_fingerprint": {
+            "title": "Selection Fingerprint",
+            "type": "string"
+          },
+          "selection_mode": {
+            "title": "Selection Mode",
+            "type": "string"
+          },
+          "selection_truncated": {
+            "title": "Selection Truncated",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "created_by",
+          "selection_mode",
+          "selection_truncated",
+          "status",
+          "item_count",
+          "eligible_count",
+          "selection_fingerprint",
+          "decision",
+          "decided_at",
+          "created_at",
+          "exclusion_counts",
+          "approve_gate_counts",
+          "outcome_counts",
+          "excluded_count"
+        ],
+        "title": "ReviewBatchRead",
+        "type": "object"
+      },
+      "ReviewBatchSelectionWrite": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_fingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Fingerprint"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id"
+        ],
+        "title": "ReviewBatchSelectionWrite",
         "type": "object"
       },
       "ReviewQueueProposalRead": {
@@ -44342,6 +46028,304 @@
         "summary": "Download Okf Bundle",
         "tags": [
           "okf-export"
+        ]
+      }
+    },
+    "/v1/context-product-versions/{version_id}/okf-bundle/imports": {
+      "post": {
+        "description": "Raise the proposals an accepted preview listed, pending review. Publishes nothing.",
+        "operationId": "apply_okf_bundle_import_v1_context_product_versions__version_id__okf_bundle_imports_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The `preview_digest` of the preview being accepted.",
+            "in": "query",
+            "name": "preview_digest",
+            "required": true,
+            "schema": {
+              "description": "The `preview_digest` of the preview being accepted.",
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Preview Digest",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The uploaded file's name.",
+            "in": "query",
+            "name": "filename",
+            "required": false,
+            "schema": {
+              "default": "okf-bundle.zip",
+              "description": "The uploaded file's name.",
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Filename",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfImportRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply Okf Bundle Import",
+        "tags": [
+          "okf-import"
+        ]
+      }
+    },
+    "/v1/context-product-versions/{version_id}/okf-bundle/imports/preview": {
+      "post": {
+        "description": "What importing this edited bundle would propose, and everything it would not. Applies\nnothing; records an audit of counts and reason codes.",
+        "operationId": "preview_okf_bundle_import_v1_context_product_versions__version_id__okf_bundle_imports_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The uploaded file's name.",
+            "in": "query",
+            "name": "filename",
+            "required": false,
+            "schema": {
+              "default": "okf-bundle.zip",
+              "description": "The uploaded file's name.",
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Filename",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkfImportPreviewRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Okf Bundle Import",
+        "tags": [
+          "okf-import"
         ]
       }
     },
@@ -61694,6 +63678,594 @@
         ]
       }
     },
+    "/v1/governance/review-batches": {
+      "post": {
+        "description": "Freeze a selection: explicit review ids (accumulated across queue pages, optionally\nwith the fingerprints the reviewer saw) or a capped snapshot of a filter. Nothing is\ndecided. The response previews how many members are eligible and why the rest are not.",
+        "operationId": "create_review_batch_v1_governance_review_batches_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewBatchCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewBatchRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Review Batch",
+        "tags": [
+          "governance-review-batches"
+        ]
+      }
+    },
+    "/v1/governance/review-batches/{batch_id}": {
+      "get": {
+        "operationId": "read_review_batch_v1_governance_review_batches__batch_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewBatchRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Review Batch",
+        "tags": [
+          "governance-review-batches"
+        ]
+      }
+    },
+    "/v1/governance/review-batches/{batch_id}/decision": {
+      "post": {
+        "description": "Decide a frozen batch once. Every eligible member is re-checked against the version it\nwas frozen at and then decided through the shared decision service; the response reports\neach member's outcome, reason code and correction. Partial success is the normal case,\nnot an error: a member another checker decided first is `ALREADY_DECIDED`, one whose\nevidence moved is `STALE_EVIDENCE`, and the rest still apply.",
+        "operationId": "decide_frozen_review_batch_v1_governance_review_batches__batch_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewBatchDecisionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewBatchDecisionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Frozen Review Batch",
+        "tags": [
+          "governance-review-batches"
+        ]
+      }
+    },
+    "/v1/governance/review-batches/{batch_id}/items": {
+      "get": {
+        "description": "Every member, in selection order, with its frozen version, eligibility, outcome and\ncorrection -- so a reviewer can inspect each one before and after deciding.",
+        "operationId": "read_review_batch_items_v1_governance_review_batches__batch_id__items_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Batch Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "outcome",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 20,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Outcome"
+            }
+          },
+          {
+            "in": "query",
+            "name": "eligibility",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 20,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Eligibility"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewBatchItemPageRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Review Batch Items",
+        "tags": [
+          "governance-review-batches"
+        ]
+      }
+    },
     "/v1/governance/reviews": {
       "get": {
         "operationId": "list_governance_reviews_v1_governance_reviews_get",
@@ -61972,6 +64544,402 @@
         "summary": "Bulk Decide Governance Reviews",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/governance/reviews/change-queue": {
+      "get": {
+        "description": "One keyset page of the governance review queue, narrowed by change kind, object type,\nreview family, object id or table scope, each row carrying the evidence fingerprint a\nbatch selection binds to. Pass `status=` (empty) for every status.\n\n`table_id` scopes to the description drafts of one table and its columns -- the\n1,000-column-table case -- resolved in two statements, whatever the table's width.",
+        "operationId": "get_change_queue_v1_governance_reviews_change_queue_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "PENDING",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 50,
+              "title": "Object Type",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "family",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 10,
+              "title": "Family",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "change_kind",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 50,
+              "title": "Change Kind",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "table_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Table Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "decidable_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Decidable Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_total",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Include Total",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeQueuePageRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Change Queue",
+        "tags": [
+          "governance-review-batches"
+        ]
+      }
+    },
+    "/v1/governance/reviews/change-queue/details": {
+      "get": {
+        "description": "Full evidence and diff for the rows a reviewer opened -- loaded on demand, at most\n`DETAIL_MAX_IDS` at a time, so the queue page itself stays small.",
+        "operationId": "get_change_queue_details_v1_governance_reviews_change_queue_details_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "items": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "title": "Review Id",
+              "type": "array"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeQueueDetailsRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Change Queue Details",
+        "tags": [
+          "governance-review-batches"
         ]
       }
     },
@@ -88566,6 +91534,135 @@
           }
         },
         "summary": "Update Playbook",
+        "tags": [
+          "playbooks"
+        ]
+      }
+    },
+    "/v1/playbooks/{playbook_id}/dry-run": {
+      "get": {
+        "description": "R11-REV01: evaluate this playbook's rule against the live catalog and report what a\nrun would do -- the subjects, each one's before/after and evidence version, the rule's\nversion, and whether the action would be applied automatically or queued for review --\nwithout applying, queuing or recording anything (not even `last_run_at`).\n\nSame population as `run`: previewing what you may trigger. A disabled playbook can be\npreviewed; that is how a steward checks one before enabling it.",
+        "operationId": "dry_run_playbook_now_v1_playbooks__playbook_id__dry_run_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "playbook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Playbook Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybookDryRunRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dry Run Playbook Now",
         "tags": [
           "playbooks"
         ]

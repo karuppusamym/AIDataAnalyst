@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **517**
-- By family: BULK 11, EXPORT 7, GRAPHQL 17, JOB 27, MCP 9, REST 445, SDK 1
+- Surfaces covered: **526**
+- By family: BULK 11, EXPORT 7, GRAPHQL 17, JOB 27, MCP 9, REST 454, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -230,6 +230,10 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/engines/capability-matrix` | REST | `aida.engine_capability_api.get_engine_capability_matrix` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/glossary-term-versions/{version_id}/consumers` | REST | `aida.glossary_api.get_glossary_term_version_consumers` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/glossary-terms/{term_id}/semantic-bindings` | REST | `aida.semantic_api.list_term_semantic_bindings` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/governance/review-batches/{batch_id}/items` | REST | `aida.review_batch_api.read_review_batch_items` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/governance/review-batches/{batch_id}` | REST | `aida.review_batch_api.read_review_batch` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/governance/reviews/change-queue/details` | REST | `aida.review_batch_api.get_change_queue_details` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/governance/reviews/change-queue` | REST | `aida.review_batch_api.get_change_queue` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/queue/summary` | REST | `aida.review_queue_api.get_review_queue_summary` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/queue` | REST | `aida.review_queue_api.get_review_queue` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/governance/reviews/{review_id}/diff` | REST | `aida.semantic_api.get_governance_review_diff` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
@@ -321,6 +325,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/workspaces` | REST | `atlas.modules.identity_tenancy.router.list_workspaces` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}` | REST | `atlas.modules.identity_tenancy.router.get_organization` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations` | REST | `atlas.modules.identity_tenancy.router.list_organizations` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | no | no | read | no | not cancellable |
+| `GET /v1/playbooks/{playbook_id}/dry-run` | REST | `aida.playbooks_api.dry_run_playbook_now` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.get_playbook` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/procedure-lineage/capability-matrix` | REST | `aida.procedure_lineage_api.get_procedure_lineage_capability_matrix` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/bi-connections` | REST | `aida.bi_api.list_bi_connections` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
@@ -395,6 +400,8 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/context-product-versions/{version_id}/compile/drift` | REST | `aida.context_compiler_api.inspect_context_compilation_drift` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/deprecate` | REST | `aida.context_product_api.request_context_product_deprecation` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/okf-bundle/context` | REST | `aida.okf_export_api.select_okf_context` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `POST /v1/context-product-versions/{version_id}/okf-bundle/imports/preview` | REST | `aida.okf_import_api.preview_okf_bundle_import` | DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `POST /v1/context-product-versions/{version_id}/okf-bundle/imports` | REST | `aida.okf_import_api.apply_okf_bundle_import` | DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/context-product-versions/{version_id}/submit` | REST | `aida.context_product_api.submit_context_product_version` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/context-products/{product_id}/versions` | REST | `aida.context_product_api.create_context_product_version` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/cross-source-object-resolution-candidates/{candidate_id}/decision` | REST | `aida.intelligence_api.decide_cross_source_object_resolution_candidate` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -437,6 +444,8 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/glossary-term-versions/{version_id}/submit` | REST | `aida.glossary_api.submit_glossary_term_version` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/glossary-terms/{term_id}/deprecate` | REST | `aida.stewardship_api.deprecate_glossary_term` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/glossary-terms/{term_id}/versions` | REST | `aida.glossary_api.create_glossary_term_version` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/governance/review-batches/{batch_id}/decision` | REST | `aida.review_batch_api.decide_frozen_review_batch` | DataSteward, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
+| `POST /v1/governance/review-batches` | REST | `aida.review_batch_api.create_review_batch` | DataSteward, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/governance/reviews/{review_id}/decision` | REST | `aida.semantic_api.decide_governance_review` | DataSteward, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/lineage/openlineage` | REST | `aida.openlineage_api.ingest_openlineage_run_event` | DataAdmin, MetadataAdmin, MetadataIngestor, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/lineage/parsed-edges/{edge_id}/decision` | REST | `aida.parsed_lineage_review_api.decide_parsed_lineage_edge` | DataSteward, MetadataReviewer, PlatformAdmin | yes | no | writes | yes | not cancellable |
