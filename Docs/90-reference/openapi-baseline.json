@@ -6709,8 +6709,22 @@
       },
       "ChangeQueueItemRead": {
         "additionalProperties": false,
-        "description": "One queue row: enough to triage and select it, not its full evidence.\n\n`evidence_fingerprint` is the version a selection binds to; send it back when freezing\na batch and a member that changed in between is excluded as `STALE_EVIDENCE`.\n`decide_blocker` is why this caller may not decide the row at all (NOT_PENDING,\nMAKER_CHECKER, UNSUPPORTED_TYPE, TARGET_UNAVAILABLE); `approve_gate` is why batch\n*approval* would be refused even so (EVIDENCE_NOT_SHOWN, INDIVIDUAL_DECISION_REQUIRED).",
+        "description": "One queue row: enough to triage and select it, not its full evidence.\n\n`evidence_fingerprint` is the version a selection binds to; send it back when freezing\na batch and a member that changed in between is excluded as `STALE_EVIDENCE`.\n`decide_blocker` is why this caller may not decide the row at all (NOT_PENDING,\nMAKER_CHECKER, UNSUPPORTED_TYPE, TARGET_UNAVAILABLE); `approve_gate` is why batch\n*approval* would be refused even so (INDIVIDUAL_DECISION_REQUIRED, NO_EVIDENCE_CONTRACT,\nEVIDENCE_NOT_SHOWN, REQUIRED_EVIDENCE_MISSING). `approve_evidence_required` names the\nfacts the row's object type must have composed to be batch-approved (empty: the type has\nno contract and is reject-only in a batch); `approve_evidence_missing` names the ones\nthis row lacks.",
         "properties": {
+          "approve_evidence_missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Approve Evidence Missing",
+            "type": "array"
+          },
+          "approve_evidence_required": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Approve Evidence Required",
+            "type": "array"
+          },
           "approve_gate": {
             "anyOf": [
               {
@@ -6823,6 +6837,8 @@
           "evidence_fingerprint",
           "decide_blocker",
           "approve_gate",
+          "approve_evidence_required",
+          "approve_evidence_missing",
           "target_unavailable"
         ],
         "title": "ChangeQueueItemRead",
@@ -24897,6 +24913,66 @@
         "title": "PlaybookActionAutomationRead",
         "type": "object"
       },
+      "PlaybookBoundRunCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "require_match": {
+            "default": true,
+            "title": "Require Match",
+            "type": "boolean"
+          }
+        },
+        "title": "PlaybookBoundRunCreate",
+        "type": "object"
+      },
+      "PlaybookBoundRunRead": {
+        "additionalProperties": false,
+        "description": "R11-REV01: a run bound to a stored preview -- or the reason it did not run.",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PlaybookPreviewBindingRead"
+          },
+          "dry_run_id": {
+            "format": "uuid",
+            "title": "Dry Run Id",
+            "type": "string"
+          },
+          "ran": {
+            "title": "Ran",
+            "type": "boolean"
+          },
+          "refusal_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal Code"
+          },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaybookRunResultRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "dry_run_id",
+          "ran",
+          "refusal_code",
+          "binding",
+          "run"
+        ],
+        "title": "PlaybookBoundRunRead",
+        "type": "object"
+      },
       "PlaybookCreate": {
         "additionalProperties": false,
         "properties": {
@@ -25116,6 +25192,67 @@
         "title": "PlaybookDryRunRead",
         "type": "object"
       },
+      "PlaybookPreviewBindingRead": {
+        "additionalProperties": false,
+        "properties": {
+          "added_count": {
+            "title": "Added Count",
+            "type": "integer"
+          },
+          "changed_count": {
+            "title": "Changed Count",
+            "type": "integer"
+          },
+          "evidence_matches": {
+            "title": "Evidence Matches",
+            "type": "boolean"
+          },
+          "match_set_matches": {
+            "title": "Match Set Matches",
+            "type": "boolean"
+          },
+          "moved_subject_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Moved Subject Ids",
+            "type": "array"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "removed_count": {
+            "title": "Removed Count",
+            "type": "integer"
+          },
+          "rule_version_matches": {
+            "title": "Rule Version Matches",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "rule_version_matches",
+          "match_set_matches",
+          "evidence_matches",
+          "added_count",
+          "removed_count",
+          "changed_count",
+          "moved_subject_ids",
+          "reasons"
+        ],
+        "title": "PlaybookPreviewBindingRead",
+        "type": "object"
+      },
       "PlaybookRead": {
         "additionalProperties": false,
         "properties": {
@@ -25288,6 +25425,104 @@
           "governance_review_id"
         ],
         "title": "PlaybookRunResultRead",
+        "type": "object"
+      },
+      "PlaybookStoredDryRunRead": {
+        "additionalProperties": false,
+        "description": "R11-REV01: a dry-run that was stored, so a run can be bound to it. `match_digest` is\nover which subjects matched, `evidence_digest` over the version of each.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "auto_apply_max_items": {
+            "title": "Auto Apply Max Items",
+            "type": "integer"
+          },
+          "automation": {
+            "$ref": "#/components/schemas/PlaybookActionAutomationRead"
+          },
+          "change_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Change Counts",
+            "type": "object"
+          },
+          "columns_truncated": {
+            "title": "Columns Truncated",
+            "type": "boolean"
+          },
+          "dry_run_id": {
+            "format": "uuid",
+            "title": "Dry Run Id",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "evidence_digest": {
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybookDryRunItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "match_digest": {
+            "title": "Match Digest",
+            "type": "string"
+          },
+          "matched_count": {
+            "title": "Matched Count",
+            "type": "integer"
+          },
+          "playbook_id": {
+            "format": "uuid",
+            "title": "Playbook Id",
+            "type": "string"
+          },
+          "predicted_disposition": {
+            "title": "Predicted Disposition",
+            "type": "string"
+          },
+          "rule_version": {
+            "title": "Rule Version",
+            "type": "string"
+          },
+          "tables_truncated": {
+            "title": "Tables Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "playbook_id",
+          "action",
+          "enabled",
+          "rule_version",
+          "evaluated_at",
+          "matched_count",
+          "tables_truncated",
+          "columns_truncated",
+          "auto_apply_max_items",
+          "predicted_disposition",
+          "automation",
+          "items",
+          "dry_run_id",
+          "match_digest",
+          "evidence_digest",
+          "change_counts"
+        ],
+        "title": "PlaybookStoredDryRunRead",
         "type": "object"
       },
       "PlaybookUpdate": {
@@ -28643,6 +28878,11 @@
             ],
             "title": "Decided At"
           },
+          "decided_in_this_call": {
+            "default": false,
+            "title": "Decided In This Call",
+            "type": "boolean"
+          },
           "detail": {
             "anyOf": [
               {
@@ -28766,6 +29006,10 @@
           "batch": {
             "$ref": "#/components/schemas/ReviewBatchRead"
           },
+          "decided_in_this_call_count": {
+            "title": "Decided In This Call Count",
+            "type": "integer"
+          },
           "members": {
             "items": {
               "$ref": "#/components/schemas/ReviewBatchDecisionMemberRead"
@@ -28781,6 +29025,10 @@
             "title": "Refused Count",
             "type": "integer"
           },
+          "resumed": {
+            "title": "Resumed",
+            "type": "boolean"
+          },
           "skipped_count": {
             "title": "Skipped Count",
             "type": "integer"
@@ -28792,6 +29040,8 @@
           "applied_count",
           "refused_count",
           "skipped_count",
+          "resumed",
+          "decided_in_this_call_count",
           "members"
         ],
         "title": "ReviewBatchDecisionRead",
@@ -29115,6 +29365,12 @@
             "title": "Outcome Counts",
             "type": "object"
           },
+          "resumable": {
+            "description": "A decision was started and not finished: the batch is still FROZEN but its\ndecision is recorded. Calling the decision again, with the same decision, resumes it\nat the first undecided member; `outcome_counts[\"PENDING\"]` is how many remain.",
+            "readOnly": true,
+            "title": "Resumable",
+            "type": "boolean"
+          },
           "selection_fingerprint": {
             "title": "Selection Fingerprint",
             "type": "string"
@@ -29148,7 +29404,8 @@
           "exclusion_counts",
           "approve_gate_counts",
           "outcome_counts",
-          "excluded_count"
+          "excluded_count",
+          "resumable"
         ],
         "title": "ReviewBatchRead",
         "type": "object"
@@ -65162,7 +65419,7 @@
     },
     "/v1/governance/review-batches/{batch_id}/decision": {
       "post": {
-        "description": "Decide a frozen batch once. Every eligible member is re-checked against the version it\nwas frozen at and then decided through the shared decision service; the response reports\neach member's outcome, reason code and correction. Partial success is the normal case,\nnot an error: a member another checker decided first is `ALREADY_DECIDED`, one whose\nevidence moved is `STALE_EVIDENCE`, and the rest still apply.",
+        "description": "Decide a frozen batch once -- or resume a decision that was interrupted. Every eligible\nmember is re-checked against the version it was frozen at and then decided through the\nshared decision service; the response reports each member's outcome, reason code and\ncorrection. Partial success is the normal case, not an error: a member another checker\ndecided first is `ALREADY_DECIDED`, one whose evidence moved is `STALE_EVIDENCE`, and the\nrest still apply.\n\nProgress is committed per chunk of members. If a call fails part-way, the members it\nrecorded stand, the batch reads `resumable`, and the same request (same decision) picks\nup at the first undecided member; the other decision is `REVIEW_BATCH_DECISION_MISMATCH`.",
         "operationId": "decide_frozen_review_batch_v1_governance_review_batches__batch_id__decision_post",
         "parameters": [
           {
@@ -93044,6 +93301,284 @@
           }
         },
         "summary": "Dry Run Playbook Now",
+        "tags": [
+          "playbooks"
+        ]
+      }
+    },
+    "/v1/playbooks/{playbook_id}/dry-runs": {
+      "post": {
+        "description": "R11-REV01: the same dry-run as `GET .../dry-run`, stored -- the rule version, which\nsubjects matched and each one's evidence version (ids and digests only) -- so that\n`POST .../dry-runs/{dry_run_id}/run` can run exactly what was previewed. Applies nothing,\nqueues nothing and does not touch `last_run_at`.",
+        "operationId": "store_playbook_dry_run_v1_playbooks__playbook_id__dry_runs_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "playbook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Playbook Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybookStoredDryRunRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Store Playbook Dry Run",
+        "tags": [
+          "playbooks"
+        ]
+      }
+    },
+    "/v1/playbooks/{playbook_id}/dry-runs/{dry_run_id}/run": {
+      "post": {
+        "description": "R11-REV01: run the playbook bound to a stored dry-run, through the same\n`evaluate_and_run_playbook` as `POST .../run`. The run re-evaluates the rule and compares\nitself to the preview; with `require_match` (the default) it runs only if the rule, the\nmatched subjects and every subject's evidence version are the ones previewed, and it\nchecks the subjects it then acted on against that evaluation too. Otherwise nothing is\napplied and the response says what moved (`ran: false`). A preview binds one run.",
+        "operationId": "run_playbook_as_previewed_v1_playbooks__playbook_id__dry_runs__dry_run_id__run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "playbook_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Playbook Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dry_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dry Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybookBoundRunCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybookBoundRunRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Playbook As Previewed",
         "tags": [
           "playbooks"
         ]

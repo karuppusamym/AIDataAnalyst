@@ -4,6 +4,8 @@ import {
   decideReviewBatch,
   fetchChangeQueue,
   fetchChangeQueueDetails,
+  fetchReviewBatch,
+  fetchReviewBatchMembers,
   freezeReviewBatch,
 } from "../lib/api";
 import type {
@@ -12,6 +14,7 @@ import type {
   ReviewBatch,
   ReviewBatchCorrection,
   ReviewBatchDecision,
+  ReviewBatchMember,
   ReviewBatchMemberOutcome,
 } from "../lib/api";
 import { VirtualList } from "../components/VirtualList";
@@ -43,6 +46,15 @@ import "./ReviewBatchQueue.css";
         and decided through the same path a single decision takes; the answer
         is per member -- applied, or refused with a reason -- and each applied
         member names its correction, or says plainly that none exists.
+
+   Batch approval is gated per object type: each type needs the evidence its
+   review rests on (a draft's text *and* its source signals, a version's diff,
+   ...). A row says which facts it lacks; a type with no evidence contract can
+   only be rejected in a batch. The frozen members are listed, paged from the
+   server, before anything is decided. A decision is committed per chunk of
+   members, so one that fails part-way is resumable: the screen re-reads the
+   batch and offers to resume the same decision, which decides only what is
+   left.
 --------------------------------------------------------------------------- */
 
 const PAGE_SIZE = 50;
@@ -69,6 +81,8 @@ const REASONS: Record<string, string> = {
   UNSUPPORTED_TYPE: "No decision path for this type",
   TARGET_UNAVAILABLE: "Its target no longer exists",
   EVIDENCE_NOT_SHOWN: "No evidence shown: reject in a batch or decide it individually",
+  NO_EVIDENCE_CONTRACT: "No batch evidence contract for this type: reject in a batch or decide it individually",
+  REQUIRED_EVIDENCE_MISSING: "Required evidence missing: reject in a batch or decide it individually",
   INDIVIDUAL_DECISION_REQUIRED: "Trust-boundary change: decide it individually",
   RATIONALE_REQUIRED: "A rejection needs a rationale",
   TARGET_REFUSED: "The target refused the change",
@@ -76,6 +90,9 @@ const REASONS: Record<string, string> = {
   NO_REOPEN_PATH: "Rejected: propose it again to change it",
   CORRECT_THROUGH_OBJECT_PATH: "Correct it through the object's own screen",
   NOT_APPLIED: "Nothing was applied",
+  REVIEW_BATCH_ALREADY_DECIDED: "This batch has already been decided",
+  REVIEW_BATCH_DECISION_MISMATCH: "This batch's decision was started the other way: resume it with that decision",
+  REVIEW_BATCH_DECISION_CONFLICT: "A concurrent change interrupted the decision",
 };
 
 function reason(code: string | null | undefined): string {
@@ -84,7 +101,24 @@ function reason(code: string | null | undefined): string {
 }
 
 function describeFailure(error: unknown): string {
-  return error instanceof ApiError ? error.detail : (error as Error).message;
+  return error instanceof ApiError ? reason(error.detail) : (error as Error).message;
+}
+
+/** `PROPOSED_TEXT` -> "proposed text": the server's fact names, read aloud. */
+function factLabel(name: string): string {
+  return name.toLowerCase().replace(/_/g, " ");
+}
+
+function GatePill({ item }: { item: ChangeQueueItem }) {
+  if (!item.approve_gate) return null;
+  if (item.approve_gate === "REQUIRED_EVIDENCE_MISSING" && item.approve_evidence_missing.length > 0) {
+    return (
+      <Pill tone="warn">
+        Missing for batch approval: {item.approve_evidence_missing.map(factLabel).join(", ")}
+      </Pill>
+    );
+  }
+  return <Pill tone="warn">{reason(item.approve_gate)}</Pill>;
 }
 
 function shortId(value: string): string {
@@ -146,7 +180,7 @@ function QueueRow({
             {item.risk_tier}
           </Pill>
           {blocked ? <Pill tone="bad">{reason(item.decide_blocker)}</Pill> : null}
-          {!blocked && item.approve_gate ? <Pill tone="warn">{reason(item.approve_gate)}</Pill> : null}
+          {!blocked ? <GatePill item={item} /> : null}
         </div>
         {item.evidence_preview[0] ? (
           <p className="rbq__claim">{item.evidence_preview[0].claim}</p>
@@ -191,6 +225,106 @@ function MemberRow({ member }: { member: ReviewBatchMemberOutcome }) {
   );
 }
 
+const MEMBER_PAGE = 100;
+
+function FrozenMemberRow({ member }: { member: ReviewBatchMember }) {
+  const excluded = member.eligibility === "EXCLUDED";
+  const gate = member.approve_gate_code;
+  return (
+    <article className="rbq__member">
+      <div className="rbq__title">
+        <span className="tnum">#{member.position + 1}</span> <b>{member.object_type ?? "Unknown review"}</b>{" "}
+        <code>{shortId(member.review_id)}</code>{" "}
+        {excluded ? (
+          <Pill tone="mute">Excluded</Pill>
+        ) : gate ? (
+          <Pill tone="warn">Reject only</Pill>
+        ) : (
+          <Pill tone="ok">Approvable</Pill>
+        )}
+      </div>
+      {excluded || gate ? (
+        <p className="rbq__claim">{reason(excluded ? member.exclusion_code : gate)}</p>
+      ) : null}
+    </article>
+  );
+}
+
+/** Every frozen member, paged from the server in selection order, so the
+ *  reviewer can inspect what they are about to decide -- not just its counts. */
+function FrozenMembers({ batch }: { batch: ReviewBatch }) {
+  const [members, setMembers] = useState<ReviewBatchMember[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  /* Same guard as the queue's: the windowed list may ask for the next page
+     again before `loadingMore` has flipped. */
+  const requested = useRef<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    requested.current = null;
+    setLoading(true);
+    setError(null);
+    fetchReviewBatchMembers(batch.id, { limit: MEMBER_PAGE }, controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        setMembers(page.items);
+        setCursor(page.next_cursor);
+      })
+      .catch((e: unknown) => {
+        if (!controller.signal.aborted) setError(describeFailure(e));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [batch.id]);
+
+  const loadMore = useCallback(async () => {
+    if (!cursor || requested.current === cursor) return;
+    requested.current = cursor;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const page = await fetchReviewBatchMembers(batch.id, { cursor, limit: MEMBER_PAGE });
+      setMembers((current) => [...current, ...page.items]);
+      setCursor(page.next_cursor);
+    } catch (e) {
+      setLoadMoreError(describeFailure(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [batch.id, cursor]);
+
+  return (
+    <div className="rbq__frozen">
+      <h3 className="rbq__countsh">Members, in the order you selected them</h3>
+      {loading ? (
+        <p className="rbq__claim" role="status">Loading members…</p>
+      ) : error ? (
+        <p className="rbq__err" role="alert">{error}</p>
+      ) : (
+        <div className="rbq__members">
+          <VirtualList
+            items={members}
+            getKey={(member) => member.review_id}
+            renderItem={(member) => <FrozenMemberRow member={member} />}
+            estimateSize={56}
+            totalCount={batch.item_count}
+            onReachEnd={cursor ? () => void loadMore() : undefined}
+            loadingMore={loadingMore}
+            loadMoreError={loadMoreError}
+            ariaLabel="Frozen batch members"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Counts({ title, counts }: { title: string; counts: Record<string, number> }) {
   const entries = Object.entries(counts);
   if (entries.length === 0) return null;
@@ -227,6 +361,9 @@ export function ReviewBatchQueue() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState(false);
+  /* The rationale of the last rejection sent, kept so a resumed rejection
+     records the same one on the members still to be decided. */
+  const [lastRationale, setLastRationale] = useState<string | null>(null);
   const inflight = useRef<AbortController | null>(null);
   /* The cursor whose page has been asked for. The windowed list calls its
      reach-end callback from render, so it can fire again before the
@@ -359,6 +496,7 @@ export function ReviewBatchQueue() {
       if (!batch) return;
       setBusy(true);
       setActionError(null);
+      if (verdict === "REJECT") setLastRationale(rationale);
       try {
         const result = await decideReviewBatch(batch.id, { decision: verdict, reason: rationale });
         setDecision(result);
@@ -366,6 +504,16 @@ export function ReviewBatchQueue() {
         setRejecting(false);
       } catch (e) {
         setActionError(describeFailure(e));
+        /* A decision commits per chunk of members, so a failure may have
+           stopped part-way. Re-read the batch: if it is resumable, the panel
+           offers to resume -- with the decision the batch recorded, which may
+           be the other one if that is what this call was refused for. */
+        try {
+          setBatch(await fetchReviewBatch(batch.id));
+        } catch {
+          /* The original failure is what the reviewer needs to see. */
+        }
+        setRejecting(false);
       } finally {
         setBusy(false);
       }
@@ -373,11 +521,22 @@ export function ReviewBatchQueue() {
     [batch],
   );
 
+  const resume = useCallback(() => {
+    if (!batch?.decision) return;
+    if (batch.decision === "REJECT") {
+      if (lastRationale) void decide("REJECT", lastRationale);
+      else setRejecting(true);
+      return;
+    }
+    void decide("APPROVE", null);
+  }, [batch, decide, lastRationale]);
+
   const startOver = useCallback(() => {
     setBatch(null);
     setDecision(null);
     setSelected(new Map());
     setActionError(null);
+    setLastRationale(null);
     void load();
   }, [load]);
 
@@ -454,17 +613,32 @@ export function ReviewBatchQueue() {
           </h2>
           <Counts title="Excluded when frozen" counts={batch.exclusion_counts} />
           <Counts title="Eligible, but rejection only" counts={batch.approve_gate_counts} />
-          <div className="rbq__actions">
-            <Button variant="primary" disabled={busy || approvable <= 0} onClick={() => void decide("APPROVE", null)}>
-              Approve {approvable} eligible
-            </Button>
-            <Button disabled={busy || batch.eligible_count === 0} onClick={() => setRejecting(true)}>
-              Reject batch…
-            </Button>
-            <Button disabled={busy} onClick={startOver}>
-              Discard and start over
-            </Button>
-          </div>
+          {batch.resumable ? (
+            <div className="rbq__resume" role="status">
+              <p>
+                The {batch.decision === "REJECT" ? "rejection" : "approval"} stopped part-way:{" "}
+                <span className="tnum">{batch.outcome_counts.PENDING ?? 0}</span> of{" "}
+                <span className="tnum">{batch.item_count}</span> members are not recorded yet. Members
+                already decided stay decided; resuming decides only the rest.
+              </p>
+              <Button variant="primary" disabled={busy} onClick={resume}>
+                Resume the {batch.decision === "REJECT" ? "rejection" : "approval"}
+              </Button>
+            </div>
+          ) : (
+            <div className="rbq__actions">
+              <Button variant="primary" disabled={busy || approvable <= 0} onClick={() => void decide("APPROVE", null)}>
+                Approve {approvable} eligible
+              </Button>
+              <Button disabled={busy || batch.eligible_count === 0} onClick={() => setRejecting(true)}>
+                Reject batch…
+              </Button>
+              <Button disabled={busy} onClick={startOver}>
+                Discard and start over
+              </Button>
+            </div>
+          )}
+          <FrozenMembers batch={batch} />
         </section>
       ) : null}
 
@@ -480,6 +654,12 @@ export function ReviewBatchQueue() {
             <span className="tnum">{decision.refused_count}</span> refused,{" "}
             <span className="tnum">{decision.skipped_count}</span> skipped
           </h2>
+          {decision.resumed ? (
+            <p className="rbq__claim">
+              Resumed an interrupted decision: <span className="tnum">{decision.decided_in_this_call_count}</span>{" "}
+              members decided now; the rest were recorded by the earlier attempt and were not decided again.
+            </p>
+          ) : null}
           <div className="rbq__members">
             <VirtualList
               items={decision.members}

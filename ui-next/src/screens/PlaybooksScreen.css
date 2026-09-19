@@ -41,3 +41,5 @@
   .pbk__head { flex-direction: column; align-items: flex-start; }
   .pbk__row { flex-direction: column; }
 }
+/* R11-REV01: the row's dry-run panel spans the row below its facts and actions. */
+.pbk__preview{flex-basis:100%;min-width:0}

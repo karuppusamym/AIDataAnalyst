@@ -37,7 +37,11 @@ class ChangeQueueItemRead(ApiModel):
     a batch and a member that changed in between is excluded as `STALE_EVIDENCE`.
     `decide_blocker` is why this caller may not decide the row at all (NOT_PENDING,
     MAKER_CHECKER, UNSUPPORTED_TYPE, TARGET_UNAVAILABLE); `approve_gate` is why batch
-    *approval* would be refused even so (EVIDENCE_NOT_SHOWN, INDIVIDUAL_DECISION_REQUIRED).
+    *approval* would be refused even so (INDIVIDUAL_DECISION_REQUIRED, NO_EVIDENCE_CONTRACT,
+    EVIDENCE_NOT_SHOWN, REQUIRED_EVIDENCE_MISSING). `approve_evidence_required` names the
+    facts the row's object type must have composed to be batch-approved (empty: the type has
+    no contract and is reject-only in a batch); `approve_evidence_missing` names the ones
+    this row lacks.
     """
 
     review_id: UUID
@@ -56,6 +60,8 @@ class ChangeQueueItemRead(ApiModel):
     evidence_fingerprint: str
     decide_blocker: str | None
     approve_gate: str | None
+    approve_evidence_required: list[str]
+    approve_evidence_missing: list[str]
     target_unavailable: bool
 
 
@@ -167,6 +173,14 @@ class ReviewBatchRead(ApiModel):
     def excluded_count(self) -> int:
         return self.item_count - self.eligible_count
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def resumable(self) -> bool:
+        """A decision was started and not finished: the batch is still FROZEN but its
+        decision is recorded. Calling the decision again, with the same decision, resumes it
+        at the first undecided member; `outcome_counts["PENDING"]` is how many remain."""
+        return self.status == "FROZEN" and self.decision is not None
+
 
 class ReviewBatchItemPageRead(ApiModel):
     batch_id: UUID
@@ -192,9 +206,13 @@ class ReviewBatchDecisionCreate(ApiModel):
 
 
 class ReviewBatchDecisionMemberRead(ReviewBatchItemRead):
-    #: The decision service's or target's own sentence for a refusal, in this response
-    #: only; the stored member carries the reason code alone (INV-6).
+    #: The decision service's, target's or approve gate's own sentence for a refusal this
+    #: call recorded, in this response only; the stored member carries the reason code alone
+    #: (INV-6).
     detail: str | None = None
+    #: False for a member an earlier, interrupted call of this decision had already recorded
+    #: (or a concurrent caller of the same batch did): reported, not decided again.
+    decided_in_this_call: bool = False
 
 
 class ReviewBatchDecisionRead(ApiModel):
@@ -204,6 +222,9 @@ class ReviewBatchDecisionRead(ApiModel):
     applied_count: int
     refused_count: int
     skipped_count: int
+    #: This call resumed a decision an earlier call of this batch started and did not finish.
+    resumed: bool
+    decided_in_this_call_count: int
     members: list[ReviewBatchDecisionMemberRead]
 
 

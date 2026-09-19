@@ -14,6 +14,7 @@ import {
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useDatasourcePicker } from "../lib/useDatasourcePicker";
+import { PlaybookDryRunPanel } from "../components/PlaybookDryRunPanel";
 import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/workflow-author.css";
@@ -77,13 +78,18 @@ function PlaybookRow({
   onRun,
   onToggle,
   onDelete,
+  onRanAsPreviewed,
 }: {
   playbook: PlaybookRead;
   busy: boolean;
   onRun: (playbook: PlaybookRead) => void;
   onToggle: (playbook: PlaybookRead) => void;
   onDelete: (playbook: PlaybookRead) => void;
+  onRanAsPreviewed: (playbook: PlaybookRead, result: PlaybookRunResultRead) => void;
 }) {
+  /* R11-REV01: the dry run lives in its own component, opened per row, so a
+     preview is fetched only for the playbook a steward asks about. */
+  const [previewOpen, setPreviewOpen] = useState(false);
   return (
     <li className="pbk__row">
       <div className="pbk__rowmain">
@@ -127,7 +133,15 @@ function PlaybookRow({
         <Button disabled={busy} onClick={() => onDelete(playbook)}>
           Delete
         </Button>
+        <Button onClick={() => setPreviewOpen((open) => !open)}>
+          {previewOpen ? "Hide dry run" : "Dry run…"}
+        </Button>
       </div>
+      {previewOpen ? (
+        <div className="pbk__preview">
+          <PlaybookDryRunPanel playbook={playbook} onRan={(result) => onRanAsPreviewed(playbook, result)} />
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -411,6 +425,13 @@ export function PlaybooksScreen() {
       );
     });
 
+  const handleRanAsPreviewed = (playbook: PlaybookRead, result: PlaybookRunResultRead) => {
+    setNotice(describeRunResult(playbook.name, result));
+    setPlaybooks((prev) =>
+      prev?.map((p) => (p.id === playbook.id ? { ...p, last_run_at: new Date().toISOString() } : p)) ?? prev,
+    );
+  };
+
   const handleToggle = (playbook: PlaybookRead) =>
     void withBusy(playbook.id, async () => {
       const updated = await updatePlaybook(playbook.id, { enabled: !playbook.enabled });
@@ -491,6 +512,7 @@ export function PlaybooksScreen() {
               onRun={handleRun}
               onToggle={handleToggle}
               onDelete={handleDelete}
+              onRanAsPreviewed={handleRanAsPreviewed}
             />
           ))}
         </ul>

@@ -103,8 +103,12 @@ async def build_estate(session: AsyncSession, *, name: str = "Bank") -> Estate:
         name="Core",
         slug=f"core-{uuid4().hex[:8]}",
     )
-    session.add_all([org, lob, domain, project])
-    await session.flush()
+    # One flush per row, parent first: these models carry plain foreign-key columns with no
+    # `relationship()`, so a single flush has nothing to order the INSERTs by, and PostgreSQL
+    # (unlike this repo's SQLite) enforces the keys -- `tests/test_review_batches_postgres.py`.
+    for row in (org, lob, domain, project):
+        session.add(row)
+        await session.flush()
     datasource = DataSource(
         id=uuid4(),
         organization_id=org.id,

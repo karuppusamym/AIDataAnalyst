@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **538**
-- By family: BULK 11, EXPORT 8, GRAPHQL 23, JOB 27, MCP 9, REST 459, SDK 1
+- Surfaces covered: **540**
+- By family: BULK 11, EXPORT 8, GRAPHQL 23, JOB 29, MCP 9, REST 459, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -123,6 +123,8 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/reviewer-agent/run` | JOB | `aida.agent_contract_api.run_reviewer_agent` | MetadataReviewer, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/steward-agent/run` | JOB | `aida.steward_agent_api.start_steward_agent_run` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/tool-agent/run` | JOB | `aida.tool_agent_api.start_tool_agent_run` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |
+| `POST /v1/playbooks/{playbook_id}/dry-runs/{dry_run_id}/run` | JOB | `aida.playbooks_api.run_playbook_as_previewed` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/playbooks/{playbook_id}/dry-runs` | JOB | `aida.playbooks_api.store_playbook_dry_run` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/playbooks/{playbook_id}/run` | JOB | `aida.playbooks_api.run_playbook_now` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/sql-drafts/{receipt_id}/run` | JOB | `aida.sql_workspace_api.run_sql_draft` | Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/tool-certification-runs/{run_id}/decision` | JOB | `aida.tool_api.decide_tool_certification` | PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |

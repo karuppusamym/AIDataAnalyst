@@ -4,7 +4,9 @@
      GET  /v1/governance/reviews/change-queue            keyset page, filtered
      GET  /v1/governance/reviews/change-queue/details    evidence for opened rows
      POST /v1/governance/review-batches                  freeze ids + versions
-     POST /v1/governance/review-batches/{id}/decision    decide: re-check, apply
+     GET  /v1/governance/review-batches/{id}             the batch, its counts, resumable
+     GET  /v1/governance/review-batches/{id}/items       its members, paged
+     POST /v1/governance/review-batches/{id}/decision    decide (or resume): re-check, apply
 
    Response and request contracts use the generated OpenAPI types. Local aliases
    preserve the screen-facing names without duplicating the server schemas.
@@ -28,6 +30,8 @@ import type {
   ReviewBatchSelectionWrite,
   ChangeQueueDetailsRead,
   ReviewBatchDecisionCreate,
+  ReviewBatchItemPageRead,
+  ReviewBatchItemRead,
 } from "../types";
 
 export type ChangeQueueEvidence = EvidenceItemRead;
@@ -39,6 +43,8 @@ export type ReviewBatch = ReviewBatchRead;
 export type ReviewBatchMemberOutcome = ReviewBatchDecisionMemberRead;
 export type ReviewBatchDecision = ReviewBatchDecisionRead;
 export type ReviewBatchSelection = ReviewBatchSelectionWrite;
+export type ReviewBatchMember = ReviewBatchItemRead;
+export type ReviewBatchMemberPage = ReviewBatchItemPageRead;
 
 export interface ChangeQueueQuery {
   family?: string | null;
@@ -100,7 +106,45 @@ export function freezeReviewBatch(
   );
 }
 
-/** `POST /v1/governance/review-batches/{id}/decision` -- one decision, per-member outcomes. */
+/** `GET /v1/governance/review-batches/{id}` -- after a failed decision call, this says
+ *  whether it is `resumable` and how many members are still PENDING. */
+export function fetchReviewBatch(batchId: string, signal?: AbortSignal): Promise<ReviewBatch> {
+  return demoOr(
+    async () => demoSummary(batchId, demoBatches.get(batchId) ?? []),
+    async () => get<ReviewBatch>(`/v1/governance/review-batches/${encodeURIComponent(batchId)}`, signal),
+  );
+}
+
+export interface ReviewBatchMemberQuery {
+  cursor?: string | null;
+  limit?: number;
+  eligibility?: "ELIGIBLE" | "EXCLUDED" | null;
+}
+
+/** `GET /v1/governance/review-batches/{id}/items` -- the frozen members, paged in
+ *  selection order, so a reviewer can inspect each one before deciding. */
+export function fetchReviewBatchMembers(
+  batchId: string,
+  query: ReviewBatchMemberQuery = {},
+  signal?: AbortSignal,
+): Promise<ReviewBatchMemberPage> {
+  return demoOr(
+    async () => demoMembers(batchId, query),
+    async () => {
+      const params = new URLSearchParams();
+      if (query.cursor) params.set("cursor", query.cursor);
+      if (query.eligibility) params.set("eligibility", query.eligibility);
+      params.set("limit", String(query.limit ?? 100));
+      return get<ReviewBatchMemberPage>(
+        `/v1/governance/review-batches/${encodeURIComponent(batchId)}/items?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `POST /v1/governance/review-batches/{id}/decision` -- one decision, per-member outcomes.
+ *  Sent again with the same decision after an interruption, it resumes. */
 export function decideReviewBatch(
   batchId: string,
   body: Pick<ReviewBatchDecisionCreate, "decision" | "reason">,
@@ -155,7 +199,10 @@ function demoItem(index: number): ChangeQueueItem {
         ],
     evidence_fingerprint: fingerprint,
     decide_blocker: own ? "MAKER_CHECKER" : null,
-    approve_gate: conflict ? "EVIDENCE_NOT_SHOWN" : null,
+    // A glossary conflict has no batch evidence contract: reject-only in a batch.
+    approve_gate: conflict ? "NO_EVIDENCE_CONTRACT" : null,
+    approve_evidence_required: conflict ? [] : ["PROPOSED_TEXT", "SOURCE_SIGNALS"],
+    approve_evidence_missing: [],
     target_unavailable: false,
   };
 }
@@ -218,6 +265,46 @@ function demoSummary(id: string, items: ReviewBatchSelection[]): ReviewBatch {
     exclusion_counts: {},
     approve_gate_counts: gates,
     outcome_counts: { PENDING: items.length },
+    resumable: false,
+  };
+}
+
+function demoMembers(batchId: string, query: ReviewBatchMemberQuery): ReviewBatchMemberPage {
+  const selections = demoBatches.get(batchId) ?? [];
+  const start = query.cursor ? Number(query.cursor) : 0;
+  const limit = query.limit ?? 100;
+  const items: ReviewBatchMember[] = selections
+    .slice(start, start + limit)
+    .map((selection, offset) => {
+      const item = DEMO_QUEUE.find((row) => row.review_id === selection.review_id);
+      return {
+        review_id: selection.review_id,
+        position: start + offset,
+        object_type: item?.object_type ?? null,
+        review_family: item?.review_family ?? null,
+        frozen_status: item?.status ?? null,
+        evidence_fingerprint: selection.evidence_fingerprint ?? null,
+        eligibility: "ELIGIBLE",
+        exclusion_code: null,
+        approve_gate_code: item?.approve_gate ?? null,
+        outcome: "PENDING",
+        reason_code: null,
+        decided_at: null,
+        correction: {
+          kind: "NONE",
+          available: false,
+          method: null,
+          path: null,
+          subject_type: null,
+          subject_id: null,
+          reason_code: "NOT_APPLIED",
+        },
+      };
+    });
+  return {
+    batch_id: batchId,
+    next_cursor: start + limit < selections.length ? String(start + limit) : null,
+    items,
   };
 }
 
@@ -255,6 +342,7 @@ function demoDecide(
       outcome: applied ? "APPLIED" : "REFUSED",
       reason_code: refusal,
       detail: null,
+      decided_in_this_call: true,
       correction:
         applied && decision === "APPROVE"
           ? {
@@ -286,6 +374,8 @@ function demoDecide(
     applied_count: applied,
     refused_count: refused,
     skipped_count: 0,
+    resumed: false,
+    decided_in_this_call_count: members.length,
     members,
   };
 }

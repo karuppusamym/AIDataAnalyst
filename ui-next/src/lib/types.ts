@@ -1128,6 +1128,8 @@ export interface ChangeQueueItemRead {
   evidence_fingerprint: string;
   decide_blocker: string | null;
   approve_gate: string | null;
+  approve_evidence_required: string[];
+  approve_evidence_missing: string[];
   target_unavailable: boolean;
 }
 
@@ -4176,6 +4178,19 @@ export interface PlaybookActionAutomationRead {
   automatic_correction_reason: string | null;
 }
 
+export interface PlaybookBoundRunCreate {
+  require_match?: boolean;
+}
+
+/** R11-REV01: a run bound to a stored preview -- or the reason it did not run. */
+export interface PlaybookBoundRunRead {
+  dry_run_id: string;
+  ran: boolean;
+  refusal_code: string | null;
+  binding: PlaybookPreviewBindingRead;
+  run: PlaybookRunResultRead | null;
+}
+
 export interface PlaybookCreate {
   name: string;
   action: "TAG" | "CLASSIFY" | "OWN" | "CERTIFY";
@@ -4215,6 +4230,18 @@ export interface PlaybookDryRunRead {
   items: PlaybookDryRunItemRead[];
 }
 
+export interface PlaybookPreviewBindingRead {
+  status: string;
+  rule_version_matches: boolean;
+  match_set_matches: boolean;
+  evidence_matches: boolean;
+  added_count: number;
+  removed_count: number;
+  changed_count: number;
+  moved_subject_ids: string[];
+  reasons: string[];
+}
+
 export interface PlaybookRead {
   id: string;
   organization_id: string;
@@ -4241,6 +4268,26 @@ export interface PlaybookRunResultRead {
   bulk_action_run_id: string | null;
   bulk_stewardship_operation_id: string | null;
   governance_review_id: string | null;
+}
+
+/** R11-REV01: a dry-run that was stored, so a run can be bound to it. `match_digest` is */
+export interface PlaybookStoredDryRunRead {
+  playbook_id: string;
+  action: string;
+  enabled: boolean;
+  rule_version: string;
+  evaluated_at: string;
+  matched_count: number;
+  tables_truncated: boolean;
+  columns_truncated: boolean;
+  auto_apply_max_items: number;
+  predicted_disposition: string;
+  automation: PlaybookActionAutomationRead;
+  items: PlaybookDryRunItemRead[];
+  dry_run_id: string;
+  match_digest: string;
+  evidence_digest: string;
+  change_counts: Record<string, number>;
 }
 
 export interface PlaybookUpdate {
@@ -4835,6 +4882,7 @@ export interface ReviewBatchDecisionMemberRead {
   decided_at: string | null;
   correction: ReviewBatchCorrectionRead;
   detail?: string | null;
+  decided_in_this_call?: boolean;
 }
 
 export interface ReviewBatchDecisionRead {
@@ -4843,6 +4891,8 @@ export interface ReviewBatchDecisionRead {
   applied_count: number;
   refused_count: number;
   skipped_count: number;
+  resumed: boolean;
+  decided_in_this_call_count: number;
   members: ReviewBatchDecisionMemberRead[];
 }
 
@@ -4895,6 +4945,7 @@ export interface ReviewBatchRead {
   approve_gate_counts: Record<string, number>;
   outcome_counts: Record<string, number>;
   excluded_count: number;
+  resumable: boolean;
 }
 
 export interface ReviewBatchSelectionWrite {

@@ -5,8 +5,11 @@ import type {
   ChangeQueuePage,
   ReviewBatch,
   ReviewBatchDecision,
+  ReviewBatchMember,
   ReviewBatchMemberOutcome,
+  ReviewBatchMemberPage,
 } from "../lib/api";
+import { ApiError } from "../lib/api";
 import { expectNoAxeViolations } from "../test/a11y";
 import type { ChangeQueueDetailsRead, ChangeQueueFilterRead } from "../lib/types";
 
@@ -17,7 +20,10 @@ import type { ChangeQueueDetailsRead, ChangeQueueFilterRead } from "../lib/types
    carries the fingerprint each row was shown with; a row the reviewer may not
    decide cannot be selected; the frozen batch's exclusions are shown before
    deciding; the decision's partial outcomes, reasons and corrections are shown
-   per member; a rejection needs a rationale.
+   per member; a rejection needs a rationale. And (the second slice): a row
+   names the evidence facts it lacks for batch approval; the frozen members are
+   listed, paged, not only counted; a decision that fails part-way is offered
+   for resumption with the decision the batch recorded.
 --------------------------------------------------------------------------- */
 
 const fetchChangeQueue = vi.fn<(query: { cursor?: string | null }) => Promise<ChangeQueuePage>>();
@@ -25,6 +31,9 @@ const fetchChangeQueueDetails = vi.fn<(ids: string[]) => Promise<ChangeQueueDeta
 const freezeReviewBatch = vi.fn<(items: unknown[]) => Promise<ReviewBatch>>();
 const decideReviewBatch =
   vi.fn<(id: string, body: { decision: string; reason: string | null }) => Promise<ReviewBatchDecision>>();
+const fetchReviewBatch = vi.fn<(id: string) => Promise<ReviewBatch>>();
+const fetchReviewBatchMembers =
+  vi.fn<(id: string, query: { cursor?: string | null }) => Promise<ReviewBatchMemberPage>>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -35,6 +44,9 @@ vi.mock("../lib/api", async (importOriginal) => {
     freezeReviewBatch: (items: unknown[]) => freezeReviewBatch(items),
     decideReviewBatch: (id: string, body: { decision: string; reason: string | null }) =>
       decideReviewBatch(id, body),
+    fetchReviewBatch: (id: string) => fetchReviewBatch(id),
+    fetchReviewBatchMembers: (id: string, query: { cursor?: string | null } = {}) =>
+      fetchReviewBatchMembers(id, query),
   };
 });
 
@@ -58,6 +70,8 @@ function row(id: string, overrides: Partial<ChangeQueueItem> = {}): ChangeQueueI
     evidence_fingerprint: `fp-${id}`,
     decide_blocker: null,
     approve_gate: null,
+    approve_evidence_required: ["PROPOSED_TEXT", "SOURCE_SIGNALS"],
+    approve_evidence_missing: [],
     target_unavailable: false,
     ...overrides,
   };
@@ -75,7 +89,7 @@ const PAGES: Record<string, ChangeQueuePage> = {
     generated_at: "2026-09-19T00:00:00Z",
     limit: 50,
     next_cursor: "c1",
-    total: 6,
+    total: 7,
     items: [row("a"), row("b"), row("own", { decide_blocker: "MAKER_CHECKER" })],
   },
   c1: {
@@ -84,7 +98,7 @@ const PAGES: Record<string, ChangeQueuePage> = {
     generated_at: "2026-09-19T00:00:00Z",
     limit: 50,
     next_cursor: "c2",
-    total: 6,
+    total: 7,
     items: [
       row("d"),
       row("conflict", {
@@ -92,7 +106,12 @@ const PAGES: Record<string, ChangeQueuePage> = {
         review_family: "SEMANTIC",
         evidence_count: 0,
         evidence_preview: [],
-        approve_gate: "EVIDENCE_NOT_SHOWN",
+        approve_gate: "NO_EVIDENCE_CONTRACT",
+        approve_evidence_required: [],
+      }),
+      row("blank", {
+        approve_gate: "REQUIRED_EVIDENCE_MISSING",
+        approve_evidence_missing: ["PROPOSED_TEXT"],
       }),
     ],
   },
@@ -102,7 +121,7 @@ const PAGES: Record<string, ChangeQueuePage> = {
     generated_at: "2026-09-19T00:00:00Z",
     limit: 50,
     next_cursor: null,
-    total: 6,
+    total: 7,
     items: [row("f")],
   },
 };
@@ -123,8 +142,9 @@ function frozen(overrides: Partial<ReviewBatch> = {}): ReviewBatch {
     selection_fingerprint: "0".repeat(64),
     decision: null,
     exclusion_counts: { STALE_EVIDENCE: 1 },
-    approve_gate_counts: { EVIDENCE_NOT_SHOWN: 1 },
+    approve_gate_counts: { NO_EVIDENCE_CONTRACT: 1 },
     outcome_counts: { PENDING: 4 },
+    resumable: false,
     ...overrides,
   };
 }
@@ -149,6 +169,7 @@ function member(
     outcome,
     reason_code: reasonCode,
     detail: null,
+    decided_in_this_call: true,
     correction: {
       kind: "NONE",
       available: false,
@@ -175,7 +196,10 @@ beforeEach(() => {
   fetchChangeQueueDetails.mockReset();
   freezeReviewBatch.mockReset();
   decideReviewBatch.mockReset();
+  fetchReviewBatch.mockReset();
+  fetchReviewBatchMembers.mockReset();
   fetchChangeQueue.mockImplementation(async (query) => PAGES[query.cursor ?? ""]!);
+  fetchReviewBatchMembers.mockResolvedValue({ batch_id: "batch-1", next_cursor: null, items: [] });
 });
 
 describe("ReviewBatchQueue", () => {
@@ -195,7 +219,7 @@ describe("ReviewBatchQueue", () => {
     }
     fireEvent.click(screen.getByRole("checkbox", { name: "Select GLOSSARY_CONFLICT draft-co…" }));
     expect(container.querySelector(".rbq__summary")).toHaveTextContent(
-      "6 matching · 6 loaded · 4 selected across pages",
+      "7 matching · 7 loaded · 4 selected across pages",
     );
 
     freezeReviewBatch.mockResolvedValue(frozen());
@@ -211,7 +235,7 @@ describe("ReviewBatchQueue", () => {
     // The preview says what was excluded and what can only be rejected, before deciding.
     const panel = await screen.findByRole("region", { name: "Frozen batch" });
     expect(within(panel).getByText(/Changed since you reviewed it/)).toBeInTheDocument();
-    expect(within(panel).getByText(/No evidence shown/)).toBeInTheDocument();
+    expect(within(panel).getByText(/No batch evidence contract/)).toBeInTheDocument();
     // Selection is locked once frozen.
     expect(screen.getByRole("checkbox", { name: "Select ASSET_DESCRIPTION_DRAFT draft-b" })).toBeDisabled();
 
@@ -221,6 +245,8 @@ describe("ReviewBatchQueue", () => {
       applied_count: 1,
       refused_count: 2,
       skipped_count: 1,
+      resumed: false,
+      decided_in_this_call_count: 4,
       members: [
         member("a", "APPLIED", null, {
           kind: "WITHDRAW_DESCRIPTION",
@@ -232,7 +258,7 @@ describe("ReviewBatchQueue", () => {
           reason_code: null,
         }),
         member("d", "REFUSED", "ALREADY_DECIDED"),
-        member("conflict", "REFUSED", "EVIDENCE_NOT_SHOWN"),
+        member("conflict", "REFUSED", "NO_EVIDENCE_CONTRACT"),
         member("f", "SKIPPED", "STALE_EVIDENCE"),
       ],
     });
@@ -264,6 +290,8 @@ describe("ReviewBatchQueue", () => {
       applied_count: 1,
       refused_count: 0,
       skipped_count: 0,
+      resumed: false,
+      decided_in_this_call_count: 1,
       members: [member("a", "APPLIED", null, { kind: "REPROPOSE", reason_code: "NO_REOPEN_PATH" })],
     });
     fireEvent.click(confirm);
@@ -301,6 +329,93 @@ describe("ReviewBatchQueue", () => {
     fireEvent.click(screen.getByRole("button", { name: "Freeze batch of 1" }));
     await screen.findByRole("region", { name: "Frozen batch" });
     await expectNoAxeViolations(container);
+  });
+
+  it("names the evidence a row lacks for batch approval", async () => {
+    await renderScreen();
+    expect(screen.getByText("Missing for batch approval: proposed text")).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/No batch evidence contract for this type: reject in a batch/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("lists the frozen members, paged from the server, before deciding", async () => {
+    await renderScreen();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select ASSET_DESCRIPTION_DRAFT draft-a" }));
+    freezeReviewBatch.mockResolvedValue(frozen());
+    const frozenMember = (
+      id: string,
+      position: number,
+      overrides: Partial<ReviewBatchMember> = {},
+    ): ReviewBatchMember => {
+      const { detail: _detail, decided_in_this_call: _decided, ...stored } = member(id, "PENDING", null);
+      return { ...stored, position, ...overrides };
+    };
+    fetchReviewBatchMembers.mockImplementation(async (_id, query) =>
+      query.cursor
+        ? { batch_id: "batch-1", next_cursor: null, items: [frozenMember("m3", 2)] }
+        : {
+            batch_id: "batch-1",
+            next_cursor: "p2",
+            items: [
+              frozenMember("m1", 0),
+              frozenMember("m2", 1, { eligibility: "EXCLUDED", exclusion_code: "STALE_EVIDENCE" }),
+            ],
+          },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Freeze batch of 1" }));
+    const panel = await screen.findByRole("region", { name: "Frozen batch" });
+    // Both pages arrive through the windowed list; the excluded member says why.
+    await within(panel).findByText("m3");
+    expect(fetchReviewBatchMembers.mock.calls.map(([, query]) => query.cursor ?? null)).toEqual([
+      null,
+      "p2",
+    ]);
+    expect(within(panel).getByText("Excluded")).toBeInTheDocument();
+    expect(within(panel).getAllByText("Changed since you reviewed it").length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText("Approvable")).toHaveLength(2);
+  });
+
+  it("offers to resume a decision that stopped part-way, and resumes the same one", async () => {
+    await renderScreen();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select ASSET_DESCRIPTION_DRAFT draft-a" }));
+    freezeReviewBatch.mockResolvedValue(frozen({ approve_gate_counts: {} }));
+    fireEvent.click(screen.getByRole("button", { name: "Freeze batch of 1" }));
+    const panel = await screen.findByRole("region", { name: "Frozen batch" });
+
+    decideReviewBatch.mockRejectedValueOnce(new ApiError(503, "upstream timed out"));
+    fetchReviewBatch.mockResolvedValue(
+      frozen({
+        approve_gate_counts: {},
+        decision: "APPROVE",
+        resumable: true,
+        outcome_counts: { APPLIED: 2, PENDING: 2 },
+      }),
+    );
+    fireEvent.click(within(panel).getByRole("button", { name: "Approve 3 eligible" }));
+    await within(panel).findByText(/stopped part-way/);
+    expect(fetchReviewBatch).toHaveBeenCalledWith("batch-1");
+    expect(within(panel).getByText(/members are not recorded yet/)).toHaveTextContent("2 of 4");
+    // The fresh decision buttons give way to the one the batch can still take.
+    expect(within(panel).queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
+
+    decideReviewBatch.mockResolvedValueOnce({
+      batch: frozen({ status: "DECIDED", decision: "APPROVE" }),
+      overall: "SUCCESS",
+      applied_count: 4,
+      refused_count: 0,
+      skipped_count: 0,
+      resumed: true,
+      decided_in_this_call_count: 2,
+      members: [member("a", "APPLIED", null)],
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "Resume the approval" }));
+    await waitFor(() => expect(decideReviewBatch).toHaveBeenCalledTimes(2));
+    expect(decideReviewBatch.mock.calls[1]).toEqual(["batch-1", { decision: "APPROVE", reason: null }]);
+    const outcome = await screen.findByRole("region", { name: "Batch outcome" });
+    expect(within(outcome).getByText(/Resumed an interrupted decision/)).toHaveTextContent(
+      "2 members decided now",
+    );
   });
 
   it("says why the queue did not load", async () => {

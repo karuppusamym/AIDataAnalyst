@@ -29,3 +29,9 @@
 .rbq__member{border-bottom:1px solid var(--line);padding:9px 2px}
 .rbq__corr{display:block;margin-top:5px;font-size:12px;color:var(--ink-2);overflow-wrap:anywhere}
 .rbq__corr--none{color:var(--ink-3)}
+/* The frozen members, before deciding; and the resume offer after an interruption. */
+.rbq__frozen{margin-top:12px}
+.rbq__frozen .rbq__countsh{margin:0 0 6px;font-size:12.5px}
+.rbq__frozen .rbq__members{height:min(260px,35vh)}
+.rbq__resume{margin-top:10px;border:1px solid var(--warn);border-radius:var(--radius);padding:9px 12px;font-size:13px;color:var(--ink-2)}
+.rbq__resume p{margin:0 0 8px}

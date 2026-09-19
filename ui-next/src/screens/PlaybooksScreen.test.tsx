@@ -10,6 +10,8 @@ const updatePlaybook = vi.fn();
 const deletePlaybook = vi.fn();
 const runPlaybookNow = vi.fn();
 const listOrgDatasources = vi.fn();
+const storePlaybookDryRun = vi.fn();
+const runPlaybookAsPreviewed = vi.fn();
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -21,6 +23,17 @@ vi.mock("../lib/api", async () => {
     deletePlaybook: (...args: unknown[]) => deletePlaybook(...args),
     runPlaybookNow: (...args: unknown[]) => runPlaybookNow(...args),
     listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
+  };
+});
+
+vi.mock("../lib/api/playbookDryRuns", async () => {
+  const actual = await vi.importActual<typeof import("../lib/api/playbookDryRuns")>(
+    "../lib/api/playbookDryRuns",
+  );
+  return {
+    ...actual,
+    storePlaybookDryRun: (...args: unknown[]) => storePlaybookDryRun(...args),
+    runPlaybookAsPreviewed: (...args: unknown[]) => runPlaybookAsPreviewed(...args),
   };
 });
 
@@ -221,6 +234,82 @@ describe("PlaybooksScreen (AT-1)", () => {
     await waitFor(() => expect(deletePlaybook).toHaveBeenCalledWith(PLAYBOOK_TAG.id));
     await waitFor(() => expect(screen.queryByText("Tag staging tables")).not.toBeInTheDocument());
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("opens a row's dry run, and a run bound to it updates the row like Run now", async () => {
+    storePlaybookDryRun.mockResolvedValue({
+      playbook_id: PLAYBOOK_TAG.id,
+      action: "TAG",
+      enabled: true,
+      rule_version: "1".repeat(64),
+      evaluated_at: "2026-09-19T00:00:00Z",
+      matched_count: 0,
+      tables_truncated: false,
+      columns_truncated: false,
+      auto_apply_max_items: 50,
+      predicted_disposition: "NO_MATCHES",
+      automation: {
+        action: "TAG",
+        subject_type: "TABLE",
+        has_automatic_branch: true,
+        automatic_branch_enabled: true,
+        automatic_when: "0 < matched_count <= auto_apply_max_items",
+        automatic_path: "aida.playbooks._auto_apply",
+        automatic_principal: "fleet-scheduler",
+        involves_model: false,
+        reviewed_operation_type: "TAG",
+        compensating_operation_when_reviewed: "RESTORE_TAG",
+        compensating_operation_when_automatic: null,
+        automatic_correction_reason: "NO_BEFORE_IMAGE_RECORDED",
+      },
+      items: [],
+      dry_run_id: "dry-1",
+      match_digest: "c".repeat(64),
+      evidence_digest: "d".repeat(64),
+      change_counts: {},
+    });
+    runPlaybookAsPreviewed.mockResolvedValue({
+      dry_run_id: "dry-1",
+      ran: true,
+      refusal_code: null,
+      binding: {
+        status: "MATCHES",
+        rule_version_matches: true,
+        match_set_matches: true,
+        evidence_matches: true,
+        added_count: 0,
+        removed_count: 0,
+        changed_count: 0,
+        moved_subject_ids: [],
+        reasons: [],
+      },
+      run: {
+        playbook_id: PLAYBOOK_TAG.id,
+        matched_count: 0,
+        outcome: "NO_MATCHES",
+        bulk_action_run_id: null,
+        bulk_stewardship_operation_id: null,
+        governance_review_id: null,
+      },
+    });
+    render(<PlaybooksScreen />);
+    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+    const tagRow = screen.getByText("Tag staging tables").closest("li")!;
+    // Nothing is fetched until a steward opens a row's dry run.
+    expect(storePlaybookDryRun).not.toHaveBeenCalled();
+    fireEvent.click(within(tagRow).getByRole("button", { name: "Dry run…" }));
+    const panel = within(tagRow).getByRole("region", { name: "Dry run of Tag staging tables" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Preview (dry run)" }));
+    await within(panel).findByText(/Would do nothing: no object matches the rule/);
+    expect(storePlaybookDryRun).toHaveBeenCalledWith(PLAYBOOK_TAG.id);
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Run as previewed" }));
+    await waitFor(() =>
+      expect(screen.getByText(/"Tag staging tables" matched 0 object\(s\) — no matches/)).toBeInTheDocument(),
+    );
+    expect(runPlaybookNow).not.toHaveBeenCalled();
+    // The row's last run moves, exactly as it does after Run now.
+    expect(within(tagRow).getByText("just now")).toBeInTheDocument();
   });
 
   it("does not dismiss on a backdrop click, because the action is destructive", async () => {

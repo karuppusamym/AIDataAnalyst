@@ -46,12 +46,37 @@ What this module deliberately does **not** do:
   this queue is the `GovernanceReview` family only, and `review_family_for` labels object
   types within it for filtering.
 
-**The approve gate.** Batch *approval* requires that the queue actually showed the reviewer
-the member's content -- composed evidence, a structured diff, or this module's bulk-operation
-summary -- and that the member is not a T3 trust-boundary change (policy, access, model
-routes, agent registrations), which stays a one-at-a-time decision. Batch *rejection* is not
-gated: it publishes nothing. Members failing the gate can still be decided individually
-through `POST /v1/governance/reviews/{id}/decision`, which is unchanged.
+**The approve gate, per object type.** Batch *approval* of a member requires three things.
+It is not a T3 trust-boundary change (policy, access, model routes, agent registrations),
+which stays a one-at-a-time decision whatever it composes (`INDIVIDUAL_DECISION_REQUIRED`).
+Its object type has an *evidence contract* in `BATCH_APPROVAL_EVIDENCE` -- the facts that
+type's review actually rests on, read off what the shared read model (and this module's
+bulk-operation supplement) composes for it: a description draft's proposed text *and* the
+signals it was built from, a model or glossary version's structured diff, a bulk operation's
+subject set and parameters, and so on. A type with no contract composes nothing a batch
+could bind, so it is **reject-only** in a batch, explicitly (`NO_EVIDENCE_CONTRACT`) rather
+than by accident. And the member itself composed every fact its contract names: nothing at
+all is `EVIDENCE_NOT_SHOWN`; some but not all is `REQUIRED_EVIDENCE_MISSING`, with the
+missing fact names reported on the queue row and in the decision's detail. Batch
+*rejection* is not gated: it publishes nothing. Members failing the gate can still be decided
+individually through `POST /v1/governance/reviews/{id}/decision`, which is unchanged. A
+model's confidence score is deliberately *not* a contracted fact: a score is not evidence,
+and the design is explicit that one must not grant approval.
+
+**Resumable decisions.** Deciding a batch is chunked (`DECISION_CHUNK_SIZE` members a
+transaction), and each member's outcome row is written *inside* the savepoint that decides
+it, so a member's decision and the record of it commit together or not at all. A decision
+that is interrupted -- a dropped connection, a crashed worker, an error in one member's
+target -- keeps every chunk committed before it; the batch stays `FROZEN` with its decision
+recorded, and calling the decision again with the same decision resumes at the first
+undecided member without re-deciding any member already recorded. A batch's decision is
+fixed when its first chunk commits (the claim commits with that chunk, so a call that fails
+inside its first chunk leaves the batch as if never decided): resuming with the other
+decision is `REVIEW_BATCH_DECISION_MISMATCH`.
+Two concurrent decisions of the same batch serialize on the batch row: each chunk begins
+with a conditional `UPDATE` of it, which PostgreSQL holds until that chunk commits, so the
+second caller waits and then continues with whatever is still undecided (each member is
+decided once) -- `tests/test_review_batches_postgres.py` races it on a real server.
 
 **Value-free (INV-6).** Fingerprints are hashes; reason codes are codes. The only free text
 that reaches the database is the reviewer's own rationale, on `governance_review.
@@ -83,6 +108,7 @@ from aida.events import record_audit
 from aida.governance_decision_service import (
     GovernanceDecisionRefused,
     check_decision_permitted,
+    claimable_columns,
     decide_review,
     delegation_details,
     lock_reviews_for_decision,
@@ -590,6 +616,171 @@ async def compose_members(
 
 
 # ---------------------------------------------------------------------------
+# Per-type evidence contracts for batch approval
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredEvidence:
+    """One fact a reviewer must have been shown before a member of a type is batch-approved.
+
+    Matched against the member's composed evidence by category and by the *source* the
+    composer stamps on each item, because the source is what says which record a fact came
+    from (the draft's text, the draft's evidence payload, the operation's subject list). A
+    `structured_diff` requirement is met by a diffable diff instead of an item.
+    """
+
+    name: str
+    category: str | None = None
+    source: re.Pattern[str] | None = None
+    structured_diff: bool = False
+
+    def satisfied_by(self, member: ComposedMember) -> bool:
+        if self.structured_diff:
+            return member.proposal is not None and member.proposal.diff.diffable
+        return any(
+            (self.category is None or item.category == self.category)
+            and (self.source is None or self.source.search(item.source) is not None)
+            and _states_something(item.claim)
+            for item in member.evidence
+        )
+
+
+def _states_something(claim: str) -> bool:
+    """A `key: value` claim whose value is blank shows the reviewer nothing -- the case that
+    matters is a draft whose proposed text is empty, rendered `proposed_description: `."""
+    _, separator, value = claim.partition(":")
+    return bool((value if separator else claim).strip())
+
+
+def _source(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
+
+
+def _description_contract(record: str) -> tuple[RequiredEvidence, ...]:
+    # `review_queue_read_model` composes a draft as its proposed text first (`.drafted_text`)
+    # and then one item per key of the evidence payload the draft was built from
+    # (`.evidence`): the text being published, and the source references it stands on.
+    return (
+        RequiredEvidence(
+            "PROPOSED_TEXT", "DESCRIPTION_DRAFT", _source(rf"^{record}:[^.]+\.drafted_text$")
+        ),
+        RequiredEvidence(
+            "SOURCE_SIGNALS", "DESCRIPTION_DRAFT", _source(rf"^{record}:[^.]+\.evidence$")
+        ),
+    )
+
+
+#: The evidence contract of every object type a batch may *approve*, derived from what
+#: `aida.review_queue_read_model.compose_review_queue` (and `_bulk_operation_evidence` here)
+#: composes for it. Any type absent from this mapping is reject-only in a batch
+#: (`NO_EVIDENCE_CONTRACT`); a T3 type is individual-only even if it were present.
+#: `tests/test_review_batch_evidence_gates.py` composes each contracted type through the real
+#: read model and asserts the contract is met, so a composer change that drops a fact fails
+#: the build instead of quietly making the type unapprovable -- or approvable without it.
+BATCH_APPROVAL_EVIDENCE: Final[Mapping[str, tuple[RequiredEvidence, ...]]] = {
+    "ASSET_DESCRIPTION_DRAFT": _description_contract("asset_description_draft"),
+    "COLUMN_DESCRIPTION_DRAFT": _description_contract("column_description_draft"),
+    "ROUTINE_DESCRIPTION_DRAFT": _description_contract("routine_description_draft"),
+    "METADATA_ENRICHMENT_PROPOSAL": (
+        # Which engine proposed it, from which inference run, on which evidence ids.
+        RequiredEvidence(
+            "ENGINE_PROVENANCE",
+            "BUSINESS_SEMANTICS_PROPOSAL",
+            _source(r"^metadata_enrichment_proposal:[^.]+$"),
+        ),
+        RequiredEvidence(
+            "INFERENCE_RUN", "BUSINESS_SEMANTICS_PROPOSAL", _source(r"^semantic_inference_run$")
+        ),
+        RequiredEvidence(
+            "EVIDENCE_REFERENCES",
+            "BUSINESS_SEMANTICS_PROPOSAL",
+            _source(r"^metadata_enrichment_proposal:[^.]+\.evidence\.evidence_ids$"),
+        ),
+    ),
+    "GLOSSARY_LINK_PROPOSAL": (
+        RequiredEvidence(
+            "MATCH_EVIDENCE",
+            "GLOSSARY_LINK_PROPOSAL",
+            _source(r"^glossary_link_proposal:[^.]+\.evidence$"),
+        ),
+    ),
+    "SEMANTIC_METRIC_PROPOSAL": (
+        RequiredEvidence(
+            "PROPOSAL_EVIDENCE",
+            "METRIC_PROPOSAL",
+            _source(r"^semantic_metric_proposal:[^.]+\.evidence$"),
+        ),
+    ),
+    "TERM_SEMANTIC_BINDING": (
+        RequiredEvidence(
+            "BINDING_IDENTITY", "TERM_BINDING", _source(r"^term_semantic_binding:[^.]+$")
+        ),
+    ),
+    "QUALITY_RULE_PROPOSAL": (
+        RequiredEvidence(
+            "PROPOSED_RULE",
+            "QUALITY_RULE_PROPOSAL",
+            _source(r"^quality_rule_proposal:[^.]+$"),
+        ),
+        RequiredEvidence(
+            "PROFILE_EVIDENCE",
+            "QUALITY_RULE_PROPOSAL",
+            _source(r"^quality_rule_proposal:[^.]+\.evidence$"),
+        ),
+    ),
+    # Human-authored versions: the structured before/after *is* the content under review.
+    "SEMANTIC_MODEL_VERSION": (RequiredEvidence("STRUCTURED_DIFF", structured_diff=True),),
+    "GLOSSARY_TERM_VERSION": (RequiredEvidence("STRUCTURED_DIFF", structured_diff=True),),
+    "BULK_STEWARDSHIP_OPERATION": (
+        # The design's classification/certification row: what is done, to which objects,
+        # with which parameters (policy value, owner, expiry).
+        RequiredEvidence(
+            "OPERATION_SUMMARY",
+            "BULK_STEWARDSHIP_OPERATION",
+            _source(r"^bulk_stewardship_operation:[^.]+$"),
+        ),
+        RequiredEvidence(
+            "AFFECTED_SUBJECTS",
+            "BULK_STEWARDSHIP_OPERATION",
+            _source(r"^bulk_stewardship_operation:[^.]+\.subject_ids$"),
+        ),
+        RequiredEvidence(
+            "ACTION_PARAMETERS",
+            "BULK_STEWARDSHIP_OPERATION",
+            _source(r"^bulk_stewardship_operation:[^.]+\.parameters$"),
+        ),
+    ),
+}
+
+
+def required_evidence(object_type: str) -> tuple[str, ...]:
+    """The fact names batch approval of this type requires; empty when it has no contract."""
+    return tuple(item.name for item in BATCH_APPROVAL_EVIDENCE.get(object_type, ()))
+
+
+def missing_evidence(member: ComposedMember) -> tuple[str, ...]:
+    """The contracted facts this member did not compose, in contract order."""
+    return tuple(
+        item.name
+        for item in BATCH_APPROVAL_EVIDENCE.get(member.review.object_type, ())
+        if not item.satisfied_by(member)
+    )
+
+
+def approve_gate_detail(member: ComposedMember, code: str | None) -> str | None:
+    """The operator-facing sentence for a gate refusal -- response only, never persisted."""
+    if code == "REQUIRED_EVIDENCE_MISSING":
+        return "missing required evidence: " + ", ".join(missing_evidence(member))
+    if code == "NO_EVIDENCE_CONTRACT":
+        return (
+            f"{member.review.object_type} has no batch evidence contract; "
+            "reject it in a batch or decide it individually"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Per-member gates
 # ---------------------------------------------------------------------------
 
@@ -630,11 +821,22 @@ def decide_blocker(member: ComposedMember, context: SecurityContext) -> str | No
 
 
 def approve_gate(member: ComposedMember) -> str | None:
-    """Why *batch approval* is refused for this member even when it is current, or None."""
+    """Why *batch approval* is refused for this member even when it is current, or None.
+
+    Order: the trust boundary first (a T3 change is individual whatever it composes), then
+    the type's evidence contract (none: reject-only), then this member's own evidence
+    against that contract. See the module docstring.
+    """
+    object_type = member.review.object_type
+    if risk_tier_for(object_type) == TIER_T3:
+        return "INDIVIDUAL_DECISION_REQUIRED"
+    contract = BATCH_APPROVAL_EVIDENCE.get(object_type)
+    if contract is None:
+        return "NO_EVIDENCE_CONTRACT"
     if not member.evidence_shown:
         return "EVIDENCE_NOT_SHOWN"
-    if risk_tier_for(member.review.object_type) == TIER_T3:
-        return "INDIVIDUAL_DECISION_REQUIRED"
+    if missing_evidence(member):
+        return "REQUIRED_EVIDENCE_MISSING"
     return None
 
 
@@ -1075,27 +1277,37 @@ def correction_for(
 #: anything else is recorded as TARGET_REFUSED. Sentences are never persisted.
 _CODE_SHAPED = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 
+#: Members decided per transaction. Every chunk commits, so an interrupted decision loses at
+#: most the chunk it was in -- which nothing of committed, so resuming simply redoes it. A
+#: chunk's fixed overhead (the batch hold, the member load, the review lock, composition) is
+#: a handful of statements, a few hundredths of a statement per member at this size, and a
+#: second decider of the same batch waits at most one chunk for the hold.
+DECISION_CHUNK_SIZE: Final = 100
+
 
 @dataclass(slots=True)
 class MemberOutcome:
     item: ReviewBatchItem
     correction: Correction
-    #: The decision service's or adapter's own operator-facing sentence, returned in this
-    #: response only (never persisted), for a refusal a reviewer needs to act on.
+    #: The decision service's or adapter's own operator-facing sentence (or the approve
+    #: gate's), returned in this response only -- never persisted -- for a refusal this call
+    #: recorded. A member recorded by an earlier call carries its reason code alone.
     detail: str | None = None
-    #: What the member's row is set to once every member has been walked. Held here rather
-    #: than written to `item` inside the loop, because a later member's savepoint rollback
-    #: expires -- and reverts -- any object flushed while it was open.
     outcome: str = "PENDING"
     reason_code: str | None = None
     subject_type: str | None = None
     subject_id: str | None = None
+    #: False for a member an earlier, interrupted call of this decision recorded (or a
+    #: concurrent caller of the same batch did): reported here, never decided twice.
+    decided_in_this_call: bool = False
 
 
 @dataclass(slots=True)
 class BatchDecisionResult:
     batch: ReviewBatch
     outcomes: list[MemberOutcome] = field(default_factory=list)
+    #: This call continued a decision an earlier call of the same batch had started.
+    resumed: bool = False
 
     @property
     def applied_count(self) -> int:
@@ -1110,81 +1322,142 @@ class BatchDecisionResult:
         return sum(1 for o in self.outcomes if o.outcome == "SKIPPED")
 
     @property
+    def decided_in_this_call_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.decided_in_this_call)
+
+    @property
     def overall(self) -> str:
-        if self.applied_count and not (self.refused_count or self.skipped_count):
-            return "SUCCESS"
-        if self.applied_count:
-            return "PARTIAL_SUCCESS"
-        return "FAILURE"
+        return _overall(self.applied_count, self.refused_count + self.skipped_count)
 
 
-def _not_applied(
-    item: ReviewBatchItem, outcome: str, reason_code: str | None, detail: str | None = None
-) -> MemberOutcome:
-    return MemberOutcome(
-        item,
-        correction_for(None, None, None, None),
-        detail,
-        outcome=outcome,
-        reason_code=reason_code,
+def _overall(applied: int, not_applied: int) -> str:
+    if applied and not not_applied:
+        return "SUCCESS"
+    if applied:
+        return "PARTIAL_SUCCESS"
+    return "FAILURE"
+
+
+class _AlreadyRecorded(Exception):
+    """Raised inside a member's savepoint when its outcome row is no longer PENDING, so the
+    decision just applied unwinds with the savepoint -- someone else recorded the member."""
+
+
+async def _hold_batch(
+    session: AsyncSession,
+    batch: ReviewBatch,
+    decision: str,
+    now: datetime,
+    *,
+    claim: bool,
+) -> bool:
+    """The conditional UPDATE that fixes a batch's decision (`claim`) and, at the start of
+    every later chunk, holds the batch for that chunk.
+
+    The hold is what serializes two deciders of the same batch. On PostgreSQL this UPDATE's
+    row lock lasts until the chunk commits, so a second caller's hold blocks, then
+    re-evaluates its predicate against the committed row: it continues with whatever is
+    still undecided (same decision, still FROZEN), or matches nothing because the batch was
+    closed. It is also each chunk's first write, which matters on SQLite: pysqlite defers
+    BEGIN to the first DML, and a member's SAVEPOINT opened before any would otherwise be
+    the outermost transaction, releasing -- committing -- on its own.
+    """
+    predicates: list[ColumnElement[bool]] = [
+        ReviewBatch.id == batch.id,
+        ReviewBatch.organization_id == batch.organization_id,
+        ReviewBatch.status == "FROZEN",
+    ]
+    values: dict[str, Any] = {"updated_at": now}
+    if claim:
+        predicates.append(ReviewBatch.decision.is_(None))
+        values["decision"] = decision
+    else:
+        predicates.append(ReviewBatch.decision == decision)
+    held = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(ReviewBatch)
+            .where(*predicates)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        ),
     )
+    return held.rowcount == 1
 
 
-async def decide_review_batch(
+async def _batch_state(session: AsyncSession, batch: ReviewBatch) -> tuple[str, str | None]:
+    """The committed status and decision, read as columns -- not through the identity map,
+    whose copy of the batch may predate another caller's claim."""
+    row = (
+        await session.execute(
+            select(ReviewBatch.status, ReviewBatch.decision).where(
+                ReviewBatch.id == batch.id,
+                ReviewBatch.organization_id == batch.organization_id,
+            )
+        )
+    ).one()
+    return str(row.status), row.decision
+
+
+async def _record_member(
+    session: AsyncSession,
+    item_id: UUID,
+    organization_id: UUID,
+    *,
+    outcome: str,
+    reason_code: str | None,
+    now: datetime,
+    subject_type: str | None = None,
+    subject_id: str | None = None,
+) -> bool:
+    """Write one member's outcome, only while it is still PENDING.
+
+    A statement, not an attribute write: an ORM change flushed inside one member's savepoint
+    is expired -- and reverted -- when a later member's savepoint rolls back, and a recorded
+    outcome must survive that. For an applied member this runs *inside* its savepoint, so
+    the decision and the record of it commit together or not at all: a resumed decision can
+    therefore trust PENDING to mean "not decided through this batch".
+    """
+    written = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(ReviewBatchItem)
+            .where(
+                ReviewBatchItem.id == item_id,
+                ReviewBatchItem.organization_id == organization_id,
+                ReviewBatchItem.outcome == "PENDING",
+            )
+            .values(
+                outcome=outcome,
+                reason_code=reason_code,
+                decided_at=now,
+                updated_at=now,
+                correction_subject_type=subject_type,
+                correction_subject_id=subject_id,
+            )
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    return written.rowcount == 1
+
+
+async def _decide_chunk(
     session: AsyncSession,
     *,
     context: SecurityContext,
-    batch_id: UUID,
+    batch: ReviewBatch,
     decision: Literal["APPROVE", "REJECT"],
     reason: str | None,
-    rationale_by_review_id: Mapping[UUID, str] | None = None,
-) -> BatchDecisionResult:
-    """Apply one decision to a frozen batch, re-checking every member first.
-
-    Order of refusal for each member: excluded at freeze (SKIPPED) -> gone -> no longer
-    pending -> evidence moved -> approve gate -> rationale -> the decision service (its own
-    permission check, compare-and-set claim and adapter). The caller commits.
-    """
-    _refuse_agents(context)
-    batch = await get_review_batch(session, context=context, batch_id=batch_id)
-    if batch.created_by != context.principal_id:
-        raise ReviewBatchError("REVIEW_BATCH_NOT_OWNED", 403)
-    now = datetime.now(UTC)
-    claim = (
-        update(ReviewBatch)
-        .where(
-            ReviewBatch.id == batch.id,
-            ReviewBatch.organization_id == batch.organization_id,
-            ReviewBatch.status == "FROZEN",
-        )
-        .values(status="DECIDED", decision=decision, decided_at=now, updated_at=now)
-        .execution_options(synchronize_session=False)
-    )
-    claimed = cast("CursorResult[Any]", await session.execute(claim))
-    if claimed.rowcount != 1:
-        raise ReviewBatchError("REVIEW_BATCH_ALREADY_DECIDED", 409)
-    for attribute, value in (
-        ("status", "DECIDED"),
-        ("decision", decision),
-        ("decided_at", now),
-        ("updated_at", now),
-    ):
-        set_committed_value(batch, attribute, value)
-
-    items = list(
-        (
-            await session.scalars(
-                select(ReviewBatchItem)
-                .where(
-                    ReviewBatchItem.batch_id == batch.id,
-                    ReviewBatchItem.organization_id == batch.organization_id,
-                )
-                .order_by(ReviewBatchItem.position)
-            )
-        ).all()
-    )
-    eligible_ids = [item.review_id for item in items if item.eligibility == "ELIGIBLE"]
-    locked = await lock_reviews_for_decision(session, eligible_ids)
+    rationale_by_review_id: Mapping[UUID, str] | None,
+    items: Sequence[ReviewBatchItem],
+    now: datetime,
+    details: dict[UUID, str],
+) -> set[UUID]:
+    """Re-check and decide one chunk of pending eligible members; the ids recorded."""
+    # Plain values captured up front: nothing below reads a batch-item attribute after a
+    # member's savepoint has opened, so an expiry can never force a lazy load mid-loop.
+    frozen = [(item.id, item.review_id, item.evidence_fingerprint) for item in items]
+    locked = await lock_reviews_for_decision(session, [review_id for _, review_id, _ in frozen])
     # INV-5: `lock_reviews_for_decision` loads by id; the organization is restated here.
     reviews = {
         review_id: review
@@ -1193,17 +1466,8 @@ async def decide_review_batch(
     }
     current = await compose_members(session, batch.organization_id, list(reviews.values()))
 
-    # Plain values captured up front: nothing below reads a batch-item attribute after a
-    # member's savepoint has opened, so an expiry can never force a lazy load mid-loop.
-    frozen = [
-        (item, item.review_id, item.eligibility, item.exclusion_code, item.evidence_fingerprint)
-        for item in items
-    ]
-    result = BatchDecisionResult(batch=batch)
-    for item, review_id, eligibility, exclusion_code, bound_fingerprint in frozen:
-        if eligibility != "ELIGIBLE":
-            result.outcomes.append(_not_applied(item, "SKIPPED", exclusion_code))
-            continue
+    recorded: set[UUID] = set()
+    for item_id, review_id, bound_fingerprint in frozen:
         member = current.get(review_id)
         refusal_code: str | None = None
         if member is None:
@@ -1220,11 +1484,27 @@ async def decide_review_batch(
         if refusal_code is None and decision == "REJECT" and not item_reason:
             refusal_code = "RATIONALE_REQUIRED"
         if refusal_code is not None:
-            result.outcomes.append(_not_applied(item, "REFUSED", refusal_code))
+            if await _record_member(
+                session,
+                item_id,
+                batch.organization_id,
+                outcome="REFUSED",
+                reason_code=refusal_code,
+                now=now,
+            ):
+                recorded.add(item_id)
+                gate_detail = (
+                    approve_gate_detail(member, refusal_code) if member is not None else None
+                )
+                if gate_detail:
+                    details[item_id] = gate_detail
             continue
         assert member is not None
         review = member.review
         object_type = review.object_type
+        unclaimed = claimable_columns(review)
+        code: str
+        detail: str
         try:
             async with session.begin_nested():
                 effect = await decide_review(
@@ -1250,61 +1530,226 @@ async def decide_review_batch(
                     },
                 )
                 subject_type, subject_id = correction_subject(object_type, review, effect.payload)
-        except GovernanceDecisionRefused as refused:
-            result.outcomes.append(
-                _not_applied(item, "REFUSED", _permission_code(refused), refused.detail)
-            )
+                if not await _record_member(
+                    session,
+                    item_id,
+                    batch.organization_id,
+                    outcome="APPLIED",
+                    reason_code=None,
+                    now=now,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                ):
+                    raise _AlreadyRecorded
+        except _AlreadyRecorded:
+            # The savepoint undid the claim in the database; put the in-memory review back
+            # too, as `decide_review` does for an adapter failure (a clean object is not part
+            # of what a nested rollback restores).
+            for column, value in unclaimed.items():
+                set_committed_value(review, column, value)
             continue
+        except GovernanceDecisionRefused as refused:
+            code, detail = _permission_code(refused), refused.detail
         except HTTPException as exc:
             detail = str(exc.detail)
             code = detail if _CODE_SHAPED.match(detail) else "TARGET_REFUSED"
-            result.outcomes.append(_not_applied(item, "REFUSED", code, detail))
+        else:
+            recorded.add(item_id)
             continue
-        result.outcomes.append(
-            MemberOutcome(
-                item,
-                correction_for(object_type, decision, subject_type, subject_id),
-                outcome="APPLIED",
-                subject_type=subject_type,
-                subject_id=subject_id,
-            )
+        if await _record_member(
+            session,
+            item_id,
+            batch.organization_id,
+            outcome="REFUSED",
+            reason_code=code,
+            now=now,
+        ):
+            recorded.add(item_id)
+            details[item_id] = detail
+    return recorded
+
+
+async def _close_batch(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    batch: ReviewBatch,
+    decision: str,
+    now: datetime,
+    resumed: bool,
+    decided_in_this_call: int,
+) -> None:
+    """Mark excluded members SKIPPED, count every outcome, close the batch, audit it once."""
+    await session.execute(
+        update(ReviewBatchItem)
+        .where(
+            ReviewBatchItem.batch_id == batch.id,
+            ReviewBatchItem.organization_id == batch.organization_id,
+            ReviewBatchItem.eligibility == "EXCLUDED",
+            ReviewBatchItem.outcome == "PENDING",
         )
-
-    # Only now, with no savepoint left to unwind them, are the member rows written.
-    for outcome in result.outcomes:
-        outcome.item.outcome = outcome.outcome
-        outcome.item.reason_code = outcome.reason_code
-        outcome.item.decided_at = now
-        outcome.item.correction_subject_type = outcome.subject_type
-        outcome.item.correction_subject_id = outcome.subject_id
-
-    counts = Counter(
-        outcome.outcome
-        if outcome.outcome == "APPLIED"
-        else f"{outcome.outcome}:{outcome.reason_code}"
-        for outcome in result.outcomes
+        .values(
+            outcome="SKIPPED",
+            reason_code=ReviewBatchItem.exclusion_code,
+            decided_at=now,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
     )
-    batch.outcome_counts = dict(counts)
+    counts = (await review_batch_counts(session, batch)).outcome_counts
+    await session.execute(
+        update(ReviewBatch)
+        .where(
+            ReviewBatch.id == batch.id,
+            ReviewBatch.organization_id == batch.organization_id,
+            ReviewBatch.status == "FROZEN",
+            ReviewBatch.decision == decision,
+        )
+        .values(status="DECIDED", decided_at=now, updated_at=now, outcome_counts=counts)
+        .execution_options(synchronize_session=False)
+    )
+    applied = counts.get("APPLIED", 0)
+    refused = sum(value for key, value in counts.items() if key.startswith("REFUSED:"))
+    skipped = sum(value for key, value in counts.items() if key.startswith("SKIPPED:"))
     record_audit(
         session,
         context,
         action="governance_review.batch_decide",
         resource_type="review_batch",
         resource_id=str(batch.id),
-        outcome=result.overall,
+        outcome=_overall(applied, refused + skipped),
         correlation_id=get_correlation_id(),
         details={
             "decision": decision,
             "selection_fingerprint": batch.selection_fingerprint,
-            "item_count": len(frozen),
-            "applied_count": result.applied_count,
-            "refused_count": result.refused_count,
-            "skipped_count": result.skipped_count,
-            "outcome_counts": dict(counts),
+            "item_count": batch.item_count,
+            "applied_count": applied,
+            "refused_count": refused,
+            "skipped_count": skipped,
+            "outcome_counts": counts,
+            "resumed": resumed,
+            "decided_in_this_call": decided_in_this_call,
             **delegation_details(context),
         },
     )
-    await session.flush()
+
+
+async def decide_review_batch(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    batch_id: UUID,
+    decision: Literal["APPROVE", "REJECT"],
+    reason: str | None,
+    rationale_by_review_id: Mapping[UUID, str] | None = None,
+    chunk_size: int = DECISION_CHUNK_SIZE,
+) -> BatchDecisionResult:
+    """Apply one decision to a frozen batch -- or resume one an earlier call started --
+    re-checking every member first.
+
+    Order of refusal for each member: excluded at freeze (SKIPPED) -> gone -> no longer
+    pending -> evidence moved -> approve gate -> rationale -> the decision service (its own
+    permission check, compare-and-set claim and adapter).
+
+    **Commits.** Unlike the rest of this module, this function commits: once per chunk of
+    `chunk_size` members, and once more to close the batch. That is the point -- see
+    "Resumable decisions" in the module docstring. Anything the caller left uncommitted in
+    the session is committed with the first chunk. If it raises part-way, every chunk
+    committed before the failure stands and the caller must roll back the rest.
+    """
+    _refuse_agents(context)
+    batch = await get_review_batch(session, context=context, batch_id=batch_id)
+    if batch.created_by != context.principal_id:
+        raise ReviewBatchError("REVIEW_BATCH_NOT_OWNED", 403)
+    organization_id = batch.organization_id
+    now = datetime.now(UTC)
+    held = await _hold_batch(session, batch, decision, now, claim=True)
+    resumed = not held
+    if resumed:
+        status, recorded_decision = await _batch_state(session, batch)
+        if status == "DECIDED":
+            raise ReviewBatchError("REVIEW_BATCH_ALREADY_DECIDED", 409)
+        if recorded_decision != decision:
+            raise ReviewBatchError("REVIEW_BATCH_DECISION_MISMATCH", 409)
+
+    details: dict[UUID, str] = {}
+    decided: set[UUID] = set()
+    closed_here = False
+    size = max(1, chunk_size)
+    while True:
+        if not held and not await _hold_batch(session, batch, decision, now, claim=False):
+            # A concurrent caller of this same batch recorded its last member and closed it
+            # while this one waited for the hold: there is nothing left to decide.
+            break
+        held = False
+        pending = list(
+            (
+                await session.scalars(
+                    select(ReviewBatchItem)
+                    .where(
+                        ReviewBatchItem.batch_id == batch.id,
+                        ReviewBatchItem.organization_id == organization_id,
+                        ReviewBatchItem.eligibility == "ELIGIBLE",
+                        ReviewBatchItem.outcome == "PENDING",
+                    )
+                    .order_by(ReviewBatchItem.position)
+                    .limit(size)
+                )
+            ).all()
+        )
+        if not pending:
+            await _close_batch(
+                session,
+                context=context,
+                batch=batch,
+                decision=decision,
+                now=now,
+                resumed=resumed,
+                decided_in_this_call=len(decided),
+            )
+            await session.commit()
+            closed_here = True
+            break
+        decided |= await _decide_chunk(
+            session,
+            context=context,
+            batch=batch,
+            decision=decision,
+            reason=reason,
+            rationale_by_review_id=rationale_by_review_id,
+            items=pending,
+            now=now,
+            details=details,
+        )
+        await session.commit()
+
+    await session.refresh(batch)
+    items = (
+        await session.scalars(
+            select(ReviewBatchItem)
+            .where(
+                ReviewBatchItem.batch_id == batch.id,
+                ReviewBatchItem.organization_id == organization_id,
+            )
+            .order_by(ReviewBatchItem.position)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    result = BatchDecisionResult(batch=batch, resumed=resumed)
+    for item in items:
+        result.outcomes.append(
+            MemberOutcome(
+                item,
+                outcome_correction(item, batch.decision),
+                details.get(item.id),
+                outcome=item.outcome,
+                reason_code=item.reason_code,
+                subject_type=item.correction_subject_type,
+                subject_id=item.correction_subject_id,
+                decided_in_this_call=item.id in decided
+                or (closed_here and item.eligibility == "EXCLUDED"),
+            )
+        )
     return result
 
 

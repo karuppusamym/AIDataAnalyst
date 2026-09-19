@@ -5,7 +5,7 @@
     POST /v1/governance/review-batches                  freeze a selection (ids + versions)
     GET  /v1/governance/review-batches/{id}             the batch and its preview counts
     GET  /v1/governance/review-batches/{id}/items       its members, paged
-    POST /v1/governance/review-batches/{id}/decision    decide it: re-check, apply, report
+    POST /v1/governance/review-batches/{id}/decision    decide (or resume) it: re-check, apply
 
 The decision route adds no decision path: every member is decided by
 `governance_decision_service.decide_review`, the same maker-checker guard and
@@ -63,8 +63,10 @@ from aida.review_batches import (
     list_change_queue,
     list_review_batch_items,
     load_queue_details,
+    missing_evidence,
     outcome_correction,
     preview_evidence,
+    required_evidence,
     review_batch_counts,
     review_family_for,
 )
@@ -99,6 +101,8 @@ def _item_read(member: ComposedMember, context: SecurityContext) -> ChangeQueueI
         evidence_fingerprint=member.fingerprint,
         decide_blocker=decide_blocker(member, context),
         approve_gate=approve_gate(member),
+        approve_evidence_required=list(required_evidence(review.object_type)),
+        approve_evidence_missing=list(missing_evidence(member)),
         target_unavailable=member.target_unavailable,
     )
 
@@ -337,11 +341,16 @@ async def decide_frozen_review_batch(
     context: SecurityContext = Depends(require_roles_or_delegated(*_DECIDE_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ReviewBatchDecisionRead:
-    """Decide a frozen batch once. Every eligible member is re-checked against the version it
-    was frozen at and then decided through the shared decision service; the response reports
-    each member's outcome, reason code and correction. Partial success is the normal case,
-    not an error: a member another checker decided first is `ALREADY_DECIDED`, one whose
-    evidence moved is `STALE_EVIDENCE`, and the rest still apply.
+    """Decide a frozen batch once -- or resume a decision that was interrupted. Every eligible
+    member is re-checked against the version it was frozen at and then decided through the
+    shared decision service; the response reports each member's outcome, reason code and
+    correction. Partial success is the normal case, not an error: a member another checker
+    decided first is `ALREADY_DECIDED`, one whose evidence moved is `STALE_EVIDENCE`, and the
+    rest still apply.
+
+    Progress is committed per chunk of members. If a call fails part-way, the members it
+    recorded stand, the batch reads `resumable`, and the same request (same decision) picks
+    up at the first undecided member; the other decision is `REVIEW_BATCH_DECISION_MISMATCH`.
     """
     try:
         result = await decide_review_batch(
@@ -354,25 +363,28 @@ async def decide_frozen_review_batch(
         )
     except ReviewBatchError as error:
         raise http_error(error) from error
+    except IntegrityError as exc:
+        # A write in the chunk in flight collided with a concurrent one. That chunk is
+        # rolled back; every chunk committed before it stands, so this is resumable.
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="REVIEW_BATCH_DECISION_CONFLICT") from exc
     batch_read = await _batch_read(session, result.batch)
     members = [
         ReviewBatchDecisionMemberRead(
             **_batch_item_read(outcome.item, body.decision).model_dump(exclude={"correction"}),
             correction=_correction_read(outcome.correction),
             detail=outcome.detail,
+            decided_in_this_call=outcome.decided_in_this_call,
         )
         for outcome in result.outcomes
     ]
-    try:
-        await session.commit()
-    except IntegrityError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=409, detail="REVIEW_BATCH_DECISION_CONFLICT") from exc
     return ReviewBatchDecisionRead(
         batch=batch_read,
         overall=result.overall,
         applied_count=result.applied_count,
         refused_count=result.refused_count,
         skipped_count=result.skipped_count,
+        resumed=result.resumed,
+        decided_in_this_call_count=result.decided_in_this_call_count,
         members=members,
     )

@@ -223,8 +223,11 @@ async def test_queue_rows_report_blockers_gates_and_fingerprints(session: AsyncS
     assert rows[theirs.id].evidence_preview[0].claim.startswith("proposed_description:")
     assert len(rows[theirs.id].evidence_fingerprint) == 64
     assert rows[mine.id].decide_blocker == "MAKER_CHECKER"
-    # Nothing composed for a glossary conflict: rejectable in a batch, not approvable.
-    assert rows[bare.id].approve_gate == "EVIDENCE_NOT_SHOWN"
+    assert rows[theirs.id].approve_evidence_required == ["PROPOSED_TEXT", "SOURCE_SIGNALS"]
+    assert rows[theirs.id].approve_evidence_missing == []
+    # A glossary conflict has no evidence contract: rejectable in a batch, not approvable.
+    assert rows[bare.id].approve_gate == "NO_EVIDENCE_CONTRACT"
+    assert rows[bare.id].approve_evidence_required == []
 
     details = await get_change_queue_details(
         review_id=[theirs.id, bare.id], context=context, session=session
@@ -471,7 +474,7 @@ async def test_decision_rechecks_every_member_and_reports_partial_outcomes(
         session=session,
     )
     assert batch.eligible_count == 6
-    assert batch.approve_gate_counts == {"EVIDENCE_NOT_SHOWN": 1}
+    assert batch.approve_gate_counts == {"NO_EVIDENCE_CONTRACT": 1}
 
     # After the freeze: a draft is edited (changed member), another checker decides one
     # (concurrent decision), and the column's description is published underneath its
@@ -524,8 +527,9 @@ async def test_decision_rechecks_every_member_and_reports_partial_outcomes(
     assert "changed after the draft was composed" in (by_review[moved_target.id].detail or "")
     assert (by_review[unshown.id].outcome, by_review[unshown.id].reason_code) == (
         "REFUSED",
-        "EVIDENCE_NOT_SHOWN",
+        "NO_EVIDENCE_CONTRACT",
     )
+    assert "no batch evidence contract" in (by_review[unshown.id].detail or "")
     assert result.overall == "PARTIAL_SUCCESS"
     assert (result.applied_count, result.refused_count, result.skipped_count) == (2, 4, 0)
     assert result.batch.status == "DECIDED"
@@ -534,7 +538,7 @@ async def test_decision_rechecks_every_member_and_reports_partial_outcomes(
         "REFUSED:STALE_EVIDENCE": 1,
         "REFUSED:ALREADY_DECIDED": 1,
         "REFUSED:TARGET_REFUSED": 1,
-        "REFUSED:EVIDENCE_NOT_SHOWN": 1,
+        "REFUSED:NO_EVIDENCE_CONTRACT": 1,
     }
 
     # Applied members went through the shared service: claimed, published, audited once.
@@ -569,7 +573,7 @@ async def test_decision_rechecks_every_member_and_reports_partial_outcomes(
         "STALE_EVIDENCE",
         "ALREADY_DECIDED",
         "TARGET_REFUSED",
-        "EVIDENCE_NOT_SHOWN",
+        "NO_EVIDENCE_CONTRACT",
     }
 
 
@@ -651,8 +655,9 @@ async def test_rejection_requires_a_rationale_per_member(session: AsyncSession) 
 
 
 async def test_approve_gate_holds_t3_changes_to_individual_decisions() -> None:
-    """No composed evidence exists yet for any trust-boundary type, so the second arm of the
-    gate is pinned directly: even with evidence shown, a T3 change is never batch-approved."""
+    """The trust boundary is checked first: whether or not anything was composed for it, a
+    T3 change is never batch-approved -- `INDIVIDUAL_DECISION_REQUIRED`, not the weaker
+    "no contract" answer a reviewer might read as "compose more evidence and retry"."""
     review = GovernanceReview(
         id=uuid4(),
         organization_id=uuid4(),
@@ -668,7 +673,7 @@ async def test_approve_gate_holds_t3_changes_to_individual_decisions() -> None:
         supplement=[EvidenceItemRead(category="X", claim="y", source="z")],
         fingerprint="0" * 64,
     )
-    assert approve_gate(shown) == "EVIDENCE_NOT_SHOWN"  # no proposal composed at all
+    assert approve_gate(shown) == "INDIVIDUAL_DECISION_REQUIRED"  # no proposal composed
     composed = await _compose_nothing_for(review)
     assert approve_gate(composed) == "INDIVIDUAL_DECISION_REQUIRED"
 
@@ -748,7 +753,7 @@ async def test_correction_journey_withdraws_a_batch_approved_description(
     [row] = queue.members
     assert row.review.id == withdrawal_review.id
     assert review_family_for(row.review.object_type) == "DESCRIPTION"
-    assert approve_gate(row) == "EVIDENCE_NOT_SHOWN"
+    assert approve_gate(row) == "NO_EVIDENCE_CONTRACT"
 
     # A different checker decides it on the ordinary single-review path.
     await decide_governance_review(

@@ -23,7 +23,13 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import MetadataPlaybook
-from aida.playbook_dry_run import dry_run_playbook
+from aida.playbook_dry_run import (
+    DryRunBindingError,
+    PlaybookDryRun,
+    dry_run_playbook,
+    run_bound_to_dry_run,
+    store_dry_run,
+)
 from aida.playbooks import PlaybookRunOutcome, evaluate_and_run_playbook
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -180,6 +186,91 @@ class PlaybookDryRunRead(ApiModel):
     predicted_disposition: str
     automation: PlaybookActionAutomationRead
     items: list[PlaybookDryRunItemRead]
+
+
+class PlaybookStoredDryRunRead(PlaybookDryRunRead):
+    """R11-REV01: a dry-run that was stored, so a run can be bound to it. `match_digest` is
+    over which subjects matched, `evidence_digest` over the version of each."""
+
+    dry_run_id: UUID
+    match_digest: str
+    evidence_digest: str
+    change_counts: dict[str, int]
+
+
+class PlaybookBoundRunCreate(ApiModel):
+    #: Refuse to run unless the rule, the matched subjects and each subject's evidence
+    #: version are exactly what was previewed. False runs anyway and records the difference.
+    require_match: bool = True
+
+
+class PlaybookPreviewBindingRead(ApiModel):
+    #: MATCHES or DIFFERS.
+    status: str
+    rule_version_matches: bool
+    match_set_matches: bool
+    evidence_matches: bool
+    added_count: int
+    removed_count: int
+    changed_count: int
+    #: Up to 50 of the added, removed or changed subjects, in that order.
+    moved_subject_ids: list[UUID]
+    #: RULE_CHANGED, MATCH_SET_CHANGED, EVIDENCE_CHANGED, RUN_DIVERGED_FROM_PREVIEW.
+    reasons: list[str]
+
+
+class PlaybookBoundRunRead(ApiModel):
+    """R11-REV01: a run bound to a stored preview -- or the reason it did not run."""
+
+    dry_run_id: UUID
+    ran: bool
+    #: PREVIEW_MISMATCH or RUN_DIVERGED_FROM_PREVIEW when `ran` is false; nothing was applied.
+    refusal_code: str | None
+    binding: PlaybookPreviewBindingRead
+    run: PlaybookRunResultRead | None
+
+
+def _dry_run_read(preview: PlaybookDryRun) -> dict[str, Any]:
+    """The fields `PlaybookDryRunRead` and `PlaybookStoredDryRunRead` share."""
+    automation = preview.automation
+    return {
+        "playbook_id": preview.playbook_id,
+        "action": preview.action,
+        "enabled": preview.enabled,
+        "rule_version": preview.rule_version,
+        "evaluated_at": preview.evaluated_at,
+        "matched_count": preview.matched_count,
+        "tables_truncated": preview.tables_truncated,
+        "columns_truncated": preview.columns_truncated,
+        "auto_apply_max_items": preview.auto_apply_max_items,
+        "predicted_disposition": preview.predicted_disposition,
+        "automation": PlaybookActionAutomationRead(
+            action=automation.action,
+            subject_type=automation.subject_type,
+            has_automatic_branch=automation.has_automatic_branch,
+            automatic_branch_enabled=preview.auto_apply_max_items > 0,
+            automatic_when="0 < matched_count <= auto_apply_max_items",
+            automatic_path=automation.automatic_path,
+            automatic_principal=automation.automatic_principal,
+            involves_model=automation.involves_model,
+            reviewed_operation_type=automation.reviewed_operation_type,
+            compensating_operation_when_reviewed=automation.compensating_operation_when_reviewed,
+            compensating_operation_when_automatic=automation.compensating_operation_when_automatic,
+            automatic_correction_reason=automation.automatic_correction_reason,
+        ),
+        "items": [
+            PlaybookDryRunItemRead(
+                subject_type=item.subject_type,
+                subject_id=item.subject_id,
+                qualified_name=item.qualified_name,
+                current_value=item.current_value,
+                proposed_value=item.proposed_value,
+                change=item.change,
+                evidence_version=item.evidence_version,
+            )
+            for item in preview.items
+        ],
+    }
 
 
 def _run_result_read(result: PlaybookRunOutcome) -> PlaybookRunResultRead:
@@ -392,42 +483,91 @@ async def dry_run_playbook_now(
     """
     playbook = await _get_playbook_in_scope(session, playbook_id, context)
     preview = await dry_run_playbook(session, playbook, now=datetime.now(UTC))
-    automation = preview.automation
-    return PlaybookDryRunRead(
-        playbook_id=preview.playbook_id,
-        action=preview.action,
-        enabled=preview.enabled,
-        rule_version=preview.rule_version,
-        evaluated_at=preview.evaluated_at,
-        matched_count=preview.matched_count,
-        tables_truncated=preview.tables_truncated,
-        columns_truncated=preview.columns_truncated,
-        auto_apply_max_items=preview.auto_apply_max_items,
-        predicted_disposition=preview.predicted_disposition,
-        automation=PlaybookActionAutomationRead(
-            action=automation.action,
-            subject_type=automation.subject_type,
-            has_automatic_branch=automation.has_automatic_branch,
-            automatic_branch_enabled=preview.auto_apply_max_items > 0,
-            automatic_when="0 < matched_count <= auto_apply_max_items",
-            automatic_path=automation.automatic_path,
-            automatic_principal=automation.automatic_principal,
-            involves_model=automation.involves_model,
-            reviewed_operation_type=automation.reviewed_operation_type,
-            compensating_operation_when_reviewed=automation.compensating_operation_when_reviewed,
-            compensating_operation_when_automatic=automation.compensating_operation_when_automatic,
-            automatic_correction_reason=automation.automatic_correction_reason,
-        ),
-        items=[
-            PlaybookDryRunItemRead(
-                subject_type=item.subject_type,
-                subject_id=item.subject_id,
-                qualified_name=item.qualified_name,
-                current_value=item.current_value,
-                proposed_value=item.proposed_value,
-                change=item.change,
-                evidence_version=item.evidence_version,
-            )
-            for item in preview.items
-        ],
+    return PlaybookDryRunRead(**_dry_run_read(preview))
+
+
+@router.post(
+    "/playbooks/{playbook_id}/dry-runs",
+    response_model=PlaybookStoredDryRunRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def store_playbook_dry_run(
+    playbook_id: UUID,
+    context: SecurityContext = Depends(require_roles(*PLAYBOOK_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> PlaybookStoredDryRunRead:
+    """R11-REV01: the same dry-run as `GET .../dry-run`, stored -- the rule version, which
+    subjects matched and each one's evidence version (ids and digests only) -- so that
+    `POST .../dry-runs/{dry_run_id}/run` can run exactly what was previewed. Applies nothing,
+    queues nothing and does not touch `last_run_at`.
+    """
+    playbook = await _get_playbook_in_scope(session, playbook_id, context)
+    preview = await dry_run_playbook(session, playbook, now=datetime.now(UTC))
+    record = await store_dry_run(session, playbook, preview, context=context)
+    read = PlaybookStoredDryRunRead(
+        **_dry_run_read(preview),
+        dry_run_id=record.id,
+        match_digest=record.match_digest,
+        evidence_digest=record.evidence_digest,
+        change_counts=dict(record.change_counts),
     )
+    await session.commit()
+    return read
+
+
+@router.post(
+    "/playbooks/{playbook_id}/dry-runs/{dry_run_id}/run",
+    response_model=PlaybookBoundRunRead,
+)
+async def run_playbook_as_previewed(
+    playbook_id: UUID,
+    dry_run_id: UUID,
+    body: PlaybookBoundRunCreate,
+    context: SecurityContext = Depends(require_roles(*PLAYBOOK_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> PlaybookBoundRunRead:
+    """R11-REV01: run the playbook bound to a stored dry-run, through the same
+    `evaluate_and_run_playbook` as `POST .../run`. The run re-evaluates the rule and compares
+    itself to the preview; with `require_match` (the default) it runs only if the rule, the
+    matched subjects and every subject's evidence version are the ones previewed, and it
+    checks the subjects it then acted on against that evaluation too. Otherwise nothing is
+    applied and the response says what moved (`ran: false`). A preview binds one run.
+    """
+    playbook = await _get_playbook_in_scope(session, playbook_id, context)
+    if not playbook.enabled:
+        raise HTTPException(status_code=409, detail="playbook is disabled")
+    try:
+        result = await run_bound_to_dry_run(
+            session,
+            playbook=playbook,
+            dry_run_id=dry_run_id,
+            context=context,
+            require_match=body.require_match,
+            now=datetime.now(UTC),
+        )
+    except DryRunBindingError as error:
+        raise HTTPException(status_code=error.http_status, detail=error.code) from error
+    binding = result.binding
+    read = PlaybookBoundRunRead(
+        dry_run_id=result.record.id,
+        ran=result.ran,
+        refusal_code=result.refusal_code,
+        binding=PlaybookPreviewBindingRead(
+            status=binding.status,
+            rule_version_matches=binding.rule_version_matches,
+            match_set_matches=binding.match_set_matches,
+            evidence_matches=binding.evidence_matches,
+            added_count=binding.added_count,
+            removed_count=binding.removed_count,
+            changed_count=binding.changed_count,
+            moved_subject_ids=list(binding.moved_subject_ids),
+            reasons=list(binding.reasons),
+        ),
+        run=_run_result_read(result.outcome) if result.ran and result.outcome else None,
+    )
+    if result.refusal_code == "RUN_DIVERGED_FROM_PREVIEW":
+        # The run acted on other subjects than it was checked against: undo all of it.
+        await session.rollback()
+    else:
+        await session.commit()
+    return read

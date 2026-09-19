@@ -1,4 +1,5 @@
-"""R11-REV01: a frozen selection of governance reviews, and what became of each member.
+"""R11-REV01: a frozen selection of governance reviews, and what became of each member --
+and (`PlaybookDryRunRecord`, at the end) a stored playbook dry-run a later run binds to.
 
 Kept out of `aida.models` for the reason `governed_execution_models` and
 `sql_workspace_models` give: `models.py` is under concurrent edit, and two additive
@@ -145,3 +146,87 @@ class ReviewBatchItem(Base, TimestampMixin):
     #: correction acts on (e.g. TABLE + table id for a description withdrawal). Ids only.
     correction_subject_type: Mapped[str | None] = mapped_column(String(30))
     correction_subject_id: Mapped[str | None] = mapped_column(String(100))
+
+
+#: What `aida.playbook_dry_run.predicted_disposition` can answer, and what
+#: `aida.playbooks.evaluate_and_run_playbook` can report.
+DRY_RUN_DISPOSITIONS = ("NO_MATCHES", "AUTOMATIC", "HUMAN_REVIEW")
+PLAYBOOK_RUN_OUTCOMES = ("NO_MATCHES", "AUTO_APPLIED", "QUEUED_FOR_REVIEW")
+
+
+class PlaybookDryRunRecord(Base, TimestampMixin):
+    """R11-REV01: a stored playbook dry-run -- what a rule matched, at which versions -- and,
+    once a run is bound to it, which run that was and whether it matched the preview.
+
+    Declared here rather than in a module of its own because this module is already
+    registered on `Base.metadata` wherever the schema is built (`migrations/env.py`, the
+    migration drift gate); both review-at-scale halves of R11-REV01 share it.
+
+    **Why store a dry-run at all.** `GET /v1/playbooks/{id}/dry-run` answers "what would a run
+    do now", but a steward who previews and then presses Run cannot tell whether the run did
+    what they previewed: the catalog, or the rule, may have moved in between. A stored
+    preview is the version a run can be bound to (`aida.playbook_dry_run.
+    run_bound_to_dry_run`): the run compares its own evaluation to this record and, by
+    default, refuses to act on anything the steward did not see.
+
+    **Value-free (INV-6).** Ids, codes, counts and SHA-256 digests. `subject_versions` is the
+    ordered list of `[subject id, evidence version]` pairs the preview matched -- ids and
+    hashes, never the tag values, owners or classifications a preview *displays* -- so a
+    later bound run can name which subjects moved, not merely that something did. The
+    matcher caps a run at `CATALOG_BULK_ACTION_MAX_ITEMS`, which bounds the list.
+
+    **Tenancy (INV-5).** `organization_id` (RESTRICT) is restated on every read. Deleting the
+    playbook deletes its previews (CASCADE): a preview of a rule that no longer exists binds
+    nothing, and the audit trail keeps what was previewed and run.
+    """
+
+    __tablename__ = "playbook_dry_run"
+    __table_args__ = (
+        CheckConstraint(
+            "predicted_disposition IN ('NO_MATCHES', 'AUTOMATIC', 'HUMAN_REVIEW')",
+            name="predicted_disposition",
+        ),
+        CheckConstraint(
+            "bound_run_outcome IS NULL OR bound_run_outcome IN "
+            "('NO_MATCHES', 'AUTO_APPLIED', 'QUEUED_FOR_REVIEW')",
+            name="bound_run_outcome",
+        ),
+        CheckConstraint(
+            "bound_binding_status IS NULL OR bound_binding_status IN ('MATCHES', 'DIFFERS')",
+            name="bound_binding_status",
+        ),
+        Index("ix_playbook_dry_run_org_playbook", "organization_id", "playbook_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    playbook_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_playbook.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    #: `aida.playbook_dry_run.rule_version` of the playbook as previewed.
+    rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: SHA-256 over the sorted matched subject ids: *which* subjects the rule matched.
+    match_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: SHA-256 over the sorted (subject id, evidence version) pairs: the state each was in.
+    evidence_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    matched_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    tables_truncated: Mapped[bool] = mapped_column(nullable=False, default=False)
+    columns_truncated: Mapped[bool] = mapped_column(nullable=False, default=False)
+    auto_apply_max_items: Mapped[int] = mapped_column(Integer, nullable=False)
+    predicted_disposition: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: change code (CREATE, UPDATE, NO_CHANGE, SUPERSEDE) -> count.
+    change_counts: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    #: `[[subject_id, evidence_version], ...]`, in match order. Ids and hashes only.
+    subject_versions: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    evaluated_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Set once, when a run is bound to this preview; a preview binds at most one run.
+    bound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bound_by: Mapped[str | None] = mapped_column(String(255))
+    bound_binding_status: Mapped[str | None] = mapped_column(String(20))
+    bound_run_outcome: Mapped[str | None] = mapped_column(String(30))
+    bound_bulk_action_run_id: Mapped[UUID | None] = mapped_column()
+    bound_bulk_stewardship_operation_id: Mapped[UUID | None] = mapped_column()
