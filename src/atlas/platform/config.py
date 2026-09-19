@@ -622,6 +622,16 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # --- GraphQL rate budgets (R11-GQL01) ---------------------------------------
+    # Off by default, like the MCP budget above: an operator turns them on where Redis is part
+    # of the deployment. Counted per caller (organization, principal type, principal id) in
+    # fixed windows by `aida.request_budget`, which fails closed in staging and production when
+    # the store is unreachable. A refused request answers 429 `RATE_LIMITED` and runs nothing.
+    graphql_budget_enabled: bool = False
+    graphql_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
+    #: Execution mutations (R11-GQL02) per caller per day; a replay of an idempotency key counts
+    #: too, because it is still a request the platform has to answer.
+    graphql_executions_per_day: int = Field(default=500, ge=1, le=1_000_000)
     # --- Data quality (DQ-6) -------------------------------------------------
     #
     # Off by default so a tenant that has not reviewed the feature keeps today's

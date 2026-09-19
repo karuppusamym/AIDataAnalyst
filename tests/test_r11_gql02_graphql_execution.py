@@ -810,3 +810,134 @@ async def test_a_pending_receipt_whose_execution_is_unfinished_stays_pending(
 
     assert settled["receipt"]["status"] == "PENDING"
     assert executed == []
+
+
+# ---------------------------------------------------------------------------
+# Per-caller rate budgets (R11-GQL01), counted by `aida.request_budget`
+# ---------------------------------------------------------------------------
+
+
+class _FakeRedis:
+    """The two calls the budget makes, against a shared in-memory store."""
+
+    store: dict[str, int] = {}
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    async def eval(self, script: str, numkeys: int, key: str, window: str) -> list[object]:
+        if self.fail:
+            from redis.exceptions import ConnectionError as RedisConnectionError
+
+            raise RedisConnectionError("store unreachable")
+        _FakeRedis.store[key] = _FakeRedis.store.get(key, 0) + 1
+        return [_FakeRedis.store[key], int(window)]
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture
+def budget_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    _FakeRedis.store = {}
+    monkeypatch.setattr(
+        "aida.request_budget.Redis.from_url", lambda *args, **kwargs: _FakeRedis()
+    )
+    return _FakeRedis.store
+
+
+def _budgeted(**limits: Any) -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, graphql_budget_enabled=True, **limits
+    )
+
+
+async def test_the_budget_is_off_by_default_and_never_touches_the_store(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_store(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a disabled budget must not reach Redis")
+
+    monkeypatch.setattr("aida.request_budget.Redis.from_url", _no_store)
+    version = await _orders_tool(scenario)
+
+    for index in range(3):
+        _outcome(await _run(http, scenario, version, key=f"gql02-off-{index:04d}"))
+
+
+async def test_a_spent_request_budget_answers_429_before_anything_is_read(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    budget_store: dict[str, int],
+) -> None:
+    _budgeted(graphql_requests_per_minute=2)
+    version = await _orders_tool(scenario)
+    _outcome(await _run(http, scenario, version, key="gql02-budget-0001"))
+    _outcome(await _run(http, scenario, version, key="gql02-budget-0002"))
+
+    refused = await _run(http, scenario, version, key="gql02-budget-0003")
+
+    assert refused.status_code == 429, refused.text
+    assert [e["extensions"]["code"] for e in refused.json()["errors"]] == ["RATE_LIMITED"]
+    assert refused.headers["X-RateLimit-Bucket"] == "REQUEST_MINUTE"
+    assert int(refused.headers["Retry-After"]) >= 1
+    assert len(executed) == 2
+    assert await _count(scenario, GovernedExecutionRequest) == 2
+    assert all("gql-analyst" not in key for key in budget_store), "keys carry a digest only"
+
+
+async def test_a_spent_execution_budget_stops_the_mutation_but_not_a_read(
+    http: httpx.AsyncClient,
+    scenario: _Scenario,
+    executed: list[str],
+    budget_store: dict[str, int],
+) -> None:
+    _budgeted(graphql_executions_per_day=1)
+    version = await _orders_tool(scenario)
+    first = _outcome(await _run(http, scenario, version, key="gql02-daily-0001"))
+
+    refused = await _run(http, scenario, version, key="gql02-daily-0002")
+    read = await http.post(
+        "/graphql",
+        json={
+            "operationName": "Receipt",
+            "query": RECEIPT,
+            "variables": {"id": first["receipt"]["id"]},
+        },
+        headers=_headers(scenario),
+    )
+
+    assert refused.status_code == 429
+    assert refused.headers["X-RateLimit-Bucket"] == "EXECUTION_DAY"
+    assert len(executed) == 1
+    assert read.status_code == 200 and read.json()["data"]["governedExecution"] is not None
+
+
+@pytest.mark.parametrize(
+    ("environment", "allowed"), [("production", False), ("staging", False), ("development", True)]
+)
+async def test_an_unreachable_store_fails_closed_only_where_it_must(
+    monkeypatch: pytest.MonkeyPatch, environment: str, allowed: bool
+) -> None:
+    from aida.request_budget import consume_window_budget
+
+    monkeypatch.setattr(
+        "aida.request_budget.Redis.from_url", lambda *args, **kwargs: _FakeRedis(fail=True)
+    )
+    settings = SimpleNamespace(redis_url="redis://unused", environment=environment)
+
+    decision = await consume_window_budget(
+        settings,  # type: ignore[arg-type]
+        namespace="graphql-budget",
+        bucket="REQUEST_MINUTE",
+        key_hash="h",
+        limit=5,
+        window_seconds=60,
+        enabled=True,
+    )
+
+    assert decision.allowed is allowed and decision.degraded is True

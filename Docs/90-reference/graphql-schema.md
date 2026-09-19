@@ -58,6 +58,7 @@ runs, so a refused document costs its parse and nothing else.
 | `OPERATION_NOT_FOUND` | 400 |
 | `OPERATION_NOT_SUPPORTED` | 400 |
 | `EXECUTION_ROOT_INVALID` | 400 |
+| `RATE_LIMITED` | 429 |
 | `FRAGMENT_CYCLE` | 400 |
 | `INTROSPECTION_DISABLED` | 400 |
 | `DEPTH_LIMIT_EXCEEDED` | 400 |

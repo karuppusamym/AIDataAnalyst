@@ -83,7 +83,7 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL Mutation.executeGovernedTool` | GRAPHQL | `aida.graphql_schema.Mutation.execute_governed_tool` | AgentDeveloper, Analyst, PlatformAdmin, ToolConsumer | yes | yes | writes | yes | not cancellable |
 | `GRAPHQL Query.datasource` | GRAPHQL | `aida.graphql_schema.Query.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.datasources` | GRAPHQL | `aida.graphql_schema.Query.datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GRAPHQL Query.governedExecution` | GRAPHQL | `aida.graphql_schema.Query.governed_execution` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | read | no | not cancellable |
+| `GRAPHQL Query.governedExecution` | GRAPHQL | `aida.graphql_schema.Query.governed_execution` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |
 | `GRAPHQL Query.table` | GRAPHQL | `aida.graphql_schema.Query.table` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Query.tables` | GRAPHQL | `aida.graphql_schema.Query.tables` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Table.columns` | GRAPHQL | `aida.graphql_schema.Table.columns` | Analyst, MetadataAdmin, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |

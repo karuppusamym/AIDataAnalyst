@@ -136,6 +136,9 @@ REFUSAL_CODES: dict[str, int] = {
     "OPERATION_NOT_FOUND": 400,
     "OPERATION_NOT_SUPPORTED": 400,
     "EXECUTION_ROOT_INVALID": 400,
+    # The caller's request or execution budget is spent (`aida.request_budget`); the
+    # response carries Retry-After. Checked before the body is read, so it costs nothing.
+    "RATE_LIMITED": 429,
     "FRAGMENT_CYCLE": 400,
     "INTROSPECTION_DISABLED": 400,
     "DEPTH_LIMIT_EXCEEDED": 400,

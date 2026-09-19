@@ -10,6 +10,9 @@ refused before its document is read.
 
 What happens to a request, in order:
 
+0. The caller's per-minute request budget is counted (`aida.request_budget`, off by
+   default like MCP's); a spent budget answers 429 `RATE_LIMITED` before the body is
+   read. An admitted mutation is also counted against the per-day execution budget.
 1. The body is read with a byte ceiling, before JSON parsing. A JSON array is
    HTTP batching, which is refused, as are unknown keys.
 2. `aida.graphql_limits.admit_document` bounds the document -- operation name,
@@ -60,6 +63,12 @@ from aida.governed_execution import (
 from aida.graphql_limits import DEFAULT_LIMITS, DocumentCost, DocumentRefused, admit_document
 from aida.graphql_reads import GRAPHQL_ENDPOINT_ROLES, open_read_scope
 from aida.graphql_schema import error_code, metadata_schema
+from aida.request_budget import (
+    BudgetDecision,
+    budget_headers,
+    consume_window_budget,
+    principal_hash,
+)
 from aida.security import SecurityContext, require_roles
 from atlas.platform.config import Settings, get_settings
 from atlas.platform.context import get_correlation_id
@@ -201,6 +210,39 @@ def _refusal(refused: DocumentRefused, correlation_id: str) -> Response:
     )
 
 
+async def _budget(
+    settings: Settings, context: SecurityContext, bucket: str
+) -> BudgetDecision:
+    """One request against the caller's GraphQL budget for `bucket`."""
+    limit, window = (
+        (settings.graphql_requests_per_minute, 60)
+        if bucket == "REQUEST_MINUTE"
+        else (settings.graphql_executions_per_day, 86_400)
+    )
+    return await consume_window_budget(
+        settings,
+        namespace="graphql-budget",
+        bucket=bucket,
+        key_hash=principal_hash(context),
+        limit=limit,
+        window_seconds=window,
+        enabled=settings.graphql_budget_enabled,
+    )
+
+
+def _rate_limited(decision: BudgetDecision, correlation_id: str) -> Response:
+    """429 with the stable code, the bucket and when to come back; no data."""
+    response = _refusal(
+        DocumentRefused(
+            "RATE_LIMITED",
+            f"the caller's {decision.bucket} budget of {decision.limit} is spent",
+        ),
+        correlation_id,
+    )
+    response.headers.update(budget_headers(decision))
+    return response
+
+
 def _operation_digest(name: str | None) -> str | None:
     """Operation names are caller-chosen text, so telemetry keeps a digest of one,
     never the name itself (INV-6)."""
@@ -249,6 +291,16 @@ async def graphql_query(
     correlation_id = get_correlation_id()
     started = perf_counter()
     operation_digest: str | None = None
+    requests = await _budget(settings, context, "REQUEST_MINUTE")
+    if not requests.allowed:
+        _telemetry(
+            outcome="RATE_LIMITED",
+            operation_digest=None,
+            cost=None,
+            started=started,
+            error_codes=["RATE_LIMITED"],
+        )
+        return _rate_limited(requests, correlation_id)
     try:
         parsed = _parse_request(await _read_body(request, limits.max_request_bytes))
         operation_digest = _operation_digest(parsed.operation_name)
@@ -282,6 +334,17 @@ async def graphql_query(
         "estimatedNodes": cost.estimated_nodes,
     }
     mutation = cost.operation_type == "mutation"
+    if mutation:
+        executions = await _budget(settings, context, "EXECUTION_DAY")
+        if not executions.allowed:
+            _telemetry(
+                outcome="RATE_LIMITED",
+                operation_digest=operation_digest,
+                cost=cost,
+                started=started,
+                error_codes=["RATE_LIMITED"],
+            )
+            return _rate_limited(executions, correlation_id)
     deadline = (
         execution_deadline(settings).total_seconds()
         if mutation
