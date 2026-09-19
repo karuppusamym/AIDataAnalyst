@@ -80,7 +80,7 @@ from aida.discovery_selection import (
     DiscoverySelection,
     apply_selection,
     grant_in_scope,
-    routine_kind,
+    routine_in_scope,
     selection_for,
     table_kind,
 )
@@ -811,12 +811,15 @@ async def out_of_scope_existing(
             MetadataRoutine.name,
             MetadataRoutine.routine_type,
             MetadataRoutine.schema_id,
+            MetadataRoutine.package_name,
         ).where(MetadataRoutine.datasource_id == datasource.id)
     )
-    for routine_id, name, routine_type, schema_id in routine_rows.all():
+    for routine_id, name, routine_type, schema_id, package_name in routine_rows.all():
         schema = schema_names.get(schema_id)
-        if schema is not None and not selection.object_in_scope(
-            schema, name, routine_kind(routine_type)
+        # R11-FP03: a package member is out of scope exactly when its package is -- the
+        # same rule `apply_selection` scopes it by on the way in, so the two halves agree.
+        if schema is not None and not routine_in_scope(
+            selection, schema, name, routine_type, package_name or None
         ):
             envelope.routine_ids.add(routine_id)
     for chunk in _id_chunks(envelope.routine_ids):
@@ -1536,6 +1539,11 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         pushed_down = connector.scope_discovery(
             include_schemas=list(selection.include_schemas),
             exclude_schemas=list(selection.exclude_schemas),
+            # R11-FP01 remainder: the object scope too, which Oracle, Snowflake, BigQuery
+            # and Databricks push into the reads whose rows belong to one object.
+            object_kinds=list(selection.object_kinds),
+            include_objects=list(selection.include_objects),
+            exclude_objects=list(selection.exclude_objects),
         )
         # Review 2026-09-16 §5: a facet read that did not complete is recorded on the
         # receipt rather than failing the run, and a refusal is told apart from a failure.

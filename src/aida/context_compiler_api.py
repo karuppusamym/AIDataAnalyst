@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
 from aida.context_compiler import (
+    ResolvedCoverageChange,
     ResolvedExemplar,
+    ResolvedMeaningCoverage,
     ResolvedNegativeAssertion,
     ResolvedOntologyMeaning,
     ResolvedRoutineReference,
@@ -22,10 +24,13 @@ from aida.context_compiler import (
 from aida.context_path import derive_context_path
 from aida.context_product_api import _enforce_capability_envelope
 from aida.context_product_coverage import (
+    load_coverage_changes,
     load_ontology_meaning,
+    load_pinned_meaning,
     load_routine_references,
     load_source_freshness,
     load_view_coverage,
+    publication_time,
 )
 from aida.context_product_policy import (
     evaluate_context_product_purpose,
@@ -258,6 +263,37 @@ async def _load_source(
     )
 
 
+async def _load_coverage_extras(
+    session: AsyncSession, version: ContextProductVersion
+) -> tuple[list[ResolvedMeaningCoverage], list[ResolvedCoverageChange]]:
+    """R11-FP09/FP12: the pinned meaning as coverage, and what the version covers that moved
+    after it was published.
+
+    Called by the compile, download and drift routes only *after* `_load_source` has made the
+    version's read decision, and rendered by the same `coverage_section` MCP's resource read
+    uses, so the four doors cannot disagree. A helper beside `_load_source` rather than two more
+    members of its tuple, because the OKF store and its tests unpack that tuple by position.
+    """
+    routine_ids = list(version.routine_ids or [])
+    meaning = await load_pinned_meaning(
+        session,
+        version.organization_id,
+        ontology_version_ids=list(version.ontology_version_ids or []),
+        semantic_model_version_ids=list(version.semantic_model_version_ids),
+        glossary_term_version_ids=list(version.glossary_term_version_ids),
+        scope_table_ids=version.table_ids,
+        scope_routine_ids=routine_ids,
+    )
+    changes = await load_coverage_changes(
+        session,
+        version.organization_id,
+        version.table_ids,
+        routine_ids,
+        since=publication_time(version),
+    )
+    return meaning, changes
+
+
 @router.get("/context-product-versions/{version_id}/compile", response_model=ContextCompilationRead)
 async def compile_context_product_version(
     version_id: UUID,
@@ -277,6 +313,7 @@ async def compile_context_product_version(
         sources,
         quality_snapshot,
     ) = await _load_source(session, version_id, context)
+    meaning, changes = await _load_coverage_extras(session, version)
     compiled = compile_context_product(
         product,
         version,
@@ -288,6 +325,8 @@ async def compile_context_product_version(
         views,
         ontology,
         sources,
+        meaning,
+        changes,
     )
     correlation_id = get_correlation_id()
     record_audit(
@@ -345,6 +384,7 @@ async def download_context_compilation(
         sources,
         quality_snapshot,
     ) = await _load_source(session, version_id, context)
+    meaning, changes = await _load_coverage_extras(session, version)
     compiled = compile_context_product(
         product,
         version,
@@ -356,6 +396,8 @@ async def download_context_compilation(
         views,
         ontology,
         sources,
+        meaning,
+        changes,
     )
     validation = validate_compiled_artifact(target, compiled.content)
     if not validation.valid:
@@ -430,6 +472,7 @@ async def inspect_context_compilation_drift(
         sources,
         _,
     ) = await _load_source(session, version_id, context)
+    meaning, changes = await _load_coverage_extras(session, version)
     compiled = compile_context_product(
         product,
         version,
@@ -441,6 +484,8 @@ async def inspect_context_compilation_drift(
         views,
         ontology,
         sources,
+        meaning,
+        changes,
     )
     deployed_hash = body.deployed_hash
     changed_paths: list[str] = []

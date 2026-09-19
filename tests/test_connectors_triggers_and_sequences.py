@@ -47,7 +47,7 @@ from aida.connectors.base import (
     build_triggers,
 )
 from aida.connectors.databricks import DatabricksConnector
-from aida.connectors.discovery import build_routines
+from aida.connectors.discovery import build_routines, facet_read_scope
 from aida.connectors.oracle import _assemble_catalog as _oracle_assemble
 from aida.connectors.oracle import _OracleEnvelopeRows
 from aida.connectors.registry import connector_registry
@@ -1055,19 +1055,29 @@ async def test_a_refused_routine_query_lands_on_the_catalog_as_a_reason() -> Non
     """The whole basis for claiming the axis without a live workspace: a refusal
     shrinks the envelope and says why, rather than failing the run or reading as
     "this catalog has no routines".
+
+    R11-FP02 follow-through: refused the way Unity Catalog refuses -- SQLSTATE 42501 in
+    the error's `context` -- and inside the `facet_read_scope` the discovery activity
+    binds, because only a refusal is absorbed now. It used to be a plain
+    `RuntimeError`, which the adapter absorbed like any other failure.
     """
+    from databricks.sql import exc as databricks_exc
 
     def _refuse_routines(sql: str, *arguments: object) -> None:
         if "information_schema.routines" in sql:
-            raise RuntimeError("PERMISSION_DENIED: USE SCHEMA")
+            raise databricks_exc.ServerOperationError(
+                "[INSUFFICIENT_PERMISSIONS] USE SCHEMA", {"sqlState": "42501"}
+            )
 
-    catalogs = await _databricks_discover(
-        [*_databricks_fetch_sequence()[:6], []],
-        execute=_refuse_routines,
-    )
+    with facet_read_scope() as scope:
+        catalogs = await _databricks_discover(
+            [*_databricks_fetch_sequence()[:6], []],
+            execute=_refuse_routines,
+        )
 
     assert catalogs[0].schemas[0].routines == ()
     assert "routines" in catalogs[0].attributes["envelope_v11_unavailable"]
+    assert scope.outcomes["routine_bodies"][0].value == "PERMISSION_DENIED"
 
 
 async def test_databricks_reports_neither_a_trigger_nor_a_sequence() -> None:

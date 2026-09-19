@@ -51,7 +51,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
+from aida.envelope_models import MetadataRoutine, MetadataTrigger, MetadataViewDefinition
 from aida.models import (
     BiArtifactImport,
     BiConnection,
@@ -320,6 +320,7 @@ def _register_definition_edges(
     edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION", "TRIGGER_DEFINITION"],
     view_definitions_by_table_id: dict[UUID, tuple[str, str]] | None = None,
     routine_references_by_id: dict[UUID, tuple[str, str]] | None = None,
+    trigger_references_by_id: dict[UUID, tuple[str, str]] | None = None,
 ) -> None:
     """Collapse column-level parser rows into one table-level edge per pair.
 
@@ -373,8 +374,10 @@ def _register_definition_edges(
         # R11-FP01: a TRIGGER_DEFINITION edge names the triggers that establish it,
         # and, on PostgreSQL, the function whose body each one's code lives in --
         # so the same single-routine rule gives it the same resolvable reference
-        # to that body. A SQL Server or Oracle trigger's own body is not a routine,
-        # so no reference is fabricated for it.
+        # to that body. A SQL Server or Oracle trigger keeps its own body, which
+        # `get_transformation_detail` now serves through the routine branch's gate,
+        # so the same single-owner rule gives it a `TRIGGER_BODY` reference to that
+        # trigger -- never to one of two triggers that both establish the pair.
         routine_ids = sorted(
             {
                 str(routine_id)
@@ -397,6 +400,17 @@ def _register_definition_edges(
                     "tool": "get_transformation_detail",
                     "entity_id": routine_ids[0],
                     "kind": "ROUTINE_BODY",
+                }
+                evidence["redaction_status"] = redaction_status
+                evidence["availability"] = availability
+        elif not routine_ids and len(trigger_ids) == 1 and trigger_references_by_id is not None:
+            found_trigger = trigger_references_by_id.get(UUID(trigger_ids[0]))
+            if found_trigger is not None:
+                redaction_status, availability = found_trigger
+                evidence["transformation_reference"] = {
+                    "tool": "get_transformation_detail",
+                    "entity_id": trigger_ids[0],
+                    "kind": "TRIGGER_BODY",
                 }
                 evidence["redaction_status"] = redaction_status
                 evidence["availability"] = availability
@@ -495,6 +509,39 @@ async def _load_routine_references(
     return {
         routine_id: (redaction_status, availability)
         for routine_id, redaction_status, availability in rows
+    }
+
+
+async def _load_trigger_references(
+    session: AsyncSession,
+    datasource: DataSource,
+    trigger_rows: Sequence[TriggerLineageEdge],
+) -> dict[UUID, tuple[str, str]]:
+    """R11-FP01: the trigger counterpart of `_load_routine_references`, for a
+    trigger that carries its own body (SQL Server, Oracle): the two narrow columns
+    its reference carries, never the body. A PostgreSQL trigger names the function
+    its code lives in instead, and its edges already reference that routine, so it
+    is not loaded here. INV-5 on both columns, as the trigger axis restates them."""
+    trigger_ids = {row.trigger_id for row in trigger_rows if row.routine_id is None}
+    if not trigger_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MetadataTrigger.id,
+                MetadataTrigger.redaction_status,
+                MetadataTrigger.availability,
+            ).where(
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.id.in_(trigger_ids),
+                MetadataTrigger.action_routine.is_(None),
+            )
+        )
+    ).all()
+    return {
+        trigger_id: (redaction_status, availability)
+        for trigger_id, redaction_status, availability in rows
     }
 
 
@@ -1202,6 +1249,7 @@ async def collect_trigger_lineage(
         rows,
         "TRIGGER_DEFINITION",
         routine_references_by_id=await _load_routine_references(session, datasource, rows),
+        trigger_references_by_id=await _load_trigger_references(session, datasource, rows),
     )
 
 

@@ -94,6 +94,65 @@ class ResolvedOntologyMeaning:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedMeaningCoverage:
+    """R11-FP09/FP12: one meaning version a product is pinned to, and whether it still stands.
+
+    Coverage said which routines and views a product stands on and how much Atlas holds about
+    each; the meaning it is pinned to -- ontology, semantic model and glossary term versions --
+    appeared only as bare ids in `references`. This is that meaning's coverage entry, in the same
+    discipline as the routine and view entries beside it:
+
+    * `status` is the version's own status and `current` whether it is still the one a reader is
+      given (the ontology's published version, the project's PUBLISHED model, the term's APPROVED
+      definition of an ACTIVE term). The pin itself never moves -- that is the point of pinning
+      -- so a `False` here is the product saying, at every door, that it serves meaning its owner
+      has moved past, and `context_rebuild` has a re-pinned version in review;
+    * `table_ids` and `routine_ids` are what the meaning speaks about, **cut to the product's own
+      scope** exactly as a routine's reads and writes are: a metric over a table outside the
+      product, a term linked to one, an ontology mapping onto one, says nothing -- not the id, not
+      a count.
+
+    Value-free and screening-free by construction: a key, a number, a status and ids already in
+    the product's scope. The meaning's *text* is `ontology_section`'s business, which screens it.
+    """
+
+    kind: str
+    version_id: str
+    key: str | None
+    version: int
+    status: str
+    current: bool
+    table_ids: tuple[str, ...] = ()
+    routine_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedCoverageChange:
+    """R11-FP12/FP15/FP16: something a published version covers that moved after it was published.
+
+    A digest says whether a definition differs from some other digest; it never said "differs
+    from what this version was approved over", so a product whose covered view was redefined, or
+    whose covered table's approved description was withdrawn, went on serving as if its review
+    still held. One entry per covered subject and kind of change, within the product's own scope:
+
+    * `change` `DEFINITION_CHANGED`, `DEPRECATED` or `REACTIVATED` for a covered view or routine,
+      from the definition signals ingestion records in the scan's own transaction; `change_class`
+      is theirs (`STRUCTURAL` outranks `LITERAL_ONLY`, because a literal-only move leaves the
+      digest above equal and a reader must be told why the product is stale anyway);
+    * `change` `MEANING_RETIRED` for a covered table, view, column or routine whose approved
+      description the version was published over is no longer what a reader is given --
+      `MEANING_REPLACED` when other approved text stands, `MEANING_WITHDRAWN` when none does.
+
+    Pre-serialized like every resolved reference: strings only.
+    """
+
+    subject_kind: str
+    subject_id: str
+    change: str
+    change_class: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedSourceFreshness:
     """R11-FP12: when the source behind part of a product's table scope was last read.
 
@@ -216,8 +275,51 @@ def _exemplars_section(exemplars: list[ResolvedExemplar]) -> dict[str, Any]:
     return {"count": len(items), "exemplars": items}
 
 
+def meaning_coverage_section(meaning: list[ResolvedMeaningCoverage]) -> list[dict[str, Any]]:
+    """R11-FP09/FP12: the pinned meaning versions, as the coverage section renders them."""
+    return sorted(
+        (
+            {
+                "kind": item.kind,
+                "version_id": item.version_id,
+                "key": item.key,
+                "version": item.version,
+                "status": item.status,
+                "current": item.current,
+                "table_ids": sorted(item.table_ids),
+                "routine_ids": sorted(item.routine_ids),
+            }
+            for item in meaning
+        ),
+        key=lambda entry: (str(entry["kind"]), str(entry["version_id"])),
+    )
+
+
+def changes_since_published_section(changes: list[ResolvedCoverageChange]) -> list[dict[str, Any]]:
+    """R11-FP12/FP16: what the published version covers that moved after it was published."""
+    return sorted(
+        (
+            {
+                "subject_kind": change.subject_kind,
+                "subject_id": change.subject_id,
+                "change": change.change,
+                "change_class": change.change_class,
+            }
+            for change in changes
+        ),
+        key=lambda entry: (
+            str(entry["subject_kind"]),
+            str(entry["subject_id"]),
+            str(entry["change"]),
+        ),
+    )
+
+
 def coverage_section(
-    routines: list[ResolvedRoutineReference], views: list[ResolvedViewCoverage]
+    routines: list[ResolvedRoutineReference],
+    views: list[ResolvedViewCoverage],
+    meaning: list[ResolvedMeaningCoverage] | None = None,
+    changes: list[ResolvedCoverageChange] | None = None,
 ) -> dict[str, Any]:
     """R11-FP12: the routines and views a product covers, and how completely. Public: MCP's
     context-product read renders the same section, so the two doors cannot disagree.
@@ -225,8 +327,23 @@ def coverage_section(
     R11-FP08 added `description`/`description_state` to each routine here rather than only to
     the compiled payload, for exactly that reason: MCP's resource read renders this same
     function's output, so a routine's meaning appears at both doors or at neither.
+
+    R11-FP09/FP12 (2026-09-18) added two keys, each present only when there is something to say,
+    so a product with neither renders exactly the section it always did:
+
+    * `meaning` -- the ontology, semantic model and glossary term versions the product pins,
+      whether each is still current, and what each speaks about within the product's scope
+      (`meaning_coverage_section`);
+    * `changed_since_published` -- the covered definitions and descriptions that moved after the
+      version was published (`changes_since_published_section`). Its presence *is* the product
+      saying it is stale: a consumer need not compare digests across time to learn that what it
+      is reading was approved over something that has since changed. A version never published
+      has no baseline and never carries it.
+
+    Both are rendered here, not beside the call, for the reason the routine description is: the
+    compiled artifact (compile, download, drift) and MCP's resource read must show one shape.
     """
-    return {
+    section: dict[str, Any] = {
         "routines": sorted(
             (
                 {
@@ -266,6 +383,11 @@ def coverage_section(
             key=lambda item: str(item["table_id"]),
         ),
     }
+    if meaning:
+        section["meaning"] = meaning_coverage_section(meaning)
+    if changes:
+        section["changed_since_published"] = changes_since_published_section(changes)
+    return section
 
 
 def ontology_section(meanings: list[ResolvedOntologyMeaning]) -> list[dict[str, Any]]:
@@ -332,6 +454,8 @@ def _artifact_payload(
     routines: list[ResolvedRoutineReference],
     views: list[ResolvedViewCoverage],
     ontology: list[ResolvedOntologyMeaning],
+    meaning: list[ResolvedMeaningCoverage],
+    changes: list[ResolvedCoverageChange],
 ) -> dict[str, Any]:
     references: dict[str, Any] = {
         "tables": [
@@ -375,8 +499,11 @@ def _artifact_payload(
         "negative_knowledge": _negative_knowledge_section(negative_knowledge),
         "exemplars": _exemplars_section(exemplars),
     }
-    if routines or views:
-        atlas_common["coverage"] = coverage_section(routines, views)
+    # R11-FP09/FP12: pinned meaning and what moved since publication belong to coverage too, so
+    # a product holding no routine or view still says what meaning it stands on, and when that
+    # (or anything else it covers) has moved -- and one with none of the four compiles as before.
+    if routines or views or meaning or changes:
+        atlas_common["coverage"] = coverage_section(routines, views, meaning, changes)
     # R11-FP09: present only when the product binds an ontology version, as `coverage` is.
     if ontology:
         atlas_common["ontology"] = ontology_section(ontology)
@@ -482,6 +609,8 @@ def compile_context_product(
     views: list[ResolvedViewCoverage] | None = None,
     ontology: list[ResolvedOntologyMeaning] | None = None,
     sources: list[ResolvedSourceFreshness] | None = None,
+    meaning: list[ResolvedMeaningCoverage] | None = None,
+    changes: list[ResolvedCoverageChange] | None = None,
 ) -> ContextCompilationRead:
     """Compile a version-pinned product without time- or environment-dependent fields.
 
@@ -512,6 +641,15 @@ def compile_context_product(
     `ontology` (R11-FP09) is the meaning of each bound ontology version, pre-resolved by
     `aida.context_product_coverage.load_ontology_meaning` from the pinned versions, and
     reaches only the Atlas-native targets. It defaults to none.
+
+    `meaning` and `changes` (R11-FP09/FP12, 2026-09-18) are the pinned meaning versions' coverage
+    and what the version covers that moved after it was published, pre-resolved by
+    `aida.context_product_coverage.load_pinned_meaning` and `load_coverage_changes`. Both land
+    in the coverage section, so they reach only the Atlas-native targets, and both default to
+    none. They are *inside* the artifact, unlike `sources`, on purpose: freshness moves every
+    time a scan finishes, which would make every deployment look drifted, whereas these move
+    only when what the product stands on actually moves -- and a deployment compiled before that
+    *is* drifted, including after a literal-only redefinition that leaves every digest equal.
     """
     payload = _artifact_payload(
         product,
@@ -523,6 +661,8 @@ def compile_context_product(
         routines or [],
         views or [],
         ontology or [],
+        meaning or [],
+        changes or [],
     )
     content = (
         yaml.safe_dump(payload, sort_keys=True, allow_unicode=False, width=100)

@@ -18,6 +18,17 @@ That is the investigation plan (R11-FP05) -- a route per gap through the machine
 never a new orchestrator and never a retry loop -- and the backlog figures are FP17's queue
 metrics. **Authorized dimensions:** a datasource the caller may not read is left out entirely,
 not counted, so the totals never disclose that it has gaps. Value-free: counts and codes only.
+
+**Uncertain grain (R11-FP05, 2026-09-18).** A table or view whose row grain the platform cannot
+establish is what makes an answer double-count, and it was the one gap FP05 named that nothing
+counted. `GRAIN_UNCERTAIN` counts it from evidence already held -- declared keys and unique
+indexes, and the composite-key candidates stewards decide -- with no new analysis; see
+`grain_established`. It routes to HUMAN_REVIEW because the only machinery that closes it is the
+existing composite-key review. An agent that fills that queue from profiles is the obvious next
+step and deliberately not built here: an agent may write outside `GovernanceReview` only into a
+queue `task_agent` lists as human-only (`_HUMAN_ONLY_QUEUES`), with a pending counter and an
+outcome reader of its own, and the composite-key queue is not one -- admitting it changes
+ADR-0029's one write path, which is the framework's decision, not the register's.
 """
 
 from __future__ import annotations
@@ -43,7 +54,16 @@ from aida.envelope_models import (
     MetadataViewDefinition,
 )
 from aida.ingest_screening import CLEAN
-from aida.models import AnalysisRun, DataQualityIncident, DataSource, ViewLineageEdge
+from aida.models import (
+    AnalysisRun,
+    CompositeKeyCandidate,
+    DataQualityIncident,
+    DataSource,
+    MetadataConstraint,
+    MetadataIndex,
+    MetadataTable,
+    ViewLineageEdge,
+)
 from aida.procedure_lineage_models import (
     DeepProcedureLineageEdge,
     TriggerLineageEdge,
@@ -136,7 +156,71 @@ GAP_DEFINITIONS: Final[dict[str, tuple[str, str, str]]] = {
         "Source changes not yet processed into holds and re-examination. They wait on the "
         "change-signal pass (`change_signal_processing_interval_minutes`).",
     ),
+    # R11-FP05: the grain gap. See `grain_uncertain` for the derivation.
+    "GRAIN_UNCERTAIN": (
+        "HUMAN_REVIEW",
+        "data steward",
+        "Tables and views whose row grain Atlas cannot establish: no declared primary key, "
+        "unique constraint or unique index, and no candidate key a steward has approved. "
+        "Joining or aggregating over one of these can double-count, and nothing here says "
+        "one row is one of anything. A steward closes it by approving a composite-key "
+        "candidate discovered from the object's profile, or the source declares a key and a "
+        "rescan reads it. Each object's code says which step is next: KEY_UNCONFIRMED or "
+        "AMBIGUOUS_KEY (candidates wait for a steward), KEYS_NOT_READ (the last run did not "
+        "read constraints, so a key may exist unseen), AGGREGATE_WITHOUT_GROUPING (a view "
+        "that aggregates and passes no column through, so its grouping is not among its "
+        "outputs), or NO_KEY.",
+    ),
 }
+
+#: R11-FP05: the constraint types that declare a row's identity -- the same pair
+#: `composite_key_api` treats as a declared key when it excludes key columns.
+DECLARED_KEY_CONSTRAINT_TYPES: Final = ("PRIMARY_KEY", "UNIQUE")
+
+
+def grain_established() -> ColumnElement[bool]:
+    """A (correlated) catalog table or view whose row grain the platform can state.
+
+    Only evidence the platform already holds, and only the kinds that *state* a
+    grain rather than suggest one: a declared primary key or unique constraint, a
+    unique or primary index (how a SQL Server indexed view or a PostgreSQL unique
+    index declares one), or a composite-key candidate a steward APPROVED through
+    the maker-checker queue. A profile's `effectively_unique` or a PENDING
+    candidate is evidence *for* a key, not a key -- a sample can be unique by
+    accident, which is exactly how double-counting slips in -- so neither
+    establishes grain on its own; a pending candidate is what the gap's route
+    asks a steward to decide.
+
+    Two unique keys on one table do not make its grain ambiguous: the grain is
+    the row, and either key names it. Ambiguity is the undecided case, where
+    several candidates wait and none is declared. Every clause restates the
+    organization (INV-5). Shared with `footprint_gap_detail` so the count and
+    the list it expands cannot drift.
+    """
+    return or_(
+        exists().where(
+            MetadataConstraint.organization_id == MetadataTable.organization_id,
+            MetadataConstraint.table_id == MetadataTable.id,
+            MetadataConstraint.status == "ACTIVE",
+            MetadataConstraint.constraint_type.in_(DECLARED_KEY_CONSTRAINT_TYPES),
+        ),
+        exists().where(
+            MetadataIndex.organization_id == MetadataTable.organization_id,
+            MetadataIndex.table_id == MetadataTable.id,
+            MetadataIndex.status == "ACTIVE",
+            or_(MetadataIndex.is_unique.is_(True), MetadataIndex.is_primary.is_(True)),
+        ),
+        exists().where(
+            CompositeKeyCandidate.organization_id == MetadataTable.organization_id,
+            CompositeKeyCandidate.table_id == MetadataTable.id,
+            CompositeKeyCandidate.status == "APPROVED",
+        ),
+    )
+
+
+def grain_uncertain() -> ColumnElement[bool]:
+    """A (correlated) ACTIVE catalog table or view whose grain is not established."""
+    return and_(MetadataTable.status == "ACTIVE", ~grain_established())
 
 
 class FootprintGapRead(ApiModel):
@@ -460,6 +544,17 @@ async def footprint_gaps(
                 )
                 .group_by(TriggerLineageEdge.datasource_id),
             ),
+        )
+        # R11-FP05: tables and views whose grain nothing the platform holds states.
+        counts["GRAIN_UNCERTAIN"] = await _grouped(
+            session,
+            select(MetadataTable.datasource_id, func.count())
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.datasource_id.in_(ids),
+                grain_uncertain(),
+            )
+            .group_by(MetadataTable.datasource_id),
         )
         counts["SOURCE_CHANGE_HOLDS"] = await _grouped(
             session,

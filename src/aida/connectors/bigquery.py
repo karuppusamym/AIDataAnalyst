@@ -13,11 +13,11 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
+from aida.capability_states import CapabilityState
 from aida.connectors.base import (
     ENTROPY_NOT_IMPLEMENTED,
     FACET_NOT_APPLICABLE,
@@ -55,9 +55,11 @@ from aida.connectors.discovery import (
     apply_view_definitions,
     assemble_catalog,
     build_table_map_from_column_rows,
+    classify_read_failure,
     read_facet,
     view_definition_row,
 )
+from aida.connectors.schema_scope import DiscoveryScope, ScopeSql, discovery_scope
 from aida.connectors.sql_execution import SqlExecutor
 
 _COMPLEX_SCALAR_TYPES = frozenset({"JSON", "STRUCT", "RECORD", "GEOGRAPHY", "BYTES"})
@@ -417,8 +419,9 @@ class _BigQueryEnvelopeRows:
     #: pairs in read order, for `discover()` to replay into `read_facet`.
     #: Separate from `unavailable`, which is this adapter's own per-axis reason
     #: for the catalog attributes: one refusal produces both, and they are read
-    #: by different surfaces.
-    refusals: tuple[tuple[str, BaseException], ...] = ()
+    #: by different surfaces. Named `failures`, not `refusals`: nothing in the
+    #: thread has judged them, and one that is not a refusal ends the run.
+    failures: tuple[tuple[str, BaseException], ...] = ()
 
     def reason(self, axis: str) -> str | None:
         for name, message in self.unavailable:
@@ -568,25 +571,57 @@ def _information_schema_query(prefix: str, columns: str, view: str, where: str =
     return sql.strip()
 
 
+def _query_parameters(values: Mapping[str, str]) -> list[Any]:
+    """R11-FP01: the pushed-down selection's values as BigQuery named query parameters.
+
+    `@scope_0` in the statement, `ScalarQueryParameter("scope_0", "STRING", ...)` beside
+    it: BigQuery binds them server-side, so a pattern is never part of the query text.
+    """
+    from google.cloud import bigquery
+
+    return [bigquery.ScalarQueryParameter(name, "STRING", value) for name, value in values.items()]
+
+
+def _run_query(client: Any, sql: str, params: Mapping[str, str] | None = None) -> Any:
+    """`client.query(sql)`, with the selection's values bound when there are any."""
+    if not params:
+        return client.query(sql)
+    from google.cloud import bigquery
+
+    return client.query(
+        sql, job_config=bigquery.QueryJobConfig(query_parameters=_query_parameters(params))
+    )
+
+
+def _refused_reason(relation: str) -> str:
+    """Why an axis is empty when the source refused it -- fixed text, never the driver's.
+
+    Before R11-FP02's follow-through this was `f"{type(exc).__name__}: {exc}"`, and it
+    reached a view definition's own `unavailable_reason` verbatim: a driver message,
+    which can quote the statement or a value (INV-6). A reason is now only ever kept
+    for a refusal -- anything else ends the run -- so naming the view is the whole of
+    what is known.
+    """
+    return (
+        f"INFORMATION_SCHEMA.{relation} was refused for this principal; the discovery "
+        "receipt records the facet as PERMISSION_DENIED"
+    )
+
+
 def _query_optional_rows(
-    client: Any, sql: str
-) -> tuple[tuple[dict[str, Any], ...], str | None, BaseException | None]:
-    """Run one supplementary metadata query, turning a refusal into a reason.
+    client: Any, sql: str, params: Mapping[str, str] | None = None
+) -> tuple[tuple[dict[str, Any], ...], BaseException | None]:
+    """Run one supplementary metadata query, capturing -- not judging -- its failure.
 
     A service account without `bigquery.routines.get` on a dataset gets an error from
     `INFORMATION_SCHEMA.ROUTINES`, and that denial must not read as "this project has
-    no routines". It comes back as a reason string that lands on the catalog.
-
-    R11-FP02: the exception is returned beside the reason so the caller can hand
-    it to `read_facet` and have the platform classify it, rather than this
-    adapter deciding for itself what a denial is. The reason string is unchanged
-    -- it is what the catalog's `envelope_v11_unavailable` attribute is built
-    from, and this is an addition to it, not a replacement.
+    no routines". The exception is returned so the coroutine can hand it to
+    `read_facet` and have the platform classify it (R11-FP02).
     """
     try:
-        return tuple(dict(row.items()) for row in client.query(sql).result()), None, None
-    except Exception as exc:
-        return (), f"{type(exc).__name__}: {exc}", exc
+        return tuple(dict(row.items()) for row in _run_query(client, sql, params).result()), None
+    except Exception as exc:  # noqa: BLE001 -- replayed verbatim into `read_facet`
+        return (), exc
 
 
 # ---------------------------------------------------------------------------
@@ -595,22 +630,26 @@ def _query_optional_rows(
 # `read_facet` is a coroutine and `google-cloud-bigquery`'s client is
 # synchronous, so every read happens inside one `asyncio.to_thread` hop. The
 # thread captures each read's failure rather than judging it, and the coroutine
-# replays the captures into `read_facet`, which classifies them by SQLSTATE,
-# records them against their facet and decides what may be absorbed. One
-# judgement site for six adapters.
+# replays the captures into `read_facet`, which classifies them, records them
+# against their facet and decides what may be absorbed. One judgement site for
+# six adapters.
 #
-# Two replay modes, matching the two failure contracts this adapter already
-# had -- adoption changes neither:
+# **One replay mode, since R11-FP02's follow-through (2026-09-18).** Every read
+# but the roster used to be replayed with `read_facet`'s re-raise suppressed,
+# because this adapter had always degraded any failure of them to no rows. That
+# was the hazard the facet mechanism exists to avoid: nothing BigQuery raised
+# could classify as a refusal then, so *every* failure -- a transient 500 on
+# ROUTINES included -- was UNAVAILABLE, was absorbed, left the axis empty, and
+# was not protected by `workflows.activities.refused_facet_existing`, so the
+# FULL reconciliation retired every routine an earlier run had captured. Every
+# capture is now replayed bare: a refusal -- HTTP 403 with the structured reason
+# `accessDenied`, which `capability_states.is_permission_refusal` now reads -- is
+# absorbed and recorded; anything else is recorded and re-raised, and the run
+# ends INTERRUPTED rather than reconciling against a source that stopped
+# answering.
 #
-# * The COLUMNS roster has always failed the run, so it is replayed bare under
-#   `FACET_INVENTORY`, which `RETIREMENT_BEARING_FACETS` holds: the refusal is
-#   recorded and then still ends the run, because a FULL run completing over
-#   zero objects would retire the estate.
-# * Every other read here has always degraded to no rows (the envelope axes
-#   with a per-axis reason, the key query with nothing at all), so those are
-#   replayed with the re-raise suppressed -- `_read_absorbed` and
-#   `_record_refused_axes` below. The refusal now reaches the receipt; what the
-#   run does is unchanged.
+# The one read with no facet, `tables`, keeps its narrower degradation for a
+# refusal only -- see `BigQueryConnector.discover`.
 # ---------------------------------------------------------------------------
 _CapturedRead = Sequence[Mapping[str, Any]] | BaseException
 
@@ -628,7 +667,7 @@ class _CapturedReads:
     envelope: _BigQueryEnvelopeRows | None = None
 
 
-def _capture(client: Any, sql: str) -> _CapturedRead:
+def _capture(client: Any, sql: str, params: Mapping[str, str] | None = None) -> _CapturedRead:
     """One read, captured rather than judged (R11-FP02).
 
     The rows are materialised inside the guard: `client.query()` returns a job
@@ -636,7 +675,7 @@ def _capture(client: Any, sql: str) -> _CapturedRead:
     at `query()` would let the refusal escape.
     """
     try:
-        return [dict(row.items()) for row in client.query(sql).result()]
+        return [dict(row.items()) for row in _run_query(client, sql, params).result()]
     except Exception as exc:  # noqa: BLE001 -- replayed verbatim into `read_facet`
         return exc
 
@@ -653,31 +692,15 @@ async def _captured(read: _CapturedRead) -> Sequence[Mapping[str, Any]]:
     return read
 
 
-async def _read_absorbed(facet: str, read: _CapturedRead) -> list[dict[str, Any]]:
-    """A read this adapter has always absorbed, now also classified and recorded.
+async def _replay_axis_failures(failures: Sequence[tuple[str, BaseException]]) -> None:
+    """Replay each envelope axis's captured failure through `read_facet`, bare.
 
-    `read_facet` judges the failure and records it against `facet`; the re-raise
-    it may make is suppressed here because this read's pre-R11-FP02 contract was
-    to degrade to no rows rather than to fail the run. Narrowing that contract
-    is a separate decision from adopting the mechanism, and BigQuery is the
-    engine where it would bite hardest -- nothing it raises can ever classify as
-    a refusal, so a bare replay would turn every transient API error on an
-    optional axis into a failed discovery.
+    A refusal is recorded against its facet and absorbed: its rows are already empty
+    and its value-free reason already rendered by the thread. Anything else is
+    recorded and re-raised, which ends the run.
     """
-    with suppress(Exception):
-        return [dict(row) for row in await read_facet(facet, _captured(read))]
-    return []
-
-
-async def _record_refused_axes(refusals: Sequence[tuple[str, BaseException]]) -> None:
-    """Classify and record each already-absorbed axis failure against its facet.
-
-    Same reasoning as `_read_absorbed`, for the axes whose rows the thread has
-    already turned into an empty tuple and a reason string.
-    """
-    for facet, failure in refusals:
-        with suppress(Exception):
-            await read_facet(facet, _captured(failure))
+    for facet, failure in failures:
+        await read_facet(facet, _captured(failure))
 
 
 _ROUTINE_COLUMNS = (
@@ -690,29 +713,66 @@ _PARAMETER_COLUMNS = (
 )
 _FIELD_PATH_COLUMNS = "table_schema, table_name, column_name, field_path, description"
 
+#: The pseudo-facet `_fetch_envelope_rows` files a TABLES failure under. Never
+#: published and never passed to `read_facet` -- `discover()` judges it itself.
+_TABLES_AXIS: Final = "tables"
 
-def _fetch_envelope_rows(client: Any, *, project_id: str, region: str) -> _BigQueryEnvelopeRows:
-    """Read every envelope 1.1 axis BigQuery exposes, recording each refusal."""
+
+def _fetch_envelope_rows(
+    client: Any, *, project_id: str, region: str, scope: DiscoveryScope | None = None
+) -> _BigQueryEnvelopeRows:
+    """Read every envelope 1.1 axis BigQuery exposes, capturing each failure.
+
+    R11-FP01: `scope` is the pushed-down selection. Region-level INFORMATION_SCHEMA
+    has no system-schema predicate to extend, so each read gets its own `WHERE`: every
+    read takes the schema scope; the reads whose rows belong to one object -- TABLES,
+    VIEWS, ROUTINE_OPTIONS, TABLE_OPTIONS, COLUMN_FIELD_PATHS -- also take the
+    `schema.object` patterns, and VIEWS the VIEW kind. ROUTINES and SCHEMATA_OPTIONS
+    establish datasets and take the schema scope only; PARAMETERS keys its rows by a
+    `specific_name` that need not be the routine's name, so it does too. TABLES takes
+    no kind: it is where every object's type comes from, and an object it left out
+    would be typed BASE TABLE by default.
+    """
+    scope = scope or DiscoveryScope()
     prefix = f"`{project_id}`.`{region}`.INFORMATION_SCHEMA"
     unavailable: list[tuple[str, str]] = []
-    refusals: list[tuple[str, BaseException]] = []
+    failures: list[tuple[str, BaseException]] = []
 
     def _collect(
-        axis: str, columns: str, view: str, where: str = "", *, facet: str | None = None
+        axis: str,
+        columns: str,
+        view: str,
+        where: str,
+        query: ScopeSql,
+        *,
+        facet: str | None = None,
     ) -> tuple[dict[str, Any], ...]:
-        rows, reason, failure = _query_optional_rows(
-            client, _information_schema_query(prefix, columns, view, where)
+        rows, failure = _query_optional_rows(
+            client, _information_schema_query(prefix, columns, view, where), query.named
         )
-        if reason is not None:
-            unavailable.append((axis, reason))
         # R11-FP02: captured, not judged -- `read_facet` is a coroutine and this
-        # runs inside `BigQueryConnector.discover`'s one thread hop.
-        if failure is not None and facet is not None:
-            refusals.append((facet, failure))
+        # runs inside `BigQueryConnector.discover`'s one thread hop. A failure that
+        # is not a refusal ends the run there, so this reason only ever survives
+        # for a refusal.
+        if failure is not None:
+            unavailable.append((axis, _refused_reason(view)))
+            failures.append((facet or _TABLES_AXIS, failure))
         return rows
 
-    description_filter = "WHERE option_name = 'description'"
-    return _BigQueryEnvelopeRows(
+    def _where(query: ScopeSql, schema_column: str, name_column: str | None = None) -> str:
+        names = query.names(schema_column, name_column) if name_column else ""
+        return f"WHERE TRUE{query.schema(schema_column)}{names}"
+
+    description = " AND option_name = 'description'"
+    q_tables = ScopeSql(scope, "bigquery")
+    q_views = ScopeSql(scope, "bigquery")
+    q_routines = ScopeSql(scope, "bigquery")
+    q_parameters = ScopeSql(scope, "bigquery")
+    q_routine_options = ScopeSql(scope, "bigquery")
+    q_table_options = ScopeSql(scope, "bigquery")
+    q_schema_options = ScopeSql(scope, "bigquery")
+    q_field_paths = ScopeSql(scope, "bigquery")
+    envelope = _BigQueryEnvelopeRows(
         # R11-FP02: `tables` deliberately carries no facet. It is the one read
         # here that answers two questions at once -- each object's *type* (which
         # belongs to the inventory) and a materialized view's DDL (which belongs
@@ -721,51 +781,75 @@ def _fetch_envelope_rows(client: Any, *, project_id: str, region: str) -> _BigQu
         # PERMISSION_DENIED roster on a receipt whose run completed, since the
         # COLUMNS roster below is read separately and succeeded; recording it as
         # `view_definitions` would claim the whole facet was refused when the
-        # VIEWS read may well have answered. So the refusal keeps this adapter's
-        # own per-axis reason and claims no facet, which is INV-9's direction.
-        tables=_collect("tables", "table_schema, table_name, table_type, ddl", "TABLES"),
+        # VIEWS read may well have answered. Its failure is judged in `discover()`
+        # instead (`_TABLES_AXIS`), where a refusal keeps today's default type and
+        # anything else ends the run.
+        tables=_collect(
+            "tables",
+            "table_schema, table_name, table_type, ddl",
+            "TABLES",
+            _where(q_tables, "table_schema", "table_name"),
+            q_tables,
+        ),
         views=_collect(
             "views",
             "table_schema, table_name, view_definition, check_option",
             "VIEWS",
+            _where(q_views, "table_schema", "table_name") + q_views.kind_gate("VIEW"),
+            q_views,
             facet=FACET_VIEW_DEFINITIONS,
         ),
         routines=_collect(
-            "routines", _ROUTINE_COLUMNS, "ROUTINES", facet=FACET_ROUTINE_BODIES
+            "routines",
+            _ROUTINE_COLUMNS,
+            "ROUTINES",
+            _where(q_routines, "routine_schema"),
+            q_routines,
+            facet=FACET_ROUTINE_BODIES,
         ),
         parameters=_collect(
-            "parameters", _PARAMETER_COLUMNS, "PARAMETERS", facet=FACET_ROUTINE_BODIES
+            "parameters",
+            _PARAMETER_COLUMNS,
+            "PARAMETERS",
+            _where(q_parameters, "specific_schema"),
+            q_parameters,
+            facet=FACET_ROUTINE_BODIES,
         ),
         routine_options=_collect(
             "routine_options",
             "routine_schema, routine_name, option_name, option_value",
             "ROUTINE_OPTIONS",
-            description_filter,
+            _where(q_routine_options, "routine_schema", "routine_name") + description,
+            q_routine_options,
             facet=FACET_ROUTINE_BODIES,
         ),
         table_options=_collect(
             "table_options",
             "table_schema, table_name, option_name, option_value",
             "TABLE_OPTIONS",
-            description_filter,
+            _where(q_table_options, "table_schema", "table_name") + description,
+            q_table_options,
             facet=FACET_OBJECT_COMMENTS,
         ),
         schema_options=_collect(
             "schema_options",
             "schema_name, option_name, option_value",
             "SCHEMATA_OPTIONS",
-            description_filter,
+            _where(q_schema_options, "schema_name") + description,
+            q_schema_options,
             facet=FACET_OBJECT_COMMENTS,
         ),
         column_field_paths=_collect(
             "column_field_paths",
             _FIELD_PATH_COLUMNS,
             "COLUMN_FIELD_PATHS",
+            _where(q_field_paths, "table_schema", "table_name"),
+            q_field_paths,
             facet=FACET_OBJECT_COMMENTS,
         ),
-        unavailable=tuple(unavailable),
-        refusals=tuple(refusals),
     )
+    return replace(envelope, unavailable=tuple(unavailable), failures=tuple(failures))
+
 
 
 def _assemble_catalog(
@@ -861,10 +945,37 @@ class BigQueryConnector(SqlExecutor):
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
         self._config = _parse_credential_payload(dsn)
         self._command_timeout = command_timeout
+        self._scope = DiscoveryScope()
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
         return self.DEFAULT_CAPABILITIES
+
+    def scope_discovery(
+        self,
+        *,
+        include_schemas: list[str],
+        exclude_schemas: list[str],
+        object_kinds: Sequence[str] = (),
+        include_objects: Sequence[str] = (),
+        exclude_objects: Sequence[str] = (),
+    ) -> bool:
+        """R11-FP01: push the selection into this adapter's INFORMATION_SCHEMA reads.
+
+        A BigQuery dataset is the selection's schema. The dataset scope reaches every
+        read; object kinds and `schema.object` patterns reach the reads whose rows belong
+        to one object (`_fetch_envelope_rows` names them). Every value is a named query
+        parameter, and everything pushed is a superset of the selection, which
+        `discovery_selection.apply_selection` still applies to the result.
+        """
+        self._scope = discovery_scope(
+            include_schemas=include_schemas,
+            exclude_schemas=exclude_schemas,
+            object_kinds=object_kinds,
+            include_objects=include_objects,
+            exclude_objects=exclude_objects,
+        )
+        return self._scope.narrows(kinds=True)
 
     def _get_client(self) -> Any:
         try:
@@ -904,29 +1015,42 @@ class BigQueryConnector(SqlExecutor):
 
         `google-cloud-bigquery` is synchronous, so the reads happen in one
         thread hop and their failures are captured there rather than judged --
-        see the `_CapturedReads` comment for the two replay modes. The assembly
-        is a pure function of the rows and moved out of the thread with it.
+        see the `_CapturedReads` comment. The assembly is a pure function of the
+        rows and moved out of the thread with it.
 
-        **BigQuery's SQLSTATE reality.** Its errors are
-        `google.api_core.exceptions.GoogleAPICallError` subclasses -- a denial is
-        `Forbidden`, carrying an HTTP `code` of 403 and no `sqlstate` field of
-        any kind (verified against the installed client). So
-        `capability_states.is_permission_refusal` can never see a `42501` here
-        and every refused read classifies as UNAVAILABLE / FACET_QUERY_FAILED.
-        That is the honest answer for this engine rather than a guess: BigQuery
-        does not speak SQLSTATE, and mapping 403 to PERMISSION_DENIED would be a
-        second, engine-specific copy of a judgement this platform deliberately
-        keeps in one place (see the R11-FP02 remainder).
+        **BigQuery's refusal code.** Its errors are
+        `google.api_core.exceptions.GoogleAPICallError` subclasses and carry no
+        SQLSTATE. A denial is `Forbidden` -- HTTP `code` 403 -- *with* the
+        structured reason `accessDenied` in `errors`; BigQuery also answers 403
+        for quota, billing and policy, so the status alone is not a refusal.
+        `capability_states.is_permission_refusal` reads both fields since R11-FP02's
+        follow-through (`BIGQUERY_REFUSAL_REASONS`), so the judgement stays in the
+        one shared place and a real denial here is PERMISSION_DENIED.
+
+        **TABLES, the read with no facet.** A refusal of it keeps every object's
+        pre-envelope `BASE TABLE` default and leaves its reason on the catalog, as
+        it always has; anything else ends the run, exactly as a replayed facet
+        failure does. Judged with the shared `classify_read_failure`, so it is the
+        same judgement, only not recorded against a facet it does not belong to.
         """
         reads = await asyncio.to_thread(self._read_facets_sync)
         column_rows = [
             dict(row) for row in await read_facet(FACET_INVENTORY, _captured(reads.columns))
         ]
-        key_rows = await _read_absorbed(FACET_CONSTRAINTS, reads.keys)
+        key_rows = [
+            dict(row) for row in await read_facet(FACET_CONSTRAINTS, _captured(reads.keys))
+        ]
         envelope = reads.envelope
         if envelope is None:
             return _assemble_catalog(self._config.project_id, column_rows, key_rows)
-        await _record_refused_axes(envelope.refusals)
+        for axis, failure in envelope.failures:
+            if axis == _TABLES_AXIS and (
+                classify_read_failure(failure)[0] is not CapabilityState.PERMISSION_DENIED
+            ):
+                raise failure
+        await _replay_axis_failures(
+            [(facet, failure) for facet, failure in envelope.failures if facet != _TABLES_AXIS]
+        )
 
         table_types = {
             (str(row["table_schema"]), str(row["table_name"])): str(row["table_type"])
@@ -943,6 +1067,9 @@ class BigQueryConnector(SqlExecutor):
     def _read_facets_sync(self) -> _CapturedReads:
         client = self._get_client()
         region = _region_dataset(self._config.location)
+        # R11-FP01: the COLUMNS roster takes the dataset scope only -- it is what tells a
+        # FULL run which in-scope datasets still exist (`aida.connectors.schema_scope`).
+        q = ScopeSql(self._scope, "bigquery")
         cols_query = f"""
             SELECT
                 table_schema,
@@ -954,15 +1081,17 @@ class BigQueryConnector(SqlExecutor):
                 is_nullable,
                 column_default
             FROM `{self._config.project_id}`.`{region}`.INFORMATION_SCHEMA.COLUMNS
+            WHERE TRUE{q.schema("table_schema")}
             ORDER BY table_schema, table_name, ordinal_position
-        """  # noqa: S608 -- credential identifiers are strictly validated
-        columns = _capture(client, cols_query)
+        """  # noqa: S608 -- credential identifiers are strictly validated; pushed values are query parameters
+        columns = _capture(client, cols_query, q.named)
         if isinstance(columns, BaseException):
             # The roster read failed: nothing to attach an axis to, and a run
             # with no objects has nothing to assemble. `discover()` replays this
             # first and it ends the run, exactly as it did before.
             return _CapturedReads(columns=columns)
 
+        q = ScopeSql(self._scope, "bigquery")
         keys_query = f"""
             SELECT
                 table_schema,
@@ -972,21 +1101,21 @@ class BigQueryConnector(SqlExecutor):
                 column_name
             FROM `{self._config.project_id}`.`{region}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE
             WHERE constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+              {q.schema("table_schema")}{q.names("table_schema", "table_name")}
             ORDER BY table_schema, table_name, constraint_name, ordinal_position
-        """  # noqa: S608 -- credential identifiers are strictly validated
-        # R11-FP02: this read was already best-effort, and its failure was
-        # absorbed into an empty constraint list with nothing recorded anywhere
-        # -- the silent empty facet this feature exists to end. It stays
-        # absorbed (`discover()` replays it through `_read_absorbed`), and the
-        # outcome now reaches the receipt.
-        keys = _capture(client, keys_query)
+        """  # noqa: S608 -- credential identifiers are strictly validated; pushed values are query parameters
+        # R11-FP02: this read used to be absorbed whatever went wrong -- the silent
+        # empty facet this feature exists to end, and then an unprotected one: a
+        # transient failure here left every table without its keys and let a FULL
+        # run retire them. It is now replayed bare like every other facet.
+        keys = _capture(client, keys_query, q.named)
 
         # Envelope 1.1 (gap/02 N1): view text, routines with bodies and
         # descriptions. `INFORMATION_SCHEMA.COLUMNS` carries no table type, so the
         # real one comes from `TABLES`; if that query is refused, every object
         # keeps today's `BASE TABLE` default and the refusal is recorded.
         envelope = _fetch_envelope_rows(
-            client, project_id=self._config.project_id, region=region
+            client, project_id=self._config.project_id, region=region, scope=self._scope
         )
         return _CapturedReads(columns=columns, keys=keys, envelope=envelope)
 

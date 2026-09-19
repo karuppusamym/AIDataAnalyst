@@ -24,7 +24,7 @@ import {
 import { CompilerPanel, useCompiler } from "./ContextProductCompiler";
 import { KnowledgeView } from "../components/KnowledgeView";
 import { NO_ROLLOUT, RolloutPanel, useRollout } from "./ContextProductRollout";
-import { CreateDraftPanel } from "./ContextProductDraft";
+import { CreateDraftPanel, NewVersionPanel } from "./ContextProductDraft";
 import "./ContextProductsScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -48,7 +48,9 @@ import "./ContextProductsScreen.css";
      3. rollout       `ContextProductRollout.tsx` — AT-7(b) consumer bindings.
      4. create draft  `ContextProductDraft.tsx` — every field
                       `ContextProductCreate` accepts, assembled only from
-                      already-approved references.
+                      already-approved references; and, from a row, a new
+                      version of that product built from the same pickers
+                      (R11-FP12), routines included.
 
    What stays here is the registry itself plus the one thing the four share:
    the single message strip. That mirrors the legacy screen's own single
@@ -77,6 +79,8 @@ function ProductRow({
   onKnowledge,
   knowledgeOpen,
   onAsk,
+  onNewVersion,
+  newVersionOpen,
 }: {
   product: ContextProductRead;
   busy: string | null;
@@ -91,6 +95,9 @@ function ProductRow({
   /** R11-FP12 (F08): open Ask on this product, or `null` when there is nothing
    *  to ask it against -- see `askDatasourceId` below. */
   onAsk: (() => void) | null;
+  /** R11-FP12: open the new-version panel for this product. */
+  onNewVersion: () => void;
+  newVersionOpen: boolean;
 }) {
   const v = product.latest_version;
   const isBusy = busy === v.id;
@@ -142,6 +149,15 @@ function ProductRow({
         {v.status === "PUBLISHED" && onAsk ? (
           <Button onClick={onAsk} title="Open Ask with this product preselected">
             Ask through this product
+          </Button>
+        ) : null}
+        {/* R11-FP12: the next version of an ACTIVE product, built from this one.
+            Not while a draft or a review is open: a second draft beside it
+            would split one product's review into two decisions, and the
+            DRAFT itself is what an author changes and submits. */}
+        {product.lifecycle_status === "ACTIVE" && v.status !== "DRAFT" && v.status !== "REVIEW_REQUIRED" ? (
+          <Button onClick={onNewVersion} title="Draft the next version of this product from this one">
+            {newVersionOpen ? "New version ✓" : "New version"}
           </Button>
         ) : null}
         {v.status === "DRAFT" ? (
@@ -217,6 +233,8 @@ export function ContextProductsScreen() {
      in this screen, never a route of its own -- the design's knowledge view
      lives inside Context Products and Catalog object details. */
   const [knowledgeProduct, setKnowledgeProduct] = useState<ContextProductRead | null>(null);
+  /* R11-FP12: the product whose next version is being drafted, if any. */
+  const [versionProduct, setVersionProduct] = useState<ContextProductRead | null>(null);
 
   /* Compiling blocks the row that started it, the same way a lifecycle
      request does, but it does not change the version's status -- so it is
@@ -317,6 +335,8 @@ export function ContextProductsScreen() {
                       setKnowledgeProduct((current) => (current?.id === p.id ? null : p))
                     }
                     knowledgeOpen={knowledgeProduct?.id === p.id}
+                    onNewVersion={() => setVersionProduct((current) => (current?.id === p.id ? null : p))}
+                    newVersionOpen={versionProduct?.id === p.id}
                     onAsk={
                       askDatasourceId
                         ? () =>
@@ -331,6 +351,20 @@ export function ContextProductsScreen() {
               />
             )}
           </article>
+
+          {versionProduct ? (
+            <NewVersionPanel
+              key={versionProduct.latest_version.id}
+              orgId={ORG}
+              product={versionProduct}
+              channel={channel}
+              onCreated={() => {
+                setVersionProduct(null);
+                reloadRegistry();
+              }}
+              onClose={() => setVersionProduct(null)}
+            />
+          ) : null}
 
           {rolloutProduct ? (
             <RolloutPanel

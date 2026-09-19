@@ -1,7 +1,7 @@
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Final
 from urllib.parse import unquote, urlsplit
 
 import oracledb
@@ -52,8 +52,10 @@ from aida.connectors.discovery import (
     build_table_map_from_column_rows,
     normalize_object_type,
     read_facet,
+    read_optional_facet,
     view_definition_row,
 )
+from aida.connectors.schema_scope import DiscoveryScope, ScopeSql, discovery_scope
 from aida.connectors.sql_execution import SqlExecutor
 
 _EXCLUDED_SCHEMAS = (
@@ -742,7 +744,9 @@ def _grant_rows(envelope: _OracleEnvelopeRows) -> list[dict[str, Any]]:
     ]
 
 
-async def _fetch_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
+async def _fetch_rows(
+    cursor: Any, sql: str, params: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """One metadata query as a single awaitable, so `read_facet` can carry it.
 
     R11-FP02: `oracledb`'s async cursor separates `execute` from `fetchall`, and
@@ -750,9 +754,57 @@ async def _fetch_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
     at parse time or at fetch time depending on the dictionary view. One
     coroutine covering both is what makes "this facet's read" a single thing to
     wrap.
+
+    R11-FP01: `params` are the pushed-down selection's patterns and kinds, bound
+    by name (`:scope_0`) -- python-oracledb sends them to the server as bind
+    values, so nothing an operator typed is ever part of the statement text.
     """
-    await cursor.execute(sql)
+    if params:
+        await cursor.execute(sql, params)
+    else:
+        await cursor.execute(sql)
     return _rows_as_dicts(cursor.description, await cursor.fetchall())
+
+
+#: R11-FP02: every relation an Oracle discovery read names is an Oracle-supplied
+#: `ALL_*` data-dictionary view, present on every release this adapter reads. So
+#: ORA-00942 "table or view does not exist" on one of them cannot mean the view
+#: is missing -- only that it was hidden from this login, which is how Oracle
+#: refuses a view a login holds no privilege on. Passed to `read_facet` as
+#: `known_relations=True`; `capability_states.HIDDEN_RELATION_ORACLE_ERRORS`
+#: has the whole argument, including why the classifier does not assume it.
+_DICTIONARY_READ: Final = True
+
+#: R11-FP02: the dictionary view behind each envelope axis, for the value-free
+#: reason an absorbed refusal leaves on the catalog and on the objects it cost.
+_AXIS_RELATIONS: dict[str, str] = {
+    "views": "ALL_VIEWS",
+    "materialized_views": "ALL_MVIEWS",
+    "routines": "ALL_OBJECTS / ALL_PROCEDURES",
+    "routine_source": "ALL_SOURCE",
+    "arguments": "ALL_ARGUMENTS",
+    "package_members": "ALL_PROCEDURES",
+    "triggers": "ALL_TRIGGERS",
+    "sequences": "ALL_SEQUENCES",
+    "table_comments": "ALL_TAB_COMMENTS",
+    "column_comments": "ALL_COL_COMMENTS",
+    "grants": "ALL_TAB_PRIVS",
+}
+
+
+def _refused_reason(axis: str) -> str:
+    """Why an axis is empty when the source refused it -- fixed text, never the driver's.
+
+    Before R11-FP02's follow-through this was `f"{type(exc).__name__}: {exc}"`, and it
+    reached `metadata_routine.unavailable_reason` and the view definition's own reason
+    verbatim: a driver message, which can quote the statement or a value (INV-6). It
+    is now only ever rendered for a refusal (anything else re-raises), so a sentence
+    naming the dictionary view is the whole of what is known.
+    """
+    return (
+        f"{_AXIS_RELATIONS.get(axis, axis)} was refused for this login; the discovery "
+        "receipt records the facet as PERMISSION_DENIED"
+    )
 
 
 #: Envelope axis -> the discovery facet its read answers, for `_fetch_envelope_rows`.
@@ -761,13 +813,8 @@ async def _fetch_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
 #: query: `ALL_VIEWS` and `ALL_MVIEWS` are both the view-definition facet, and the
 #: four routine reads are all the routine-bodies facet, so a login refused either
 #: half of one gets that facet recorded once (`FacetReadScope.record` keeps the
-#: first outcome).
-#:
-#: `triggers` and `sequences` are absent, and that absence is the honest state
-#: rather than an oversight: `DISCOVERY_FACETS` names eight facets and neither
-#: kind is one of them, so there is no name `record` would accept or a receipt
-#: could publish. They keep the per-axis reason this adapter already gives them
-#: (see the R11-FP02 remainder).
+#: first outcome). Every axis has one, `triggers` and `sequences` included since
+#: `DISCOVERY_FACETS` named them, so no envelope read escapes the classification.
 _AXIS_FACETS: dict[str, str] = {
     "views": FACET_VIEW_DEFINITIONS,
     "materialized_views": FACET_VIEW_DEFINITIONS,
@@ -785,71 +832,98 @@ _AXIS_FACETS: dict[str, str] = {
 
 
 async def _fetch_optional_rows(
-    cursor: Any, sql: str, *, facet: str | None = None
+    cursor: Any,
+    sql: str,
+    *,
+    axis: str,
+    facet: str,
+    params: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[dict[str, Any], ...], str | None]:
-    """Run one supplementary metadata query, turning a refusal into a reason.
+    """Run one supplementary metadata query; a refusal costs the axis, nothing else does.
 
     Envelope 1.1 reads dictionary views a least-privilege reader may not hold
     (`ALL_SOURCE`, `ALL_TAB_PRIVS`, `ALL_MVIEWS`). A denial must not read as "the
-    source has none of these", so it comes back as a reason string that lands on the
-    object or on the catalog rather than as a silent empty list.
+    source has none of these", so an absorbed refusal comes back as a reason that
+    lands on the objects and on the catalog, as well as on the receipt.
 
-    R11-FP02: with a `facet`, the read goes through
-    `connectors.discovery.read_facet` first, so the source's refusal of this one
-    facet also reaches the discovery receipt as PERMISSION_DENIED /
-    SOURCE_DENIED_READ -- where a reader can tell it apart from "this schema has
-    no routines" and where the FULL reconciliation will not retire what it was
-    not allowed to look at.
+    **R11-FP02 follow-through: only a refusal is absorbed.** This function used to
+    catch *every* failure and turn it into a reason, so a dropped connection on
+    `ALL_TAB_PRIVS` produced an empty grants axis -- and because that failure was
+    UNAVAILABLE rather than PERMISSION_DENIED, `workflows.activities.
+    refused_facet_existing` did not protect the grants an earlier run captured, and
+    the FULL reconciliation retired every one of them against a source that had
+    merely stopped answering. It is now exactly `read_facet`'s rule, the one the
+    PostgreSQL and SQL Server adapters always had: a refusal is recorded against
+    its facet, absorbed and explained; anything else is recorded and re-raised, so
+    the run ends INTERRUPTED instead of reconciling. Outside a `facet_read_scope`
+    nothing is absorbed at all.
 
-    The absorption around it stays, and the layering is what keeps this change
-    additive. Inside a `facet_read_scope` a refusal is recorded and swallowed by
-    `read_facet` (no rows, no reason -- the receipt now carries the fact);
-    anything that is *not* a refusal is recorded and re-raised, and lands in the
-    `except` below, which renders the per-axis reason this adapter has always
-    rendered. Outside a scope `read_facet` absorbs nothing at all, so the reason
-    is rendered exactly as before. Either way the axis is never silently empty,
-    and no failure this adapter used to survive starts failing a run.
-
-    **Oracle's SQLSTATE reality.** `oracledb`'s `DatabaseError` exposes `code`,
-    `full_code` and `message` and *no* `sqlstate` field -- verified against the
-    installed 4.0.2 driver, whose `_Error` carries no such attribute either. So
-    `capability_states.is_permission_refusal` cannot see a `42501` for
-    `ORA-01031: insufficient privileges` (nor for `ORA-00942`, which is how
-    Oracle denies a table it will not admit exists), and every refusal here
-    classifies as UNAVAILABLE / FACET_QUERY_FAILED. That is deliberate
-    under-claiming, in INV-9's direction: "we did not get it" rather than a
-    guess at the source's intent. Practically it means this adapter records the
-    facet and keeps its own reason, and does not yet absorb a refusal.
+    **Oracle's codes.** `oracledb` reports no SQLSTATE; its `_Error.code` is the ORA
+    number, which `capability_states.is_permission_refusal` now reads: ORA-01031
+    is a refusal anywhere, and ORA-00942 is one here because every read names a
+    dictionary view that exists (`_DICTIONARY_READ`).
     """
-    try:
-        if facet is None:
-            rows = await _fetch_rows(cursor, sql)
-        else:
-            rows = list(await read_facet(facet, _fetch_rows(cursor, sql)))
-    except Exception as exc:
-        return (), f"{type(exc).__name__}: {exc}"
-    return tuple(rows), None
+    rows, refused = await read_optional_facet(
+        facet, _fetch_rows(cursor, sql, params), known_relations=_DICTIONARY_READ
+    )
+    return tuple(rows), (_refused_reason(axis) if refused else None)
 
 
-async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
-    """Read every envelope 1.1 axis Oracle exposes, recording each refusal."""
-    owner_clause = _schema_exclusion_clause("owner")
+def _owner_scope(query: ScopeSql, owner_column: str) -> str:
+    """The system-schema exclusion plus the pushed-down schema scope, on one owner column."""
+    return f"{_schema_exclusion_clause(owner_column)}{query.schema(owner_column)}"
+
+
+#: R11-FP01: selection kind -> `ALL_SOURCE.TYPE`. A package's source is its spec and its
+#: body, both of which belong to the one PACKAGE routine the envelope reports.
+_SOURCE_TYPE_KINDS: dict[str, tuple[str, ...]] = {
+    "PROCEDURE": ("PROCEDURE",),
+    "FUNCTION": ("FUNCTION",),
+    "PACKAGE": ("PACKAGE", "PACKAGE BODY"),
+}
+
+
+async def _fetch_envelope_rows(
+    cursor: Any, scope: DiscoveryScope | None = None
+) -> _OracleEnvelopeRows:
+    """Read every envelope 1.1 axis Oracle exposes, recording each refusal.
+
+    R11-FP01: `scope` is the pushed-down selection. Every read takes its schema scope;
+    the reads whose rows belong to one object -- a view's or materialized view's text, a
+    routine's source, a table's comments -- also take its `schema.object` patterns and,
+    where the read holds one kind, its kinds. The inventories that establish a schema
+    (routines, package members, triggers, sequences, grants) and the argument lists take
+    the schema scope only; `aida.connectors.schema_scope`'s module docstring says why.
+    """
+    scope = scope or DiscoveryScope()
     unavailable: list[tuple[str, str]] = []
 
-    async def _collect(axis: str, sql: str) -> tuple[dict[str, Any], ...]:
-        rows, reason = await _fetch_optional_rows(cursor, sql, facet=_AXIS_FACETS.get(axis))
+    async def _collect(axis: str, sql: str, query: ScopeSql) -> tuple[dict[str, Any], ...]:
+        rows, reason = await _fetch_optional_rows(
+            cursor, sql, axis=axis, facet=_AXIS_FACETS[axis], params=query.named or None
+        )
         if reason is not None:
             unavailable.append((axis, reason))
         return rows
 
+    q = ScopeSql(scope, "oracle")
     views = await _collect(
         "views",
-        f"SELECT owner, view_name, text_length, text FROM ALL_VIEWS WHERE {owner_clause}",  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        "SELECT owner, view_name, text_length, text FROM ALL_VIEWS "  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        f"WHERE {_owner_scope(q, 'owner')}{q.names('owner', 'view_name')}{q.kind_gate('VIEW')}",
+        q,
     )
+    # An Oracle materialized view reaches the roster through its container table (the
+    # ALL_OBJECTS row of type TABLE), so its definition belongs to a TABLE-kind object.
+    q = ScopeSql(scope, "oracle")
     materialized_views = await _collect(
         "materialized_views",
-        f"SELECT owner, mview_name, query_len, query FROM ALL_MVIEWS WHERE {owner_clause}",  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        "SELECT owner, mview_name, query_len, query FROM ALL_MVIEWS "  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        f"WHERE {_owner_scope(q, 'owner')}{q.names('owner', 'mview_name')}"
+        f"{q.kind_gate('TABLE')}",
+        q,
     )
+    q = ScopeSql(scope, "oracle")
     routines = await _collect(
         "routines",
         f"""
@@ -865,32 +939,42 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
          AND ap.object_name = ao.object_name
          AND ap.procedure_name IS NULL
         WHERE ao.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
-          AND {_schema_exclusion_clause("ao.owner")}
+          AND {_owner_scope(q, "ao.owner")}
         ORDER BY ao.owner, ao.object_name
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
+    q = ScopeSql(scope, "oracle")
     routine_source = await _collect(
         "routine_source",
         f"""
         SELECT owner, name, type, line, text
         FROM ALL_SOURCE
         WHERE type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
-          AND {owner_clause}
+          AND {_owner_scope(q, "owner")}{q.names("owner", "name")}
+          {q.kinds("type", _SOURCE_TYPE_KINDS)}
         ORDER BY owner, name, type, line
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
+    # Schema scope only: a packaged member's arguments are keyed by its package, and a
+    # member follows its package into the scan (`discovery_selection.routine_in_scope`),
+    # so a name filter here would have to reproduce that rule inside SQL.
+    q = ScopeSql(scope, "oracle")
     arguments = await _collect(
         "arguments",
         f"""
         SELECT owner, object_name, package_name, subprogram_id, argument_name, position,
                data_type, in_out
         FROM ALL_ARGUMENTS
-        WHERE data_level = 0 AND {owner_clause}
+        WHERE data_level = 0 AND {_owner_scope(q, "owner")}
         ORDER BY owner, object_name, subprogram_id, position
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
     # R11-FP03: the subprograms a package declares. SUBPROGRAM_ID keys their arguments, and
     # OVERLOAD tells two same-named members apart.
+    q = ScopeSql(scope, "oracle")
     package_members = await _collect(
         "package_members",
         f"""
@@ -898,9 +982,10 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
         FROM ALL_PROCEDURES
         WHERE procedure_name IS NOT NULL
           AND object_type = 'PACKAGE'
-          AND {owner_clause}
+          AND {_owner_scope(q, "owner")}
         ORDER BY owner, object_name, subprogram_id
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
     # R11-FP01: triggers.
     #
@@ -925,6 +1010,7 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
     # triggers out: those have no parent object, so they are not a data path
     # between two objects, which is the reason this axis exists. Recorded as a
     # scope decision rather than left as an unexplained absence.
+    q = ScopeSql(scope, "oracle")
     triggers = await _collect(
         "triggers",
         f"""
@@ -940,9 +1026,10 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
             trigger_body
         FROM ALL_TRIGGERS
         WHERE base_object_type IN ('TABLE', 'VIEW')
-          AND {owner_clause}
+          AND {_owner_scope(q, "owner")}
         ORDER BY owner, table_name, trigger_name
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
     # R11-FP01: sequences.
     #
@@ -955,6 +1042,7 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
     # envelope as `minimum_bound` / `maximum_bound`: they are limits in a
     # `CREATE SEQUENCE` statement, and a field spelled like a row value invites
     # the confusion INV-6's naming ratchet exists to catch.
+    q = ScopeSql(scope, "oracle")
     sequences = await _collect(
         "sequences",
         f"""
@@ -967,25 +1055,32 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
             cycle_flag,
             cache_size
         FROM ALL_SEQUENCES
-        WHERE {_schema_exclusion_clause("sequence_owner")}
+        WHERE {_owner_scope(q, "sequence_owner")}
         ORDER BY sequence_owner, sequence_name
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
+    q = ScopeSql(scope, "oracle")
     table_comments = await _collect(
         "table_comments",
-        f"SELECT owner, table_name, comments FROM ALL_TAB_COMMENTS WHERE {owner_clause}",  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        "SELECT owner, table_name, comments FROM ALL_TAB_COMMENTS "  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        f"WHERE {_owner_scope(q, 'owner')}{q.names('owner', 'table_name')}",
+        q,
     )
+    q = ScopeSql(scope, "oracle")
     column_comments = await _collect(
         "column_comments",
         f"""
         SELECT owner, table_name, column_name, comments
         FROM ALL_COL_COMMENTS
-        WHERE {owner_clause}
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        WHERE {_owner_scope(q, "owner")}{q.names("owner", "table_name")}
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
     # ALL_TAB_PRIVS names the owning schema TABLE_SCHEMA, where DBA_TAB_PRIVS names it
     # OWNER. ALL_USERS separates a user grantee from a role grantee; Oracle's privilege
-    # views do not say which a grantee is.
+    # views do not say which a grantee is. Schema scope only: grants establish a schema.
+    q = ScopeSql(scope, "oracle")
     grants = await _collect(
         "grants",
         f"""
@@ -1003,9 +1098,10 @@ async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
             END AS grantee_type
         FROM ALL_TAB_PRIVS p
         LEFT JOIN ALL_USERS u ON u.username = p.grantee
-        WHERE {_schema_exclusion_clause("p.table_schema")}
+        WHERE {_owner_scope(q, "p.table_schema")}
         ORDER BY p.table_schema, p.table_name, p.grantee, p.privilege
-        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+        """,  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
+        q,
     )
     return _OracleEnvelopeRows(
         views=views,
@@ -1051,10 +1147,36 @@ class OracleConnector(SqlExecutor):
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
         self._params = _parse_dsn(dsn)
         self._command_timeout = command_timeout
+        self._scope = DiscoveryScope()
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
         return self.DEFAULT_CAPABILITIES
+
+    def scope_discovery(
+        self,
+        *,
+        include_schemas: list[str],
+        exclude_schemas: list[str],
+        object_kinds: Sequence[str] = (),
+        include_objects: Sequence[str] = (),
+        exclude_objects: Sequence[str] = (),
+    ) -> bool:
+        """R11-FP01: push the selection into this adapter's dictionary queries.
+
+        The schema scope reaches every read; object kinds and `schema.object` patterns
+        reach the reads whose rows belong to one object (see `_fetch_envelope_rows` and
+        `aida.connectors.schema_scope`). Everything pushed is a superset of the
+        selection, and `discovery_selection.apply_selection` still runs on the result.
+        """
+        self._scope = discovery_scope(
+            include_schemas=include_schemas,
+            exclude_schemas=exclude_schemas,
+            object_kinds=object_kinds,
+            include_objects=include_objects,
+            exclude_objects=exclude_objects,
+        )
+        return self._scope.narrows(kinds=True)
 
     async def _connect(self, *, timeout_seconds: float) -> Any:
         connection = await oracledb.connect_async(
@@ -1086,6 +1208,9 @@ class OracleConnector(SqlExecutor):
                 catalog_row = await cursor.fetchone()
                 catalog_name = str(catalog_row[0]) if catalog_row else ""
 
+                # R11-FP01: the roster takes the schema scope only -- it is what tells a
+                # FULL run which in-scope schemas still exist (`schema_scope` docstring).
+                q = ScopeSql(self._scope, "oracle")
                 columns_query = f"""
                     SELECT
                         atc.owner AS table_schema,
@@ -1102,9 +1227,9 @@ class OracleConnector(SqlExecutor):
                       ON ao.owner = atc.owner
                      AND ao.object_name = atc.table_name
                      AND ao.object_type IN ('TABLE', 'VIEW')
-                    WHERE {_schema_exclusion_clause("atc.owner")}
+                    WHERE {_owner_scope(q, "atc.owner")}
                     ORDER BY atc.owner, atc.table_name, atc.column_id
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 # R11-FP02: the inventory read, wrapped as `FACET_INVENTORY` --
                 # which records the refusal and then still lets it fail the run,
                 # because that facet is in `RETIREMENT_BEARING_FACETS`. A FULL
@@ -1122,10 +1247,15 @@ class OracleConnector(SqlExecutor):
                         "column_default": row["COLUMN_DEFAULT"],
                     }
                     for row in await read_facet(
-                        FACET_INVENTORY, _fetch_rows(cursor, columns_query)
+                        FACET_INVENTORY,
+                        _fetch_rows(cursor, columns_query, q.named or None),
+                        known_relations=_DICTIONARY_READ,
                     )
                 ]
 
+                # R11-FP01: a table's constraints, indexes and partitions belong to it, so
+                # these reads also take the `schema.object` patterns, on the owning table.
+                q = ScopeSql(self._scope, "oracle")
                 keys_query = f"""
                     SELECT
                         ac.owner AS table_schema,
@@ -1138,9 +1268,9 @@ class OracleConnector(SqlExecutor):
                     JOIN ALL_CONS_COLUMNS acc
                       ON acc.owner = ac.owner AND acc.constraint_name = ac.constraint_name
                     WHERE ac.constraint_type IN ('P', 'U')
-                      AND {_schema_exclusion_clause("ac.owner")}
+                      AND {_owner_scope(q, "ac.owner")}{q.names("ac.owner", "ac.table_name")}
                     ORDER BY ac.owner, ac.table_name, ac.constraint_name, acc.position
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 key_rows = [
                     {
                         "table_schema": row["TABLE_SCHEMA"],
@@ -1150,10 +1280,13 @@ class OracleConnector(SqlExecutor):
                         "column_name": row["COLUMN_NAME"],
                     }
                     for row in await read_facet(
-                        FACET_CONSTRAINTS, _fetch_rows(cursor, keys_query)
+                        FACET_CONSTRAINTS,
+                        _fetch_rows(cursor, keys_query, q.named or None),
+                        known_relations=_DICTIONARY_READ,
                     )
                 ]
 
+                q = ScopeSql(self._scope, "oracle")
                 foreign_keys_query = f"""
                     SELECT
                         ac.owner AS table_schema,
@@ -1174,9 +1307,9 @@ class OracleConnector(SqlExecutor):
                      AND r_acc.constraint_name = r_ac.constraint_name
                      AND r_acc.position = acc.position
                     WHERE ac.constraint_type = 'R'
-                      AND {_schema_exclusion_clause("ac.owner")}
+                      AND {_owner_scope(q, "ac.owner")}{q.names("ac.owner", "ac.table_name")}
                     ORDER BY ac.owner, ac.table_name, ac.constraint_name, acc.position
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 foreign_key_rows = [
                     {
                         "table_schema": row["TABLE_SCHEMA"],
@@ -1188,7 +1321,9 @@ class OracleConnector(SqlExecutor):
                         "referenced_column": row["REFERENCED_COLUMN"],
                     }
                     for row in await read_facet(
-                        FACET_CONSTRAINTS, _fetch_rows(cursor, foreign_keys_query)
+                        FACET_CONSTRAINTS,
+                        _fetch_rows(cursor, foreign_keys_query, q.named or None),
+                        known_relations=_DICTIONARY_READ,
                     )
                 ]
 
@@ -1196,6 +1331,7 @@ class OracleConnector(SqlExecutor):
                 # ALL_CONS_COLUMNS above. Whether an index backs a PRIMARY KEY
                 # constraint is surfaced via a LEFT JOIN on (owner, index_name)
                 # rather than a second round trip.
+                q = ScopeSql(self._scope, "oracle")
                 indexes_query = f"""
                     SELECT
                         ai.owner AS table_schema,
@@ -1215,9 +1351,9 @@ class OracleConnector(SqlExecutor):
                       ON ac.owner = ai.owner
                      AND ac.constraint_name = ai.index_name
                      AND ac.constraint_type = 'P'
-                    WHERE {_schema_exclusion_clause("ai.owner")}
+                    WHERE {_owner_scope(q, "ai.owner")}{q.names("ai.owner", "ai.table_name")}
                     ORDER BY ai.owner, ai.table_name, ai.index_name, aic.column_position
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 index_rows = [
                     {
                         "table_schema": row["TABLE_SCHEMA"],
@@ -1229,33 +1365,42 @@ class OracleConnector(SqlExecutor):
                         "column_name": row["COLUMN_NAME"],
                     }
                     for row in await read_facet(
-                        FACET_INDEXES, _fetch_rows(cursor, indexes_query)
+                        FACET_INDEXES,
+                        _fetch_rows(cursor, indexes_query, q.named or None),
+                        known_relations=_DICTIONARY_READ,
                     )
                 ]
 
+                q = ScopeSql(self._scope, "oracle")
                 partition_type_query = f"""
                     SELECT owner AS table_schema, table_name AS table_name,
                            partitioning_type AS partition_type
                     FROM ALL_PART_TABLES
-                    WHERE {_schema_exclusion_clause("owner")}
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    WHERE {_owner_scope(q, "owner")}{q.names("owner", "table_name")}
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 partition_types = {
                     (row["TABLE_SCHEMA"], row["TABLE_NAME"]): row["PARTITION_TYPE"]
                     for row in await read_facet(
-                        FACET_PARTITIONS, _fetch_rows(cursor, partition_type_query)
+                        FACET_PARTITIONS,
+                        _fetch_rows(cursor, partition_type_query, q.named or None),
+                        known_relations=_DICTIONARY_READ,
                     )
                 }
 
+                q = ScopeSql(self._scope, "oracle")
                 partition_key_query = f"""
                     SELECT owner AS table_schema, name AS table_name,
                            column_name AS column_name, column_position AS ordinal_position
                     FROM ALL_PART_KEY_COLUMNS
-                    WHERE object_type = 'TABLE' AND {_schema_exclusion_clause("owner")}
+                    WHERE object_type = 'TABLE'
+                      AND {_owner_scope(q, "owner")}{q.names("owner", "name")}
                     ORDER BY owner, name, column_position
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 partition_key_columns: dict[tuple[str, str], list[str]] = {}
                 for row in await read_facet(
-                    FACET_PARTITIONS, _fetch_rows(cursor, partition_key_query)
+                    FACET_PARTITIONS,
+                    _fetch_rows(cursor, partition_key_query, q.named or None),
+                    known_relations=_DICTIONARY_READ,
                 ):
                     key = (row["TABLE_SCHEMA"], row["TABLE_NAME"])
                     partition_key_columns.setdefault(key, []).append(row["COLUMN_NAME"])
@@ -1267,6 +1412,7 @@ class OracleConnector(SqlExecutor):
                 # failed fetch (same honesty tradeoff as the envelope helpers
                 # above make for LONG columns, just without the reason-string
                 # machinery since CN-8 is explicitly not an envelope 1.1 axis).
+                q = ScopeSql(self._scope, "oracle")
                 partitions_query = f"""
                     SELECT
                         table_owner AS table_schema,
@@ -1274,12 +1420,14 @@ class OracleConnector(SqlExecutor):
                         partition_name AS partition_name,
                         partition_position AS ordinal_position
                     FROM ALL_TAB_PARTITIONS
-                    WHERE {_schema_exclusion_clause("table_owner")}
+                    WHERE {_owner_scope(q, "table_owner")}{q.names("table_owner", "table_name")}
                     ORDER BY table_owner, table_name, partition_position
-                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                    """  # noqa: S608 -- static dictionary SQL; every pushed value is a bind
                 partition_rows = []
                 for row in await read_facet(
-                    FACET_PARTITIONS, _fetch_rows(cursor, partitions_query)
+                    FACET_PARTITIONS,
+                    _fetch_rows(cursor, partitions_query, q.named or None),
+                    known_relations=_DICTIONARY_READ,
                 ):
                     schema_name = row["TABLE_SCHEMA"]
                     table_name = row["TABLE_NAME"]
@@ -1296,7 +1444,7 @@ class OracleConnector(SqlExecutor):
                         }
                     )
 
-                envelope = await _fetch_envelope_rows(cursor)
+                envelope = await _fetch_envelope_rows(cursor, self._scope)
         finally:
             await connection.close()
 

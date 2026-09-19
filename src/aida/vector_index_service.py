@@ -19,8 +19,16 @@ This module is the missing half:
   embedding model.
 
 **Value-freedom (INV-6).** Only metadata text is embedded -- object names and
-types -- never a source row. The index stores the vector and a hash of the
-text, never the text.
+types, and (R11-FP08) a routine's *approved, Atlas-authored* description --
+never a source row and never a routine body. The index stores the vector and a
+hash of the text, never the text.
+
+**One composer, two callers (R11-FP08).** `compose_vector_texts` is the only
+function that decides what an object's embedded text is. The rebuild below and
+the live path in `retrieval_stages` both call it, so the text a persisted
+vector encodes and the text the live path would embed cannot drift apart
+again -- and because they share it, a persisted entry can be checked against
+the text it *should* encode (`stale_index_entries`) before its score is used.
 
 **Fail closed (INV-4).** With no embedding provider configured, this refuses
 rather than backfilling with a hash double. That was a real defect once: a
@@ -31,6 +39,7 @@ the name "vector" gave ranking a signal that was noise.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -46,7 +55,11 @@ from aida.embedding_provider import (
     index_signature,
     resolve_embedding_provider,
 )
-from aida.envelope_models import MetadataRoutine
+from aida.envelope_models import (
+    MetadataRoutine,
+    RoutineDocumentation,
+    RoutineDocumentationVersion,
+)
 from aida.events import record_audit
 from aida.models import (
     Embedding,
@@ -105,16 +118,200 @@ def _system_context(organization_id: UUID) -> SecurityContext:
     )
 
 
+# --------------------------------------------------------------------------- #
+# R11-FP08: the one composer of embedded text
+# --------------------------------------------------------------------------- #
+
+#: Routine ids per `IN (...)` when loading approved descriptions. A rebuild can
+#: carry thousands of routines, and asyncpg refuses a statement with more than
+#: 32,767 bind parameters; a chunk keeps every statement far inside that.
+_DESCRIPTION_LOAD_CHUNK = 500
+
+
+def vector_text(*, owner_type: str, name: str, approved_description: str | None = None) -> str:
+    """The text a vector of this object encodes. Pure; `compose_vector_texts` feeds it.
+
+    R11-FP08: a ROUTINE's text is its display name *plus its approved
+    description*, so a routine described in business language is reachable by
+    meaning in the vector stage as it already is in the lexical one. Every other
+    owner type is exactly the `build_embedding_text(name, object_type)` it always
+    was -- byte for byte, so a table's, column's or tool's stored hash does not
+    move and nothing outside routines is re-embedded by this change.
+
+    What is deliberately *not* here, and why:
+
+    * **The routine body** -- never. It is source code holding the estate's
+      largest indirect-injection surface, and even redacted it is source-derived
+      text; the description draft never quotes it either
+      (`test_routine_description_body_states.py`). Nothing reads
+      `body_sql_redacted` on the way to this function.
+    * **The source's own comment** (`MetadataRoutine.source_description`) --
+      a rescan rewords it, and it has not been reviewed. The lexical stage reads
+      it because a comment is still words the source uses; embedding it would
+      put unreviewed text into a signal that is scored as meaning.
+    * **An unapproved description** -- the caller passes only the APPROVED
+      version's text (`approved_routine_descriptions`). A draft is a proposal
+      nobody has decided; SUPERSEDED and WITHDRAWN text is what Atlas no longer
+      asserts.
+
+    Embedding the approved description is not an INV-6 question: it is
+    Atlas-authored, reviewed prose, not a value read from a source.
+    """
+    return build_embedding_text(
+        name=name,
+        object_type=owner_type,
+        description=approved_description if owner_type == "ROUTINE" else None,
+    )
+
+
+async def approved_routine_descriptions(
+    session: AsyncSession, organization_id: UUID, routine_ids: Iterable[str | UUID]
+) -> dict[str, str]:
+    """`str(routine_id) -> approved description`, for the routines that have one.
+
+    Only the APPROVED version, and the newest one if a history ever holds two --
+    the `routine_description_service.current_routine_descriptions` rule, restated
+    here with `organization_id` on *both* tables (INV-5): that helper keys on
+    routine id alone, and this read feeds a ranking every tenant's questions
+    reach. An id that does not parse as a UUID has no description rather than
+    raising: a hit id is data, and a malformed one must not end the stage.
+    """
+    wanted: list[UUID] = []
+    for routine_id in routine_ids:
+        try:
+            wanted.append(routine_id if isinstance(routine_id, UUID) else UUID(str(routine_id)))
+        except ValueError:
+            continue
+    found: dict[str, str] = {}
+    for start in range(0, len(wanted), _DESCRIPTION_LOAD_CHUNK):
+        chunk = wanted[start : start + _DESCRIPTION_LOAD_CHUNK]
+        rows = await session.execute(
+            select(RoutineDocumentation.routine_id, RoutineDocumentationVersion.description)
+            .join(
+                RoutineDocumentation,
+                RoutineDocumentation.id == RoutineDocumentationVersion.documentation_id,
+            )
+            .where(
+                RoutineDocumentation.routine_id.in_(chunk),
+                RoutineDocumentation.organization_id == organization_id,
+                RoutineDocumentationVersion.organization_id == organization_id,
+                RoutineDocumentationVersion.status == "APPROVED",
+            )
+            # Ascending, so the last write per routine is the newest approved one.
+            .order_by(RoutineDocumentationVersion.version)
+        )
+        for routine_id, description in rows.all():
+            found[str(routine_id)] = description
+    return found
+
+
+async def compose_vector_texts(
+    session: AsyncSession,
+    organization_id: UUID,
+    objects: Sequence[tuple[str, str, str]],
+) -> list[str]:
+    """The embedded text for each `(owner_type, owner_id, display_name)`, in order.
+
+    **The only way embedded text is composed**, on both sides of the vector
+    stage: `_indexable_objects` below (what a persisted vector encodes) and
+    `retrieval_stages._live_vector_scores` (what the live path embeds). Before
+    R11-FP08 each side called `build_embedding_text` itself and the two were
+    kept equal by a comment; that is why a description could not be added --
+    adding it to one side would have produced vectors of text the other side
+    never composes, a divergence the index's coverage report cannot see because
+    the entry *is* present. `test_vector_routine_descriptions` asserts both
+    sides produce identical text for the same object.
+
+    One read at most (approved routine descriptions), and none at all when no
+    ROUTINE is among the objects -- so a pool of tables, columns and tools costs
+    exactly what it did.
+    """
+    routine_ids = [owner_id for owner_type, owner_id, _name in objects if owner_type == "ROUTINE"]
+    descriptions = (
+        await approved_routine_descriptions(session, organization_id, routine_ids)
+        if routine_ids
+        else {}
+    )
+    return [
+        vector_text(
+            owner_type=owner_type,
+            name=name,
+            approved_description=descriptions.get(owner_id) if owner_type == "ROUTINE" else None,
+        )
+        for owner_type, owner_id, name in objects
+    ]
+
+
+def text_fingerprint(text: str) -> str:
+    """The `text_hash` a persisted entry stores for `text` -- public for the stale check."""
+    return _text_hash(text)
+
+
+async def stale_index_entries(
+    session: AsyncSession,
+    organization_id: UUID,
+    expected: Mapping[tuple[str, str], str],
+    *,
+    settings: Settings,
+) -> set[tuple[str, str]]:
+    """The `(owner_type, owner_id)` keys whose persisted vector must not be used.
+
+    `expected` maps each key to the `text_fingerprint` of the text
+    `compose_vector_texts` produces for it *now*. A key is stale when the index
+    holds no entry for it under the current signature, or holds one embedded
+    from different text.
+
+    **Why this exists (R11-FP08).** An approved routine description is
+    published, superseded and withdrawn, and none of those touches the catalog
+    row `index_freshness` watches -- so an index built while a description was
+    approved stayed `USABLE` after it was withdrawn, and the vector stage kept
+    ranking the routine on text a reviewer had retired. Comparing fingerprints
+    per entry makes that impossible by construction, on every path that changes
+    a description, including ones added later: nothing has to remember to fire
+    a re-index hook. The stale entry is embedded live instead (one provider call
+    for the stale few, not the pool), and the next `rebuild_vector_index`
+    re-embeds it -- its text hash no longer matches -- after which it is served
+    from the index again.
+
+    The same check closes two older gaps in passing, because a *missing* entry
+    is stale too: a routine or column discovered after the last build (the
+    freshness rule only watches tables), and GLOSSARY_TERM, which the collector
+    has never indexed (see `_indexable_objects`) -- both used to leave the stage
+    with no vector score at all under `PERSISTED_INDEX`, the R11-B2 shape.
+
+    One statement, narrowed on the indexed `owner_id` and matched on the full
+    pair in Python -- the portable form `PostgresBruteForceIndex.search` uses.
+    """
+    if not expected:
+        return set()
+    signature = index_signature(settings)
+    rows = await session.execute(
+        select(Embedding.owner_type, Embedding.owner_id, Embedding.text_hash).where(
+            Embedding.organization_id == organization_id,
+            Embedding.index_signature == signature,
+            Embedding.chunk_index == 0,
+            Embedding.owner_id.in_({owner_id for _type, owner_id in expected}),
+        )
+    )
+    stored = {
+        (owner_type, owner_id): text_hash
+        for owner_type, owner_id, text_hash in rows.all()
+        if (owner_type, owner_id) in expected
+    }
+    return {key for key, fingerprint in expected.items() if stored.get(key) != fingerprint}
+
+
 async def _indexable_objects(
     session: AsyncSession, organization_id: UUID, datasource_id: UUID | None
 ) -> list[tuple[str, str, str]]:
     """`(owner_type, owner_id, text)` for everything worth embedding.
 
     Four statements regardless of estate size -- one per owner type -- not
-    one per object. Only ACTIVE objects: a deprecated table answering a
+    one per object, plus the approved-description read `compose_vector_texts`
+    makes for routines. Only ACTIVE objects: a deprecated table answering a
     semantic search is a wrong answer with a confident score.
     """
-    rows: list[tuple[str, str, str]] = []
+    named: list[tuple[str, str, str]] = []
 
     table_stmt = select(MetadataTable.id, MetadataTable.name).where(
         MetadataTable.organization_id == organization_id,
@@ -123,9 +320,7 @@ async def _indexable_objects(
     if datasource_id is not None:
         table_stmt = table_stmt.where(MetadataTable.datasource_id == datasource_id)
     for table_id, name in (await session.execute(table_stmt)).all():
-        rows.append(
-            ("TABLE", str(table_id), build_embedding_text(name=name, object_type="TABLE"))
-        )
+        named.append(("TABLE", str(table_id), name))
 
     column_stmt = (
         select(MetadataColumn.id, MetadataColumn.name)
@@ -139,28 +334,24 @@ async def _indexable_objects(
     if datasource_id is not None:
         column_stmt = column_stmt.where(MetadataTable.datasource_id == datasource_id)
     for column_id, name in (await session.execute(column_stmt)).all():
-        rows.append(
-            ("COLUMN", str(column_id), build_embedding_text(name=name, object_type="COLUMN"))
-        )
+        named.append(("COLUMN", str(column_id), name))
 
     # R11-FP11: routines are retrieval candidates like tables and columns, and were the only
     # kind the index did not cover: every question paid a provider call to embed them live
-    # (`retrieval_stages` logs that as `retrieval_vector_index_gap`). The text is the one the
-    # live path composes -- `schema.name`, the display name a ROUTINE hit carries -- so moving a
-    # routine into the index changes what it costs and not how it ranks.
+    # (`retrieval_stages` logs that as `retrieval_vector_index_gap`). The name is the one a
+    # ROUTINE hit carries as its display name -- `schema.name` -- so the index and the live path
+    # start from the same identity.
     #
-    # R11-FP08 deliberately did NOT change this text. An approved routine description joins
-    # retrieval as a *lexical* signal (`retrieval.hybrid_retrieve`'s ROUTINE candidate), and
-    # the embedded text has one hard constraint that a lexical candidate text does not: it
-    # must be byte-identical to what `retrieval_stages._live_vector_scores` composes, which is
-    # `build_embedding_text(name=hit.display_name, object_type=hit.object_type)` and nothing
-    # else. Adding the description here alone would make every indexed routine's vector
-    # describe text the live path never produces -- a silent divergence that the coverage gap
-    # cannot report, because the entry *is* present. Adding it on both sides is a different
-    # change: it needs the live composer (owned by `retrieval_stages`) and a full re-embed of
-    # every routine on the next publish or withdrawal of a description, which is a re-index
-    # trigger this builder has no notion of. Until both halves move together, the description
-    # ranks lexically and the vector channel ranks the name.
+    # R11-FP08, 2026-09-18: the text now also carries the routine's APPROVED description. The
+    # first FP08 slice deliberately left it out, and recorded why: the embedded text has to be
+    # byte-identical to what `retrieval_stages._live_vector_scores` composes, and a description
+    # added here alone would have been a divergence the coverage gap cannot see (the entry is
+    # present; only its text is wrong), while adding it to both sides needed a re-embed on every
+    # publish and withdrawal that this builder had no notion of. Both halves now move together:
+    # both sides compose through `compose_vector_texts`, and the re-embed is not a trigger at
+    # all but a fingerprint -- the stored `text_hash` no longer matches once a description
+    # changes, so `stale_index_entries` keeps the vector stage off the old vector and this
+    # builder's own `skipped_unchanged` comparison re-embeds exactly the routines that moved.
     routine_stmt = (
         select(MetadataSchema.name, MetadataRoutine.id, MetadataRoutine.name)
         .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
@@ -172,34 +363,33 @@ async def _indexable_objects(
     if datasource_id is not None:
         routine_stmt = routine_stmt.where(MetadataRoutine.datasource_id == datasource_id)
     for schema_name, routine_id, name in (await session.execute(routine_stmt)).all():
-        rows.append(
-            (
-                "ROUTINE",
-                str(routine_id),
-                build_embedding_text(name=f"{schema_name}.{name}", object_type="ROUTINE"),
-            )
-        )
+        named.append(("ROUTINE", str(routine_id), f"{schema_name}.{name}"))
 
     # Glossary terms are organization-wide rather than per-datasource, so a
     # datasource-scoped rebuild deliberately leaves them alone rather than
     # re-embedding the whole glossary on every source's schedule.
+    #
+    # Known and left as found (R11-FP08, 2026-09-18): nothing in this codebase writes
+    # `lifecycle_status = 'PUBLISHED'` -- terms are ACTIVE or DEPRECATED -- so this collector
+    # has never produced a glossary entry; and a GLOSSARY_TERM hit's display name is its
+    # approved version's `display_name`, not `term_key`, so an entry built from this text would
+    # not match what the live path embeds. `stale_index_entries` now treats the missing entries
+    # as stale and the live path scores glossary candidates, so nothing is silently unscored;
+    # indexing them for cost is a separate change (the text must come from the same approved
+    # version the lexical stage reads).
     if datasource_id is None:
-        # `term_key` is the term's stable business name; `lifecycle_status`
-        # is the published/deprecated axis on this model (there is no `name`
-        # or `status` column -- the definition text lives on the version).
         term_stmt = select(GlossaryTerm.id, GlossaryTerm.term_key).where(
             GlossaryTerm.organization_id == organization_id,
             GlossaryTerm.lifecycle_status == "PUBLISHED",
         )
         for term_id, name in (await session.execute(term_stmt)).all():
-            rows.append(
-                (
-                    "GLOSSARY_TERM",
-                    str(term_id),
-                    build_embedding_text(name=name, object_type="GLOSSARY_TERM"),
-                )
-            )
-    return rows
+            named.append(("GLOSSARY_TERM", str(term_id), name))
+
+    texts = await compose_vector_texts(session, organization_id, named)
+    return [
+        (owner_type, owner_id, text)
+        for (owner_type, owner_id, _name), text in zip(named, texts, strict=True)
+    ]
 
 
 async def rebuild_vector_index(

@@ -357,6 +357,7 @@ async def select_authorized_candidates(
 
 
 async def _live_vector_scores(
+    session: AsyncSession,
     embedding_provider: AsyncEmbeddingProvider,
     request: RetrievalRequest,
     candidates: Sequence[Any],
@@ -371,15 +372,24 @@ async def _live_vector_scores(
     nothing. `query_emb` is passed when the caller has already embedded the
     question -- the persisted path has -- so closing the index's coverage gap
     costs one request rather than two.
+
+    R11-FP08: the text comes from `vector_index_service.compose_vector_texts`,
+    the same function the index builder uses, so a ROUTINE candidate is
+    embedded with its approved description here exactly as it is in the
+    persisted index. It used to call `build_embedding_text` itself, which is
+    why an approved description could reach neither side: adding it to one
+    would have made the two sides embed different text for the same object.
     """
-    from aida.vector_retrieval import build_embedding_text, vector_search
+    from aida.vector_index_service import compose_vector_texts
+    from aida.vector_retrieval import vector_search
 
     if not candidates:
         return []
-    candidate_texts = [
-        build_embedding_text(name=hit.display_name, object_type=hit.object_type)
-        for hit in candidates
-    ]
+    candidate_texts = await compose_vector_texts(
+        session,
+        request.organization_id,
+        [(hit.object_type, str(hit.object_id), hit.display_name) for hit in candidates],
+    )
     if query_emb is None:
         batch = await embedding_provider.embed([request.question, *candidate_texts])
         query_vector = list(batch.vectors[0])
@@ -441,14 +451,29 @@ async def run_vector_channel(
     the bulk of the estate, and the gap stays visible if the covered set
     changes again.
 
+    **A persisted vector is used only while it encodes today's text (R11-FP08).**
+    A routine's embedded text now carries its approved description, and a
+    description is published, superseded and withdrawn without touching the
+    catalog row `index_freshness` watches -- so a freshness verdict of `USABLE`
+    says nothing about whether one routine's vector still describes it. Before
+    the persisted search, every indexed candidate's current text is composed
+    (`compose_vector_texts`, the builder's own function) and fingerprinted, and
+    an entry whose stored fingerprint differs -- or that does not exist -- is
+    kept out of the persisted search and embedded live instead. A withdrawn
+    description therefore stops steering this stage on the next question, not
+    on the next rebuild.
+
     Policy still filters before ranking: the candidate set handed to the index
     is exactly the authorized set, so the index can only reorder what the
     caller was already entitled to.
     """
     from aida.vector_index_service import (
         INDEXED_OWNER_TYPES,
+        compose_vector_texts,
         index_freshness,
         search_persisted_index,
+        stale_index_entries,
+        text_fingerprint,
     )
     from aida.vector_store import EmbeddingRef, VectorIndexUnavailable
 
@@ -499,11 +524,34 @@ async def run_vector_channel(
 
     scored: list[tuple[str, str, float]] = []
     if freshness.usable:
+        # R11-FP08: which persisted entries still encode the text this stage would embed now.
+        # Composed by the builder's own function, so "the same text" is not a convention two
+        # call sites keep but one function's output compared with its stored fingerprint.
+        indexed = [hit for hit in authorized if hit.object_type in INDEXED_OWNER_TYPES]
+        current_texts = await compose_vector_texts(
+            session,
+            request.organization_id,
+            [(hit.object_type, str(hit.object_id), hit.display_name) for hit in indexed],
+        )
+        stale = await stale_index_entries(
+            session,
+            request.organization_id,
+            {
+                (hit.object_type, str(hit.object_id)): text_fingerprint(text)
+                for hit, text in zip(indexed, current_texts, strict=True)
+            },
+            settings=request.settings,
+        )
         batch = await embedding_provider.embed([request.question])
         query_emb = tuple(batch.vectors[0])
+        # A stale entry is left out of the persisted search entirely rather than scored and
+        # then overwritten: the search ranks top-`result_limit`, so a stale vector allowed in
+        # would still displace a fresh candidate from that window even if its own score were
+        # replaced afterwards.
         refs = tuple(
             EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
             for hit in authorized
+            if (hit.object_type, str(hit.object_id)) not in stale
         )
         try:
             scored = list(
@@ -548,24 +596,34 @@ async def run_vector_channel(
             # how many needed it, because a stage that quietly scores a subset
             # is the failure this fixes and it must stay visible if the
             # covered set changes again.
+            #
+            # R11-FP08: a candidate whose entry is stale or missing (see above) is embedded
+            # live the same way, from its current text, and reported beside the uncovered
+            # types as `stale_entries` -- a count that stays high after a rebuild would mean the
+            # builder and this stage disagree about text again, which is the failure the shared
+            # composer exists to prevent.
             uncovered = [
-                hit for hit in authorized if hit.object_type not in INDEXED_OWNER_TYPES
+                hit
+                for hit in authorized
+                if hit.object_type not in INDEXED_OWNER_TYPES
+                or (hit.object_type, str(hit.object_id)) in stale
             ]
             if uncovered:
                 logger.info(
                     "retrieval_vector_index_gap",
                     uncovered=len(uncovered),
+                    stale_entries=len(stale),
                     object_types=sorted({hit.object_type for hit in uncovered}),
                     datasource_id=str(request.datasource.id),
                 )
                 scored.extend(
                     await _live_vector_scores(
-                        embedding_provider, request, uncovered, query_emb=query_emb
+                        session, embedding_provider, request, uncovered, query_emb=query_emb
                     )
                 )
 
     if not freshness.usable:
-        scored = await _live_vector_scores(embedding_provider, request, authorized)
+        scored = await _live_vector_scores(session, embedding_provider, request, authorized)
 
     contributions = [
         SignalContribution(

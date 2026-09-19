@@ -42,12 +42,12 @@ Every field of `ConnectorCapabilities`, per engine. A `PLANNED` engine advertise
 
 Optional `Connector` methods each adapter overrides (the base class declines honestly, so an override is the capability):
 
-- `bigquery`: `get_query_history`
-- `databricks`: none
+- `bigquery`: `scope_discovery`, `get_query_history`
+- `databricks`: `scope_discovery`
 - `db2`: none
-- `oracle`: none
+- `oracle`: `scope_discovery`
 - `postgres`: `scope_discovery`, `count_invisible_objects`, `discover_streaming`, `profile_column_values`
-- `snowflake`: `get_query_history`
+- `snowflake`: `scope_discovery`, `get_query_history`
 - `sqlserver`: `scope_discovery`
 - `teradata`: none
 
@@ -88,8 +88,8 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | oracle | PROCEDURE | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | oracle | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | oracle | PACKAGE | ROUTINE_CONTAINER | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
-| oracle | PACKAGE MEMBER | ROUTINE | SUPPORTED | UNAVAILABLE | UNAVAILABLE | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
-| oracle | TRIGGER | TRIGGER | SUPPORTED | SUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| oracle | PACKAGE MEMBER | ROUTINE | SUPPORTED | UNAVAILABLE | PARTIAL | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
+| oracle | TRIGGER | TRIGGER | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | oracle | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | postgres | TABLE | TABLE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | SUPPORTED | SUPPORTED | SUPPORTED |
 | postgres | VIEW | VIEW | SUPPORTED | SUPPORTED | PARTIAL | SUPPORTED | SUPPORTED | SUPPORTED |
@@ -101,7 +101,7 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | postgres | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | postgres | AGGREGATE FUNCTION | ROUTINE | SUPPORTED | UNAVAILABLE | UNAVAILABLE | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
 | postgres | WINDOW FUNCTION | ROUTINE | SUPPORTED | UNAVAILABLE | UNAVAILABLE | NOT_APPLICABLE | UNAVAILABLE | UNSUPPORTED |
-| postgres | TRIGGER | TRIGGER | SUPPORTED | PARTIAL | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| postgres | TRIGGER | TRIGGER | SUPPORTED | PARTIAL | PARTIAL | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | postgres | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | snowflake | TABLE | TABLE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | PARTIAL | SUPPORTED | SUPPORTED |
 | snowflake | VIEW | VIEW | SUPPORTED | SUPPORTED | PARTIAL | PARTIAL | SUPPORTED | SUPPORTED |
@@ -121,7 +121,7 @@ One row per engine and **native** object kind. An Oracle `PACKAGE`, a PostgreSQL
 | sqlserver | FUNCTION | ROUTINE | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | PARTIAL | UNSUPPORTED |
 | sqlserver | PACKAGE | ROUTINE_CONTAINER | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
 | sqlserver | PACKAGE MEMBER | ROUTINE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE |
-| sqlserver | TRIGGER | TRIGGER | SUPPORTED | SUPPORTED | UNSUPPORTED | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
+| sqlserver | TRIGGER | TRIGGER | SUPPORTED | SUPPORTED | PARTIAL | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | sqlserver | SEQUENCE | SEQUENCE | SUPPORTED | NOT_APPLICABLE | NOT_APPLICABLE | NOT_APPLICABLE | UNSUPPORTED | UNSUPPORTED |
 | teradata | TABLE | TABLE | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | teradata | VIEW | VIEW | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -166,12 +166,12 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | MATERIALIZED VIEW | execution | SUPPORTED |  | bigquery, postgres, snowflake | governed read execution through the query gateway, cost-estimated first via the adapter's explain path |
 | PROCEDURE | inventory | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').PROCEDURE.inventory, derived from the adapter's own capability flags |
 | PROCEDURE | definition_retrieval | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').PROCEDURE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| PROCEDURE | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood' |
+| PROCEDURE | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood' |
 | PROCEDURE | candidate_generation | PARTIAL | `CANDIDATE_SHAPE_REFUSED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated |
 | PROCEDURE | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | FUNCTION | inventory | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').FUNCTION.inventory, derived from the adapter's own capability flags |
 | FUNCTION | definition_retrieval | SUPPORTED |  | bigquery | discovery_selection.kind_capabilities('bigquery').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| FUNCTION | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood' |
+| FUNCTION | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | bigquery, oracle, postgres, snowflake, sqlserver | procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood' |
 | FUNCTION | candidate_generation | PARTIAL | `CANDIDATE_SHAPE_REFUSED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | procedure_tool_blueprint drafts only from a routine with a single read-only result statement (find_single_read_only_result_statement); a write, a nested call, dynamic SQL or an unparsed chunk is refused with a named code rather than approximated |
 | FUNCTION | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | bigquery, databricks, oracle, postgres, snowflake, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | TABLE | inventory | SUPPORTED |  | databricks | discovery_selection.kind_capabilities('databricks').TABLE.inventory, derived from the adapter's own capability flags |
@@ -211,17 +211,17 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | FUNCTION | definition_retrieval | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | PACKAGE | inventory | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').PACKAGE.inventory, derived from the adapter's own capability flags |
 | PACKAGE | definition_retrieval | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').PACKAGE.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
-| PACKAGE | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | oracle | a package body is parsed as one body by the same parser; its statements are not attributed to the member subprogram that contains them, and tool generation refuses the package outright |
+| PACKAGE | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | oracle | a package body is split into its member subprograms; each member's edges carry package_member and member_attribution=MEMBER, package-level code is PACKAGE_LEVEL, and a body that cannot be split (NO_PACKAGE_BODY, UNBALANCED_BLOCKS, UNREADABLE_MEMBER) is parsed whole with every edge PACKAGE_FALLBACK and the reason on the result; tool generation still refuses the package |
 | PACKAGE | candidate_generation | UNSUPPORTED | `CANDIDATE_SHAPE_REFUSED` | oracle | procedure_tool_blueprint refuses a package with PACKAGE_NOT_CALLABLE before reading its body -- a container is not one callable thing |
 | PACKAGE | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | PACKAGE MEMBER | inventory | SUPPORTED |  | oracle | oracle.py reads ALL_PROCEDURES with SUBPROGRAM_ID/OVERLOAD; each member is its own routine keyed by (schema, package, name, signature) |
 | PACKAGE MEMBER | definition_retrieval | UNAVAILABLE | `DEFINITION_HELD_BY_CONTAINER` | oracle | a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code |
-| PACKAGE MEMBER | parsing_lineage | UNAVAILABLE | `DEFINITION_HELD_BY_CONTAINER` | oracle | no text reaches the parser: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code |
+| PACKAGE MEMBER | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | oracle | read from the package's own source, split per member: each member's edges carry package_member and member_attribution=MEMBER; when the package body cannot be split every edge falls back to PACKAGE_FALLBACK with the reason recorded, so a member's lineage is never silently attributed to the package as a whole |
 | PACKAGE MEMBER | candidate_generation | UNAVAILABLE | `DEFINITION_HELD_BY_CONTAINER` | oracle | no eligible definition to draft from: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code |
 | PACKAGE MEMBER | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | TRIGGER | inventory | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by ALL_TRIGGERS in oracle.py |
 | TRIGGER | definition_retrieval | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis |
-| TRIGGER | parsing_lineage | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, sqlserver | the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated |
+| TRIGGER | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | oracle | procedure_lineage.parse_trigger_lineage parses the captured body with the same explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is recorded on trigger_parse_coverage. Oracle's :NEW / :OLD is recorded as UNRESOLVED_TRIGGER_SUBJECT rather than bound: sqlglot reads the leading colon as a bind placeholder, so a read from the firing row carries no source table |
 | TRIGGER | candidate_generation | UNSUPPORTED | `CANDIDATE_SHAPE_REFUSED` | oracle, postgres, sqlserver | no blueprint generator drafts this kind, and none should: a trigger is fired by a statement rather than called, and reading a sequence means advancing it, which writes to the source |
 | TRIGGER | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | oracle, postgres, sqlserver | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | SEQUENCE | inventory | SUPPORTED |  | oracle | discovery_selection.kind_capabilities('oracle').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by ALL_SEQUENCES in oracle.py |
@@ -251,6 +251,7 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | WINDOW FUNCTION | execution | UNSUPPORTED | `ADAPTER_NOT_IMPLEMENTED` | postgres | the gateway's only execution surface is estimate_read_query / execute_read_query (INV-2); nothing invokes a routine, and a procedure tool runs the SELECT its blueprint derived, never a CALL |
 | TRIGGER | inventory | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by pg_trigger in postgres.py |
 | TRIGGER | definition_retrieval | PARTIAL |  | postgres | discovery_selection.kind_capabilities('postgres').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis |
+| TRIGGER | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | postgres | procedure_lineage.parse_trigger_lineage parses the captured body with the same explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is recorded on trigger_parse_coverage. A PostgreSQL trigger has no body: the parse follows action_routine to the function that holds it, with NEW / OLD bound to the firing table |
 | SEQUENCE | inventory | SUPPORTED |  | postgres | discovery_selection.kind_capabilities('postgres').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by pg_sequence in postgres.py |
 | TABLE | inventory | SUPPORTED |  | snowflake | discovery_selection.kind_capabilities('snowflake').TABLE.inventory, derived from the adapter's own capability flags |
 | TABLE | profile_access | PARTIAL | `ADAPTER_NOT_IMPLEMENTED` | snowflake | value-free statistics only (row estimates, null rates, distinct estimates, lengths) -- snowflake declares value_range_profiling=False, so ranges and top values are refused rather than approximated |
@@ -282,6 +283,7 @@ Engines whose cell is identical are listed together, and the two self-explanator
 | FUNCTION | definition_retrieval | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').FUNCTION.definition; a captured definition keeps `truncated` and `unavailable_reason`, reported per object as TRUNCATED / UNAVAILABLE by capability_states.definition_read_state |
 | TRIGGER | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').TRIGGER.inventory, derived from the adapter's own capability flags, and backed by sys.triggers in sqlserver.py |
 | TRIGGER | definition_retrieval | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').TRIGGER.definition; a captured trigger body is literal-redacted, fingerprinted and screened exactly as a routine body is, and keeps `truncated` / `unavailable_reason`. PARTIAL where the engine keeps the code outside the trigger: a PostgreSQL trigger has no body, and the adapter records the action function whose own body arrives on the routine axis |
+| TRIGGER | parsing_lineage | PARTIAL | `PARSER_DEGRADES_EXPLICITLY` | sqlserver | procedure_lineage.parse_trigger_lineage parses the captured body with the same explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is recorded on trigger_parse_coverage. INSERTED / DELETED -- aliased or not -- are bound to the firing table, so a write from the firing row names its source |
 | SEQUENCE | inventory | SUPPORTED |  | sqlserver | discovery_selection.kind_capabilities('sqlserver').SEQUENCE.inventory, derived from the adapter's own capability flags, and backed by sys.sequences in sqlserver.py |
 
 ### Notes on native identity
@@ -314,11 +316,11 @@ Per-construct detail is in [the parser capability matrix](procedure-lineage-capa
 
 ## Source mapping
 
-- Granularity available: `statement_ordinal`
-- State: `UNSUPPORTED` (`ADAPTER_NOT_IMPLEMENTED`)
-- Evidence: the only positional field on a parsed lineage fact is statement_ordinal; no line, column, character-offset or range field exists on ProcedureLineageEdgeRecord or on deep_procedure_lineage_edge
+- Granularity available: `statement_ordinal, statement_range, statement_range_status`
+- State: `PARTIAL` (`PARSER_DEGRADES_EXPLICITLY`)
+- Evidence: each parsed lineage fact carries statement_range (half-open code-point offsets, 1-based start/end line and column) and statement_range_status (STATEMENT / GAP_STATEMENT / CALL_SITE / NOT_LOCATED) into the stored, redacted body, pinned by statement_text_digest (SHA-256 of that text); persisted on deep_procedure_lineage_edge and trigger_lineage_edge; NULL positions with NOT_LOCATED where no statement of the text holds the fact, never a range of zero
 
-Recorded as unsupported rather than approximated. A character range would have to be an offset into the text the range describes, and Atlas does not hold that text: R11-D16 makes storage keep only a re-rendered or lexically scrubbed form of a routine body, never the source bytes, so an offset computed on stored text does not point at the customer's source, and an offset computed on the raw body cannot be stored because the raw body is not. Control-flow recognition compounds it -- the procedure parser peels IF/WHILE/LOOP bodies with text-level regexes before sqlglot ever sees a statement, so offsets would have to survive several slicing passes. A precise-looking number that points at the wrong text is worse than an honest statement ordinal, and publishing one would be exactly the marketed-vs-actual drift review §5 names.
+Ranges index the text Atlas holds and parsed -- body_sql_redacted, the text a steward is shown -- never the customer's source bytes, which Atlas does not keep (R11-D16): a PARSED redaction re-renders the body, so a raw-text offset would point at the wrong place, and the digest lets a reader prove a range still indexes the stored body. Statement grain, from the parser's own splitter and control-flow peel, not token grain: sqlglot's positions are relative to the peeled, sometimes rewritten, remainder. An unparsed statement reads GAP_STATEMENT with the span of the text it could not read. PARTIAL because a fact with no statement of the text is NOT_LOCATED rather than approximated.
 
 ## dbt macro and hook coverage
 
@@ -335,14 +337,13 @@ Bounded coverage reporting, not resolution. Macro expansion is **not** resolved 
 
 Named here so the deferral is published rather than merely decided. Each already appears as an `UNSUPPORTED` or `NOT_APPLICABLE` cell above.
 
-- A trigger's own body produces no lineage: R11-FP01 discovers the trigger, its firing table, its events, its timing and (on Oracle and SQL Server) its redacted body, so the table -> trigger edge is a known fact -- but no pass hands that body to `procedure_lineage`, so the relations the body itself reads and writes are still invisible.
-- Discovered triggers and sequences are not persisted yet: `metadata_trigger` and `metadata_sequence` exist with their migration, and `ingestion.persist_envelope_extensions` has no writer for either, so both axes reach the envelope and stop there. Until that lands, every trigger and sequence count on a discovery receipt is zero for a reason that is not the source's.
+- An Oracle trigger's read from its firing row names no source table: `procedure_lineage` binds PostgreSQL's NEW / OLD and SQL Server's INSERTED / DELETED to the firing table, but records Oracle's `:NEW` / `:OLD` as UNRESOLVED_TRIGGER_SUBJECT rather than binding it, because sqlglot reads the leading colon as a bind placeholder.
 - Databricks now reads view definitions and routine bodies, and declares no `grants` axis: Unity Catalog's privilege model is not the SQL grant model that axis records. Its dialect is also refused by both lineage parsers, so the definitions it now captures are inventoried and never parsed.
 - PostgreSQL aggregate and window functions are discovered with their identity, signature, parameters and return type, and their definition is UNAVAILABLE: `pg_get_functiondef` refuses those prokinds, so PostgreSQL exposes no CREATE statement to capture.
-- Schema-scope pushdown reaches the source's own queries on PostgreSQL and SQL Server only; the other four adapters filter after reading, so an excluded schema is still read.
-- The push-ingestion path applies no discovery selection and records no invisible-object count, so a pushed estate has no NOT_SELECTED or visibility evidence of its own.
+- Discovery-selection pushdown: all six adapters take the schema scope into their own metadata queries. Oracle, Snowflake and BigQuery also take the `schema.object` patterns and object kinds, and Databricks the patterns, into the reads whose rows belong to one object; PostgreSQL and SQL Server push the schema scope only. No adapter narrows the inventories that establish which schemas exist -- a FULL run retires a schema it did not see -- so kinds and patterns are still applied to those after reading.
+- The push-ingestion path records no invisible-object count, so a pushed estate has no visibility evidence of its own. (It does apply the discovery selection, since 2026-09-17; this entry used to say it did not.)
 - There is no definition-history read route: metadata_routine_definition_version accumulates versions that no endpoint serves.
 - `count_invisible_objects` answers on PostgreSQL only; every other adapter inherits None, which is reported as unknown visibility rather than as nothing hidden.
 - Query history is declared False on all six adapters, including the two (Snowflake, BigQuery) whose method exists, because nothing consumes it.
-- Precise source mapping is unsupported: see the source-mapping record.
+- Source mapping is statement-grain, not token-grain: a parsed fact carries the range of its statement in the stored, redacted body, and a fact no statement holds is NOT_LOCATED -- see the source-mapping record.
 - No facet carries a tested engine-version or deployment-variant range; the matrix key names both as not recorded.

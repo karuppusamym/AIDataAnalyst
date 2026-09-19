@@ -200,6 +200,8 @@ async def test_each_gap_is_counted_routed_and_hidden_past_the_gate(
         "LINEAGE_AWAITING_REVIEW": 1,
         "SOURCE_CHANGE_HOLDS": 1,
         "CHANGE_SIGNALS_PENDING": 1,
+        # R11-FP05: `v_hidden` and `orders` declare no key and nobody approved one.
+        "GRAIN_UNCERTAIN": 2,
     }
     for gap in listed.gaps:
         assert (gap.resolution, gap.owner, gap.explanation) == GAP_DEFINITIONS[gap.kind]

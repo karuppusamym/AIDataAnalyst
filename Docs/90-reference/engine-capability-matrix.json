@@ -26,16 +26,15 @@
     }
   ],
   "declared_gaps": [
-    "A trigger's own body produces no lineage: R11-FP01 discovers the trigger, its firing table, its events, its timing and (on Oracle and SQL Server) its redacted body, so the table -> trigger edge is a known fact -- but no pass hands that body to `procedure_lineage`, so the relations the body itself reads and writes are still invisible.",
-    "Discovered triggers and sequences are not persisted yet: `metadata_trigger` and `metadata_sequence` exist with their migration, and `ingestion.persist_envelope_extensions` has no writer for either, so both axes reach the envelope and stop there. Until that lands, every trigger and sequence count on a discovery receipt is zero for a reason that is not the source's.",
+    "An Oracle trigger's read from its firing row names no source table: `procedure_lineage` binds PostgreSQL's NEW / OLD and SQL Server's INSERTED / DELETED to the firing table, but records Oracle's `:NEW` / `:OLD` as UNRESOLVED_TRIGGER_SUBJECT rather than binding it, because sqlglot reads the leading colon as a bind placeholder.",
     "Databricks now reads view definitions and routine bodies, and declares no `grants` axis: Unity Catalog's privilege model is not the SQL grant model that axis records. Its dialect is also refused by both lineage parsers, so the definitions it now captures are inventoried and never parsed.",
     "PostgreSQL aggregate and window functions are discovered with their identity, signature, parameters and return type, and their definition is UNAVAILABLE: `pg_get_functiondef` refuses those prokinds, so PostgreSQL exposes no CREATE statement to capture.",
-    "Schema-scope pushdown reaches the source's own queries on PostgreSQL and SQL Server only; the other four adapters filter after reading, so an excluded schema is still read.",
-    "The push-ingestion path applies no discovery selection and records no invisible-object count, so a pushed estate has no NOT_SELECTED or visibility evidence of its own.",
+    "Discovery-selection pushdown: all six adapters take the schema scope into their own metadata queries. Oracle, Snowflake and BigQuery also take the `schema.object` patterns and object kinds, and Databricks the patterns, into the reads whose rows belong to one object; PostgreSQL and SQL Server push the schema scope only. No adapter narrows the inventories that establish which schemas exist -- a FULL run retires a schema it did not see -- so kinds and patterns are still applied to those after reading.",
+    "The push-ingestion path records no invisible-object count, so a pushed estate has no visibility evidence of its own. (It does apply the discovery selection, since 2026-09-17; this entry used to say it did not.)",
     "There is no definition-history read route: metadata_routine_definition_version accumulates versions that no endpoint serves.",
     "`count_invisible_objects` answers on PostgreSQL only; every other adapter inherits None, which is reported as unknown visibility rather than as nothing hidden.",
     "Query history is declared False on all six adapters, including the two (Snowflake, BigQuery) whose method exists, because nothing consumes it.",
-    "Precise source mapping is unsupported: see the source-mapping record.",
+    "Source mapping is statement-grain, not token-grain: a parsed fact carries the range of its statement in the stored, redacted body, and a fact no statement holds is NOT_LOCATED -- see the source-mapping record.",
     "No facet carries a tested engine-version or deployment-variant range; the matrix key names both as not recorded."
   ],
   "engines": [
@@ -68,6 +67,7 @@
       "maturity": "BETA",
       "notes": "Pull discovery via region-qualified INFORMATION_SCHEMA (primary-key constraints only; foreign-key metadata honestly omitted, uncertified), dry-run byte estimation, and governed read execution bounded by the gateway's deterministic byte-budget gate.",
       "overridden_methods": [
+        "scope_discovery",
         "get_query_history"
       ],
       "parser_dialect_supported": true
@@ -100,7 +100,9 @@
       "live_validation": "NOT_EXERCISED",
       "maturity": "BETA",
       "notes": "Pull discovery of Unity Catalog catalogs/schemas/tables/columns via per-catalog INFORMATION_SCHEMA, PRIMARY KEY/UNIQUE constraints, best-effort FOREIGN KEY discovery (degrades to none rather than failing on older metastores), table/column/schema/catalog comments, view definitions and routine bodies with parameters (R11-FP01, read from Unity Catalog's information_schema through the same best-effort path), EXPLAIN COST-based query estimation, and bounded profiling. PAT auth only (no delegated/workload identity); the grant axis is not implemented, because Unity Catalog's privilege model is not the SQL grant model that axis records. Unity Catalog has no trigger and no sequence object, so both of those read NOT_APPLICABLE rather than unsupported. Code complete; never exercised against a live Databricks workspace -- same honesty gap as the Snowflake, Oracle and BigQuery rows.",
-      "overridden_methods": [],
+      "overridden_methods": [
+        "scope_discovery"
+      ],
       "parser_dialect_supported": false
     },
     {
@@ -162,7 +164,9 @@
       "live_validation": "NOT_EXERCISED",
       "maturity": "BETA",
       "notes": "Pull discovery, constraints, bounded profiling, and governed read execution. Query-estimate enforcement remains intentionally unavailable until an Oracle explain path is certified.",
-      "overridden_methods": [],
+      "overridden_methods": [
+        "scope_discovery"
+      ],
       "parser_dialect_supported": true
     },
     {
@@ -230,6 +234,7 @@
       "maturity": "BETA",
       "notes": "Pull discovery across multi-database catalogs via INFORMATION_SCHEMA, referential constraints, partition-pruned EXPLAIN cost estimation, approximate statistics profiling, and warehouse query ID traceability.",
       "overridden_methods": [
+        "scope_discovery",
         "get_query_history"
       ],
       "parser_dialect_supported": true
@@ -533,7 +538,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -578,7 +583,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1613,7 +1618,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1658,7 +1663,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1703,7 +1708,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "a package body is parsed as one body by the same parser; its statements are not attributed to the member subprogram that contains them, and tool generation refuses the package outright",
+          "evidence": "a package body is split into its member subprograms; each member's edges carry package_member and member_attribution=MEMBER, package-level code is PACKAGE_LEVEL, and a body that cannot be split (NO_PACKAGE_BODY, UNBALANCED_BLOCKS, UNREADABLE_MEMBER) is parsed whole with every edge PACKAGE_FALLBACK and the reason on the result; tool generation still refuses the package",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -1748,10 +1753,10 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "no text reaches the parser: a member's body is deliberately absent with its reason recorded; the package's own source holds it, and the member is not counted as withheld code",
+          "evidence": "read from the package's own source, split per member: each member's edges carry package_member and member_attribution=MEMBER; when the package body cannot be split every edge falls back to PACKAGE_FALLBACK with the reason recorded, so a member's lineage is never silently attributed to the package as a whole",
           "facet": "parsing_lineage",
-          "reason": "DEFINITION_HELD_BY_CONTAINER",
-          "state": "UNAVAILABLE"
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -1793,10 +1798,10 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated",
+          "evidence": "procedure_lineage.parse_trigger_lineage parses the captured body with the same explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is recorded on trigger_parse_coverage. Oracle's :NEW / :OLD is recorded as UNRESOLVED_TRIGGER_SUBJECT rather than bound: sqlglot reads the leading colon as a bind placeholder, so a read from the firing row carries no source table",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -2063,7 +2068,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2108,7 +2113,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2333,10 +2338,10 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated",
+          "evidence": "procedure_lineage.parse_trigger_lineage parses the captured body with the same explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is recorded on trigger_parse_coverage. A PostgreSQL trigger has no body: the parse follows action_routine to the function that holds it, with NEW / OLD bound to the firing table",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -2603,7 +2608,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -2648,7 +2653,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3053,7 +3058,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3098,7 +3103,7 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "procedure_lineage explicitly degrades on 6 of 29 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
+          "evidence": "procedure_lineage explicitly degrades on 6 of 33 recognised constructs, each producing a named UNPARSED marker rather than a silent drop; per-object completion is recorded on routine_parse_coverage, so 'inventoried' is never read as 'understood'",
           "facet": "parsing_lineage",
           "reason": "PARSER_DEGRADES_EXPLICITLY",
           "state": "PARTIAL"
@@ -3233,10 +3238,10 @@
           "state": "SUPPORTED"
         },
         "parsing_lineage": {
-          "evidence": "the firing table is discovered and carried on the envelope, so the table -> trigger edge is a known fact; no pass hands a trigger body to procedure_lineage, so the relations the body itself reads and writes produce no edge. Declared as a gap rather than approximated",
+          "evidence": "procedure_lineage.parse_trigger_lineage parses the captured body with the same explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is recorded on trigger_parse_coverage. INSERTED / DELETED -- aliased or not -- are bound to the firing table, so a write from the firing row names its source",
           "facet": "parsing_lineage",
-          "reason": "ADAPTER_NOT_IMPLEMENTED",
-          "state": "UNSUPPORTED"
+          "reason": "PARSER_DEGRADES_EXPLICITLY",
+          "state": "PARTIAL"
         },
         "profile_access": {
           "evidence": "this kind holds no rows, so there is nothing to profile",
@@ -3477,11 +3482,11 @@
     }
   ],
   "source_mapping": {
-    "evidence": "the only positional field on a parsed lineage fact is statement_ordinal; no line, column, character-offset or range field exists on ProcedureLineageEdgeRecord or on deep_procedure_lineage_edge",
-    "granularity": "statement_ordinal",
-    "rationale": "Recorded as unsupported rather than approximated. A character range would have to be an offset into the text the range describes, and Atlas does not hold that text: R11-D16 makes storage keep only a re-rendered or lexically scrubbed form of a routine body, never the source bytes, so an offset computed on stored text does not point at the customer's source, and an offset computed on the raw body cannot be stored because the raw body is not. Control-flow recognition compounds it -- the procedure parser peels IF/WHILE/LOOP bodies with text-level regexes before sqlglot ever sees a statement, so offsets would have to survive several slicing passes. A precise-looking number that points at the wrong text is worse than an honest statement ordinal, and publishing one would be exactly the marketed-vs-actual drift review \u00a75 names.",
-    "reason": "ADAPTER_NOT_IMPLEMENTED",
-    "state": "UNSUPPORTED"
+    "evidence": "each parsed lineage fact carries statement_range (half-open code-point offsets, 1-based start/end line and column) and statement_range_status (STATEMENT / GAP_STATEMENT / CALL_SITE / NOT_LOCATED) into the stored, redacted body, pinned by statement_text_digest (SHA-256 of that text); persisted on deep_procedure_lineage_edge and trigger_lineage_edge; NULL positions with NOT_LOCATED where no statement of the text holds the fact, never a range of zero",
+    "granularity": "statement_ordinal, statement_range, statement_range_status",
+    "rationale": "Ranges index the text Atlas holds and parsed -- body_sql_redacted, the text a steward is shown -- never the customer's source bytes, which Atlas does not keep (R11-D16): a PARSED redaction re-renders the body, so a raw-text offset would point at the wrong place, and the digest lets a reader prove a range still indexes the stored body. Statement grain, from the parser's own splitter and control-flow peel, not token grain: sqlglot's positions are relative to the peeled, sometimes rewritten, remainder. An unparsed statement reads GAP_STATEMENT with the span of the text it could not read. PARTIAL because a fact with no statement of the text is NOT_LOCATED rather than approximated.",
+    "reason": "PARSER_DEGRADES_EXPLICITLY",
+    "state": "PARTIAL"
   },
   "states": [
     "SUPPORTED",

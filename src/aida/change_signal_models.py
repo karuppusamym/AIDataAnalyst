@@ -6,6 +6,13 @@ one reviewable file for one new table, registered on the same `Base` so Alembic 
 
 Value-free by construction: a signal names a subject by id and kind, says what kind of change
 it was, and nothing else -- no name, no text, no digest of text.
+
+R11-FP15 (meaning, 2026-09-18): five more subject kinds name the *meaning* versions a reader
+is given -- `TABLE_DESCRIPTION`, `COLUMN_DESCRIPTION` and `ROUTINE_DESCRIPTION` (a row of
+`asset_documentation_version`, `column_documentation_version` and
+`routine_documentation_version`), `SEMANTIC_MODEL` (`semantic_model_version`) and
+`GLOSSARY_TERM` (`glossary_term_version`) -- and one more signal type, `MEANING_RETIRED`, with
+the classes `MEANING_REPLACED` and `MEANING_WITHDRAWN`. See `change_signals` for what counts.
 """
 
 from datetime import UTC, datetime
@@ -28,19 +35,25 @@ class MetadataChangeSignal(Base):
 
     __tablename__ = "metadata_change_signal"
     __table_args__ = (
+        # R11-FP15: the three constraints below were widened by migration `c6e2a9f41d37`; the
+        # text here must stay character-for-character what that migration creates, or the
+        # ORM-vs-migration gate reports drift.
         CheckConstraint(
-            "subject_kind IN ('TABLE', 'VIEW', 'ROUTINE', 'GRANT', 'ONTOLOGY')",
+            "subject_kind IN ('TABLE', 'VIEW', 'ROUTINE', 'GRANT', 'ONTOLOGY', "
+            "'TABLE_DESCRIPTION', 'COLUMN_DESCRIPTION', 'ROUTINE_DESCRIPTION', "
+            "'SEMANTIC_MODEL', 'GLOSSARY_TERM')",
             name="subject_kind",
         ),
         CheckConstraint(
             "signal_type IN ('DEFINITION_CHANGED', 'STRUCTURE_CHANGED', 'DEPRECATED', "
-            "'REACTIVATED', 'PERMISSION_CHANGED', 'MEANING_PUBLISHED')",
+            "'REACTIVATED', 'PERMISSION_CHANGED', 'MEANING_PUBLISHED', 'MEANING_RETIRED')",
             name="signal_type",
         ),
         CheckConstraint(
             "change_class IS NULL OR change_class IN ('LITERAL_ONLY', 'STRUCTURAL', "
             "'GRANT_ADDED', 'GRANT_MODIFIED', 'GRANT_REVOKED', 'SIGNATURE_CHANGED', "
-            "'COLUMNS_ADDED', 'COLUMNS_RETURNED', 'COLUMNS_REMOVED', 'COLUMNS_RETYPED')",
+            "'COLUMNS_ADDED', 'COLUMNS_RETURNED', 'COLUMNS_REMOVED', 'COLUMNS_RETYPED', "
+            "'MEANING_REPLACED', 'MEANING_WITHDRAWN')",
             name="change_class",
         ),
         CheckConstraint("status IN ('PENDING', 'PROCESSED')", name="status"),
@@ -66,9 +79,12 @@ class MetadataChangeSignal(Base):
     # grant was added, modified or revoked. A retired routine: SIGNATURE_CHANGED when one new
     # signature replaced it. A reshaped table (R11-FP16): COLUMNS_ADDED, COLUMNS_RETURNED or
     # COLUMNS_REMOVED, which a query whose columns still bind survives, or COLUMNS_RETYPED.
+    # MEANING_RETIRED (R11-FP15): MEANING_REPLACED when another approved version now stands,
+    # MEANING_WITHDRAWN when none does.
     change_class: Mapped[str | None] = mapped_column(String(20))
-    # The routine that replaced a SIGNATURE_CHANGED one. No foreign key: a subject id points into
-    # whichever table its kind names.
+    # What replaced the subject: the routine that replaced a SIGNATURE_CHANGED one, or the
+    # approved meaning version that replaced a MEANING_REPLACED one (same store as the subject).
+    # No foreign key: a subject id points into whichever table its kind names.
     related_subject_id: Mapped[UUID | None] = mapped_column()
     status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
     detected_at: Mapped[datetime] = mapped_column(

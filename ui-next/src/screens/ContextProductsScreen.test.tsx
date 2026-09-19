@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ContextCompilationRead, ContextProductCreate, ContextProductRead, GovernanceReviewRead, ProjectRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
@@ -38,6 +38,9 @@ const fetchTools = vi.fn();
 const listGlossaryTerms = vi.fn();
 const fetchContextProductRoutineOptions = vi.fn();
 const listOntologyVersions = vi.fn();
+/* R11-FP12: a new version posts through the shared transport verb. `demoOr` is
+   pinned to its live arm so the request is the one a deployed client sends. */
+const postJson = vi.fn();
 
 vi.mock("../lib/api/ontology", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/ontology")>();
@@ -79,6 +82,8 @@ vi.mock("../lib/api", async (importOriginal) => {
       requestContextProductDeprecation(versionId, signal),
     compileContextProductVersion: (versionId: string, target: string, signal?: AbortSignal) =>
       compileContextProductVersion(versionId, target, signal),
+    postJson: (...args: unknown[]) => postJson(...args),
+    demoOr: (_demo: unknown, live: () => Promise<unknown>) => live(),
   };
 });
 
@@ -141,7 +146,7 @@ beforeEach(() => {
     fetchCatalogRows, fetchSemanticModelVersions, fetchTools, listGlossaryTerms,
     fetchContextProductRoutineOptions, listOntologyVersions,
     fetchContextProductVersions, fetchContextProductBindings,
-    setContextProductBinding, removeContextProductBinding,
+    setContextProductBinding, removeContextProductBinding, postJson,
   ]) fn.mockReset();
   fetchContextProductRoutineOptions.mockResolvedValue([]);
   listOntologyVersions.mockResolvedValue([]);
@@ -436,6 +441,73 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     const [, bodyArg] = createContextProduct.mock.calls[0]!;
     expect(bodyArg.ontology_version_ids).toEqual(["ov1"]);
   });
+  /* ---- New version (R11-FP12) ------------------------------------------
+     Routines could be named only when a product was first created: nothing on
+     this screen added a version at all. A new version starts from the latest,
+     offers the same six pickers -- the routine one fed by the same options
+     route -- and names its base. */
+
+  it("drafts a new version naming a routine through the same picker, based on the latest (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1 });
+    fetchContextProductRoutineOptions.mockResolvedValue([
+      {
+        id: "r1", datasource_id: "ds_snowflake_prod", datasource_name: "snowflake_prod",
+        schema_name: "core", name: "rebuild_totals", routine_type: "PROCEDURE", signature: "()",
+      },
+    ]);
+    postJson.mockResolvedValue({ ...PUBLISHED_PRODUCT.latest_version, id: "cpv_3", version: 3, status: "DRAFT" });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "New version" }));
+    const panel = await screen.findByRole("article", { name: "New version of consumer-risk-context" });
+    // Pre-filled from the base: its name, and the table it already names.
+    expect(within(panel).getByLabelText("Name")).toHaveValue("Consumer risk analysis");
+    expect(within(panel).getByRole("checkbox", { name: /core\.orders_raw/ })).toBeChecked();
+    fireEvent.click(await within(panel).findByRole("checkbox", { name: /core\.rebuild_totals\(\)/ }));
+    fireEvent.click(within(panel).getByRole("button", { name: "Create version draft" }));
+
+    await waitFor(() => expect(postJson).toHaveBeenCalledTimes(1));
+    const [path, body] = postJson.mock.calls[0]!;
+    expect(path).toBe("/v1/context-products/cp_1/versions");
+    expect(body).toEqual({
+      name: "Consumer risk analysis",
+      description: "Bounded context for risk analysts.",
+      purpose: "Explain drivers of consumer delinquency for the monthly risk packet.",
+      owner_type: "GROUP",
+      owner_principal: "risk-data-stewards",
+      table_ids: ["t1"],
+      semantic_model_version_ids: [],
+      glossary_term_version_ids: [],
+      eligible_tool_version_ids: [],
+      routine_ids: ["r1"],
+      allowed_consumer_roles: ["Analyst"],
+      lineage_depth: 2,
+      quality_requirements: { minimum_score: 85, deny_on_critical_incident: true },
+      policy_summary: PUBLISHED_PRODUCT.latest_version.policy_summary,
+      support_window_days: null,
+      based_on_version_id: "cpv_1",
+    });
+    expect(fetchContextProductRoutineOptions).toHaveBeenCalledWith("proj_core", expect.anything());
+    // The registry reloads and the panel closes once the draft exists.
+    await waitFor(() => expect(fetchContextProducts).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.queryByRole("article", { name: "New version of consumer-risk-context" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("does not offer a new version while a draft is the latest (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [DRAFT_PRODUCT], limit: 200, offset: 0, total: 1 });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "New version" })).not.toBeInTheDocument();
+  });
+
   /* ---- Staged rollout (AT-7(b) consumer bindings) --------------------- */
 
   it("pins a named consumer to a specific version through the real binding endpoint", async () => {

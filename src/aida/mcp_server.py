@@ -52,7 +52,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import structlog
@@ -84,10 +84,13 @@ from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_compiler import coverage_section, freshness_section, ontology_section
 from aida.context_product_coverage import (
+    load_coverage_changes,
     load_ontology_meaning,
+    load_pinned_meaning,
     load_routine_references,
     load_source_freshness,
     load_view_coverage,
+    publication_time,
 )
 from aida.context_product_policy import (
     ContextProductQualityDecision,
@@ -99,7 +102,12 @@ from aida.context_product_policy import (
     was_previously_authorized_consumer,
 )
 from aida.db import get_session
-from aida.envelope_models import MetadataRoutine, MetadataViewDefinition
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataTrigger,
+    MetadataViewDefinition,
+)
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import (
     SCREENING_VERSION,
@@ -142,6 +150,7 @@ from aida.okf_store import (
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
 from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
+from aida.routine_lineage_edges import trigger_body
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
@@ -278,9 +287,12 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "dbt-matched entities get redacted compiled SQL, dependencies, tests, "
             "materialization and source artifact hash; a view table (AT-19, envelope 1.1) "
             "gets its redacted definition SQL, redaction status and screening status; a "
-            "routine gets its redacted body the same way. Answers 'why do you say so' for a "
-            "VIEW_DEFINITION, PROCEDURE_DEFINITION or DBT_DEPENDENCY edge from "
-            "get_lineage_graph -- not just that the edge exists."
+            "routine gets its redacted body the same way, and so does a SQL Server or "
+            "Oracle trigger (a PostgreSQL trigger has no body of its own and points at the "
+            "function that carries it). A body the screening gate withholds comes back "
+            "null with body_withheld_reason. Answers 'why do you say so' for a "
+            "VIEW_DEFINITION, PROCEDURE_DEFINITION, TRIGGER_DEFINITION or DBT_DEPENDENCY "
+            "edge from get_lineage_graph -- not just that the edge exists."
         ),
         "inputSchema": {
             "type": "object",
@@ -291,7 +303,7 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "description": (
                         "Table UUID or dbt-resource UUID returned by resolve_entity, or the "
                         "entity_id of an edge's transformation_reference (a view's table "
-                        "UUID, or a routine UUID)"
+                        "UUID, a routine UUID, or a trigger UUID)"
                     ),
                 },
             },
@@ -1297,6 +1309,12 @@ async def _transformation_detail(
        `PROCEDURE_DEFINITION` edge exactly one routine establishes names it as
        `transformation_reference.entity_id`; see
        `_routine_transformation_detail`.
+
+    4. R11-FP01: a captured trigger's body (`MetadataTrigger`) -- `entity_id` is
+       the trigger's own id, as a SQL Server or Oracle trigger's
+       `TRIGGER_DEFINITION` edge names it; see `_trigger_transformation_detail`.
+       Routine and trigger bodies are released through one gate,
+       `_released_body`.
     """
     resource = await session.scalar(
         select(DbtResource)
@@ -1459,13 +1477,14 @@ async def _routine_transformation_detail(
         or routine.datasource_id != datasource.id
         or routine.organization_id != datasource.organization_id
     ):
-        return None
-    body = routine.body_sql_redacted
-    if (
-        routine.redaction_status not in VALUE_FREE_REDACTION_STATUSES
-        or not is_eligible_for_model_context(routine.screening_status)
-    ):
-        body = None
+        return await _trigger_transformation_detail(session, datasource, entity_id)
+    body, withheld_reason = _released_body(
+        "ROUTINE",
+        body=routine.body_sql_redacted,
+        availability=routine.availability,
+        redaction_status=routine.redaction_status,
+        screening_status=routine.screening_status,
+    )
     return {
         "transformation_source": "ROUTINE_BODY",
         "routine_id": str(routine.id),
@@ -1475,6 +1494,7 @@ async def _routine_transformation_detail(
         "language": routine.language,
         "status": routine.status,
         "body_sql_redacted": body,
+        "body_withheld_reason": withheld_reason,
         "body_fingerprint": routine.body_fingerprint,
         "redaction_status": routine.redaction_status,
         "screening_status": routine.screening_status,
@@ -1485,6 +1505,127 @@ async def _routine_transformation_detail(
         "truncated": routine.truncated,
         "availability": routine.availability,
         "unavailable_reason": routine.unavailable_reason,
+        "governance": {
+            "value_free": True,
+            "body_sql_literals_redacted": True,
+            "raw_body_persisted": False,
+        },
+    }
+
+
+def _released_body(
+    kind: Literal["ROUTINE", "TRIGGER"],
+    *,
+    body: str | None,
+    availability: str,
+    redaction_status: str,
+    screening_status: str,
+) -> tuple[str | None, str | None]:
+    """The one release decision this surface makes for captured code text.
+
+    `(body, None)` when the stored text may be handed to a caller's model
+    context, else `(None, reason)`. The predicate is the one
+    `context_product_coverage._releasable` names as this tool's gate -- captured,
+    stored in a value-free form (`PARSED` or `LEXICAL`), and not quarantined by
+    prompt-risk screening -- and the reason codes are the vocabulary
+    `routine_lineage_edges` already uses for the same gate's refusals
+    (`<KIND>_BODY_UNAVAILABLE` / `_NOT_STORED` / `_QUARANTINED` / `_MISSING`), so a
+    withheld body is a marker with a reason rather than an absent key.
+
+    A routine and a trigger go through this same function: a trigger body is the
+    same literal-bearing, injection-capable text a procedure body is (R11-FP01), so
+    it gets the same gate, not a second one that could drift from it.
+    """
+    if availability != AVAILABLE:
+        return None, f"{kind}_BODY_UNAVAILABLE"
+    if redaction_status not in VALUE_FREE_REDACTION_STATUSES:
+        return None, f"{kind}_BODY_NOT_STORED"
+    if not is_eligible_for_model_context(screening_status):
+        return None, f"{kind}_BODY_QUARANTINED"
+    if body is None:
+        return None, f"{kind}_BODY_MISSING"
+    return body, None
+
+
+async def _trigger_transformation_detail(
+    session: AsyncSession,
+    datasource: DataSource,
+    entity_id: UUID,
+) -> dict[str, Any] | None:
+    """R11-FP01: a captured trigger's body, for an entity no earlier lookup
+    matched -- `entity_id` is a `MetadataTrigger.id` in this datasource.
+
+    It is what a `TRIGGER_DEFINITION` edge a SQL Server or Oracle trigger
+    establishes names in `evidence.transformation_reference` (kind
+    `TRIGGER_BODY`), so the edge and this read describe the same row. Those
+    engines store a trigger's body with the trigger; it was redacted, fingerprinted
+    and screened at write time exactly as a routine body is, and it is released
+    here through `_released_body` -- the routine branch's gate, not a copy of it.
+    A withheld or quarantined body comes back as `body_sql_redacted: null` with
+    `body_withheld_reason` and the statuses that explain it, never as a missing key.
+
+    PostgreSQL keeps no trigger body: the code is the function `action_routine`
+    names. That is reported as what it is -- UNAVAILABLE with the engine's own
+    reason -- plus `body_reference`, the routine this trigger's lineage is read
+    from, resolved by the trigger axis's own join (`routine_lineage_edges.trigger_body`)
+    so the reference names exactly the function the lineage agent parsed. The
+    caller follows it to the routine branch, whose own gate then decides whether
+    that body is released; nothing of the function's text is read into this
+    response. An action routine that cannot be resolved leaves `body_reference`
+    null with the join's reason code.
+    """
+    trigger = await session.get(MetadataTrigger, entity_id)
+    if (
+        trigger is None
+        or trigger.datasource_id != datasource.id
+        or trigger.organization_id != datasource.organization_id
+    ):
+        return None
+    body, withheld_reason = _released_body(
+        "TRIGGER",
+        body=trigger.body_sql_redacted,
+        availability=trigger.availability,
+        redaction_status=trigger.redaction_status,
+        screening_status=trigger.screening_status,
+    )
+    body_reference: dict[str, str] | None = None
+    body_reference_unresolved: str | None = None
+    if trigger.availability != AVAILABLE and (trigger.action_routine or "").strip():
+        resolved = await trigger_body(session, datasource, trigger)
+        if resolved.routine_id is not None:
+            body_reference = {
+                "tool": "get_transformation_detail",
+                "entity_id": str(resolved.routine_id),
+                "kind": "ROUTINE_BODY",
+            }
+        else:
+            body_reference_unresolved = resolved.unresolved_reason
+    return {
+        "transformation_source": "TRIGGER_BODY",
+        "trigger_id": str(trigger.id),
+        "name": trigger.name,
+        "table_name": trigger.table_name,
+        "table_schema_name": trigger.table_schema_name,
+        "timing": trigger.timing,
+        "events": list(trigger.events),
+        "orientation": trigger.orientation,
+        "is_enabled": trigger.is_enabled,
+        "action_routine": trigger.action_routine,
+        "status": trigger.status,
+        "body_sql_redacted": body,
+        "body_withheld_reason": withheld_reason,
+        "body_reference": body_reference,
+        "body_reference_unresolved_reason": body_reference_unresolved,
+        "body_fingerprint": trigger.body_fingerprint,
+        "redaction_status": trigger.redaction_status,
+        "screening_status": trigger.screening_status,
+        "screening_reason_codes": trigger.screening_reason_codes,
+        # See the note in `_view_definition_transformation_detail`.
+        "screening_version": trigger.screening_version,
+        "screening_stale": not is_verdict_current(trigger.screening_version),
+        "truncated": trigger.truncated,
+        "availability": trigger.availability,
+        "unavailable_reason": trigger.unavailable_reason,
         "governance": {
             "value_free": True,
             "body_sql_literals_redacted": True,
@@ -3002,6 +3143,24 @@ async def _read_context_product_resource(
             ),
             await load_view_coverage(
                 session, product_version.organization_id, product_version.table_ids
+            ),
+            # R11-FP09/FP12: the pinned meaning, and what moved since publication -- the same
+            # loaders and the same helper as the compile, download and drift doors.
+            await load_pinned_meaning(
+                session,
+                product_version.organization_id,
+                ontology_version_ids=list(product_version.ontology_version_ids or []),
+                semantic_model_version_ids=list(product_version.semantic_model_version_ids),
+                glossary_term_version_ids=list(product_version.glossary_term_version_ids),
+                scope_table_ids=product_version.table_ids,
+                scope_routine_ids=list(product_version.routine_ids or []),
+            ),
+            await load_coverage_changes(
+                session,
+                product_version.organization_id,
+                product_version.table_ids,
+                list(product_version.routine_ids or []),
+                since=publication_time(product_version),
             ),
         ),
         # R11-FP12: how old what coverage describes is, per source behind it.

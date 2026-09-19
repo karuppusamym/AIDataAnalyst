@@ -418,21 +418,29 @@ def test_a_trigger_is_never_offered_as_a_governed_tool(matrix) -> None:
         assert cell.reason == "CANDIDATE_SHAPE_REFUSED"
 
 
-def test_a_triggers_own_body_produces_no_lineage_and_says_so(matrix) -> None:
-    """The gap R11-FP01 declined and published rather than half-building. The
-    firing table is discovered, so the table -> trigger edge is a known fact;
-    nothing hands the body to `procedure_lineage`, so the relations it reads and
-    writes produce no edge. UNSUPPORTED rather than PARTIAL, because PARTIAL is
-    a claim and nothing yet produces a trigger lineage edge at all.
+def test_a_triggers_own_body_is_parsed_and_says_how_far(matrix) -> None:
+    """Corrected 2026-09-18. This test used to pin UNSUPPORTED -- "nothing hands the
+    body to `procedure_lineage`" -- and the matrix went on publishing that on the live
+    route after `procedure_lineage.parse_trigger_lineage` landed. A trigger body is now
+    parsed by the same parser a routine body is, with its firing-row names bound, so it
+    earns the routine's claim: PARTIAL with explicit degradation, and never SUPPORTED.
+    Oracle's cell names its own degradation, and the declared gaps name it too.
     """
     for engine in ("postgres", "oracle", "sqlserver"):
         cell = next(
             c for c in _row(matrix, engine, "TRIGGER").cells if c.facet == FACET_PARSING
         )
-        assert cell.state == CapabilityState.UNSUPPORTED.value
-        assert cell.reason == "ADAPTER_NOT_IMPLEMENTED"
-        assert "firing table" in cell.evidence
-    assert any("firing table" in gap for gap in matrix.declared_gaps), matrix.declared_gaps
+        assert cell.state == CapabilityState.PARTIAL.value
+        assert cell.reason == "PARSER_DEGRADES_EXPLICITLY"
+        assert "parse_trigger_lineage" in cell.evidence
+    oracle_cell = next(
+        c for c in _row(matrix, "oracle", "TRIGGER").cells if c.facet == FACET_PARSING
+    )
+    assert "UNRESOLVED_TRIGGER_SUBJECT" in oracle_cell.evidence
+    assert any(":NEW" in gap for gap in matrix.declared_gaps), matrix.declared_gaps
+    joined = " ".join(matrix.declared_gaps)
+    assert "no pass hands" not in joined
+    assert "not persisted yet" not in joined
 
 
 def test_a_sequence_has_nothing_to_parse_at_all(matrix) -> None:
@@ -451,9 +459,10 @@ def test_the_declared_gaps_name_every_deferral(matrix) -> None:
     """The out-of-scope items are published, not merely decided. A deferral
     nobody can read is indistinguishable from an oversight."""
     joined = " ".join(matrix.declared_gaps).lower()
+    # "sequence" left this list on 2026-09-18 with the deferral it named: discovered
+    # sequences are persisted and reconciled (ce98bee), so there is nothing to declare.
     for phrase in (
         "trigger",
-        "sequence",
         "databricks",
         "aggregate and window",
         "pushdown",
@@ -513,13 +522,30 @@ def test_value_free_profiling_is_partial_where_ranges_are_refused(matrix) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_source_mapping_is_recorded_as_unsupported_with_its_reason(matrix) -> None:
+def test_source_mapping_is_statement_ranges_and_says_it_is_partial(matrix) -> None:
+    """R11-FP07, 2026-09-18: was `..._recorded_as_unsupported_with_its_reason`. Parsed
+    facts now carry their statement's range into the stored, redacted body, so the cell
+    is PARTIAL with explicit degradation -- statement grain, NOT_LOCATED where no
+    statement holds a fact -- and never SUPPORTED."""
     mapping = matrix.source_mapping
-    assert mapping.state == CapabilityState.UNSUPPORTED.value
-    assert mapping.granularity == "statement_ordinal"
+    assert mapping.state == CapabilityState.PARTIAL.value
+    assert mapping.reason == "PARSER_DEGRADES_EXPLICITLY"
+    assert mapping.granularity == "statement_ordinal, statement_range, statement_range_status"
     assert "R11-D16" in mapping.rationale
-    for phrase in ("line", "column", "character-offset", "range"):
-        assert phrase in mapping.evidence
+    for phrase in ("line", "column", "statement_text_digest", "NOT_LOCATED", "GAP_STATEMENT"):
+        assert phrase in mapping.evidence + mapping.rationale, phrase
+
+
+def test_a_package_body_is_parsed_per_member_with_a_named_fallback(matrix) -> None:
+    """R11-FP03, 2026-09-18: the PACKAGE parsing cell used to say the body was parsed
+    as one and never attributed to its members. It is split now, and says how it
+    degrades when it cannot be -- PARTIAL, with the fallback named."""
+    cell = next(c for c in _row(matrix, "oracle", "PACKAGE").cells if c.facet == FACET_PARSING)
+    assert cell.state == CapabilityState.PARTIAL.value
+    assert cell.reason == "PARSER_DEGRADES_EXPLICITLY"
+    for phrase in ("member_attribution=MEMBER", "PACKAGE_FALLBACK", "UNBALANCED_BLOCKS"):
+        assert phrase in cell.evidence, phrase
+    assert "not attributed" not in cell.evidence
 
 
 def test_adding_a_positional_field_would_change_the_source_mapping_record() -> None:
@@ -536,8 +562,8 @@ def test_adding_a_positional_field_would_change_the_source_mapping_record() -> N
             for token in ("ordinal", "line", "offset", "range", "position", "span")
         )
     ]
-    assert positional == ["statement_ordinal"], (
-        "a new positional field landed; regenerate the matrix and revisit the "
+    assert positional == ["statement_ordinal", "statement_range", "statement_range_status"], (
+        "a positional field landed or left; regenerate the matrix and revisit the "
         "source-mapping decision rather than leaving the published record stale"
     )
 

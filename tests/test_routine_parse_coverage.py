@@ -282,7 +282,9 @@ async def test_the_state_is_rendered_at_the_boundary_not_stored(session) -> None
     assert read.state == CapabilityState.PARTIAL.value
     assert read.parse_completed is False
     assert read.unparsed_reason_codes
-    assert read.source_mapping_granularity == "STATEMENT_ORDINAL"
+    # R11-FP07: a parse that read a body locates its statements in it -- even one
+    # that could not read every statement, because a gap is located too.
+    assert read.source_mapping_granularity == "STATEMENT_RANGE"
 
 
 async def test_a_reparse_replaces_the_measurement_rather_than_accumulating(session) -> None:

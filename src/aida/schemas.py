@@ -2910,6 +2910,19 @@ class ContextProductConsumerBindingRead(ApiModel):
 # ---------------------------------------------------------------------------
 
 
+class StatementRangeRead(ApiModel):
+    """R11-FP07: a statement's span in the stored body. Half-open code-point
+    offsets; 1-based lines and columns, the end being the statement's last
+    character. Positions only -- never an excerpt."""
+
+    start_offset: int
+    end_offset: int
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+
+
 class DeepProcedureLineageEdgeRead(ApiModel):
     """One edge from the procedure-aware parser (N3) -- richer than a flat
     `view_lineage_edge`/`procedure_lineage_edge` row: carries the statement it
@@ -2938,6 +2951,19 @@ class DeepProcedureLineageEdgeRead(ApiModel):
     #: The stored row's ADR-0026 review state, on a listed edge. A parse
     #: response reports what the parser found, and leaves it unset.
     review_status: str | None = None
+    #: R11-FP07: where this edge's statement is in the stored body -- null when not
+    #: located, never a zero range -- what the range is the range of, and the
+    #: SHA-256 of the stored body the offsets index (compare it with the routine's
+    #: current stored body before trusting a range).
+    statement_range: StatementRangeRead | None = None
+    statement_range_status: str | None = None
+    statement_text_digest: str | None = None
+    #: R11-FP03: for an Oracle package, the member subprogram this edge belongs to,
+    #: the grain it is attributed at, and the captured member routine when exactly
+    #: one matches.
+    package_member: str | None = None
+    member_attribution: str | None = None
+    member_routine_id: UUID | None = None
 
 
 class DeepProcedureLineageParseResponse(ApiModel):
@@ -2955,6 +2981,12 @@ class DeepProcedureLineageParseResponse(ApiModel):
     # DELETE/MERGE/CREATE -- proven read-only, not merely "no write found".
     is_read_only: bool
     persisted_edge_count: int = 0
+    #: R11-FP07: SHA-256 of the stored body every located edge's range indexes.
+    statement_text_digest: str | None = None
+    #: R11-FP03: MEMBER / PACKAGE_FALLBACK for an Oracle package, with the
+    #: fallback's reason code; null for anything else.
+    member_attribution: str | None = None
+    member_fallback_reason: str | None = None
 
 
 class ProcedureCapabilityConstructRead(ApiModel):
@@ -4320,6 +4352,10 @@ class RoutineParseCoverageRead(ApiModel):
     confidence: str
     source_mapping_granularity: str
     parsed_at: datetime
+    #: R11-FP03: for an Oracle package, MEMBER or PACKAGE_FALLBACK and the
+    #: fallback's reason code; null for anything else.
+    member_attribution: str | None = None
+    member_fallback_reason: str | None = None
 
 
 class TriggerParseCoverageRead(ApiModel):

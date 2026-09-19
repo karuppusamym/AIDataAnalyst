@@ -471,9 +471,15 @@ async def test_a_candidate_the_index_does_not_cover_still_gets_a_vector_score(
         # The index knows the table and has never heard of the tool.
         return (("TABLE", table_id, 0.77),)
 
+    async def _nothing_stale(*args: object, **kwargs: object) -> set[tuple[str, str]]:
+        # R11-FP08: the table's stored entry encodes its current text. This test is about the
+        # uncovered *type*; a stale entry is `test_vector_routine_descriptions`'s subject.
+        return set()
+
     monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
     monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
     monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
+    monkeypatch.setattr(vector_index_service, "stale_index_entries", _nothing_stale)
 
     result = await stages.run_vector_channel(
         None,  # type: ignore[arg-type]

@@ -20,6 +20,7 @@ from aida.connectors.bigquery import (
     _region_dataset,
     _unquote_option_value,
 )
+from aida.connectors.discovery import facet_read_scope
 from aida.connectors.registry import connector_registry
 from aida.query_gateway import gate_query_estimate
 
@@ -524,10 +525,23 @@ def _bigquery_responses(**overrides: Any) -> dict[str, Any]:
 
 
 async def _bigquery_discover(**overrides: Any) -> tuple[Any, ...]:
+    """Discovery inside the `facet_read_scope` the discovery activity always binds."""
     connector = BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN)
     client = _FakeBigQueryClient(_bigquery_responses(**overrides))
-    with patch.object(connector, "_get_client", return_value=client):
+    with patch.object(connector, "_get_client", return_value=client), facet_read_scope():
         return await connector.discover()
+
+
+def _access_denied(detail: str) -> Exception:
+    """A BigQuery refusal as google-cloud-bigquery raises it: HTTP 403 with the
+    structured reason `accessDenied`. R11-FP02 follow-through: an envelope axis now
+    absorbs a refusal only, so the tests of an absorbed axis refuse it this way rather
+    than with an arbitrary exception."""
+    from google.api_core import exceptions as google_exceptions
+
+    return google_exceptions.from_http_status(
+        403, f"Access Denied: {detail}", errors=[{"reason": "accessDenied"}]
+    )
 
 
 def test_bigquery_capabilities_declare_only_the_axes_it_implements() -> None:
@@ -584,15 +598,28 @@ async def test_a_base_table_carries_no_view_definition() -> None:
 
 
 async def test_a_refused_views_query_leaves_a_reason_on_the_view() -> None:
-    catalogs = await _bigquery_discover(VIEWS=RuntimeError("403 Access Denied: table VIEWS"))
+    catalogs = await _bigquery_discover(VIEWS=_access_denied("table VIEWS"))
 
     schema = catalogs[0].schemas[0]
     view = next(t for t in schema.tables if t.name == "active_customer")
     assert view.view_definition is not None
     assert view.view_definition.definition_sql is None
     assert view.view_definition.unavailable_reason is not None
-    assert "403 Access Denied" in view.view_definition.unavailable_reason
+    # Value-free since R11-FP02's follow-through (INV-6): the refused view is named,
+    # the driver's own sentence is not.
+    assert "INFORMATION_SCHEMA.VIEWS" in view.view_definition.unavailable_reason
+    assert "Access Denied" not in view.view_definition.unavailable_reason
     assert "views" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+async def test_a_views_failure_that_is_not_a_refusal_now_ends_the_run() -> None:
+    """R11-FP02 follow-through: a transient failure -- here a 500 -- used to be absorbed
+    into an empty axis the FULL reconciliation then read as "every view definition is
+    gone". It is not a refusal, so it now ends the run instead."""
+    from google.api_core import exceptions as google_exceptions
+
+    with pytest.raises(google_exceptions.InternalServerError):
+        await _bigquery_discover(VIEWS=google_exceptions.InternalServerError("backendError"))
 
 
 async def test_a_refused_tables_query_leaves_todays_object_type_default() -> None:
@@ -601,11 +628,21 @@ async def test_a_refused_tables_query_leaves_todays_object_type_default() -> Non
     If TABLES is refused every object keeps the pre-envelope `BASE TABLE` default
     rather than discovery failing, and the refusal is recorded on the catalog.
     """
-    catalogs = await _bigquery_discover(TABLES=RuntimeError("403 Access Denied: table TABLES"))
+    catalogs = await _bigquery_discover(TABLES=_access_denied("table TABLES"))
 
     schema = catalogs[0].schemas[0]
     assert {table.object_type for table in schema.tables} == {"BASE_TABLE"}
     assert "tables" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+async def test_a_tables_failure_that_is_not_a_refusal_ends_the_run() -> None:
+    """TABLES has no facet of its own, so `discover()` judges its failure with the shared
+    `classify_read_failure`: a refusal keeps today's default type, and anything else --
+    which used to default every view to BASE TABLE silently -- now ends the run."""
+    from google.api_core import exceptions as google_exceptions
+
+    with pytest.raises(google_exceptions.ServiceUnavailable):
+        await _bigquery_discover(TABLES=google_exceptions.ServiceUnavailable("backendError"))
 
 
 def test_a_view_definition_over_the_cap_is_a_flagged_prefix() -> None:
@@ -651,13 +688,12 @@ async def test_a_remote_functions_body_is_unavailable_rather_than_empty() -> Non
 
 
 async def test_a_refused_routines_query_is_recorded_rather_than_read_as_no_routines() -> None:
-    catalogs = await _bigquery_discover(
-        ROUTINES=RuntimeError("403 Access Denied: bigquery.routines.list")
-    )
+    catalogs = await _bigquery_discover(ROUTINES=_access_denied("bigquery.routines.list"))
 
     assert catalogs[0].schemas[0].routines == ()
     recorded = catalogs[0].attributes["envelope_v11_unavailable"]
-    assert "bigquery.routines.list" in recorded["routines"]
+    assert "INFORMATION_SCHEMA.ROUTINES" in recorded["routines"]
+    assert "bigquery.routines.list" not in recorded["routines"]
 
 
 def test_a_schema_known_only_through_a_routine_still_surfaces() -> None:

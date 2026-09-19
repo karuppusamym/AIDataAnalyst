@@ -21,15 +21,18 @@ between reads, with `truncated` saying when a source has more than a person can 
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Select, exists, or_, select
+from sqlalchemy import Select, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.capability_states import CapabilityState
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE
+from aida.connectors.discovery import FACET_CONSTRAINTS
 from aida.envelope_models import (
     AVAILABLE,
     UNAVAILABLE,
@@ -37,9 +40,11 @@ from aida.envelope_models import (
     MetadataTrigger,
     MetadataViewDefinition,
 )
-from aida.footprint_gaps import GAP_DEFINITIONS, trigger_awaits_parse
+from aida.footprint_gaps import GAP_DEFINITIONS, grain_uncertain, trigger_awaits_parse
 from aida.ingest_screening import CLEAN
 from aida.models import (
+    AnalysisRun,
+    CompositeKeyCandidate,
     DataQualityIncident,
     MetadataCatalog,
     MetadataSchema,
@@ -559,6 +564,149 @@ async def _pending_signals(
     return objects
 
 
+#: R11-FP05: the per-object codes of `GRAIN_UNCERTAIN`, in the order they are
+#: decided -- each names the step that closes that object's gap.
+GRAIN_AGGREGATE_WITHOUT_GROUPING: Final = "AGGREGATE_WITHOUT_GROUPING"
+GRAIN_AMBIGUOUS_KEY: Final = "AMBIGUOUS_KEY"
+GRAIN_KEY_UNCONFIRMED: Final = "KEY_UNCONFIRMED"
+GRAIN_KEYS_NOT_READ: Final = "KEYS_NOT_READ"
+GRAIN_NO_KEY: Final = "NO_KEY"
+#: A constraints read that ended in one of these read no keys, so "no key" is not
+#: known -- a refused or unavailable read, or an adapter that does not read them.
+_KEYS_UNREAD_STATES: Final = frozenset(
+    {
+        CapabilityState.PERMISSION_DENIED.value,
+        CapabilityState.UNAVAILABLE.value,
+        CapabilityState.UNSUPPORTED.value,
+    }
+)
+_VIEW_KINDS: Final = frozenset({"VIEW", "MATERIALIZED_VIEW"})
+
+
+async def _constraints_unread(
+    session: AsyncSession, organization_id: UUID, datasource_id: UUID
+) -> bool:
+    """Whether the source's last completed run did not read its constraints -- read from
+    that run's own receipt, the figure `footprint_gaps` reads refusals from."""
+    receipt = (
+        await session.execute(
+            select(AnalysisRun.discovery_receipt)
+            .where(
+                AnalysisRun.organization_id == organization_id,
+                AnalysisRun.datasource_id == datasource_id,
+                AnalysisRun.status == "COMPLETED",
+            )
+            .order_by(AnalysisRun.updated_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    facets = receipt.get("facets") if isinstance(receipt, dict) else None
+    facet = facets.get(FACET_CONSTRAINTS) if isinstance(facets, dict) else None
+    return isinstance(facet, dict) and facet.get("state") in _KEYS_UNREAD_STATES
+
+
+async def _grain_objects(
+    session: AsyncSession, organization_id: UUID, datasource_id: UUID
+) -> list[FootprintGapObjectRead]:
+    """The tables and views `footprint_gaps` counts as GRAIN_UNCERTAIN, each with the code
+    for the step that closes it.
+
+    Read with the same predicate the count uses (`grain_uncertain`), and every code comes from
+    a record the platform already holds, in this order:
+
+    * AGGREGATE_WITHOUT_GROUPING -- a view whose ACTIVE parsed lineage aggregates and passes no
+      column through directly. Its grouping, if any, is not among its outputs, so no column of
+      it can name a row; a view that also passes columns through falls to the codes below;
+    * AMBIGUOUS_KEY / KEY_UNCONFIRMED -- several, or one, PENDING composite-key candidates: a
+      steward's decision is the next step;
+    * KEYS_NOT_READ -- no candidate, and the last completed run did not read constraints, so a
+      declared key may exist that Atlas has not seen;
+    * NO_KEY -- none of the above. Candidate discovery over the object's profile is the next
+      step; an object with no profile has nothing to discover from.
+    """
+    rows = (
+        await session.execute(
+            select(
+                MetadataTable.id,
+                MetadataCatalog.name,
+                MetadataSchema.name,
+                MetadataTable.name,
+                MetadataTable.object_type,
+            )
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.datasource_id == datasource_id,
+                grain_uncertain(),
+            )
+            .order_by(MetadataCatalog.name, MetadataSchema.name, MetadataTable.name)
+            .limit(MAX_OBJECTS + 1)
+        )
+    ).all()
+    table_ids = [row[0] for row in rows]
+    if not table_ids:
+        return []
+    pending = Counter(
+        {
+            table_id: int(count)
+            for table_id, count in (
+                await session.execute(
+                    select(CompositeKeyCandidate.table_id, func.count())
+                    .where(
+                        CompositeKeyCandidate.organization_id == organization_id,
+                        CompositeKeyCandidate.datasource_id == datasource_id,
+                        CompositeKeyCandidate.table_id.in_(table_ids),
+                        CompositeKeyCandidate.status == "PENDING",
+                    )
+                    .group_by(CompositeKeyCandidate.table_id)
+                )
+            ).all()
+        }
+    )
+    shapes: dict[UUID, set[str]] = {}
+    for target_table_id, transformation_type in (
+        await session.execute(
+            select(ViewLineageEdge.target_table_id, ViewLineageEdge.transformation_type)
+            .where(
+                ViewLineageEdge.organization_id == organization_id,
+                ViewLineageEdge.datasource_id == datasource_id,
+                ViewLineageEdge.target_table_id.in_(table_ids),
+                ViewLineageEdge.review_status == "ACTIVE",
+                ViewLineageEdge.transformation_type.in_(("AGGREGATED", "DIRECT")),
+            )
+            .distinct()
+        )
+    ).all():
+        if target_table_id is not None:
+            shapes.setdefault(target_table_id, set()).add(str(transformation_type))
+    keys_unread = await _constraints_unread(session, organization_id, datasource_id)
+
+    objects: list[FootprintGapObjectRead] = []
+    for table_id, catalog_name, schema_name, name, object_type in rows:
+        is_view = str(object_type).upper() in _VIEW_KINDS
+        shape = shapes.get(table_id, set())
+        if is_view and shape == {"AGGREGATED"}:
+            code = GRAIN_AGGREGATE_WITHOUT_GROUPING
+        elif pending[table_id] > 1:
+            code = GRAIN_AMBIGUOUS_KEY
+        elif pending[table_id] == 1:
+            code = GRAIN_KEY_UNCONFIRMED
+        elif keys_unread:
+            code = GRAIN_KEYS_NOT_READ
+        else:
+            code = GRAIN_NO_KEY
+        objects.append(
+            FootprintGapObjectRead(
+                object_type="VIEW" if is_view else "TABLE",
+                object_id=table_id,
+                qualified_name=f"{catalog_name}.{schema_name}.{name}",
+                detail=code,
+            )
+        )
+    return objects
+
+
 async def footprint_gap_objects(
     session: AsyncSession, *, organization_id: UUID, datasource_id: UUID, kind: str
 ) -> FootprintGapDetailRead:
@@ -589,6 +737,8 @@ async def footprint_gap_objects(
         objects = await _held_tables(session, organization_id, datasource_id)
     elif kind == "CHANGE_SIGNALS_PENDING":
         objects = await _pending_signals(session, organization_id, datasource_id)
+    elif kind == "GRAIN_UNCERTAIN":
+        objects = await _grain_objects(session, organization_id, datasource_id)
     truncated = len(objects) > MAX_OBJECTS
     return FootprintGapDetailRead(
         datasource_id=datasource_id,

@@ -14,7 +14,15 @@ read -- so the two cannot describe the same version differently:
   read, and last read in full, so a digest can be read as fresh or stale rather than
   only as equal or different;
 * `load_view_coverage` derives, from the version's own `table_ids`, the views and materialized
-  views among them and the same facts about their definitions.
+  views among them and the same facts about their definitions;
+* `load_pinned_meaning` (R11-FP09/FP12, 2026-09-18) resolves the ontology, semantic model and
+  glossary term versions the version pins: whether each still stands, and what each speaks
+  about within the product's scope;
+* `load_coverage_changes` (R11-FP12/FP15/FP16, 2026-09-18) says what the version covers that
+  moved after it was published -- a covered view's or routine's definition, or the approved
+  description of a covered table, view, column or routine. `context_rebuild` asks the same
+  function which published products to re-draft, so the product a reader is told is stale and
+  the product put back into review are one computation.
 
 **Nothing a product does not cover leaks through.** Read and write table ids are cut to the
 product's own `table_ids`, and nothing is counted: a routine that also reads a table outside the
@@ -33,10 +41,24 @@ from datetime import datetime
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
+from aida.change_signal_meaning import RETIRED_STATUSES
+from aida.change_signal_models import MetadataChangeSignal
+from aida.change_signals import (
+    CHANGE_MEANING_REPLACED,
+    CHANGE_MEANING_WITHDRAWN,
+    CHANGE_STRUCTURAL,
+    SIGNAL_DEFINITION_CHANGED,
+    SIGNAL_DEPRECATED,
+    SIGNAL_MEANING_RETIRED,
+    SIGNAL_REACTIVATED,
+)
 from aida.context_compiler import (
+    ResolvedCoverageChange,
+    ResolvedMeaningCoverage,
     ResolvedOntologyMeaning,
     ResolvedRoutineReference,
     ResolvedSourceFreshness,
@@ -54,10 +76,19 @@ from aida.envelope_models import (
 from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.models import (
     AnalysisRun,
+    AssetDocumentation,
+    AssetDocumentationVersion,
+    AssetTermLink,
+    ColumnDocumentation,
+    ColumnDocumentationVersion,
+    GlossaryTerm,
+    GlossaryTermVersion,
     MetadataCatalog,
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
+    SemanticMetricVersion,
+    SemanticModelVersion,
     ViewLineageEdge,
 )
 from aida.ontology_models import OntologyHead, OntologyVersion
@@ -581,3 +612,476 @@ async def load_ontology_meaning(
             )
         )
     return meanings
+
+
+# --------------------------------------------------------------------------
+# R11-FP09/FP12: the meaning a version pins, as coverage
+# --------------------------------------------------------------------------
+
+MEANING_ONTOLOGY: Final = "ONTOLOGY"
+MEANING_SEMANTIC_MODEL: Final = "SEMANTIC_MODEL"
+MEANING_GLOSSARY_TERM: Final = "GLOSSARY_TERM"
+
+
+async def _column_tables(
+    session: AsyncSession, organization_id: UUID, column_ids: Sequence[Any]
+) -> dict[str, str]:
+    ids = _uuids(column_ids)
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(MetadataColumn.id, MetadataColumn.table_id).where(
+                MetadataColumn.id.in_(ids), MetadataColumn.organization_id == organization_id
+            )
+        )
+    ).all()
+    return {str(column_id): str(table_id) for column_id, table_id in rows}
+
+
+async def _ontology_coverage(
+    session: AsyncSession,
+    organization_id: UUID,
+    version_ids: list[UUID],
+    tables: set[str],
+    routines: set[str],
+) -> list[ResolvedMeaningCoverage]:
+    rows = (
+        await session.execute(
+            select(
+                OntologyVersion.id,
+                OntologyVersion.version,
+                OntologyVersion.status,
+                OntologyVersion.definition,
+                OntologyHead.ontology_key,
+                OntologyHead.published_version,
+            )
+            .join(OntologyHead, OntologyHead.id == OntologyVersion.ontology_id)
+            .where(
+                OntologyVersion.id.in_(version_ids),
+                OntologyVersion.organization_id == organization_id,
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+    live_mappings: dict[UUID, list[dict[str, Any]]] = {}
+    for version_id, _, _, definition, _, _ in rows:
+        body: dict[str, Any] = definition or {}
+        # A deprecated concept is left out of the ontology section, so what it maps is too.
+        retired = {
+            str(concept.get("key"))
+            for concept in body.get("concepts") or []
+            if isinstance(concept, dict) and concept.get("deprecated")
+        }
+        live_mappings[version_id] = [
+            mapping
+            for mapping in body.get("mappings") or []
+            if isinstance(mapping, dict) and str(mapping.get("concept")) not in retired
+        ]
+    column_tables = await _column_tables(
+        session,
+        organization_id,
+        sorted(
+            {
+                str(mapping.get("subject_id"))
+                for mappings in live_mappings.values()
+                for mapping in mappings
+                if mapping.get("subject_type") == "COLUMN"
+            }
+        ),
+    )
+    resolved: list[ResolvedMeaningCoverage] = []
+    for version_id, number, status, _, ontology_key, published_version in rows:
+        spoken_tables: set[str] = set()
+        spoken_routines: set[str] = set()
+        for mapping in live_mappings[version_id]:
+            subject_type, subject_id = str(mapping.get("subject_type")), str(
+                mapping.get("subject_id")
+            )
+            if subject_type in ("TABLE", "VIEW") and subject_id in tables:
+                spoken_tables.add(subject_id)
+            elif subject_type == "COLUMN" and column_tables.get(subject_id) in tables:
+                spoken_tables.add(column_tables[subject_id])
+            elif subject_type == "ROUTINE" and subject_id in routines:
+                spoken_routines.add(subject_id)
+        resolved.append(
+            ResolvedMeaningCoverage(
+                kind=MEANING_ONTOLOGY,
+                version_id=str(version_id),
+                key=ontology_key,
+                version=number,
+                status=status,
+                current=status == "APPROVED" and published_version == number,
+                table_ids=tuple(sorted(spoken_tables)),
+                routine_ids=tuple(sorted(spoken_routines)),
+            )
+        )
+    return resolved
+
+
+async def _semantic_model_coverage(
+    session: AsyncSession, organization_id: UUID, version_ids: list[UUID], tables: list[UUID]
+) -> list[ResolvedMeaningCoverage]:
+    rows = (
+        await session.execute(
+            select(
+                SemanticModelVersion.id, SemanticModelVersion.version, SemanticModelVersion.status
+            ).where(
+                SemanticModelVersion.id.in_(version_ids),
+                SemanticModelVersion.organization_id == organization_id,
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+    # The metrics' source tables, asked for only within the product's scope: a metric over a
+    # table the product does not cover is never read, so it cannot be reported or counted.
+    metric_rows = (
+        (
+            await session.execute(
+                select(
+                    SemanticMetricVersion.semantic_model_version_id,
+                    SemanticMetricVersion.source_table_id,
+                ).where(
+                    SemanticMetricVersion.semantic_model_version_id.in_(version_ids),
+                    SemanticMetricVersion.organization_id == organization_id,
+                    SemanticMetricVersion.source_table_id.in_(tables),
+                )
+            )
+        ).all()
+        if tables
+        else []
+    )
+    spoken: dict[UUID, set[str]] = {}
+    for model_id, table_id in metric_rows:
+        spoken.setdefault(model_id, set()).add(str(table_id))
+    return [
+        ResolvedMeaningCoverage(
+            kind=MEANING_SEMANTIC_MODEL,
+            version_id=str(model_id),
+            key=None,
+            version=number,
+            status=status,
+            current=status == "PUBLISHED",
+            table_ids=tuple(sorted(spoken.get(model_id, set()))),
+        )
+        for model_id, number, status in rows
+    ]
+
+
+async def _glossary_term_coverage(
+    session: AsyncSession, organization_id: UUID, version_ids: list[UUID], tables: list[UUID]
+) -> list[ResolvedMeaningCoverage]:
+    rows = (
+        await session.execute(
+            select(
+                GlossaryTermVersion.id,
+                GlossaryTermVersion.term_id,
+                GlossaryTermVersion.version,
+                GlossaryTermVersion.status,
+                GlossaryTerm.term_key,
+                GlossaryTerm.lifecycle_status,
+            )
+            .join(GlossaryTerm, GlossaryTerm.id == GlossaryTermVersion.term_id)
+            .where(
+                GlossaryTermVersion.id.in_(version_ids),
+                GlossaryTermVersion.organization_id == organization_id,
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+    link_rows = (
+        (
+            await session.execute(
+                select(AssetTermLink.term_id, AssetTermLink.table_id).where(
+                    AssetTermLink.term_id.in_([term_id for _, term_id, _, _, _, _ in rows]),
+                    AssetTermLink.organization_id == organization_id,
+                    AssetTermLink.table_id.in_(tables),
+                )
+            )
+        ).all()
+        if tables
+        else []
+    )
+    linked: dict[UUID, set[str]] = {}
+    for term_id, table_id in link_rows:
+        linked.setdefault(term_id, set()).add(str(table_id))
+    return [
+        ResolvedMeaningCoverage(
+            kind=MEANING_GLOSSARY_TERM,
+            version_id=str(version_id),
+            key=term_key,
+            version=number,
+            status=status,
+            # A term retired as a whole leaves its last approved definition APPROVED; the term's
+            # own lifecycle is what says nobody should be reading it any more.
+            current=status == "APPROVED" and lifecycle == "ACTIVE",
+            table_ids=tuple(sorted(linked.get(term_id, set()))),
+        )
+        for version_id, term_id, number, status, term_key, lifecycle in rows
+    ]
+
+
+async def load_pinned_meaning(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    ontology_version_ids: Sequence[Any],
+    semantic_model_version_ids: Sequence[Any],
+    glossary_term_version_ids: Sequence[Any],
+    scope_table_ids: Sequence[Any],
+    scope_routine_ids: Sequence[Any],
+) -> list[ResolvedMeaningCoverage]:
+    """R11-FP09/FP12: the meaning versions a version pins, as coverage entries.
+
+    Every door a version is read through renders these with the compiler's `coverage_section`,
+    so a pinned glossary term reads the same in a compiled artifact, a download, a drift check
+    and MCP's resource read. A pin that does not resolve in this organization resolves to
+    nothing (INV-5); the compile door already refuses a version whose ontology pin does not
+    resolve, and the ids themselves are in `references` regardless.
+    """
+    tables = _uuids(scope_table_ids)
+    table_scope = {str(value) for value in tables}
+    routine_scope = {str(value) for value in _uuids(scope_routine_ids)}
+    resolved: list[ResolvedMeaningCoverage] = []
+    ontology_ids = _uuids(ontology_version_ids)
+    if ontology_ids:
+        resolved.extend(
+            await _ontology_coverage(
+                session, organization_id, ontology_ids, table_scope, routine_scope
+            )
+        )
+    model_ids = _uuids(semantic_model_version_ids)
+    if model_ids:
+        resolved.extend(await _semantic_model_coverage(session, organization_id, model_ids, tables))
+    term_ids = _uuids(glossary_term_version_ids)
+    if term_ids:
+        resolved.extend(await _glossary_term_coverage(session, organization_id, term_ids, tables))
+    return resolved
+
+
+# --------------------------------------------------------------------------
+# R11-FP12/FP15/FP16: what moved under a published version
+# --------------------------------------------------------------------------
+
+#: The definition signals that mean a covered view's or routine's definition moved.
+_DEFINITION_MOVES: Final = (SIGNAL_DEFINITION_CHANGED, SIGNAL_DEPRECATED, SIGNAL_REACTIVATED)
+
+
+def publication_time(version: Any) -> datetime | None:
+    """When a context product version became what consumers were given, or `None` if never.
+
+    `published_at` is stamped by the approval that published it; `approved_at` is the same
+    moment on a version recorded before `published_at` existed. A draft, or a rejected version,
+    has neither and so has no baseline to be stale against.
+    """
+    moment = getattr(version, "published_at", None) or getattr(version, "approved_at", None)
+    return moment if isinstance(moment, datetime) else None
+
+
+async def _definition_changes(
+    session: AsyncSession,
+    organization_id: UUID,
+    tables: list[UUID],
+    routines: list[UUID],
+    since: datetime,
+) -> list[ResolvedCoverageChange]:
+    """Covered views' and routines' definition moves after `since`, from FP15's signals.
+
+    Signals rather than a stored digest, because they are the one record of a definition moving
+    that every source path writes, in the scan's own transaction, and a view has no definition
+    history to read a digest-at-publication from. A definition that moved and moved back reads
+    as moved: a reviewer re-confirms, which is the conservative answer.
+    """
+    covered: list[ColumnElement[bool]] = []
+    if tables:
+        covered.append(
+            and_(
+                MetadataChangeSignal.subject_kind == "VIEW",
+                MetadataChangeSignal.subject_id.in_(tables),
+            )
+        )
+    if routines:
+        covered.append(
+            and_(
+                MetadataChangeSignal.subject_kind == "ROUTINE",
+                MetadataChangeSignal.subject_id.in_(routines),
+            )
+        )
+    if not covered:
+        return []
+    rows = (
+        await session.execute(
+            select(
+                MetadataChangeSignal.subject_kind,
+                MetadataChangeSignal.subject_id,
+                MetadataChangeSignal.signal_type,
+                MetadataChangeSignal.change_class,
+            )
+            .where(
+                MetadataChangeSignal.organization_id == organization_id,
+                MetadataChangeSignal.signal_type.in_(_DEFINITION_MOVES),
+                MetadataChangeSignal.detected_at > since,
+                or_(*covered),
+            )
+            .order_by(MetadataChangeSignal.detected_at, MetadataChangeSignal.id)
+        )
+    ).all()
+    classes: dict[tuple[str, str, str], str | None] = {}
+    for kind, subject_id, signal_type, change_class in rows:
+        key = (kind, str(subject_id), signal_type)
+        # Newest class wins, except that a structural move is never hidden behind a later
+        # literal-only one: the digest has moved, and the class must agree with it.
+        if classes.get(key) != CHANGE_STRUCTURAL:
+            classes[key] = change_class
+    return [
+        ResolvedCoverageChange(kind, subject_id, signal_type, change_class)
+        for (kind, subject_id, signal_type), change_class in classes.items()
+    ]
+
+
+def _retired_since(
+    version: Any,
+    documentation: Any,
+    text: str,
+    subject: Any,
+    in_scope: ColumnElement[bool],
+    organization_id: UUID,
+    since: datetime,
+) -> Select[Any]:
+    """The approved description in force at `since` that no approved text now repeats.
+
+    Net, not event-by-event: a version approved at or before `since` and retired after it is the
+    one the product was published over, and it is a change only if no APPROVED version of the
+    same object now says the same thing. So text replaced and then restored reads as unchanged,
+    a re-approval of identical text never counts, and a draft never does -- only a version a
+    reader was given can be retired. `replaced` says whether other approved text stands now.
+    """
+    current = aliased(version)
+    same_text = exists().where(
+        current.documentation_id == version.documentation_id,
+        current.status == "APPROVED",
+        getattr(current, text) == getattr(version, text),
+    )
+    other = aliased(version)
+    replaced = exists().where(
+        other.documentation_id == version.documentation_id,
+        other.status == "APPROVED",
+    )
+    return (
+        select(subject, replaced.label("replaced"))
+        .select_from(version)
+        .join(documentation, documentation.id == version.documentation_id)
+        .where(
+            version.organization_id == organization_id,
+            in_scope,
+            version.status.in_(RETIRED_STATUSES),
+            or_(version.approved_at.is_(None), version.approved_at <= since),
+            version.updated_at > since,
+            ~same_text,
+        )
+    )
+
+
+async def _description_changes(
+    session: AsyncSession,
+    organization_id: UUID,
+    tables: list[UUID],
+    routines: list[UUID],
+    since: datetime,
+) -> list[ResolvedCoverageChange]:
+    """Covered objects whose approved description moved after `since`, read from the stores.
+
+    Read from the append-only version rows rather than from FP15's meaning signals, which say
+    the same thing but only once a sweep has run: a reader must learn a product is stale whether
+    or not an operator has turned the maintenance passes on.
+    """
+    found: dict[tuple[str, str], bool] = {}
+
+    async def collect(statement: Select[Any], kind_of: Any) -> None:
+        for row in (await session.execute(statement)).all():
+            # Columns: the described object, whether other approved text stands, then whatever
+            # the caller added to tell its kind.
+            subject_id, replaced = row[0], row[1]
+            kind = kind_of(row)
+            key = (kind, str(subject_id))
+            found[key] = found.get(key, False) or bool(replaced)
+
+    if tables:
+        table_statement = _retired_since(
+            AssetDocumentationVersion,
+            AssetDocumentation,
+            "readme",
+            AssetDocumentation.table_id,
+            AssetDocumentation.table_id.in_(tables),
+            organization_id,
+            since,
+        ).join(MetadataTable, MetadataTable.id == AssetDocumentation.table_id)
+        await collect(
+            table_statement.add_columns(MetadataTable.object_type),
+            lambda row: "TABLE" if table_kind(row[2]) == "TABLE" else "VIEW",
+        )
+        await collect(
+            _retired_since(
+                ColumnDocumentationVersion,
+                ColumnDocumentation,
+                "description",
+                ColumnDocumentation.column_id,
+                ColumnDocumentation.table_id.in_(tables),
+                organization_id,
+                since,
+            ),
+            lambda row: "COLUMN",
+        )
+    if routines:
+        await collect(
+            _retired_since(
+                RoutineDocumentationVersion,
+                RoutineDocumentation,
+                "description",
+                RoutineDocumentation.routine_id,
+                RoutineDocumentation.routine_id.in_(routines),
+                organization_id,
+                since,
+            ),
+            lambda row: "ROUTINE",
+        )
+    return [
+        ResolvedCoverageChange(
+            kind,
+            subject_id,
+            SIGNAL_MEANING_RETIRED,
+            CHANGE_MEANING_REPLACED if replaced else CHANGE_MEANING_WITHDRAWN,
+        )
+        for (kind, subject_id), replaced in found.items()
+    ]
+
+
+async def load_coverage_changes(
+    session: AsyncSession,
+    organization_id: UUID,
+    table_ids: Sequence[Any],
+    routine_ids: Sequence[Any],
+    *,
+    since: datetime | None,
+) -> list[ResolvedCoverageChange]:
+    """R11-FP12/FP15/FP16: what a version covers that moved after `since` -- normally its
+    `publication_time`; `None` (never published) has no baseline and yields nothing.
+
+    Scope is the version's own `table_ids` (their views, and the columns of all of them) and
+    `routine_ids`, and every query is bounded by it and by the organization (INV-5): nothing
+    outside the product is read, so nothing outside it can be reported or counted. Value-free:
+    kinds, ids already in scope, and codes. Uses only `session.execute(...).all()`, like every
+    resolver here.
+    """
+    if since is None:
+        return []
+    tables = _uuids(table_ids)
+    routines = _uuids(routine_ids)
+    changes = [
+        *await _definition_changes(session, organization_id, tables, routines, since),
+        *await _description_changes(session, organization_id, tables, routines, since),
+    ]
+    return sorted(changes, key=lambda item: (item.subject_kind, item.subject_id, item.change))

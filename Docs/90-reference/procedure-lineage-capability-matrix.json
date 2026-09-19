@@ -173,6 +173,30 @@
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._TSQL_INLINE_RETURN_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "SUPPORTED",
       "view_parser_status": "N/A"
+    },
+    {
+      "construct": "PROCEDURE/FUNCTION header without CREATE, or with EDITIONABLE (Oracle ALL_SOURCE)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._ORACLE_SOURCE_HEADER_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "PACKAGE / PACKAGE BODY (Oracle; each member's edges attributed to the member)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PACKAGE_TEXT_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "PROCEDURE p / FUNCTION f RETURN t declaration (Oracle spec or forward declaration)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._SUBPROGRAM_DECLARATION_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "RETURN <expression> (PL/SQL; no subquery is allowed there)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._PLSQL_RETURN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
+      "view_parser_status": "N/A"
     }
   ],
   "dialects": [
@@ -182,7 +206,7 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-18T01:26:55.180631+00:00",
+  "generated_at": "2026-09-19T03:52:55.053897+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",

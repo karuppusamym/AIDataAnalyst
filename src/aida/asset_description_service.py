@@ -29,7 +29,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
-from aida.envelope_models import AVAILABLE, MetadataViewDefinition
+from aida.envelope_models import AVAILABLE, MetadataTrigger, MetadataViewDefinition
 from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import (
     AssetDescriptionDraft,
@@ -47,7 +47,7 @@ from aida.models import (
     ProcedureLineageEdge,
     ViewLineageEdge,
 )
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.refusal import RefusalDetail
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
@@ -100,6 +100,9 @@ class AssetEvidence:
     #: R11-FP16: for a table, SHA-256 of the active columns' names, types and nullability the
     #: draft was written against, so a later check can tell its shape moved.
     column_digest: str | None = None
+    #: R11-FP01: (trigger name, firing table, trigger id) for each enabled trigger whose
+    #: reviewed lineage writes this table. Catalog facts only -- never the trigger's body.
+    writing_triggers: tuple[tuple[str, str, UUID], ...] = ()
 
     @property
     def is_view(self) -> bool:
@@ -250,6 +253,16 @@ def compose_draft_text(evidence: AssetEvidence) -> str:
         sentences.append(
             lead + ", ".join(evidence.upstream_table_names[:_LINEAGE_PROSE_LIMIT]) + "."
         )
+    if evidence.writing_triggers:
+        # R11-FP01: a trigger's write is a path no job or view explains, so it is
+        # named as what it is. Names only; the body is never quoted.
+        shown = evidence.writing_triggers[:_LINEAGE_PROSE_LIMIT]
+        trigger_word = "trigger" if len(shown) == 1 else "triggers"
+        sentences.append(
+            f"It is written by database {trigger_word} "
+            + ", ".join(f"{name} (fires on {firing_table})" for name, firing_table, _ in shown)
+            + "."
+        )
     if evidence.downstream_table_names:
         sentences.append(
             "Downstream, it feeds "
@@ -298,6 +311,7 @@ TABLE_EVIDENCE_SIGNALS = frozenset(
         "object_kind",
         "definition_state",
         "definition_digest",
+        "writing_trigger_ids",
     }
 )
 #: This exact text -- or the machine text it was edited from -- was rejected.
@@ -429,6 +443,12 @@ def evidence_payload(evidence: AssetEvidence) -> dict[str, Any]:
         payload["definition_digest"] = evidence.definition_digest
     elif evidence.column_digest is not None:
         payload["column_digest"] = evidence.column_digest
+    if evidence.writing_triggers:
+        # R11-FP01: only when there are some, so a table no trigger writes records
+        # exactly the evidence -- and the refusal fingerprint -- it always did.
+        payload["writing_trigger_ids"] = [
+            str(trigger_id) for _name, _firing_table, trigger_id in evidence.writing_triggers
+        ]
     return payload
 
 
@@ -469,12 +489,18 @@ def _definition_facts(definition: MetadataViewDefinition | None) -> tuple[str, s
     return ("TRUNCATED" if definition.truncated else "CAPTURED"), digest
 
 
-#: ADR-0026's parsed-edge tables whose rows name two catalog tables.
+#: ADR-0026's parsed-edge tables whose rows name two catalog tables. R11-FP01: a
+#: trigger's reviewed lineage is one of them -- the edge type is the review queue's
+#: own `TRIGGER` -- so a table a trigger writes is described as populated from the
+#: table the trigger fires on, exactly as a routine's target is.
 _PARSED_EDGE_MODELS: tuple[tuple[str, Any], ...] = (
     ("VIEW", ViewLineageEdge),
     ("PROCEDURE", ProcedureLineageEdge),
     ("ROUTINE", DeepProcedureLineageEdge),
+    ("TRIGGER", TriggerLineageEdge),
 )
+#: The two whose rows can be a hop into a routine-local temp table.
+_BODY_EDGE_MODELS: tuple[Any, ...] = (DeepProcedureLineageEdge, TriggerLineageEdge)
 
 #: A neighbouring table's name, the edge type, and one edge that names it.
 _ParsedNeighbour = tuple[str, str, UUID]
@@ -498,9 +524,18 @@ async def _parsed_lineage_neighbours(
             model.review_status == "ACTIVE",
             MetadataTable.datasource_id == table.datasource_id,
         ]
-        if model is DeepProcedureLineageEdge:
+        if model in _BODY_EDGE_MODELS:
             # A hop into a temp table is the procedure's own plumbing.
             filters.append(model.is_intermediate.is_(False))
+        if model is TriggerLineageEdge:
+            # INV-5, stated on the edge row itself rather than inferred from the
+            # joined table: the trigger axis restates both on every read.
+            filters.extend(
+                [
+                    model.organization_id == table.organization_id,
+                    model.datasource_id == table.datasource_id,
+                ]
+            )
         for this_side, other_side, found in (
             (model.target_table_id, model.source_table_id, upstream),
             (model.source_table_id, model.target_table_id, downstream),
@@ -531,6 +566,44 @@ async def _parsed_lineage_neighbours(
         [(name, edge_type, edge_id) for name, (edge_type, edge_id) in upstream.items()],
         [(name, edge_type, edge_id) for name, (edge_type, edge_id) in downstream.items()],
     )
+
+
+async def _writing_triggers(
+    session: AsyncSession, table: MetadataTable
+) -> tuple[tuple[str, str, UUID], ...]:
+    """R11-FP01: the triggers whose reviewed lineage writes `table`, as
+    (trigger name, firing table, trigger id).
+
+    The fact a table's description should state and nothing else carries: its rows
+    are written by a trigger whenever another table changes, so no job, view or
+    call site explains them. Stated from the trigger's own catalog facts -- its name
+    and the table it fires on -- and never from its body, which is evidence to read
+    through the screening gate, not text to quote. Only ACTIVE edges (an agent's
+    proposal is not yet a fact), only a trigger the source still has and has not
+    disabled (a description is about what happens now), and INV-5 on both rows.
+    """
+    rows = (
+        await session.execute(
+            select(MetadataTrigger.id, MetadataTrigger.name, MetadataTrigger.table_name)
+            .join(TriggerLineageEdge, TriggerLineageEdge.trigger_id == MetadataTrigger.id)
+            .where(
+                TriggerLineageEdge.organization_id == table.organization_id,
+                TriggerLineageEdge.datasource_id == table.datasource_id,
+                TriggerLineageEdge.target_table_id == table.id,
+                TriggerLineageEdge.review_status == "ACTIVE",
+                TriggerLineageEdge.is_write.is_(True),
+                TriggerLineageEdge.is_intermediate.is_(False),
+                MetadataTrigger.organization_id == table.organization_id,
+                MetadataTrigger.datasource_id == table.datasource_id,
+                MetadataTrigger.status == "ACTIVE",
+                MetadataTrigger.is_enabled.is_not(False),
+            )
+            .distinct()
+            .order_by(MetadataTrigger.name, MetadataTrigger.id)
+            .limit(_LINEAGE_QUERY_LIMIT)
+        )
+    ).all()
+    return tuple((name, firing_table, trigger_id) for trigger_id, name, firing_table in rows)
 
 
 def _with_parsed_names(names: list[str], parsed: list[_ParsedNeighbour]) -> tuple[str, ...]:
@@ -598,6 +671,7 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
     ).all()
     # ADR-0026's parsed lineage, on the same terms -- see the helper.
     upstream_parsed, downstream_parsed = await _parsed_lineage_neighbours(session, table)
+    writing_triggers = await _writing_triggers(session, table)
 
     # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
     # not on `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
@@ -674,6 +748,7 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         definition_state=definition_state,
         definition_digest=definition_digest,
         column_digest=column_digest,
+        writing_triggers=writing_triggers,
     )
 
 

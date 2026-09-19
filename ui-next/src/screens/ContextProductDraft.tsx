@@ -1,11 +1,18 @@
 import { useCallback, useState } from "react";
-import type { ContextProductCreate } from "../lib/types";
+import type {
+  ContextProductCreate,
+  ContextProductRead,
+  ContextProductVersionCreate,
+  ContextProductVersionRead,
+} from "../lib/types";
 import {
   createContextProduct,
+  demoOr,
   fetchCatalogRows,
   fetchContextProductRoutineOptions,
   fetchSemanticModelVersions,
   fetchTools,
+  postJson,
 } from "../lib/api";
 import { listGlossaryTerms } from "../lib/_api_append";
 import { listOntologyVersions } from "../lib/api/ontology";
@@ -39,6 +46,17 @@ import type { StatusChannel } from "../components/screenState";
    `policy_summary` is fixed to gateway-only / no-raw-context, exactly as the
    legacy form hard-codes it: a Context Product is a description of approved
    metadata, and the source values it describes are never part of it.
+
+   R11-FP12 (2026-09-18): the pickers are also the second half of this file,
+   `NewVersionPanel`. Routines could only be chosen when a product was first
+   created -- there was no way to add a version at all from this screen, so a
+   product that should now name a procedure, or should stop naming one the
+   source retired, had to be re-created under a new key. The panel posts
+   `POST /v1/context-products/{id}/versions` (`create_context_product_version`)
+   with the latest version as its base, pre-filled from it, and renders the
+   very same six pickers through `GovernedReferencePickers` -- the routine one
+   fed by the same `context-product-routine-options` route -- so what a new
+   version may name is exactly what a new product may name.
 --------------------------------------------------------------------------- */
 
 interface DraftState {
@@ -79,23 +97,13 @@ const INITIAL_DRAFT: DraftState = {
   denyOnCriticalIncident: true,
 };
 
-export function CreateDraftPanel({
-  orgId,
-  projectId,
-  channel,
-  onCreated,
-}: {
-  orgId: string;
-  projectId: string | null;
-  channel: StatusChannel;
-  onCreated: () => void;
-}) {
-  const [draft, setDraft] = useState<DraftState>(INITIAL_DRAFT);
-  const [creating, setCreating] = useState(false);
-  const setField = useCallback(<K extends keyof DraftState>(key: K, value: DraftState[K]) => {
-    setDraft((prev) => ({ ...prev, [key]: value }));
-  }, []);
+/** The six governed-reference groups, as the draft state holds them. */
+type ReferenceKey = "tableIds" | "semanticIds" | "glossaryIds" | "toolIds" | "routineIds" | "ontologyVersionIds";
 
+/** Every picker's options, loaded once per project. The same reads the
+ *  screens that own each object make, so a draft -- a new product's or a new
+ *  version's -- can only name what the platform has already approved. */
+function useGovernedReferenceOptions(orgId: string, projectId: string | null) {
   const tableOptions = usePickerOptions(
     (signal) => fetchCatalogRows({ organizationId: orgId, limit: 200 }, signal).then((p) => p.items),
     (row) => ({
@@ -150,6 +158,254 @@ export function CreateDraftPanel({
     [orgId],
   );
 
+  return { tableOptions, semanticOptions, glossaryOptions, toolOptions, routineOptions, ontologyOptions };
+}
+
+/** The six reference pickers, bound to one draft's id arrays. Shared by the
+ *  create panel and the new-version panel so the two cannot drift apart --
+ *  above all the routine picker, which is the reason the second one exists. */
+function GovernedReferencePickers({
+  orgId,
+  projectId,
+  value,
+  onChange,
+}: {
+  orgId: string;
+  projectId: string | null;
+  value: Pick<DraftState, ReferenceKey>;
+  onChange: (key: ReferenceKey, ids: string[]) => void;
+}) {
+  const { tableOptions, semanticOptions, glossaryOptions, toolOptions, routineOptions, ontologyOptions } =
+    useGovernedReferenceOptions(orgId, projectId);
+  return (
+    <>
+      <div className="cpform__span2">
+        <ReferencePicker
+          label="Governed tables"
+          options={tableOptions.options}
+          loading={tableOptions.loading}
+          error={tableOptions.error}
+          selected={value.tableIds}
+          onChange={(ids) => onChange("tableIds", ids)}
+          searchPlaceholder="Filter by table or schema…"
+          emptyHint="This organization has no catalogued tables yet. Run a scan from Sources first."
+        />
+      </div>
+      <div className="cpform__span2">
+        <ReferencePicker
+          label="Semantic model versions"
+          options={semanticOptions.options}
+          loading={semanticOptions.loading}
+          error={semanticOptions.error}
+          selected={value.semanticIds}
+          onChange={(ids) => onChange("semanticIds", ids)}
+          emptyHint="No semantic model versions in this project yet."
+          visibleRows={4}
+        />
+      </div>
+      <div className="cpform__span2">
+        <ReferencePicker
+          label="Glossary terms"
+          options={glossaryOptions.options}
+          loading={glossaryOptions.loading}
+          error={glossaryOptions.error}
+          selected={value.glossaryIds}
+          onChange={(ids) => onChange("glossaryIds", ids)}
+          emptyHint="No approved glossary terms yet. Author them in Business meaning."
+          visibleRows={4}
+        />
+      </div>
+      <div className="cpform__span2">
+        <ReferencePicker
+          label="Eligible tools"
+          options={toolOptions.options}
+          loading={toolOptions.loading}
+          error={toolOptions.error}
+          selected={value.toolIds}
+          onChange={(ids) => onChange("toolIds", ids)}
+          emptyHint="No published tools in this project. Publish one from Tool registry."
+          visibleRows={4}
+        />
+      </div>
+      <div className="cpform__span2">
+        <ReferencePicker
+          label="Stored procedures and functions"
+          options={routineOptions.options}
+          loading={routineOptions.loading}
+          error={routineOptions.error}
+          selected={value.routineIds}
+          onChange={(ids) => onChange("routineIds", ids)}
+          emptyHint="No active routines on this project's sources. Scan a source that exposes them first."
+          visibleRows={4}
+        />
+      </div>
+      <div className="cpform__span2">
+        <ReferencePicker
+          label="Ontology versions"
+          options={ontologyOptions.options}
+          loading={ontologyOptions.loading}
+          error={ontologyOptions.error}
+          selected={value.ontologyVersionIds}
+          onChange={(ids) => onChange("ontologyVersionIds", ids)}
+          emptyHint="No approved ontology versions yet. Publish one from Unified lineage, Manage ontology."
+          visibleRows={4}
+        />
+      </div>
+    </>
+  );
+}
+
+/** The governance fields both panels send, from one draft. `routine_ids` and
+ *  `ontology_version_ids` only when one is picked, so a body without them is
+ *  byte-for-byte the body the create call always sent. */
+function definitionBody(draft: DraftState) {
+  return {
+    name: draft.name,
+    description: draft.description,
+    purpose: draft.purpose,
+    owner_type: draft.ownerType,
+    owner_principal: draft.ownerPrincipal,
+    table_ids: draft.tableIds,
+    semantic_model_version_ids: draft.semanticIds,
+    glossary_term_version_ids: draft.glossaryIds,
+    eligible_tool_version_ids: draft.toolIds,
+    ...(draft.routineIds.length > 0 ? { routine_ids: draft.routineIds } : {}),
+    ...(draft.ontologyVersionIds.length > 0 ? { ontology_version_ids: draft.ontologyVersionIds } : {}),
+    allowed_consumer_roles: splitList(draft.consumerRoles),
+    lineage_depth: Number(draft.lineageDepth || 2),
+    quality_requirements: {
+      minimum_score: Number(draft.minimumScore || 0),
+      deny_on_critical_incident: draft.denyOnCriticalIncident,
+    },
+  };
+}
+
+/** Every field a definition carries, in the order the create form always
+ *  showed them. `leading` is the create form's stable key: a new version keeps
+ *  its product's key, so it has none. */
+function DraftFields({
+  orgId,
+  projectId,
+  draft,
+  setField,
+  leading = null,
+}: {
+  orgId: string;
+  projectId: string | null;
+  draft: DraftState;
+  setField: <K extends keyof DraftState>(key: K, value: DraftState[K]) => void;
+  leading?: React.ReactNode;
+}) {
+  return (
+    <div className="cpform__grid">
+      {leading}
+      <Field label="Name">
+        <input
+          required
+          minLength={3}
+          placeholder="Consumer risk analysis"
+          value={draft.name}
+          onChange={(e) => setField("name", e.target.value)}
+        />
+      </Field>
+      <Field label="Owner type">
+        <select
+          value={draft.ownerType}
+          onChange={(e) => setField("ownerType", e.target.value as DraftState["ownerType"])}
+        >
+          <option value="GROUP">Group</option>
+          <option value="INDIVIDUAL">Individual</option>
+        </select>
+      </Field>
+      <Field label="Owner principal">
+        <input
+          required
+          minLength={2}
+          placeholder="risk-data-stewards"
+          value={draft.ownerPrincipal}
+          onChange={(e) => setField("ownerPrincipal", e.target.value)}
+        />
+      </Field>
+      <div className="cpform__span2">
+        <Field label="Description">
+          <textarea
+            required
+            minLength={3}
+            rows={2}
+            placeholder="What this package contains"
+            value={draft.description}
+            onChange={(e) => setField("description", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="cpform__span2">
+        <Field label="Approved purpose">
+          <textarea
+            required
+            minLength={10}
+            rows={2}
+            placeholder="Bounded purpose for agent and analyst consumption"
+            value={draft.purpose}
+            onChange={(e) => setField("purpose", e.target.value)}
+          />
+        </Field>
+      </div>
+      <GovernedReferencePickers
+        orgId={orgId}
+        projectId={projectId}
+        value={draft}
+        onChange={(key, ids) => setField(key, ids)}
+      />
+      <Field label="Consumer roles">
+        <input required value={draft.consumerRoles} onChange={(e) => setField("consumerRoles", e.target.value)} />
+      </Field>
+      <Field label="Lineage depth">
+        <input
+          type="number"
+          min={0}
+          max={4}
+          value={draft.lineageDepth}
+          onChange={(e) => setField("lineageDepth", e.target.value)}
+        />
+      </Field>
+      <Field label="Minimum quality score">
+        <input
+          type="number"
+          min={0}
+          max={100}
+          value={draft.minimumScore}
+          onChange={(e) => setField("minimumScore", e.target.value)}
+        />
+      </Field>
+      <label className="cpform__checkbox cpform__span2">
+        <input
+          type="checkbox"
+          checked={draft.denyOnCriticalIncident}
+          onChange={(e) => setField("denyOnCriticalIncident", e.target.checked)}
+        />
+        Deny consumption while a referenced table has an active critical incident
+      </label>
+    </div>
+  );
+}
+
+export function CreateDraftPanel({
+  orgId,
+  projectId,
+  channel,
+  onCreated,
+}: {
+  orgId: string;
+  projectId: string | null;
+  channel: StatusChannel;
+  onCreated: () => void;
+}) {
+  const [draft, setDraft] = useState<DraftState>(INITIAL_DRAFT);
+  const [creating, setCreating] = useState(false);
+  const setField = useCallback(<K extends keyof DraftState>(key: K, value: DraftState[K]) => {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
   const submit = useCallback(
     async (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
@@ -159,23 +415,7 @@ export function CreateDraftPanel({
       }
       const body: ContextProductCreate = {
         product_key: draft.productKey,
-        name: draft.name,
-        description: draft.description,
-        purpose: draft.purpose,
-        owner_type: draft.ownerType,
-        owner_principal: draft.ownerPrincipal,
-        table_ids: draft.tableIds,
-        semantic_model_version_ids: draft.semanticIds,
-        glossary_term_version_ids: draft.glossaryIds,
-        eligible_tool_version_ids: draft.toolIds,
-        ...(draft.routineIds.length > 0 ? { routine_ids: draft.routineIds } : {}),
-        ...(draft.ontologyVersionIds.length > 0 ? { ontology_version_ids: draft.ontologyVersionIds } : {}),
-        allowed_consumer_roles: splitList(draft.consumerRoles),
-        lineage_depth: Number(draft.lineageDepth || 2),
-        quality_requirements: {
-          minimum_score: Number(draft.minimumScore || 0),
-          deny_on_critical_incident: draft.denyOnCriticalIncident,
-        },
+        ...definitionBody(draft),
         policy_summary: {
           source_values: "GATEWAY_ONLY",
           retention: "NO_RAW_CONTEXT",
@@ -212,169 +452,23 @@ export function CreateDraftPanel({
           <Pill tone="warn">DRAFT</Pill>
         </header>
 
-        <div className="cpform__grid">
-          <Field label="Stable key">
-            <input
-              required
-              pattern="[a-z][a-z0-9_-]{1,99}"
-              placeholder="consumer-risk-context"
-              value={draft.productKey}
-              onChange={(e) => setField("productKey", e.target.value)}
-            />
-          </Field>
-          <Field label="Name">
-            <input
-              required
-              minLength={3}
-              placeholder="Consumer risk analysis"
-              value={draft.name}
-              onChange={(e) => setField("name", e.target.value)}
-            />
-          </Field>
-          <Field label="Owner type">
-            <select
-              value={draft.ownerType}
-              onChange={(e) => setField("ownerType", e.target.value as DraftState["ownerType"])}
-            >
-              <option value="GROUP">Group</option>
-              <option value="INDIVIDUAL">Individual</option>
-            </select>
-          </Field>
-          <Field label="Owner principal">
-            <input
-              required
-              minLength={2}
-              placeholder="risk-data-stewards"
-              value={draft.ownerPrincipal}
-              onChange={(e) => setField("ownerPrincipal", e.target.value)}
-            />
-          </Field>
-          <div className="cpform__span2">
-            <Field label="Description">
-              <textarea
+        <DraftFields
+          orgId={orgId}
+          projectId={projectId}
+          draft={draft}
+          setField={setField}
+          leading={
+            <Field label="Stable key">
+              <input
                 required
-                minLength={3}
-                rows={2}
-                placeholder="What this package contains"
-                value={draft.description}
-                onChange={(e) => setField("description", e.target.value)}
+                pattern="[a-z][a-z0-9_-]{1,99}"
+                placeholder="consumer-risk-context"
+                value={draft.productKey}
+                onChange={(e) => setField("productKey", e.target.value)}
               />
             </Field>
-          </div>
-          <div className="cpform__span2">
-            <Field label="Approved purpose">
-              <textarea
-                required
-                minLength={10}
-                rows={2}
-                placeholder="Bounded purpose for agent and analyst consumption"
-                value={draft.purpose}
-                onChange={(e) => setField("purpose", e.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="cpform__span2">
-            <ReferencePicker
-              label="Governed tables"
-              options={tableOptions.options}
-              loading={tableOptions.loading}
-              error={tableOptions.error}
-              selected={draft.tableIds}
-              onChange={(ids) => setField("tableIds", ids)}
-              searchPlaceholder="Filter by table or schema…"
-              emptyHint="This organization has no catalogued tables yet. Run a scan from Sources first."
-            />
-          </div>
-          <div className="cpform__span2">
-            <ReferencePicker
-              label="Semantic model versions"
-              options={semanticOptions.options}
-              loading={semanticOptions.loading}
-              error={semanticOptions.error}
-              selected={draft.semanticIds}
-              onChange={(ids) => setField("semanticIds", ids)}
-              emptyHint="No semantic model versions in this project yet."
-              visibleRows={4}
-            />
-          </div>
-          <div className="cpform__span2">
-            <ReferencePicker
-              label="Glossary terms"
-              options={glossaryOptions.options}
-              loading={glossaryOptions.loading}
-              error={glossaryOptions.error}
-              selected={draft.glossaryIds}
-              onChange={(ids) => setField("glossaryIds", ids)}
-              emptyHint="No approved glossary terms yet. Author them in Business meaning."
-              visibleRows={4}
-            />
-          </div>
-          <div className="cpform__span2">
-            <ReferencePicker
-              label="Eligible tools"
-              options={toolOptions.options}
-              loading={toolOptions.loading}
-              error={toolOptions.error}
-              selected={draft.toolIds}
-              onChange={(ids) => setField("toolIds", ids)}
-              emptyHint="No published tools in this project. Publish one from Tool registry."
-              visibleRows={4}
-            />
-          </div>
-          <div className="cpform__span2">
-            <ReferencePicker
-              label="Stored procedures and functions"
-              options={routineOptions.options}
-              loading={routineOptions.loading}
-              error={routineOptions.error}
-              selected={draft.routineIds}
-              onChange={(ids) => setField("routineIds", ids)}
-              emptyHint="No active routines on this project's sources. Scan a source that exposes them first."
-              visibleRows={4}
-            />
-          </div>
-          <div className="cpform__span2">
-            <ReferencePicker
-              label="Ontology versions"
-              options={ontologyOptions.options}
-              loading={ontologyOptions.loading}
-              error={ontologyOptions.error}
-              selected={draft.ontologyVersionIds}
-              onChange={(ids) => setField("ontologyVersionIds", ids)}
-              emptyHint="No approved ontology versions yet. Publish one from Unified lineage, Manage ontology."
-              visibleRows={4}
-            />
-          </div>
-          <Field label="Consumer roles">
-            <input required value={draft.consumerRoles} onChange={(e) => setField("consumerRoles", e.target.value)} />
-          </Field>
-          <Field label="Lineage depth">
-            <input
-              type="number"
-              min={0}
-              max={4}
-              value={draft.lineageDepth}
-              onChange={(e) => setField("lineageDepth", e.target.value)}
-            />
-          </Field>
-          <Field label="Minimum quality score">
-            <input
-              type="number"
-              min={0}
-              max={100}
-              value={draft.minimumScore}
-              onChange={(e) => setField("minimumScore", e.target.value)}
-            />
-          </Field>
-          <label className="cpform__checkbox cpform__span2">
-            <input
-              type="checkbox"
-              checked={draft.denyOnCriticalIncident}
-              onChange={(e) => setField("denyOnCriticalIncident", e.target.checked)}
-            />
-            Deny consumption while a referenced table has an active critical incident
-          </label>
-        </div>
+          }
+        />
 
         <p className="cpform__privacy">
           The control plane stores identifiers and approved metadata only. Source values remain gateway-only and are
@@ -383,6 +477,146 @@ export function CreateDraftPanel({
 
         <Button type="submit" variant="primary" disabled={creating || !projectId}>
           {creating ? "Creating…" : "Create governed draft"}
+        </Button>
+      </form>
+    </article>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   New version -- R11-FP12.
+
+   A product's next version starts from its latest one: every field and every
+   pinned reference pre-filled, the stable key fixed (it is the product), and
+   `based_on_version_id` naming the base so the review shows what changed. The
+   draft it creates is a DRAFT like any other and reaches consumers only through
+   Submit and an independent approval; nothing here publishes.
+
+   The base's `policy_summary` and `support_window_days` are carried unchanged
+   rather than offered as fields: the create form fixes the first to
+   gateway-only for the reason its header gives, and neither is something a
+   steward should change by accident while adding a routine.
+--------------------------------------------------------------------------- */
+
+/** The draft state a new version starts from: its base, exactly. */
+function draftFromVersion(product: ContextProductRead): DraftState {
+  const base = product.latest_version;
+  const quality = base.quality_requirements;
+  return {
+    productKey: product.product_key,
+    name: base.name,
+    ownerType: base.owner_type,
+    ownerPrincipal: base.owner_principal,
+    description: base.description,
+    purpose: base.purpose,
+    tableIds: [...(base.table_ids ?? [])],
+    semanticIds: [...(base.semantic_model_version_ids ?? [])],
+    glossaryIds: [...(base.glossary_term_version_ids ?? [])],
+    toolIds: [...(base.eligible_tool_version_ids ?? [])],
+    routineIds: [...(base.routine_ids ?? [])],
+    ontologyVersionIds: [...(base.ontology_version_ids ?? [])],
+    consumerRoles: base.allowed_consumer_roles.join(", "),
+    lineageDepth: String(base.lineage_depth ?? 2),
+    minimumScore: String(quality?.minimum_score ?? 0),
+    denyOnCriticalIncident: quality?.deny_on_critical_incident ?? true,
+  };
+}
+
+/** `POST /v1/context-products/{product_id}/versions` (`create_context_product_version`).
+ *  Demo mode answers with the draft the server would create, and sends nothing. */
+function createContextProductVersion(
+  product: ContextProductRead,
+  body: ContextProductVersionCreate,
+): Promise<ContextProductVersionRead> {
+  const base = product.latest_version;
+  return demoOr(
+    async () => ({
+      ...base,
+      ...body,
+      id: `${base.id}-next`,
+      version: base.version + 1,
+      status: "DRAFT",
+      approved_by: null,
+      approved_at: null,
+      published_at: null,
+      based_on_version_id: base.id,
+    }),
+    () => postJson<ContextProductVersionRead>(`/v1/context-products/${product.id}/versions`, body),
+  );
+}
+
+export function NewVersionPanel({
+  orgId,
+  product,
+  channel,
+  onCreated,
+  onClose,
+}: {
+  orgId: string;
+  product: ContextProductRead;
+  channel: StatusChannel;
+  onCreated: () => void;
+  onClose: () => void;
+}) {
+  const base = product.latest_version;
+  const [draft, setDraft] = useState<DraftState>(() => draftFromVersion(product));
+  const [creating, setCreating] = useState(false);
+  const setField = useCallback(<K extends keyof DraftState>(key: K, value: DraftState[K]) => {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const submit = useCallback(
+    async (e: React.FormEvent<HTMLFormElement>) => {
+      e.preventDefault();
+      const body: ContextProductVersionCreate = {
+        ...definitionBody(draft),
+        policy_summary: base.policy_summary,
+        support_window_days: base.support_window_days,
+        based_on_version_id: base.id,
+      };
+      setCreating(true);
+      channel.info("Validating governed references...");
+      try {
+        const created = await createContextProductVersion(product, body);
+        channel.success(
+          `Draft v${created.version} created from v${base.version}. Submit it for independent review when ready.`,
+        );
+        onCreated();
+      } catch (reason) {
+        channel.failure(reason);
+      } finally {
+        setCreating(false);
+      }
+    },
+    [draft, base, product, channel, onCreated],
+  );
+
+  return (
+    <article className="cpform" aria-label={`New version of ${product.product_key}`}>
+      <form onSubmit={(e) => void submit(e)}>
+        <header className="cpform__head">
+          <div>
+            <p className="cpform__eyebrow">NEXT VERSION</p>
+            <h2 className="cpform__h2">
+              New version of {product.product_key}
+            </h2>
+            <p className="cpform__lede">
+              Starts from v{base.version}. Change what it names -- tables, semantics, terms, tools, routines,
+              ontology -- and submit the draft for review; the published version keeps serving until then.
+            </p>
+          </div>
+          <div className="cprollout__headactions">
+            <Pill tone="warn">DRAFT</Pill>
+            <Button type="button" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </header>
+
+        <DraftFields orgId={orgId} projectId={product.project_id} draft={draft} setField={setField} />
+
+        <Button type="submit" variant="primary" disabled={creating}>
+          {creating ? "Creating…" : "Create version draft"}
         </Button>
       </form>
     </article>

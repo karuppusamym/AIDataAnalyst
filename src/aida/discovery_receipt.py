@@ -104,18 +104,17 @@ STREAM_INTERRUPTED: Final = "INTERRUPTED"
 # `MetadataTrigger.availability` + `unavailable_reason`. A sequence has no text
 # at all and so could never have had them.
 #
-# **What is deliberately not done here.** `DISCOVERY_FACETS` itself lives in
-# `connectors.discovery`, which is another session's this cycle, so no connector
-# can yet attribute a *refused* trigger read to this facet -- `FacetReadScope.record`
-# validates against that frozenset. The receipt accepts the outcome
-# (`RECEIPT_FACETS` below) and the reconciliation honours it
-# (`workflows.activities._FACET_AXES`), so the protection is in place the moment
-# that one entry lands. Until it does, a refused trigger read raises out of
-# `discover_streaming` and fails the run -- which reconciles nothing and so
-# retires nothing, the same safe direction `RETIREMENT_BEARING_FACETS` relies on.
-# (Both now come from `connectors.discovery` with the other eight -- see the
-# import at the top of this module. They were declared here while that module
-# belonged to another session; the entry it was waiting for has landed.)
+# **A refused trigger or sequence read costs that facet, not the run.** Both names
+# are in `DISCOVERY_FACETS` beside the other eight, so an adapter attributes a
+# refusal of either to its own facet, the receipt publishes it, and
+# `workflows.activities._FACET_AXES` keeps the refused axis's existing rows out of
+# the deprecate-missing pass. That last part is the one that matters: without it a
+# refused trigger read would tombstone every trigger a previous run captured.
+# (These two names were first declared in this module, while `connectors.discovery`
+# belonged to another session; they moved there so the facet a connector attributes
+# a refusal to and the facet this receipt publishes are the same string by
+# construction. This comment used to describe that interim state and was left
+# behind when it ended -- corrected 2026-09-18.)
 
 #: Facets a connector reports by capability flag alone -- Atlas counts no withheld share for them.
 #: Taken from `connectors.discovery`'s own names so the facet a connector attributes a refused
@@ -143,11 +142,9 @@ FACET_OBJECT_VISIBILITY: Final = "object_visibility"
 #: Every facet name this receipt will record an outcome for. A refusal recorded against a name
 #: outside this set would be accepted and then quietly dropped by `as_json`, which is the one
 #: failure mode a receipt must not have, so `record_facet_outcome` refuses it instead.
-RECEIPT_FACETS: Final[frozenset[str]] = DISCOVERY_FACETS | {
-    FACET_OBJECT_VISIBILITY,
-    FACET_TRIGGERS,
-    FACET_SEQUENCES,
-}
+#: Triggers and sequences are not added here separately: they are already in
+#: `DISCOVERY_FACETS`, and listing them again would read as though they were not.
+RECEIPT_FACETS: Final[frozenset[str]] = DISCOVERY_FACETS | {FACET_OBJECT_VISIBILITY}
 
 
 def _count_code(counter: Counter[str], text: str | None, truncated: bool) -> None:

@@ -59,8 +59,10 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+import structlog
+from sqlalchemy import ColumnElement, Exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from aida.events import record_audit, record_outbox
 from aida.models import (
@@ -72,7 +74,12 @@ from aida.models import (
     ProcedureLineageEdge,
     ViewLineageEdge,
 )
+from aida.procedure_lineage import UNPARSED_TRANSFORMATION_TYPE
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.security_types import SecurityContext
+from aida.sql_lineage_parser import STAR_COLUMN_MARKER, TransformationType
+
+logger = structlog.get_logger(__name__)
 
 # --------------------------------------------------------------------------- #
 # 1. The sensitivity lattice (raise-only ordering)
@@ -138,8 +145,13 @@ NON_PROPAGATING_EDGE_KINDS: frozenset[str] = frozenset({INFLUENCES})
 #   DBT_DEPENDENCY       -> DECLARED       (a manifest-declared transformation dep)
 #   VIEW_DEFINITION      -> VIEW_DDL       (parsed CREATE VIEW definition)
 #   PROCEDURE_DEFINITION -> VIEW_DDL       (parsed stored-procedure body -- same
-#                                           deterministic DDL-parse provenance)
+#                                           deterministic DDL-parse provenance; both
+#                                           procedure tables, the captured-routine one
+#                                           included, fold into the graph under it)
 #   OPENLINEAGE_ETL      -> OPENLINEAGE    (an OpenLineage run event)
+#   TRIGGER_DEFINITION   -> VIEW_DDL       (R11-FP01: a parsed trigger body -- the same
+#                                           parse a procedure body gets, with the firing
+#                                           row bound to the table it fires on)
 #   SUGGESTED_RELATIONSHIP -> INFLUENCES   (an inferred candidate -- NON-propagating)
 # ``EXECUTED_QUERY`` has no unified-graph edge_source today (query lineage lives
 # in ``query_gateway.extract_column_lineage`` as QueryExecution.column_lineage,
@@ -151,6 +163,7 @@ EDGE_SOURCE_TO_PROPAGATION_KIND: dict[str, str] = {
     "VIEW_DEFINITION": VIEW_DDL,
     "PROCEDURE_DEFINITION": VIEW_DDL,
     "OPENLINEAGE_ETL": OPENLINEAGE,
+    "TRIGGER_DEFINITION": VIEW_DDL,
     "SUGGESTED_RELATIONSHIP": INFLUENCES,
 }
 
@@ -595,6 +608,62 @@ async def get_current_derived_classification(
 #   an unbounded scan. The cap is reported, never silently applied.
 
 
+#: R11-FP01: why a *reviewed* trigger edge could not become a column-level
+#: propagation edge. Each is a declared gap -- the classification does not travel
+#: that edge, and the gap says so -- never a table-grain edge in its place, which
+#: would stamp the origin's classification on every column of the written table.
+#:
+#: `SELECT * FROM inserted` / `NEW.*` -- the canonical audit trigger. The parser
+#: records it as one table-level `TABLE_STAR` edge because the body names no
+#: column; mapping it back to columns would mean guessing whether the INSERT had a
+#: column list, and a wrong guess raises an enforcement input off nothing.
+GAP_TABLE_STAR = "TABLE_STAR"
+#: The write's source could not be bound to a catalog table -- Oracle's `:NEW`,
+#: which the parser records unresolved rather than guesses. In a procedure body
+#: also an unqualified column the parser could not attribute, and a table the body
+#: reads that this scan does not hold: another database's, one outside the
+#: discovery selection, or a `#temp` some *caller* created and filled.
+GAP_SOURCE_UNRESOLVED = "SOURCE_UNRESOLVED"
+#: An end names a column the catalog does not hold on that table (a stale scan,
+#: or a name the parser could not normalise).
+GAP_COLUMN_NOT_IN_CATALOG = "COLUMN_NOT_IN_CATALOG"
+#: An end matches two columns of one table that differ only by case.
+GAP_COLUMN_AMBIGUOUS = "COLUMN_AMBIGUOUS"
+#: R11-B19: the one case the trigger vocabulary above does not name, because only
+#: routine-local state produces it. The write reads an intermediate the body itself
+#: filled -- a `#temp`, a table variable, a PostgreSQL `CREATE TEMP TABLE`, a
+#: called routine's result -- but no catalog column was carried through it for the
+#: column this edge reads, so the parser synthesised no transitive edge to follow.
+#: Its source is not *unresolved*: the parser bound the name, to the body's own
+#: intermediate, and that is exactly why `SOURCE_UNRESOLVED` would send the reader
+#: to the wrong fix. The remedy is upstream of the hop -- the statement that fills
+#: the intermediate -- which is what this code points at. (An intermediate filled
+#: by `SELECT *` is `TABLE_STAR`, not this: the star is the cause and already has
+#: a name.)
+GAP_INTERMEDIATE_NOT_CARRIED = "INTERMEDIATE_NOT_CARRIED"
+
+
+@dataclass(frozen=True, slots=True)
+class PropagationGap:
+    """One reviewed lineage edge a classification could not travel, and why.
+
+    Identifiers and a reason code only (INV-6): the edge, the object whose body it
+    was read from, and the table it writes -- enough to find the edge in the review
+    queue and the gap in the log, and nothing a body or a source value could reach.
+
+    `edge_source` is the unified graph's literal: `TRIGGER_DEFINITION` (a
+    `trigger_lineage_edge` row, `owner_ref` its trigger) or `PROCEDURE_DEFINITION`
+    (a `deep_procedure_lineage_edge` row, `owner_ref` its routine -- the legacy
+    procedure table declares no gaps, so the literal names one table here).
+    """
+
+    edge_source: str
+    edge_ref: str
+    owner_ref: str
+    target_table_id: str
+    reason: str
+
+
 @dataclass(frozen=True, slots=True)
 class PropagationInputs:
     """What one datasource contributes to a propagation run."""
@@ -602,6 +671,53 @@ class PropagationInputs:
     edges: list[PropagationEdge]
     asserted: dict[str, str]
     truncated: bool
+    #: R11-FP01: reviewed edges that could not be resolved to columns. Empty for
+    #: every source whose edges all resolved, so nothing reads it as a failure.
+    gaps: tuple[PropagationGap, ...] = ()
+
+
+#: R11-B19: another row of the same routine, seen from the edge being collected.
+_FEED = aliased(DeepProcedureLineageEdge, name="intermediate_feed")
+
+
+def _intermediate_feed(
+    organization_id: UUID, datasource_id: UUID, *column_match: ColumnElement[bool]
+) -> Exists:
+    """Whether the collected routine edge reads an intermediate its own body filled.
+
+    True when the same routine (and, in an Oracle package, the same member -- one
+    member's temp state is not another's) wrote the edge's source *as an
+    intermediate*: the parser's own test for a hop, asked in SQL so it costs the
+    sweep no second, unbounded read. `column_match` narrows it to the column the
+    edge reads (the hop was carried) or to a `*` fill (the hop is a star copy).
+
+    Matched ignoring case because the parser's hop pass matches that way
+    (`procedure_lineage._propagate_intermediate_hops`), and against the stored
+    name because that is all a row keeps: sqlglot drops the `#`, so T-SQL's
+    `#totals` is stored as `totals`, and a PostgreSQL temp table is unqualified.
+    Either can share a name with a real catalog table, and
+    `lineage_table_resolution` then binds the hop's source to that table -- which
+    is why a hop is recognised here, by what the body did, and never by whether its
+    table id resolved. A SUPERSEDED fill is an older body's, so it is not asked;
+    PROPOSED and REJECTED fills are the current parse's statements whatever a
+    person decided about the edge, so they are. INV-5 is restated inside.
+    """
+    edge = DeepProcedureLineageEdge
+    return (
+        select(_FEED.id)
+        .where(
+            _FEED.organization_id == organization_id,
+            _FEED.datasource_id == datasource_id,
+            _FEED.routine_id == edge.routine_id,
+            _FEED.package_member.is_not_distinct_from(edge.package_member),
+            _FEED.is_intermediate.is_(True),
+            _FEED.transformation_type != UNPARSED_TRANSFORMATION_TYPE,
+            _FEED.review_status != "SUPERSEDED",
+            func.lower(_FEED.target_table) == func.lower(edge.source_table),
+            *column_match,
+        )
+        .exists()
+    )
 
 
 async def collect_propagation_inputs(
@@ -613,13 +729,28 @@ async def collect_propagation_inputs(
 ) -> PropagationInputs:
     """Build column-level propagation edges for one datasource.
 
-    Reads the three parser-produced column-level edge tables that carry a
-    resolved table id on both ends -- view definitions, procedure definitions
-    and OpenLineage column edges -- and resolves each end to a real
-    `MetadataColumn`. The unified graph's own `edge_source` literals are used
-    so `propagation_kind_for_edge_source` decides what may propagate, rather
-    than this collector hard-coding trust.
+    Reads every reviewed column-level lineage table -- view definitions, the
+    legacy pasted-SQL procedure table, OpenLineage column edges, trigger bodies
+    (R11-FP01) and captured routine bodies (R11-B19) -- and resolves each end to
+    a real `MetadataColumn`. The unified graph's own `edge_source` literals are
+    used so `propagation_kind_for_edge_source` decides what may propagate, rather
+    than this collector hard-coding trust. A reviewed trigger or routine edge
+    that cannot be resolved to columns comes back on `gaps`, never at table grain.
     """
+    # The legacy procedure table (`models.ProcedureLineageEdge`) is still read,
+    # deliberately. Nothing has written it since R11-X5 removed the pasted-SQL
+    # parse endpoint -- captured routine lineage lands in
+    # `deep_procedure_lineage_edge`, read further down -- but a deployment's
+    # existing rows are ACTIVE, reviewed lineage that the unified graph, the
+    # parsed-edge review queue and the description drafter all still read.
+    # Dropping the read here alone would make propagation disagree with the graph
+    # a steward is shown, and silently stop a classification at a path someone
+    # approved: the under-propagation this module exists to prevent. With no
+    # writer it cannot grow, and a path both tables state is two edges between
+    # the same columns, which changes what is derived not at all. It retires
+    # without a code change the day those rows leave ACTIVE (a data decision,
+    # not this module's). Its rows keep R11-B17's exact-match resolution: they
+    # carry no write or intermediate flag to apply the routine table's rules to.
     edge_specs: list[tuple[Any, str]] = [
         (ViewLineageEdge, "VIEW_DEFINITION"),
         (ProcedureLineageEdge, "PROCEDURE_DEFINITION"),
@@ -694,9 +825,208 @@ async def collect_propagation_inputs(
     else:
         truncated = True
 
-    table_ids = {row[0] for row in raw} | {row[2] for row in raw}
+    # R11-FP01: reviewed trigger lineage. A trigger that copies `orders` into
+    # `orders_audit` on every insert is as real a data path as a view, and a PII
+    # column on `orders` must reach the audit table's copy of it. Same three rules as
+    # the tables above -- ACTIVE only, each end resolved within its own table, bounded
+    # -- plus two of the trigger table's own: a hop into a temp table is the body's
+    # plumbing, and only a *write* moves data into a table (a filter-only edge moves
+    # none, and an UNPARSED marker names no table). A reviewed edge that cannot be
+    # resolved to columns is recorded as a `PropagationGap`, never folded in at table
+    # grain. The trigger's own status is not consulted, as a view's is not: rows a
+    # since-dropped trigger copied are still in the table it wrote.
+    # Trigger and routine edges share one resolution path below: (source table,
+    # source column, target table, target column, edge_source, edge ref, owner ref).
+    body_raw: list[tuple[UUID, str, UUID, str, str, str, str]] = []
+    gaps: list[PropagationGap] = []
+    # Appended after every source above, so the budget each of them already had is
+    # undisturbed; and asked even when that budget is spent, so `truncated` says
+    # whether a trigger edge was actually left out rather than merely could be.
+    remaining = max(max_edges - len(raw), 0)
+    trigger_rows = (
+        await session.execute(
+            select(
+                TriggerLineageEdge.source_table_id,
+                TriggerLineageEdge.source_column,
+                TriggerLineageEdge.target_table_id,
+                TriggerLineageEdge.target_column,
+                TriggerLineageEdge.transformation_type,
+                TriggerLineageEdge.id,
+                TriggerLineageEdge.trigger_id,
+            )
+            .where(
+                TriggerLineageEdge.organization_id == organization_id,
+                TriggerLineageEdge.datasource_id == datasource_id,
+                TriggerLineageEdge.review_status == "ACTIVE",
+                TriggerLineageEdge.target_table_id.is_not(None),
+                TriggerLineageEdge.is_write.is_(True),
+                TriggerLineageEdge.is_intermediate.is_(False),
+                TriggerLineageEdge.transformation_type.not_in(
+                    (TransformationType.FILTERED.value, UNPARSED_TRANSFORMATION_TYPE)
+                ),
+            )
+            .order_by(TriggerLineageEdge.id)
+            .limit(remaining + 1)
+        )
+    ).all()
+    if len(trigger_rows) > remaining:
+        truncated = True
+        trigger_rows = trigger_rows[:remaining]
+    for (
+        source_table_id,
+        source_column,
+        target_table_id,
+        target_column,
+        transformation_type,
+        edge_id,
+        trigger_id,
+    ) in trigger_rows:
+        if (
+            transformation_type == TransformationType.TABLE_STAR.value
+            or STAR_COLUMN_MARKER in (source_column, target_column)
+        ):
+            reason = GAP_TABLE_STAR
+        elif source_table_id is None or target_table_id is None:
+            reason = GAP_SOURCE_UNRESOLVED
+        else:
+            body_raw.append(
+                (source_table_id, source_column, target_table_id, target_column,
+                 "TRIGGER_DEFINITION", str(edge_id), str(trigger_id))
+            )
+            continue
+        gaps.append(
+            PropagationGap(
+                edge_source="TRIGGER_DEFINITION",
+                edge_ref=str(edge_id),
+                owner_ref=str(trigger_id),
+                target_table_id=str(target_table_id),
+                reason=reason,
+            )
+        )
+
+    # R11-B19: reviewed captured-routine lineage. A stored procedure that reads
+    # `customers.ssn` and writes `customer_copy` is the same data path a trigger
+    # is, and until this the classification stopped at the procedure: the target
+    # read as unclassified, so every control keyed on classification treated it as
+    # ordinary data. The trigger block's rules, unchanged -- ACTIVE only (the
+    # agent's PROPOSED, a REJECTED and a SUPERSEDED edge move nothing), a write
+    # only, never an UNPARSED marker (a parse gap the coverage record and the
+    # footprint register already report; it names no table), bounded, each end
+    # resolved within its own table, and a reviewed edge that cannot be resolved
+    # declared on `gaps` -- plus what routine-local state adds:
+    #
+    # * **An intermediate is never an endpoint.** A write *into* a temp table,
+    #   table variable or local (`is_intermediate`) is not collected: what it tags
+    #   does not outlive the call. A write *out of* one is a hop, and the parser
+    #   has already synthesised the transitive edge across it (`via_temp_table`):
+    #   `orders.ssn -> #t.ssn -> totals.ssn` is stored as the two hops and
+    #   `orders.ssn -> totals.ssn`, which is ACTIVE or not on its own review. So a
+    #   hop the parse carried is simply not collected -- it is neither an edge nor
+    #   a gap, and it spends no budget -- and the transitive edge is what moves
+    #   the classification. A hop the parse could *not* carry is a gap: `TABLE_STAR`
+    #   when the intermediate was filled by `SELECT *`, `INTERMEDIATE_NOT_CARRIED`
+    #   otherwise. See `_intermediate_feed` for why a hop is recognised by the fill
+    #   and never by whether its table id resolved.
+    # * **A called routine's lineage propagates.** An edge read through a nested
+    #   `EXEC`/`CALL` (`via_routine`, `routine_call_descent`) is the caller's
+    #   reviewed edge: approved on the caller, and the data moves every time the
+    #   caller runs, whichever branch a parameter steers -- a path PII *can* take
+    #   is the path a control must assume it does. It is capped at PARTIAL
+    #   confidence for exactly that reason, and so is every transitive edge; this
+    #   collector weighs neither, as it weighs no trigger or view edge. The callee
+    #   parsed in its own right states the same edge again under its own id, which
+    #   is the same pair of columns and derives nothing different.
+    #
+    # The routine's own status is not consulted, as a trigger's is not: rows a
+    # since-dropped procedure wrote are still in the table it wrote them to.
+    routine_budget = max(max_edges - len(raw) - len(trigger_rows), 0)
+    routine_rows = (
+        await session.execute(
+            select(
+                DeepProcedureLineageEdge.source_table_id,
+                DeepProcedureLineageEdge.source_column,
+                DeepProcedureLineageEdge.target_table_id,
+                DeepProcedureLineageEdge.target_column,
+                DeepProcedureLineageEdge.transformation_type,
+                DeepProcedureLineageEdge.id,
+                DeepProcedureLineageEdge.routine_id,
+                _intermediate_feed(organization_id, datasource_id).label("reads_intermediate"),
+                _intermediate_feed(
+                    organization_id, datasource_id, _FEED.target_column == STAR_COLUMN_MARKER
+                ).label("star_filled"),
+            )
+            .where(
+                DeepProcedureLineageEdge.organization_id == organization_id,
+                DeepProcedureLineageEdge.datasource_id == datasource_id,
+                DeepProcedureLineageEdge.review_status == "ACTIVE",
+                DeepProcedureLineageEdge.target_table_id.is_not(None),
+                DeepProcedureLineageEdge.is_write.is_(True),
+                DeepProcedureLineageEdge.is_intermediate.is_(False),
+                DeepProcedureLineageEdge.transformation_type.not_in(
+                    (TransformationType.FILTERED.value, UNPARSED_TRANSFORMATION_TYPE)
+                ),
+                # A carried hop: its column was filled inside the body, so the
+                # transitive edge carries it. Not an edge of this pass.
+                ~_intermediate_feed(
+                    organization_id,
+                    datasource_id,
+                    func.lower(_FEED.target_column)
+                    == func.lower(DeepProcedureLineageEdge.source_column),
+                ),
+            )
+            .order_by(DeepProcedureLineageEdge.id)
+            .limit(routine_budget + 1)
+        )
+    ).all()
+    if len(routine_rows) > routine_budget:
+        truncated = True
+        routine_rows = routine_rows[:routine_budget]
+    for (
+        source_table_id,
+        source_column,
+        target_table_id,
+        target_column,
+        transformation_type,
+        edge_id,
+        routine_id,
+        reads_intermediate,
+        star_filled,
+    ) in routine_rows:
+        if (
+            transformation_type == TransformationType.TABLE_STAR.value
+            or STAR_COLUMN_MARKER in (source_column, target_column)
+        ):
+            reason = GAP_TABLE_STAR
+        elif reads_intermediate:
+            reason = GAP_TABLE_STAR if star_filled else GAP_INTERMEDIATE_NOT_CARRIED
+        elif source_table_id is None:
+            reason = GAP_SOURCE_UNRESOLVED
+        else:
+            body_raw.append(
+                (source_table_id, source_column, target_table_id, target_column,
+                 "PROCEDURE_DEFINITION", str(edge_id), str(routine_id))
+            )
+            continue
+        gaps.append(
+            PropagationGap(
+                edge_source="PROCEDURE_DEFINITION",
+                edge_ref=str(edge_id),
+                owner_ref=str(routine_id),
+                target_table_id=str(target_table_id),
+                reason=reason,
+            )
+        )
+
+    table_ids = (
+        {row[0] for row in raw}
+        | {row[2] for row in raw}
+        | {row[0] for row in body_raw}
+        | {row[2] for row in body_raw}
+    )
     if not table_ids:
-        return PropagationInputs(edges=[], asserted={}, truncated=truncated)
+        return PropagationInputs(
+            edges=[], asserted={}, truncated=truncated, gaps=tuple(gaps)
+        )
 
     columns = (
         await session.execute(
@@ -705,7 +1035,10 @@ async def collect_propagation_inputs(
                 MetadataColumn.table_id,
                 MetadataColumn.name,
                 MetadataColumn.classification,
-            ).where(MetadataColumn.table_id.in_(table_ids))
+            ).where(
+                MetadataColumn.organization_id == organization_id,
+                MetadataColumn.table_id.in_(table_ids),
+            )
         )
     ).all()
     # A column name is unique within a table, never across tables -- which is
@@ -713,6 +1046,26 @@ async def collect_propagation_inputs(
     by_key: dict[tuple[UUID, str], UUID] = {
         (table_id, name): column_id for column_id, table_id, name, _cls in columns
     }
+    # R11-FP01: a trigger body names its columns in whatever case its author typed,
+    # and the engine resolved them case-insensitively when it compiled the trigger
+    # (SQL Server's default collation; PostgreSQL and Oracle fold unquoted names).
+    # So a trigger end that misses exactly may match within *its own table* ignoring
+    # case -- but only when that match is unique; two columns differing only by case
+    # is a declared gap, not a guess. R11-B19: a routine body is the same text,
+    # compiled the same way, so its ends resolve by the same rule.
+    by_folded_key: dict[tuple[UUID, str], list[UUID]] = {}
+    for column_id, table_id, name, _cls in columns:
+        by_folded_key.setdefault((table_id, name.casefold()), []).append(column_id)
+
+    def resolve_body_end(table_id: UUID, name: str) -> UUID | str:
+        """The column id, or the gap reason when the end does not resolve."""
+        exact = by_key.get((table_id, name))
+        if exact is not None:
+            return exact
+        folded = by_folded_key.get((table_id, name.casefold()), [])
+        if len(folded) == 1:
+            return folded[0]
+        return GAP_COLUMN_AMBIGUOUS if folded else GAP_COLUMN_NOT_IN_CATALOG
     asserted: dict[str, str] = {
         str(column_id): classification
         for column_id, _table_id, _name, classification in columns
@@ -733,7 +1086,44 @@ async def collect_propagation_inputs(
                 edge_ref=ref,
             )
         )
-    return PropagationInputs(edges=edges, asserted=asserted, truncated=truncated)
+    for (
+        source_table_id,
+        source_column,
+        target_table_id,
+        target_column,
+        body_edge_source,
+        ref,
+        owner_ref,
+    ) in body_raw:
+        upstream_end = resolve_body_end(source_table_id, source_column)
+        downstream_end = resolve_body_end(target_table_id, target_column)
+        unresolved = next(
+            (end for end in (upstream_end, downstream_end) if isinstance(end, str)), None
+        )
+        if unresolved is not None:
+            gaps.append(
+                PropagationGap(
+                    edge_source=body_edge_source,
+                    edge_ref=ref,
+                    owner_ref=owner_ref,
+                    target_table_id=str(target_table_id),
+                    reason=unresolved,
+                )
+            )
+            continue
+        if upstream_end == downstream_end:
+            continue
+        edges.append(
+            PropagationEdge(
+                upstream_id=str(upstream_end),
+                downstream_id=str(downstream_end),
+                kind=propagation_kind_for_edge_source(body_edge_source),
+                edge_ref=ref,
+            )
+        )
+    return PropagationInputs(
+        edges=edges, asserted=asserted, truncated=truncated, gaps=tuple(gaps)
+    )
 
 
 async def propagate_for_datasource(
@@ -756,6 +1146,24 @@ async def propagate_for_datasource(
         datasource_id=datasource_id,
         max_edges=max_edges,
     )
+    if inputs.gaps:
+        # R11-FP01: a reviewed edge a classification could not travel is said, not
+        # skipped -- counted per reason, with ids and codes only (INV-6).
+        reasons: dict[str, int] = {}
+        # R11-B19: and per edge table, so a procedure's gap is not read as a trigger's.
+        sources: dict[str, int] = {}
+        for gap in inputs.gaps:
+            reasons[gap.reason] = reasons.get(gap.reason, 0) + 1
+            sources[gap.edge_source] = sources.get(gap.edge_source, 0) + 1
+        logger.warning(
+            "classification_propagation_gaps",
+            organization_id=str(organization_id),
+            datasource_id=str(datasource_id),
+            gap_count=len(inputs.gaps),
+            reasons=reasons,
+            edge_sources=sources,
+            edge_refs=sorted(gap.edge_ref for gap in inputs.gaps)[:50],
+        )
     if not inputs.edges or not inputs.asserted:
         return []
     return await store_derived_classifications(

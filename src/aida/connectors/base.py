@@ -1002,13 +1002,26 @@ class Connector(ABC):
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
         raise NotImplementedError
 
-    def scope_discovery(self, *, include_schemas: list[str], exclude_schemas: list[str]) -> bool:
-        """R11-FP01: take a selection's schema scope into the source's own metadata queries.
+    def scope_discovery(
+        self,
+        *,
+        include_schemas: list[str],
+        exclude_schemas: list[str],
+        object_kinds: Sequence[str] = (),
+        include_objects: Sequence[str] = (),
+        exclude_objects: Sequence[str] = (),
+    ) -> bool:
+        """R11-FP01: take a selection's scope into the source's own metadata queries.
 
         Returns whether this connector does. The default does not, and correctness never
         depends on it: the selection is applied to whatever `discover` returns, before anything
         is persisted (`aida.discovery_selection.apply_selection`). A connector that overrides
         this reads less; it never reads differently (`aida.connectors.schema_scope`).
+
+        The three object-level arguments are keyword-only with empty defaults, so a caller that
+        passes only the schema scope -- the discovery activity did, until the object scope was
+        pushable -- keeps working unchanged, and an adapter that pushes the schema scope only
+        (PostgreSQL, SQL Server) accepts and ignores them.
         """
         return False
 

@@ -444,15 +444,16 @@ def _extract_showplan_estimate(raw_xml: str) -> QueryEstimate:
 # stopped answering, and buys the thing this feature is for -- a refusal of one
 # facet no longer costs the facets read after it.
 #
-# **SQL Server's SQLSTATE reality.** `pytds` exceptions carry `msg_no`,
-# `number`, `severity` and a TDS `state` byte; they carry no `sqlstate` field at
-# all (verified against the installed driver). So
-# `capability_states.is_permission_refusal` cannot see a `42501`, and a genuine
-# refusal here classifies as UNAVAILABLE / FACET_QUERY_FAILED, which `read_facet`
-# re-raises. That is the under-claim INV-9 asks for and the behaviour this
-# adapter already had; what adoption adds today is the receipt entry naming the
-# facet. The day the driver reports a SQLSTATE -- or another one replaces it --
-# the same wiring starts absorbing the refusal with no change here.
+# **SQL Server's error-code reality.** `pytds` exceptions carry `msg_no`,
+# `number`, `severity` and a TDS `state` byte, and no `sqlstate` field at all
+# (verified against the installed driver). `number` is the server's own error
+# number -- the `sys.messages.message_id` of the ERROR token, a structured field
+# rather than text -- so since R11-FP02's follow-through
+# `capability_states.is_permission_refusal` reads it
+# (`SQLSERVER_PRIVILEGE_ERRORS`): a `DENY` on a catalog view answers 229, which
+# classifies as PERMISSION_DENIED, and `read_facet` absorbs it like any other
+# engine's refusal. Proven live in `tests/test_facet_refusal_sqlserver_live.py`.
+# A failure with any other number is still UNAVAILABLE and still re-raised.
 _CapturedRead = list[Any] | BaseException
 
 
@@ -559,7 +560,18 @@ class SqlServerConnector(SqlExecutor):
         finally:
             connection.close()
 
-    def scope_discovery(self, *, include_schemas: list[str], exclude_schemas: list[str]) -> bool:
+    def scope_discovery(
+        self,
+        *,
+        include_schemas: list[str],
+        exclude_schemas: list[str],
+        object_kinds: Sequence[str] = (),
+        include_objects: Sequence[str] = (),
+        exclude_objects: Sequence[str] = (),
+    ) -> bool:
+        # R11-FP01: this adapter pushes the schema scope only. The object kinds and
+        # `schema.object` patterns are accepted so one call reaches every adapter, and are
+        # left to `discovery_selection.apply_selection`, which runs on every batch anyway.
         self._schema_scope = schema_scope(include_schemas, exclude_schemas)
         return self._schema_scope.restricted
 

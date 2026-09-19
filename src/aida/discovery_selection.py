@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.connectors.base import DiscoveredCatalog, DiscoveredGrant
+from aida.connectors.base import DiscoveredCatalog, DiscoveredGrant, DiscoveredRoutine
 from aida.connectors.registry import connector_registry
 from aida.envelope_models import MetadataRoutine, MetadataSequence, MetadataTrigger
 from aida.models import DataSource, MetadataCatalog, MetadataSchema, MetadataTable
@@ -227,6 +227,68 @@ def routine_kind(routine_type: str) -> str:
     return normalized
 
 
+def routine_in_scope(
+    selection: DiscoverySelection,
+    schema: str,
+    name: str,
+    routine_type: str,
+    package_name: str | None = None,
+) -> bool:
+    """R11-FP03: whether a routine is in scope -- an Oracle package member by its package.
+
+    **The contract.** A member subprogram of an Oracle package enters and leaves the scan
+    with its package: it is judged as kind PACKAGE under the name `schema.package`, never by
+    its own name or kind. A selection that includes the package -- by `schema.object`
+    pattern or by the PACKAGE kind -- reaches every member; one that excludes the package
+    excludes every member; and no pattern selects a member apart from its package.
+
+    **Why the package and not the member.** A member has nothing of its own a scan could
+    maintain separately: its source is the package's (`oracle._append_package_members`
+    records it absent with that reason), EXECUTE is granted on the package, and lineage
+    parses the package body as one. Scoped by its own name, `include_objects=["hr.risk_pkg"]`
+    kept the package and silently dropped every member -- the selection reached the
+    container and none of its contents -- and `object_kinds=["PACKAGE"]` did the same.
+
+    A standalone routine (`package_name` empty) is judged by its own name and kind exactly
+    as before. See `apply_selection` for the one half of this contract not yet wired.
+    """
+    if package_name:
+        return selection.object_in_scope(schema, package_name, "PACKAGE")
+    return selection.object_in_scope(schema, name, routine_kind(routine_type))
+
+
+def _routine_kept(
+    selection: DiscoverySelection,
+    schema: str,
+    name: str,
+    routine_type: str,
+    package_name: str | None,
+) -> bool:
+    """The routine rule `apply_selection` and the preview apply today.
+
+    `routine_in_scope`, widened by the member's *own* rule -- and the widening is the
+    retirement half of the contract, deliberately not closed here. A FULL run retires
+    every existing routine it did not see unless `workflows.activities.
+    out_of_scope_existing` counts it as out of scope, and that function still judges a
+    member by its own name and kind (`selection.object_in_scope(schema, name, kind)`).
+    So this rule may only ever drop a routine that one also counts as out of scope:
+    admitting more is safe (the member is simply seen), dropping more is not -- with
+    `exclude_objects=["hr.risk_pkg"]` the member `hr.score` would be left out of the scan
+    by this rule and judged *in* scope by that one, and tombstoned. The include half of
+    the contract (a package reaches its members) is therefore live; the exclude half (an
+    excluded package takes its members with it) waits for `out_of_scope_existing` to call
+    `routine_in_scope`, at which point the `or` below is deleted in the same change.
+    `tests/test_package_member_selection.py` pins the safety property either way.
+    """
+    return routine_in_scope(selection, schema, name, routine_type, package_name)
+
+
+def _package_of(routine: DiscoveredRoutine) -> str | None:
+    """The package a discovered routine is a member of, from the reserved attribute."""
+    package = routine.attributes.get("package_name")
+    return str(package) if package else None
+
+
 def grant_in_scope(
     selection: DiscoverySelection, schema: str, object_type: str, object_name: str
 ) -> bool:
@@ -293,7 +355,11 @@ def apply_selection(
             routines = []
             for routine in schema.routines:
                 kind = routine_kind(routine.routine_type)
-                if selection.object_in_scope(schema.name, routine.name, kind):
+                # R11-FP03: a package member follows its package in (see `_routine_kept`
+                # for the half of the contract that is not wired yet, and why).
+                if _routine_kept(
+                    selection, schema.name, routine.name, routine.routine_type, _package_of(routine)
+                ):
                     routines.append(routine)
                 else:
                     excluded[kind] += 1
@@ -534,7 +600,13 @@ async def preview_selection(
     ).all()
     routines = (
         await session.execute(
-            select(MetadataSchema.name, MetadataRoutine.name, MetadataRoutine.routine_type)
+            select(
+                MetadataSchema.name,
+                MetadataRoutine.name,
+                MetadataRoutine.routine_type,
+                # R11-FP03: a member is previewed by the rule the run applies to it.
+                MetadataRoutine.package_name,
+            )
             .join(MetadataSchema, MetadataSchema.id == MetadataRoutine.schema_id)
             .where(
                 MetadataRoutine.datasource_id == datasource.id, MetadataRoutine.status == "ACTIVE"
@@ -592,18 +664,21 @@ async def preview_selection(
     counts: dict[str, SelectionCountRead] = {
         kind: SelectionCountRead(kind=kind, in_scope=0, excluded=0) for kind in OBJECT_KINDS
     }
-    objects = [
-        (schema, name, table_kind(object_type))
+    # The fourth element is the package a routine is a member of ("" for a standalone
+    # routine, None for every other kind), so a member is counted by the same rule the
+    # run applies to it (`_routine_kept`).
+    objects: list[tuple[str, str, str, str | None]] = [
+        (schema, name, table_kind(object_type), None)
         for schema, name, object_type in tables[:PREVIEW_OBJECT_LIMIT]
     ] + [
-        (schema, name, routine_kind(routine_type))
-        for schema, name, routine_type in routines[:PREVIEW_OBJECT_LIMIT]
+        (schema, name, routine_kind(routine_type), package or "")
+        for schema, name, routine_type, package in routines[:PREVIEW_OBJECT_LIMIT]
     ] + [
-        (schema, name, "TRIGGER") for schema, name in triggers[:PREVIEW_OBJECT_LIMIT]
+        (schema, name, "TRIGGER", None) for schema, name in triggers[:PREVIEW_OBJECT_LIMIT]
     ] + [
-        (schema, name, "SEQUENCE") for schema, name in sequences[:PREVIEW_OBJECT_LIMIT]
+        (schema, name, "SEQUENCE", None) for schema, name in sequences[:PREVIEW_OBJECT_LIMIT]
     ]
-    for schema, name, kind in objects:
+    for schema, name, kind, package in objects:
         qualified = f"{schema}.{name}".lower()
         matched_patterns.update(
             pattern
@@ -611,7 +686,12 @@ async def preview_selection(
             if fnmatchcase(qualified, pattern.lower())
         )
         count = counts.setdefault(kind, SelectionCountRead(kind=kind, in_scope=0, excluded=0))
-        if selection.object_in_scope(schema, name, kind):
+        in_scope = (
+            selection.object_in_scope(schema, name, kind)
+            if package is None
+            else _routine_kept(selection, schema, name, kind, package or None)
+        )
+        if in_scope:
             count.in_scope += 1
         else:
             count.excluded += 1

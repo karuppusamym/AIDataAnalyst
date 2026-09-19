@@ -269,7 +269,7 @@ def parse_coverage_state(*, parse_completed: bool, statement_count: int) -> Capa
 
 
 # ---------------------------------------------------------------------------
-# PERMISSION_DENIED, classified from the one signal that is not prose.
+# PERMISSION_DENIED, classified from structured codes -- never from prose.
 # ---------------------------------------------------------------------------
 
 #: SQLSTATE classes that mean "this login may not", from the SQL standard's own
@@ -280,23 +280,167 @@ def parse_coverage_state(*, parse_completed: bool, statement_count: int) -> Capa
 #: would make a typo look like a permission problem.
 PRIVILEGE_SQLSTATES: Final[frozenset[str]] = frozenset({"42501", "28000"})
 
+#: R11-FP02: SQL Server error numbers that mean "this login may not", as `pytds`
+#: reports them on `DatabaseError.number` (the TDS ERROR token's own number
+#: field -- the server's `sys.messages.message_id`, not text). Checked against
+#: `sys.messages` on the live sample container on 2026-09-18, and chosen the
+#: way `PRIVILEGE_SQLSTATES` is: only numbers whose whole meaning is a refusal.
+#:
+#: * 229 -- the <permission> permission was denied on the object (severity 14,
+#:   SQL Server's security class). What a `DENY SELECT` on a catalog view
+#:   produces, and the one the live test provokes.
+#: * 230 -- the same, on a column.
+#: * 262 -- <permission> permission denied in database (e.g. SHOWPLAN).
+#: * 297 -- the user does not have permission to perform this action.
+#: * 300 -- <permission> permission was denied on object ... database (e.g.
+#:   VIEW SERVER STATE, VIEW DATABASE STATE).
+#: * 916 -- the server principal is not able to access the database under the
+#:   current security context.
+#: * 15247 -- user does not have permission to perform this action (the
+#:   system-procedure spelling of 297).
+#:
+#: Deliberately absent: 208 (invalid object name -- a genuinely missing object),
+#: 1088 and 15151 ("does not exist *or* you do not have permission" -- SQL
+#: Server itself declines to say which, so neither can we), and 18456 / 4060
+#: (a failed login, which also covers a wrong password -- the analogue of
+#: PostgreSQL's 28P01, which `PRIVILEGE_SQLSTATES` leaves out for the same
+#: reason).
+SQLSERVER_PRIVILEGE_ERRORS: Final[frozenset[int]] = frozenset(
+    {229, 230, 262, 297, 300, 916, 15247}
+)
 
-def is_permission_refusal(exc: BaseException | None) -> bool:
-    """Whether `exc` is the source refusing a read, judged by SQLSTATE alone.
+#: R11-FP02: Oracle error numbers that mean "this login may not", as
+#: `python-oracledb` reports them on the `_Error` object it raises with
+#: (`exc.args[0].code`, an `int` the driver takes from the server's error
+#: packet). `full_code` is *not* read: the driver derives it by slicing the
+#: message text at its first colon, and this function never reads a message.
+#:
+#: * 1031 -- ORA-01031 insufficient privileges.
+#: * 1045 -- ORA-01045 user lacks CREATE SESSION privilege; logon denied (the
+#:   analogue of SQLSTATE 28000, "not permitted to log in").
+#:
+#: Deliberately absent: 1017 (invalid username/password -- a credential, not a
+#: refusal) and 28000 (account locked -- a state of the account).
+ORACLE_PRIVILEGE_ERRORS: Final[frozenset[int]] = frozenset({1031, 1045})
+
+#: R11-FP02: codes whose meaning is "this relation does not exist *or* you may
+#: not see it" -- the engine deliberately refuses to say which, so from the code
+#: alone a refusal cannot be told from a genuinely missing object:
+#:
+#: * Oracle ORA-00942 (`code == 942`), "table or view does not exist". Oracle
+#:   returns it for an object the login holds no privilege on at all, so as not
+#:   to disclose that the object exists -- a revoked `ALL_TAB_PRIVS` fails this
+#:   way, not with ORA-01031.
+#: * Snowflake error 2003 (`errno == 2003`, SQLSTATE 02000), "object does not
+#:   exist or not authorized".
+#:
+#: **The ORA-00942 decision.** Judged on the exception alone, these are *not*
+#: refusals: a query naming a table that was dropped, or never existed, gets
+#: exactly this code, and calling that PERMISSION_DENIED would send an
+#: administrator to grant access on something that is not there. They count as
+#: refusals only when the caller states, from its own knowledge of the
+#: statement, that every relation it names is one the engine always has
+#: (`known_relations=True`) -- an Oracle `ALL_*` dictionary view, a Snowflake
+#: `INFORMATION_SCHEMA` view, or an object the same scan has just listed. Then
+#: "does not exist" is ruled out by construction and only "you may not see it"
+#: is left. That is a deduction from a structured code plus the caller's own
+#: SQL, never a reading of the message; a caller that cannot say it keeps the
+#: under-claiming answer.
+HIDDEN_RELATION_ORACLE_ERRORS: Final[frozenset[int]] = frozenset({942})
+HIDDEN_RELATION_SNOWFLAKE_ERRORS: Final[frozenset[int]] = frozenset({2003})
+
+#: R11-FP02: the structured `reason` BigQuery puts on a job or API error when
+#: the principal lacks a permission (`errors[i]["reason"]`, mapped to HTTP 403
+#: by `google.cloud.bigquery.job.base._ERROR_REASON_TO_EXCEPTION`). A 403 alone
+#: is *not* a refusal: BigQuery also answers 403 for `quotaExceeded`,
+#: `billingNotEnabled`, `policyViolation`, `blocked` and `responseTooLarge`,
+#: none of which a grant would fix. So both the status and this reason are
+#: required.
+BIGQUERY_REFUSAL_REASONS: Final[frozenset[str]] = frozenset({"accessDenied"})
+_HTTP_FORBIDDEN: Final = 403
+
+
+def _driver_module(exc: BaseException) -> str:
+    """The top-level package of the class that raised `exc` -- which driver it is.
+
+    Vendor codes are only meaningful for the vendor that assigned them (`number`
+    229 is SQL Server's, `code` 403 is an HTTP status), so each code below is
+    read only from an exception its own driver raised. The class's module is a
+    structural fact about the exception, not text it carries.
+    """
+    return type(exc).__module__.partition(".")[0]
+
+
+def _vendor_code_refusal(exc: BaseException, *, known_relations: bool) -> bool:
+    """Whether a driver's own numeric code, read as a field, says "refused"."""
+    module = type(exc).__module__
+    driver = _driver_module(exc)
+    if driver == "pytds":
+        number = getattr(exc, "number", None)
+        return isinstance(number, int) and number in SQLSERVER_PRIVILEGE_ERRORS
+    if driver == "oracledb":
+        # `oracledb.DatabaseError(_Error)`: the structured error object is the
+        # exception's first argument, and its `code` is the ORA number.
+        error = exc.args[0] if exc.args else None
+        code = getattr(error, "code", None)
+        if not isinstance(code, int) or isinstance(code, bool):
+            return False
+        if code in ORACLE_PRIVILEGE_ERRORS:
+            return True
+        return known_relations and code in HIDDEN_RELATION_ORACLE_ERRORS
+    if driver == "snowflake":
+        errno = getattr(exc, "errno", None)
+        return (
+            known_relations
+            and isinstance(errno, int)
+            and errno in HIDDEN_RELATION_SNOWFLAKE_ERRORS
+        )
+    if module.startswith("google.api_core"):
+        if getattr(exc, "code", None) != _HTTP_FORBIDDEN:
+            return False
+        errors = getattr(exc, "errors", None)
+        if not isinstance(errors, list | tuple):
+            return False
+        return any(
+            isinstance(error, Mapping) and error.get("reason") in BIGQUERY_REFUSAL_REASONS
+            for error in errors
+        )
+    return False
+
+
+def is_permission_refusal(exc: BaseException | None, *, known_relations: bool = False) -> bool:
+    """Whether `exc` is the source refusing a read, judged from structured codes alone.
 
     Walks the exception chain (a driver error is usually wrapped -- SQLAlchemy
     puts the original on `.orig`, and `raise ... from` puts it on `__cause__`)
-    looking for a standard SQLSTATE in `PRIVILEGE_SQLSTATES`.
+    looking for a code that means "this login may not":
 
-    **Why SQLSTATE and nothing else.** A refusal has to be told apart from a
-    failure without reading the driver's message, which can quote a value
-    (INV-6) and which no two drivers spell the same way. SQLSTATE is a
-    standardised code the driver reports as a field. Vendors whose driver does
-    not report one -- Oracle's `ORA-01031`, SQL Server's error 229 -- fall
-    through as `False`, so their refusals are recorded as `UNAVAILABLE`
-    instead. That is the under-claiming direction INV-9 requires: a gap
-    reported as "we did not get it" is honest, a failure reported as a denial
-    would be a guess about the source's intent.
+    * a standard SQLSTATE in `PRIVILEGE_SQLSTATES`, as an attribute (asyncpg,
+      snowflake-connector) or in a driver's context mapping (databricks-sql);
+    * a vendor's own numeric error code, read as the field the driver reports it
+      in -- SQL Server's error number from `pytds` (`SQLSERVER_PRIVILEGE_ERRORS`),
+      Oracle's ORA number from `oracledb` (`ORACLE_PRIVILEGE_ERRORS`), and
+      BigQuery's HTTP 403 *with* the structured reason `accessDenied`
+      (`BIGQUERY_REFUSAL_REASONS`);
+    * with `known_relations=True` only, a vendor's "does not exist or not
+      authorized" code (`HIDDEN_RELATION_*`) -- see that constant for why the
+      caller has to vouch for the relations before it can mean a refusal.
+
+    **Never the message.** A refusal has to be told apart from a failure
+    without reading the driver's message, which can quote a value (INV-6) and
+    which no two drivers spell the same way. SQLSTATE is one structured field; a
+    vendor's numeric error code is another, assigned by the same server, carried
+    by the driver as a number rather than as prose, and exactly as honest a
+    signal. Before R11-FP02's follow-through this read SQLSTATE only, so `pytds`,
+    `oracledb` and `google-api-core` -- which report none -- recorded every
+    refusal as UNAVAILABLE. They no longer need to.
+
+    **Where the structured fields cannot tell, the answer stays False.** An
+    exception with no recognised code -- a timeout, a dropped connection, a
+    driver error built without its code, a 403 for quota -- is not a refusal,
+    and is recorded as UNAVAILABLE. That is the under-claiming direction INV-9
+    requires: "we did not get it" is honest, while "the source refused you"
+    without a code that says so would be a guess at the source's intent.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -317,6 +461,8 @@ def is_permission_refusal(exc: BaseException | None) -> bool:
                 value = context.get(key)
                 if isinstance(value, str) and value in PRIVILEGE_SQLSTATES:
                     return True
+        if _vendor_code_refusal(current, known_relations=known_relations):
+            return True
         nxt = getattr(current, "orig", None)
         if not isinstance(nxt, BaseException):
             nxt = current.__cause__ or current.__context__

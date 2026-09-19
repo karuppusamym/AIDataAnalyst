@@ -140,7 +140,9 @@ DISCOVERY_FACETS: Final[frozenset[str]] = frozenset(
 RETIREMENT_BEARING_FACETS: Final[frozenset[str]] = frozenset({FACET_INVENTORY})
 
 
-def classify_read_failure(exc: BaseException) -> tuple[CapabilityState, str]:
+def classify_read_failure(
+    exc: BaseException, *, known_relations: bool = False
+) -> tuple[CapabilityState, str]:
     """One failed facet read as a state and a reason code -- never as a message.
 
     INV-6 is the whole reason this is a function and not an f-string. A
@@ -149,17 +151,23 @@ def classify_read_failure(exc: BaseException) -> tuple[CapabilityState, str]:
     derived from `str(exc)` may be persisted (the same rule
     `workflows.activities` applies to `analysis_run.error_message`, and the
     same one `connectors.base.FACET_REASON_CODES` gives for its own set). The
-    judgement is made from the driver's own SQLSTATE field
-    (`capability_states.is_permission_refusal`) and what is written down is
+    judgement is made from the driver's own structured code -- SQLSTATE, or a
+    vendor's numeric error code read as the field the driver reports it in
+    (`capability_states.is_permission_refusal`) -- and what is written down is
     this pair of closed-vocabulary codes.
 
-    A driver that reports no SQLSTATE -- Oracle's `ORA-01031`, SQL Server's
-    error 229 -- classifies as UNAVAILABLE. That under-claims, which is the
-    direction INV-9 requires: "we did not get it" is honest, while "the source
-    refused you" would be a guess at the source's intent that sends an
-    administrator off to grant access that may change nothing.
+    `known_relations` is the caller vouching that every relation the failed
+    statement names is one the engine always has (see
+    `capability_states.HIDDEN_RELATION_ORACLE_ERRORS`), which is what lets a
+    "does not exist or not authorized" code mean the second half.
+
+    A failure no structured code identifies as a refusal classifies as
+    UNAVAILABLE. That under-claims, which is the direction INV-9 requires: "we
+    did not get it" is honest, while "the source refused you" would be a guess
+    at the source's intent that sends an administrator off to grant access that
+    may change nothing.
     """
-    if is_permission_refusal(exc):
+    if is_permission_refusal(exc, known_relations=known_relations):
         return CapabilityState.PERMISSION_DENIED, REASON_SOURCE_DENIED_READ
     return CapabilityState.UNAVAILABLE, REASON_FACET_QUERY_FAILED
 
@@ -227,7 +235,9 @@ def active_facet_read_scope() -> FacetReadScope | None:
     return _ACTIVE_SCOPE.get()
 
 
-async def read_facet[T](facet: str, read: Awaitable[Sequence[T]]) -> Sequence[T]:
+async def read_facet[T](
+    facet: str, read: Awaitable[Sequence[T]], *, known_relations: bool = False
+) -> Sequence[T]:
     """Await one facet's own query; a refusal of it costs that facet, not the run.
 
     Returns the rows the source gave. If the source *refuses* the read, the
@@ -251,20 +261,38 @@ async def read_facet[T](facet: str, read: Awaitable[Sequence[T]]) -> Sequence[T]
       recorded (`RETIREMENT_BEARING_FACETS`).
     * **Outside a `facet_read_scope` nothing is absorbed**, because nothing
       would record it.
+
+    `known_relations` is passed through to the classifier; see
+    `classify_read_failure`.
+    """
+    rows, _refused = await read_optional_facet(facet, read, known_relations=known_relations)
+    return rows
+
+
+async def read_optional_facet[T](
+    facet: str, read: Awaitable[Sequence[T]], *, known_relations: bool = False
+) -> tuple[Sequence[T], bool]:
+    """`read_facet`, plus whether an absorbed refusal is the reason no rows came back.
+
+    Exactly `read_facet`'s rule -- the same classification, the same three
+    non-absorptions -- and one extra fact in the return: `True` when the read
+    was refused and absorbed. An adapter that renders a per-axis reason onto its
+    own objects (Oracle's views and routine bodies) needs to tell "the source
+    refused this" from "the source has none", and an empty sequence alone cannot.
     """
     if facet not in DISCOVERY_FACETS:
         raise ValueError(f"unknown discovery facet: {facet}")
     try:
-        return await read
+        return await read, False
     except Exception as exc:
-        state, reason = classify_read_failure(exc)
+        state, reason = classify_read_failure(exc, known_relations=known_relations)
         scope = _ACTIVE_SCOPE.get()
         if scope is None:
             raise
         scope.record(facet, state=state, reason=reason)
         if state is not CapabilityState.PERMISSION_DENIED or facet in RETIREMENT_BEARING_FACETS:
             raise
-        return ()
+        return (), True
 
 
 def build_table_map_from_column_rows(column_rows: Sequence[Mapping[str, Any]]) -> TableMap:

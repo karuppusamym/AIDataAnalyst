@@ -18,14 +18,21 @@ Three things they have to keep honest at once:
   FULL run cannot reconcile against a source that stopped answering.
 
 **And what each driver can actually report**, which is the part no fake may paper over.
-`capability_states.is_permission_refusal` judges by SQLSTATE and nothing else, so an
-adapter's classification is only as good as its driver's error object. Verified here
-against the installed drivers rather than assumed: asyncpg and snowflake-connector
-expose a `sqlstate` field, and `pytds`, `oracledb`, `google-api-core` and
-`databricks-sql-connector` do not -- the last one carries the SQLSTATE in
-`exc.context["sqlState"]`, which the shared classifier does not read. Their refusals
-therefore record UNAVAILABLE, which under-claims in INV-9's direction, and the tests
-below assert exactly that rather than pretending otherwise.
+`capability_states.is_permission_refusal` judges by structured codes and never by the
+message, so an adapter's classification is only as good as its driver's error object.
+Verified here against the installed drivers rather than assumed: asyncpg and
+snowflake-connector expose a `sqlstate` field; databricks-sql-connector carries its
+SQLSTATE in `exc.context["sqlState"]`; and `pytds`, `oracledb` and `google-api-core`
+report none, but each carries the vendor's own code as a field -- SQL Server's error
+`number`, Oracle's `_Error.code`, BigQuery's HTTP 403 with the structured reason
+`accessDenied` -- which the classifier reads since R11-FP02's follow-through. The tests
+below build each refusal with the driver's own error class and the code the vendor
+really sends, and pair it with a failure of the same class that is *not* a refusal.
+
+**Since the follow-through, only a refusal is absorbed on any of the six adapters.**
+The four warehouse adapters used to absorb every failure of an optional axis; a
+non-refusal now ends the run there too, and the tests below pin that alongside the
+refusal each engine does absorb.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from aida.connectors.discovery import (
     FACET_GRANTS,
     FACET_INVENTORY,
     FACET_OBJECT_COMMENTS,
+    FACET_ROUTINE_BODIES,
     FACET_TRIGGERS,
     FACET_VIEW_DEFINITIONS,
     FacetReadScope,
@@ -396,30 +404,57 @@ async def test_sqlserver_a_refused_view_definition_read_is_recorded_and_absorbed
     assert scope.outcomes == {FACET_VIEW_DEFINITIONS: REFUSED}
 
 
-async def test_sqlserver_pytds_reports_no_sqlstate_so_a_real_refusal_under_claims(
+def _pytds_error(number: int, text: str) -> Exception:
+    """A `pytds` server error exactly as the driver builds one: the class it picks from
+    the number, with `number` / `msg_no` set from the TDS ERROR token."""
+    error = sqlserver.pytds.OperationalError(text)
+    error.number = number
+    error.msg_no = number
+    error.severity = 14
+    return error
+
+
+async def test_sqlserver_error_229_is_a_refusal_read_from_the_error_number(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The per-engine truth, asserted against the installed driver rather than assumed.
-
-    A `pytds` error carries `number`, `msg_no`, `severity` and a TDS `state` byte, and
-    no `sqlstate` field, so `is_permission_refusal` cannot see the 42501 that SQL Server
-    never sends. The outcome is UNAVAILABLE / FACET_QUERY_FAILED -- "we did not get it",
-    not a guess at the source's intent -- and `read_facet` re-raises it, so this
-    adapter's refusals still end the run until the driver can report the code.
+    """R11-FP02 follow-through. A `pytds` error carries no `sqlstate` at all -- only the
+    server's error `number`, a field. 229 ("the SELECT permission was denied on the
+    object") is what a `DENY` on a catalog view answers, and the classifier now reads
+    it, so the facet is PERMISSION_DENIED and the table still arrives. The live proof
+    is `tests/test_facet_refusal_sqlserver_live.py`; this pins it without a server.
     """
-    denied = sqlserver.pytds.ProgrammingError(
-        "The SELECT permission was denied on the object 'customer'"
-    )
+    denied = _pytds_error(229, "The SELECT permission was denied on the object 'views'")
     assert not hasattr(denied, "sqlstate")
-    assert is_permission_refusal(denied) is False
+    assert is_permission_refusal(denied) is True
 
     _patch_sqlserver(monkeypatch, _sqlserver_answers(**{"FROM sys.views v": denied}))
     connector = sqlserver.SqlServerConnector("mssql://u:p@h:1433/bank")
 
-    with facet_read_scope() as scope, pytest.raises(sqlserver.pytds.ProgrammingError):
-        await connector.discover()
+    with facet_read_scope() as scope:
+        catalogs = await connector.discover()
 
-    assert scope.outcomes == {FACET_VIEW_DEFINITIONS: UNAVAILABLE}
+    assert catalogs[0].schemas[0].tables[0].name == "customer"
+    assert scope.outcomes == {FACET_VIEW_DEFINITIONS: REFUSED}
+
+
+async def test_sqlserver_an_error_number_that_is_not_a_refusal_still_ends_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """208 is "invalid object name" -- a missing object, not a refusal -- and a `pytds`
+    error built without a server number (a client-side failure) reads 0. Neither is a
+    refusal, so each records UNAVAILABLE and re-raises: the under-claiming answer."""
+    for failure in (
+        _pytds_error(208, "Invalid object name 'sys.views'."),
+        sqlserver.pytds.ProgrammingError("The SELECT permission was denied"),
+    ):
+        assert is_permission_refusal(failure) is False
+        _patch_sqlserver(monkeypatch, _sqlserver_answers(**{"FROM sys.views v": failure}))
+        connector = sqlserver.SqlServerConnector("mssql://u:p@h:1433/bank")
+
+        with facet_read_scope() as scope, pytest.raises(type(failure)):
+            await connector.discover()
+
+        assert scope.outcomes == {FACET_VIEW_DEFINITIONS: UNAVAILABLE}
 
 
 async def test_sqlserver_a_refused_roster_is_recorded_and_still_fails_the_run(
@@ -542,25 +577,33 @@ async def test_oracle_a_refused_privilege_view_is_recorded_on_the_facet(
 
     assert catalogs[0].schemas[0].grants == ()
     assert scope.outcomes == {FACET_GRANTS: REFUSED}
-    # The refusal was absorbed by `read_facet`, so the per-axis reason this adapter
-    # renders for a failure it survives is not rendered: the receipt carries the fact
-    # now, as a state and a reason code rather than as a driver's sentence (INV-6).
-    assert "grants" not in catalogs[0].attributes.get("envelope_v11_unavailable", {})
+    # The per-axis reason names the dictionary view and nothing the driver said: the
+    # refusal's message quotes a row value, and none of it reaches the catalog (INV-6).
+    reason = catalogs[0].attributes["envelope_v11_unavailable"]["grants"]
+    assert "ALL_TAB_PRIVS" in reason
+    assert "123-45-6789" not in reason
+    assert "permission denied" not in reason
 
 
-async def test_oracle_reports_no_sqlstate_so_a_real_denial_keeps_its_own_reason(
+def _ora(code: int, text: str) -> Exception:
+    """An `oracledb` server error exactly as the thin driver raises one: an `_Error`
+    whose `code` is the ORA number, wrapped in the exception class it selects."""
+    from oracledb import errors as oracledb_errors
+
+    error = oracledb_errors._Error(text, code=code)
+    return error.exc_type(error)
+
+
+async def test_oracle_ora_01031_is_a_refusal_read_from_the_driver_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Oracle's own answer, verified against the installed driver: `oracledb`'s
-    `DatabaseError` exposes `code`, `full_code` and `message` and no `sqlstate`, so
-    `ORA-01031: insufficient privileges` classifies as UNAVAILABLE. `read_facet`
-    re-raises that, this adapter's pre-existing absorption catches it, and the axis
-    keeps the reason it always had -- so nothing this adapter used to survive starts
-    failing a run, and the receipt gains the outcome.
-    """
-    denied = oracle.oracledb.DatabaseError("ORA-01031: insufficient privileges")
+    """R11-FP02 follow-through. `oracledb` reports no `sqlstate`; its `_Error.code` is
+    the ORA number, a field the driver takes from the server's error packet (the
+    `full_code` beside it is sliced out of the message, and is not read). ORA-01031 is
+    a refusal anywhere, so the grants facet is PERMISSION_DENIED and absorbed."""
+    denied = _ora(1031, "ORA-01031: insufficient privileges")
     assert not hasattr(denied, "sqlstate")
-    assert is_permission_refusal(denied) is False
+    assert is_permission_refusal(denied) is True
 
     _patch_oracle(monkeypatch, _oracle_answers(**{"FROM ALL_TAB_PRIVS p": denied}))
 
@@ -568,8 +611,51 @@ async def test_oracle_reports_no_sqlstate_so_a_real_denial_keeps_its_own_reason(
         catalogs = await _oracle_connector().discover()
 
     assert catalogs[0].schemas[0].grants == ()
-    assert scope.outcomes == {FACET_GRANTS: UNAVAILABLE}
+    assert scope.outcomes == {FACET_GRANTS: REFUSED}
     assert "grants" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+async def test_oracle_ora_00942_is_a_refusal_only_on_a_dictionary_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ORA-00942 decision. "Table or view does not exist" is also what Oracle says
+    to a login holding no privilege on an object, so on its own it is *not* a refusal
+    -- a genuinely missing table answers exactly the same. This adapter reads only
+    `ALL_*` dictionary views, which exist on every release, so for its reads the
+    missing half is ruled out and 00942 means the view was hidden from this login."""
+    hidden = _ora(942, "ORA-00942: table or view does not exist")
+    assert is_permission_refusal(hidden) is False
+    assert is_permission_refusal(hidden, known_relations=True) is True
+
+    _patch_oracle(monkeypatch, _oracle_answers(**{"FROM ALL_SOURCE": hidden}))
+
+    with facet_read_scope() as scope:
+        catalogs = await _oracle_connector().discover()
+
+    assert scope.outcomes == {FACET_ROUTINE_BODIES: REFUSED}
+    assert "routine_source" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+async def test_oracle_a_failure_that_is_not_a_refusal_now_ends_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-FP02 follow-through: the behaviour change. This adapter used to catch every
+    failure of an envelope axis and turn it into a reason, so a dropped connection on
+    `ALL_TAB_PRIVS` left an empty grants axis that the FULL reconciliation then read as
+    "every grant was revoked". A failure no code identifies as a refusal -- a lost
+    session (ORA-03113), or a driver error with no code at all -- is now recorded as
+    UNAVAILABLE and re-raised, exactly as on PostgreSQL."""
+    for failure in (
+        _ora(3113, "ORA-03113: end-of-file on communication channel"),
+        oracle.oracledb.DatabaseError("ORA-01031: insufficient privileges"),
+    ):
+        assert is_permission_refusal(failure, known_relations=True) is False
+        _patch_oracle(monkeypatch, _oracle_answers(**{"FROM ALL_TAB_PRIVS p": failure}))
+
+        with facet_read_scope() as scope, pytest.raises(type(failure)):
+            await _oracle_connector().discover()
+
+        assert scope.outcomes == {FACET_GRANTS: UNAVAILABLE}
 
 
 async def test_oracle_a_refused_constraint_read_no_longer_costs_the_run(
@@ -716,21 +802,26 @@ def _bigquery_connector() -> bigquery.BigQueryConnector:
     )
 
 
-async def test_bigquery_a_denial_records_unavailable_because_403_is_not_a_sqlstate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """BigQuery does not speak SQLSTATE. `google.api_core.exceptions.Forbidden` carries
-    an HTTP `code` of 403 and no `sqlstate` of any kind, so the honest outcome is
-    UNAVAILABLE. Mapping 403 to PERMISSION_DENIED here would put a second,
-    engine-specific copy of the judgement in an adapter, which is the duplication
-    `classify_read_failure` exists to prevent -- so the gap is reported, not patched
-    around, and the run still completes with the facet recorded.
-    """
+def _bigquery_error(status: int, reason: str) -> Exception:
+    """A BigQuery job error exactly as google-cloud-bigquery raises one: its reason
+    mapped to an HTTP status, and the error result carried in `errors`."""
     from google.api_core import exceptions as google_exceptions
 
-    denied = google_exceptions.Forbidden("Access Denied: user lacks bigquery.routines.get")
+    return google_exceptions.from_http_status(
+        status, "Access Denied: user lacks bigquery.routines.get", errors=[{"reason": reason}]
+    )
+
+
+async def test_bigquery_a_403_with_reason_access_denied_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-FP02 follow-through. BigQuery does not speak SQLSTATE; a denial is `Forbidden`
+    -- HTTP 403 -- carrying the structured reason `accessDenied`, which is what
+    `google.cloud.bigquery.job.base._ERROR_REASON_TO_EXCEPTION` maps it from. Both fields
+    are read, never the message, and the facet is PERMISSION_DENIED and absorbed."""
+    denied = _bigquery_error(403, "accessDenied")
     assert not hasattr(denied, "sqlstate")
-    assert is_permission_refusal(denied) is False
+    assert is_permission_refusal(denied) is True
 
     client = _FakeBigQueryClient(
         {"INFORMATION_SCHEMA.COLUMNS": _BQ_COLUMNS, "INFORMATION_SCHEMA.VIEWS": denied}
@@ -742,21 +833,49 @@ async def test_bigquery_a_denial_records_unavailable_because_403_is_not_a_sqlsta
         catalogs = await connector.discover()
 
     assert [table.name for table in catalogs[0].schemas[0].tables] == ["customer"]
-    assert scope.outcomes == {FACET_VIEW_DEFINITIONS: UNAVAILABLE}
+    assert scope.outcomes == {FACET_VIEW_DEFINITIONS: REFUSED}
 
 
-async def test_bigquery_a_refused_key_read_is_no_longer_silently_empty(
+async def test_bigquery_a_403_that_is_not_a_denial_ends_the_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """This read was already best-effort and its failure was absorbed into an empty
-    constraint list with nothing recorded anywhere -- the silent empty facet the whole
-    feature exists to end. It stays absorbed; it is no longer silent."""
+    """403 alone is not a refusal: BigQuery answers it for `quotaExceeded`,
+    `billingNotEnabled` and `policyViolation` too, none of which a grant fixes -- and a
+    `Forbidden` built with no reason at all says nothing either. Each records UNAVAILABLE
+    and, since the follow-through, re-raises: the key read used to swallow every failure
+    into an empty constraint list, which a FULL run then reconciled as "every key was
+    dropped"."""
     from google.api_core import exceptions as google_exceptions
 
+    for failure in (
+        _bigquery_error(403, "quotaExceeded"),
+        google_exceptions.Forbidden("denied"),
+    ):
+        assert is_permission_refusal(failure) is False
+        client = _FakeBigQueryClient(
+            {
+                "INFORMATION_SCHEMA.COLUMNS": _BQ_COLUMNS,
+                "INFORMATION_SCHEMA.KEY_COLUMN_USAGE": failure,
+            }
+        )
+        connector = _bigquery_connector()
+        monkeypatch.setattr(connector, "_get_client", lambda client=client: client)
+
+        with facet_read_scope() as scope, pytest.raises(google_exceptions.Forbidden):
+            await connector.discover()
+
+        assert scope.outcomes == {FACET_CONSTRAINTS: UNAVAILABLE}
+
+
+async def test_bigquery_a_refused_key_read_is_absorbed_and_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal the key read still survives -- no longer silently: the facet is
+    recorded, so the reconciliation keeps the keys an earlier run captured."""
     client = _FakeBigQueryClient(
         {
             "INFORMATION_SCHEMA.COLUMNS": _BQ_COLUMNS,
-            "INFORMATION_SCHEMA.KEY_COLUMN_USAGE": google_exceptions.Forbidden("denied"),
+            "INFORMATION_SCHEMA.KEY_COLUMN_USAGE": _bigquery_error(403, "accessDenied"),
         }
     )
     connector = _bigquery_connector()
@@ -766,7 +885,7 @@ async def test_bigquery_a_refused_key_read_is_no_longer_silently_empty(
         catalogs = await connector.discover()
 
     assert catalogs[0].schemas[0].tables[0].constraints == ()
-    assert scope.outcomes == {FACET_CONSTRAINTS: UNAVAILABLE}
+    assert scope.outcomes == {FACET_CONSTRAINTS: REFUSED}
 
 
 # ---------------------------------------------------------------------------

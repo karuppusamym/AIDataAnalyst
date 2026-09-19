@@ -29,6 +29,15 @@ time, and routes each through machinery that already exists rather than a second
   context products pinning an earlier version through `context_rebuild`, which re-pins from
   the pins themselves. A source grant authorizes nothing in Atlas (INV-5), so a permission
   change places no hold.
+* **A retired meaning** (R11-FP15, `MEANING_RETIRED`: an approved table, column or routine
+  description superseded by different text or withdrawn, a semantic model or glossary term
+  version superseded) is recorded as seen too, and places no hold: meaning cannot make a query
+  answer differently, only make a reader understand it differently. It reaches the context
+  products that stood on it through `context_rebuild`, which re-drafts each into review by
+  comparing what the product was published over with what stands now -- so the product does not
+  wait on this pass, and a sweep that ran late cannot make one look current. No write site
+  records these (`aida.change_signal_meaning` explains why), so each pass first sweeps for
+  them and then consumes them with everything else.
 
 Every signal ends PROCESSED with the action taken in `outcome` -- the per-signal watermark. Each is
 applied in its own savepoint, so one failure leaves the rest of the batch intact and the failed
@@ -47,6 +56,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.change_signal_meaning import record_meaning_signals
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signals import (
     SIGNAL_DEFINITION_CHANGED,
@@ -137,6 +147,8 @@ class ProcessingOutcome:
     incidents_opened: int = 0
     incidents_updated: int = 0
     dependents_warned: int = 0
+    #: R11-FP15: meaning retirements this pass found and recorded before processing.
+    meaning_signals_recorded: int = 0
     actions: dict[str, int] = field(default_factory=dict)
 
     def as_details(self) -> dict[str, Any]:
@@ -146,6 +158,7 @@ class ProcessingOutcome:
             "incidents_opened": self.incidents_opened,
             "incidents_updated": self.incidents_updated,
             "dependents_warned": self.dependents_warned,
+            "meaning_signals_recorded": self.meaning_signals_recorded,
             "actions": dict(sorted(self.actions.items())),
         }
 
@@ -294,6 +307,17 @@ async def process_change_signals(
 ) -> ProcessingOutcome:
     """Process one organization's oldest PENDING signals, at most `limit`. The caller commits."""
     effective_now = now or datetime.now(UTC)
+    outcome = ProcessingOutcome()
+    # R11-FP15: meaning retirements have no write site to record them, so the pass that consumes
+    # signals records them first. Its own savepoint: a sweep that fails must not cost the batch
+    # of source signals behind it, and the next pass sweeps again.
+    try:
+        async with session.begin_nested():
+            outcome.meaning_signals_recorded = await record_meaning_signals(
+                session, organization_id=organization_id, limit=limit
+            )
+    except Exception:  # noqa: BLE001 -- the sweep must not stop the batch
+        logger.exception("meaning_signal_sweep_failed", organization_id=str(organization_id))
     signals = (
         await session.scalars(
             select(MetadataChangeSignal)
@@ -305,7 +329,6 @@ async def process_change_signals(
             .limit(limit)
         )
     ).all()
-    outcome = ProcessingOutcome()
     for signal in signals:
         try:
             async with session.begin_nested():

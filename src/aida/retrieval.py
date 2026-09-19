@@ -87,6 +87,7 @@ from aida.envelope_models import (
     AVAILABLE,
     MetadataRoutine,
     MetadataRoutineParameter,
+    MetadataTrigger,
     MetadataViewDefinition,
     RoutineDocumentation,
     RoutineDocumentationVersion,
@@ -114,7 +115,7 @@ from aida.models import (
 )
 from aida.ontology_kinds import table_mapping_kind
 from aida.ontology_models import OntologyHead, OntologyVersion
-from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.procedure_lineage_models import DeepProcedureLineageEdge, TriggerLineageEdge
 from aida.quality_coupling import resolve_table_ids
 from aida.retrieval_metrics import RETRIEVAL_SECONDS
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
@@ -1011,6 +1012,7 @@ async def hybrid_retrieve(
     parameter_names: dict[UUID, list[str]] = {}
     reads_by_routine: dict[UUID, set[str]] = {}
     writes_by_routine: dict[UUID, set[str]] = {}
+    triggers_by_routine: dict[UUID, set[str]] = {}
     approved_descriptions: dict[UUID, RoutineDocumentationVersion] = {}
     if routine_ids:
         # R11-FP08: the approved description of every routine that was fetched -- the
@@ -1062,6 +1064,53 @@ async def hybrid_retrieve(
                 reads_by_routine.setdefault(routine_id, set()).add(str(source_table_id))
             if target_table_id is not None and is_write:
                 writes_by_routine.setdefault(routine_id, set()).add(str(target_table_id))
+        # R11-FP01: a PostgreSQL trigger keeps no body -- its code is the function its
+        # `action_routine` names, and the trigger axis reads that function with the
+        # firing row bound, recording `routine_id` on each edge. So a trigger function's
+        # reviewed trigger lineage *is* what that routine's body reads and writes, and
+        # it joins the same two lists and so the graph stage's existing
+        # ROUTINE_READS_TABLE / ROUTINE_WRITES_TABLE edges: "which function audits
+        # orders" reaches the audit table no word of it names. The routine's own
+        # parse cannot supply this -- inside a trigger function `NEW` names no table.
+        # Same rules as the routine edges above: ACTIVE only, a temp-table hop left
+        # out, and never the body. A trigger the source has dropped no longer runs
+        # the function, so only an ACTIVE trigger's edges steer.
+        trigger_edge_rows = await session.execute(
+            select(
+                TriggerLineageEdge.routine_id,
+                TriggerLineageEdge.trigger_id,
+                TriggerLineageEdge.source_table_id,
+                TriggerLineageEdge.target_table_id,
+                TriggerLineageEdge.is_write,
+            )
+            .join(MetadataTrigger, MetadataTrigger.id == TriggerLineageEdge.trigger_id)
+            .where(
+                TriggerLineageEdge.routine_id.in_(routine_ids),
+                TriggerLineageEdge.organization_id == datasource.organization_id,
+                TriggerLineageEdge.datasource_id == datasource.id,
+                TriggerLineageEdge.review_status == "ACTIVE",
+                TriggerLineageEdge.is_intermediate.is_(False),
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.status == "ACTIVE",
+            )
+        )
+        for (
+            trigger_routine_id,
+            trigger_id,
+            source_table_id,
+            target_table_id,
+            is_write,
+        ) in trigger_edge_rows.all():
+            if trigger_routine_id is None:
+                continue
+            triggers_by_routine.setdefault(trigger_routine_id, set()).add(str(trigger_id))
+            if source_table_id is not None:
+                reads_by_routine.setdefault(trigger_routine_id, set()).add(str(source_table_id))
+            if target_table_id is not None and is_write:
+                writes_by_routine.setdefault(trigger_routine_id, set()).add(
+                    str(target_table_id)
+                )
 
     for routine, schema_name in routine_rows:
         # The source's own words stay in the bag beside Atlas's: retrieval is about
@@ -1123,6 +1172,14 @@ async def hybrid_retrieve(
                 routine_reason_codes.extend(
                     ["BM25_ROUTINE_DESCRIPTION", "ROUTINE_DESCRIPTION_APPROVED"]
                 )
+        # R11-FP01: which triggers' reviewed lineage the two lists above include --
+        # identifiers only, and only when there are some, so a routine no trigger
+        # runs carries exactly the metadata it always did.
+        trigger_metadata: dict[str, Any] = (
+            {"trigger_ids": sorted(triggers_by_routine[routine.id])}
+            if routine.id in triggers_by_routine
+            else {}
+        )
         hits.append(
             HybridRetrievalHit(
                 object_type="ROUTINE",
@@ -1138,6 +1195,7 @@ async def hybrid_retrieve(
                     "language": routine.language,
                     "reads_table_ids": sorted(reads_by_routine.get(routine.id, set())),
                     "writes_table_ids": sorted(writes_by_routine.get(routine.id, set())),
+                    **trigger_metadata,
                     **description_metadata,
                     # Whether MCP `get_transformation_detail` would release the body:
                     # the same gate a person's parse applies.

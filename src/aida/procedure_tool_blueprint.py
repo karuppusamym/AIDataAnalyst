@@ -44,9 +44,10 @@ a variable reference the renderer does not resolve to a placeholder is not.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from sqlalchemy import select
@@ -59,7 +60,7 @@ from aida.procedure_lineage import (
     walk_procedure_statements,
 )
 from aida.relationship_naming import physical_type_family
-from aida.routine_lineage_edges import require_eligible_routine_body
+from aida.routine_lineage_edges import RoutineNotEligibleError, require_eligible_routine_body
 from aida.schemas import ToolParameterDefinition
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
 from aida.view_tool_blueprint import _PARAMETER_TYPE_BY_PHYSICAL_FAMILY
@@ -70,6 +71,12 @@ if TYPE_CHECKING:
 
 try:
     from sqlglot import exp as _exp
+    from sqlglot import parse_one as _parse_one
+    from sqlglot.errors import ParseError as _ParseError
+    from sqlglot.errors import TokenError as _TokenError
+    from sqlglot.optimizer.normalize_identifiers import (
+        normalize_identifiers as _normalize_identifiers,
+    )
 
     _SQLGLOT_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -328,3 +335,154 @@ async def resolve_procedure_tool_source(
     ]
 
     return routine, node, result, routine_parameters
+
+
+# ---------------------------------------------------------------------------
+# R11-FP14: is a hand-written tool this routine's extracted query?
+# ---------------------------------------------------------------------------
+#
+# A tool this module generates records `source_routine_id` and the body's fingerprint, so
+# R11-FP16 holds it when the routine moves. A person who writes the same query by hand gets no
+# such link -- nothing in their SQL names the routine -- so their tool keeps answering after the
+# routine's logic changes. Detecting that needs "is this the same query?" asked of two texts
+# that can never be compared as strings: the routine's result statement comes from a body whose
+# literals were redacted before storage (`sql_redaction`), and the tool's template went through
+# `SqlGuard`, which re-rendered it and appended a row cap.
+#
+# So the comparison is made in the space the stored body already lives in. Both sides are parsed
+# and rendered by sqlglot exactly as `SqlGuard` renders a tool's `normalized_sql` (the text a tool
+# fingerprint is computed over); every value position becomes the redaction placeholder
+# `sql_redaction` writes into a stored body; the guard's own row cap is removed; unquoted
+# identifiers are normalised per dialect. What remains is structure: which tables, joined how,
+# filtered on which columns, grouped and projected how. **No literal is ever compared** -- the
+# routine side has none left to compare, and a tool that re-supplies a redacted value must still
+# match its routine.
+
+#: The placeholder `sql_redaction` substitutes for every literal in stored SQL. A literal, a bound
+#: parameter and a placeholder all occupy the same *value slot*, and on the routine side most of
+#: them already read as this.
+_VALUE_SLOT: Final = "redacted"
+
+
+def _is_value_slot(node: exp.Expr, parameter_names: frozenset[str]) -> bool:
+    if isinstance(node, _exp.Literal | _exp.Placeholder | _exp.Parameter):
+        return True
+    # A PL/pgSQL or SQL-function body names its parameters bare (`WHERE d >= start_date`), where a
+    # tool writes a placeholder. Only an *unqualified* name the routine itself declares as IN/INOUT
+    # is treated as one: a qualified `t.start_date` is a column whatever the routine declares.
+    return (
+        bool(parameter_names)
+        and isinstance(node, _exp.Column)
+        and not node.table
+        and node.name.lower() in parameter_names
+    )
+
+
+def _carries_logic(query: exp.Expr) -> bool:
+    """Whether a query does anything beyond projecting plain columns of one table.
+
+    **A bare projection is never matched.** `SELECT c.id, c.name FROM sales.customers AS c` in a
+    routine and in a tool are the same text because it is the obvious query over that table, not
+    because one was copied from the other -- and binding such a tool would hold it whenever the
+    routine changes, for logic the tool never took from it. The binding exists to catch a
+    routine's *logic* moving, so a query with none has nothing to bind.
+    """
+    if len(list(query.find_all(_exp.Table))) > 1:
+        return True
+    logic = (
+        _exp.Where,
+        _exp.Join,
+        _exp.Group,
+        _exp.Having,
+        _exp.AggFunc,
+        _exp.Window,
+        _exp.With,
+        _exp.Subquery,
+        _exp.SetOperation,
+        _exp.Distinct,
+        _exp.Case,
+    )
+    if any(query.find(kind) is not None for kind in logic):
+        return True
+    if isinstance(query, _exp.Select):
+        return any(
+            not isinstance(projection.unalias(), _exp.Column) for projection in query.selects
+        )
+    return False
+
+
+def structural_query_key(
+    query: exp.Expr | str, *, dialect: str, parameter_names: Iterable[str] = ()
+) -> str | None:
+    """A digest of `query`'s structure with every value position erased, or None.
+
+    None means "never match this": the text does not parse, is not a query, or is a bare
+    projection (`_carries_logic`). `parameter_names` are the routine's declared IN/INOUT names,
+    for a body that references them bare; a tool's template passes none, because its values are
+    already placeholders.
+
+    What deliberately does *not* match, so a false binding is not proposed:
+
+    * a different table alias, a schema-qualified name on one side only, or reordered
+      projections or predicates -- these are not normalised, because each is also how two
+      genuinely different queries differ, and a miss costs a proposal where a false match costs
+      a held tool;
+    * a query that embeds the routine's query as a subquery, a CTE or one side of a join -- that
+      is a different tool that *uses* the routine's logic, not the routine's query;
+    * two queries that differ only in a value: they match, by design, since the routine's values
+      are gone from storage. The person who confirms the binding sees both.
+
+    The row cap `SqlGuard` appends to every tool (`LIMIT`/`TOP`/`FETCH`) is removed from the top
+    level on both sides; a routine's own cap is removed with it, because the stored body's number
+    was redacted and cannot be compared anyway.
+    """
+    if not _SQLGLOT_AVAILABLE:  # pragma: no cover
+        return None
+    if isinstance(query, str):
+        try:
+            node = _parse_one(query, read=dialect)
+        except (_ParseError, _TokenError, ValueError):
+            return None
+    else:
+        node = query.copy()
+    if not isinstance(node, _exp.Query):
+        return None
+    node.set("limit", None)
+    names = frozenset(name.lower() for name in parameter_names if name)
+    node = node.transform(
+        lambda part: _exp.Placeholder(this=_VALUE_SLOT) if _is_value_slot(part, names) else part,
+        copy=False,
+    )
+    try:
+        node = _normalize_identifiers(node, dialect=dialect)
+        if not _carries_logic(node):
+            return None
+        rendered = node.sql(dialect=dialect, comments=False)
+    except ValueError:
+        # A dialect sqlglot does not know, or a node it cannot render in it: no key, so no
+        # match -- the conservative answer, and never a failed agent item.
+        return None
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def routine_result_query_key(
+    routine: MetadataRoutine, parameter_names: Iterable[str], *, dialect: str
+) -> str | None:
+    """The structural key of the one result query this module would extract, or None.
+
+    Exactly the routines tool generation would read: not a PACKAGE, a body that passes
+    `require_eligible_routine_body`, parses fully, writes nothing and has one standalone result
+    statement (`find_single_read_only_result_statement`). A routine that writes is not matched
+    even when its last SELECT equals a tool's: its output depends on the writes before it, and
+    "the routine's extracted query" is a thing this platform only defines for read-only routines.
+    A literal in the result statement does *not* stop the match -- it is exactly why a person
+    would have written the tool by hand, re-supplying the value generation refused to guess.
+    """
+    if routine.routine_type.strip().upper() == "PACKAGE":
+        return None
+    try:
+        body = require_eligible_routine_body(routine)
+        node, _result = find_single_read_only_result_statement(body, dialect)
+    except (RoutineNotEligibleError, ProcedureNotEligibleError):
+        return None
+    return structural_query_key(node, dialect=dialect, parameter_names=parameter_names)

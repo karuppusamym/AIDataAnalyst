@@ -20,10 +20,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, Final, NoReturn
+from types import MappingProxyType
+from typing import Any, ClassVar, Final, NoReturn
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -441,9 +442,9 @@ class ContextProductScope:
     R11-FP12: a product names the tables an agent should read and the tool versions it declares
     eligible. MCP already scopes an agent's tool list to a product it is read through; asking
     through one over REST scoped nothing, so a curated product had no bearing on the answer.
+    What the product decides is which tables, routines and tool versions this answer may use.
     Semantic candidates -- a glossary term, an ontology concept, a metric -- carry meaning rather
-    than data access and are left alone; what the product decides is which tables and which tool
-    versions this answer may use.
+    than data access, and are held only to the versions the product pins (`admits`).
     """
 
     version_id: UUID
@@ -499,41 +500,106 @@ class ContextProductScope:
         table would otherwise pass an allowlist written in table ids -- a routine, which reads
         tables of its own, did exactly that.
 
+        **A kind with no rule is refused.** `HIT_TYPE_RULES` names every hit type retrieval can
+        emit, each with the rule that decides it, and a type it does not name is not evidence
+        here. This used to end in a fallthrough that admitted any hit carrying no `table_id`, so
+        the boundary held only for the kinds someone had remembered to list: review 2026-09-16
+        F02 was that default admitting routines from outside the product, and the fix added a
+        ROUTINE branch while every later kind would still have walked through the same way.
+        Refusing is the direction the rest of this boundary already takes -- F01's gateway scope
+        refuses a reference it cannot resolve rather than admitting it -- and the only one in
+        which adding a candidate kind is safe by construction. The structural gate in
+        `tests/test_context_product_hit_types.py` derives what retrieval can emit from the code
+        and fails while any of it has no rule here, so a new kind is decided when it is added
+        rather than refused silently.
+
         **Meaning is pinned where the product pins it.** A product that binds ontology, glossary
         or semantic-model versions answers from those and no others, so Ask agrees with what the
         compiler publishes. A product that binds none of a kind does not narrow that kind, and
         current approved meaning applies: pinning nothing is not the same as forbidding
         everything, or every product would have to re-pin the whole glossary to stay usable.
+
+        Only consulted for a question asked through a product; a product-free request never
+        reaches it.
         """
-        if hit.object_type == "GOVERNED_TOOL":
-            return hit.object_id in self.tool_version_ids
-        if hit.object_type == "TABLE":
-            # A table reached by graph expansion carries no `table_id` of its own, so the hit's
-            # id is what decides: a table the product does not name is not evidence here.
-            return hit.object_id in self.table_ids
-        if hit.object_type == "ROUTINE":
-            return str(hit.metadata.get("routine_id")) in self.routine_ids
-        if hit.object_type == "ONTOLOGY_CONCEPT":
-            return self._pinned(self.ontology_version_ids, hit.metadata.get("ontology_version_id"))
-        if hit.object_type == "GLOSSARY_TERM":
-            return self._pinned(
-                self.glossary_term_version_ids, hit.metadata.get("term_version_id")
-            )
-        if hit.object_type in {"METRIC", "SEMANTIC_METRIC"}:
-            return self._pinned(
-                self.semantic_model_version_ids, hit.metadata.get("semantic_model_version_id")
-            )
+        rule = self.HIT_TYPE_RULES.get(hit.object_type)
+        return rule is not None and rule(self, hit)
+
+    def _declared_tool(self, hit: RetrievalHit) -> bool:
+        """GOVERNED_TOOL: a tool version the product declares eligible, and no other."""
+        return hit.object_id in self.tool_version_ids
+
+    def _named_table(self, hit: RetrievalHit) -> bool:
+        """TABLE: the hit's own id.
+
+        A table reached by graph expansion carries no `table_id` of its own -- only the path that
+        reached it -- so the hit's id is what decides: a table the product does not name is not
+        evidence here.
+        """
+        return hit.object_id in self.table_ids
+
+    def _owning_table(self, hit: RetrievalHit) -> bool:
+        """COLUMN, BUSINESS_ANNOTATION, DBT_RESOURCE: the table the hit belongs to.
+
+        A column is part of its table, an annotation describes one, and a dbt resource is a
+        relation Atlas matched to one; each is evidence exactly when that table is. One that
+        names no table is refused. Retrieval always stamps a column and an annotation with their
+        table, so for those this only refuses a malformed hit; for a dbt resource it is the
+        unmatched node -- a model or source the catalog could not place, or a kind that is never
+        a relation (a test, an exposure, a dbt metric). The fallthrough used to admit those.
+        Products have no dbt reference group and the compiler publishes no dbt content, so such a
+        node names nothing the product governs; it also puts no table into the model's context;
+        and a relation that failed to match is an unresolved reference, which F01's boundary
+        refuses rather than admits.
+        """
         table_id = hit.metadata.get("table_id")
-        if table_id is None:
-            # Evidence that names no object this product governs -- it narrows nothing here.
-            return True
-        return str(table_id) in self.table_ids
+        return table_id is not None and str(table_id) in self.table_ids
+
+    def _referenced_routine(self, hit: RetrievalHit) -> bool:
+        """ROUTINE: a routine the product references (F02). Its reviewed lineage names tables of
+        its own, so an allowlist written in table ids would pass every routine in the datasource."""
+        return str(hit.metadata.get("routine_id")) in self.routine_ids
+
+    def _pinned_ontology(self, hit: RetrievalHit) -> bool:
+        """ONTOLOGY_CONCEPT: pinned meaning, on the concept's approved ontology version."""
+        return self._pinned(self.ontology_version_ids, hit.metadata.get("ontology_version_id"))
+
+    def _pinned_glossary(self, hit: RetrievalHit) -> bool:
+        """GLOSSARY_TERM: pinned meaning, on the term's approved version."""
+        return self._pinned(self.glossary_term_version_ids, hit.metadata.get("term_version_id"))
+
+    def _pinned_semantic_model(self, hit: RetrievalHit) -> bool:
+        """SEMANTIC_METRIC: pinned meaning, on the semantic model version the metric belongs to."""
+        return self._pinned(
+            self.semantic_model_version_ids, hit.metadata.get("semantic_model_version_id")
+        )
 
     @staticmethod
     def _pinned(pinned_version_ids: frozenset[str], version_id: object) -> bool:
         if not pinned_version_ids:
             return True
         return str(version_id) in pinned_version_ids
+
+    #: Every hit type retrieval can emit, and the rule that decides it. Exactly the emitted set:
+    #: a type missing here is refused by `admits`, and a rule for a type nobody emits would be an
+    #: admission granted in advance to whatever later takes that name -- `METRIC`, decided beside
+    #: `SEMANTIC_METRIC` though no producer ever emitted it, was one and is gone. Read-only, so
+    #: the table cannot be widened at runtime.
+    HIT_TYPE_RULES: ClassVar[Mapping[str, Callable[[ContextProductScope, RetrievalHit], bool]]] = (
+        MappingProxyType(
+            {
+                "GOVERNED_TOOL": _declared_tool,
+                "TABLE": _named_table,
+                "COLUMN": _owning_table,
+                "BUSINESS_ANNOTATION": _owning_table,
+                "DBT_RESOURCE": _owning_table,
+                "ROUTINE": _referenced_routine,
+                "ONTOLOGY_CONCEPT": _pinned_ontology,
+                "GLOSSARY_TERM": _pinned_glossary,
+                "SEMANTIC_METRIC": _pinned_semantic_model,
+            }
+        )
+    )
 
 
 async def _load_published_context_product(

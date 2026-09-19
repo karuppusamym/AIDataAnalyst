@@ -1,6 +1,6 @@
 # Procedure lineage parser capability matrix
 
-Generated 2026-09-18T01:26:55.180631+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
+Generated 2026-09-19T03:52:55.053897+00:00 by `scripts/generate_procedure_capability_matrix.py` (`aida.procedure_capability_matrix.build_capability_matrix`) -- every status below is read directly out of `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code at generation time, not hand-maintained prose. Regenerate after any change to either module's dispatcher; do not hand-edit this file.
 
 ## Dialects attempted
 
@@ -39,6 +39,10 @@ Generated 2026-09-18T01:26:55.180631+00:00 by `scripts/generate_procedure_capabi
 | FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query) | N/A | SUPPORTED |
 | CREATE PROCEDURE/FUNCTION header, and DO $$ ... $$ (anonymous block) | N/A | SUPPORTED |
 | RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body) | N/A | SUPPORTED |
+| PROCEDURE/FUNCTION header without CREATE, or with EDITIONABLE (Oracle ALL_SOURCE) | N/A | SUPPORTED |
+| PACKAGE / PACKAGE BODY (Oracle; each member's edges attributed to the member) | N/A | SUPPORTED |
+| PROCEDURE p / FUNCTION f RETURN t declaration (Oracle spec or forward declaration) | N/A | RECOGNISED_NO_LINEAGE |
+| RETURN <expression> (PL/SQL; no subquery is allowed there) | N/A | RECOGNISED_NO_LINEAGE |
 
 `SUPPORTED` -- real column/table-level lineage extracted.
 `EXPLICIT_UNPARSED` -- recognised, but this parser cannot safely resolve it: an explicit `UNPARSED` marker edge is produced instead (INV-9/AT-C4), never a silent drop.

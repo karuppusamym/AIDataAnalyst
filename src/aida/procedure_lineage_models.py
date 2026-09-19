@@ -50,6 +50,21 @@ PostgreSQL trigger's edge was read from.
 
 **Its coverage record, 2026-09-17: `TriggerParseCoverage`**, `RoutineParseCoverage`
 mirrored onto the trigger axis for the same reason the edge table is separate.
+
+**Statement ranges, 2026-09-18 (R11-FP07).** Both edge tables carry where each
+edge's statement is in the body that was parsed -- `StatementRangeColumns`, one
+mixin so the two tables cannot drift. The offsets index the *stored* body, and
+`statement_text_digest` is that text's SHA-256, so a range is checkable against
+the body as it now stands. A row parsed before this, or an edge not bound to a
+statement, has NULL positions and `statement_range_status = 'NOT_LOCATED'`:
+never zeros, which would read as a real position at the top of the body.
+
+**Package members, 2026-09-18 (R11-FP03).** An edge read from an Oracle
+package's body names the member subprogram it belongs to (`package_member`), the
+grain it is attributed at (`member_attribution`), and -- when the member resolves
+to exactly one captured routine -- that routine (`member_routine_id`). The edge's
+owner stays the package (`routine_id`): the package body is what was parsed, and
+every count and replace keyed on `routine_id` keeps meaning what it meant.
 """
 
 from datetime import datetime
@@ -62,7 +77,31 @@ from aida.db import Base
 from aida.models import TimestampMixin
 
 
-class DeepProcedureLineageEdge(Base, TimestampMixin):
+class StatementRangeColumns:
+    """R11-FP07: where an edge's statement is in the stored body it was read from.
+
+    Positions only -- a line/column offset is not a value, an excerpt would be,
+    and no excerpt is kept (INV-6). See `procedure_lineage.StatementRange` for
+    the conventions: half-open code-point offsets, 1-based lines and columns,
+    the end position being the statement's last character.
+    """
+
+    statement_start_offset: Mapped[int | None] = mapped_column(Integer)
+    statement_end_offset: Mapped[int | None] = mapped_column(Integer)
+    statement_start_line: Mapped[int | None] = mapped_column(Integer)
+    statement_start_column: Mapped[int | None] = mapped_column(Integer)
+    statement_end_line: Mapped[int | None] = mapped_column(Integer)
+    statement_end_column: Mapped[int | None] = mapped_column(Integer)
+    #: `procedure_lineage.StatementRangeStatus`: what the range is the range of,
+    #: or NOT_LOCATED when there is none.
+    statement_range_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="NOT_LOCATED", server_default="NOT_LOCATED"
+    )
+    #: SHA-256 of the stored body the offsets index; NULL when not located.
+    statement_text_digest: Mapped[str | None] = mapped_column(String(64))
+
+
+class DeepProcedureLineageEdge(StatementRangeColumns, Base, TimestampMixin):
     """One column-level (or, for an `UNPARSED` statement, statement-level)
     lineage fact extracted by `procedure_lineage.parse_procedure_lineage`
     from one `MetadataRoutine`'s body -- see that module's docstring for the
@@ -150,6 +189,15 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
     # R11-FP07: the called routine an edge was read from (`aida.routine_call_descent`);
     # NULL for an edge from the routine's own statements.
     via_routine: Mapped[str | None] = mapped_column(String(500))
+    # R11-FP03: an Oracle package's member subprogram this edge belongs to, as the
+    # package body names it; the grain it is attributed at
+    # (`procedure_lineage.MemberAttribution`); and the captured member routine,
+    # when exactly one matches. All NULL on an edge from anything but a package.
+    package_member: Mapped[str | None] = mapped_column(String(255))
+    member_attribution: Mapped[str | None] = mapped_column(String(30))
+    member_routine_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="SET NULL"), index=True
+    )
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # ADR-0026's review lifecycle: the same six columns the P1-05 edge tables
     # carry, added on 2026-09-11 (migration d81f5a2c9e47) so an edge here can
@@ -168,7 +216,7 @@ class DeepProcedureLineageEdge(Base, TimestampMixin):
     created_by: Mapped[str | None] = mapped_column(String(255))
 
 
-class TriggerLineageEdge(Base, TimestampMixin):
+class TriggerLineageEdge(StatementRangeColumns, Base, TimestampMixin):
     """R11-FP01: one lineage fact read out of one trigger's body.
 
     Same shape and same vocabulary as `DeepProcedureLineageEdge` -- the parse is
@@ -344,11 +392,12 @@ class RoutineParseCoverage(Base, TimestampMixin):
     dialect: Mapped[str] = mapped_column(String(50), nullable=False)
     confidence: Mapped[str] = mapped_column(String(30), nullable=False)
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    #: The positional precision the unparsed statements above are located to.
-    #: `STATEMENT_ORDINAL` today, and recorded per row rather than only in the
-    #: published matrix so a consumer reading one coverage record knows how
-    #: precisely it can point at the source -- see the engine capability
-    #: matrix's source-mapping record for why a character range is not offered.
+    #: The positional precision this parse's statements are located to, recorded
+    #: per row so a consumer reading one coverage record knows how precisely it can
+    #: point at the body. `STATEMENT_RANGE` since R11-FP07: each edge carries a
+    #: line/column span in the stored body, pinned by `statement_text_digest`.
+    #: `STATEMENT_ORDINAL` for a parse that reached no body to locate anything in
+    #: (and on every row measured before ranges existed).
     source_mapping_granularity: Mapped[str] = mapped_column(
         String(40), nullable=False, default="STATEMENT_ORDINAL",
         server_default="STATEMENT_ORDINAL",
@@ -356,6 +405,13 @@ class RoutineParseCoverage(Base, TimestampMixin):
     parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     #: The principal or agent whose parse produced this measurement.
     measured_by: Mapped[str | None] = mapped_column(String(255))
+    #: R11-FP03: for an Oracle package, the grain its edges were attributed at --
+    #: `MEMBER` when its body was split into members, `PACKAGE_FALLBACK` when it
+    #: could not be -- and, for a fallback, the `PackageSplitFailure` code saying
+    #: why. NULL for anything that is not a package. Kept here so "which packages
+    #: are only understood as a whole?" is a stored answer, not an edge scan.
+    member_attribution: Mapped[str | None] = mapped_column(String(30))
+    member_fallback_reason: Mapped[str | None] = mapped_column(String(40))
 
 
 class TriggerParseCoverage(Base, TimestampMixin):
@@ -424,3 +480,7 @@ class TriggerParseCoverage(Base, TimestampMixin):
     )
     parsed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     measured_by: Mapped[str | None] = mapped_column(String(255))
+    #: R11-FP03: mirrored from `RoutineParseCoverage` so the two stay one shape; a
+    #: trigger body is never a package, so these stay NULL.
+    member_attribution: Mapped[str | None] = mapped_column(String(30))
+    member_fallback_reason: Mapped[str | None] = mapped_column(String(40))

@@ -102,12 +102,29 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     "RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body)": (
         "_TSQL_INLINE_RETURN_RE"
     ),
+    # R11-FP03: Oracle as ALL_SOURCE stores it, and packages split into members.
+    "PROCEDURE/FUNCTION header without CREATE, or with EDITIONABLE (Oracle ALL_SOURCE)": (
+        "_ORACLE_SOURCE_HEADER_RE"
+    ),
+    "PACKAGE / PACKAGE BODY (Oracle; each member's edges attributed to the member)": (
+        "_PACKAGE_TEXT_RE"
+    ),
+    "PROCEDURE p / FUNCTION f RETURN t declaration (Oracle spec or forward declaration)": (
+        "_SUBPROGRAM_DECLARATION_RE"
+    ),
+    "RETURN <expression> (PL/SQL; no subquery is allowed there)": "_PLSQL_RETURN_RE",
 }
 
 # Regex-recognised constructs that end in an explicit UNPARSED marker rather than
 # extracted lineage.
 _EXPLICIT_UNPARSED_REGEXES: Final[frozenset[str]] = frozenset(
     {"_DYNAMIC_SQL_RE", "_NESTED_CALL_RE", "_PLPGSQL_EXECUTE_RE"}
+)
+
+# Regex-recognised constructs that are genuinely lineage-free: recognised and
+# correctly skipped, not a gap.
+_NO_LINEAGE_REGEXES: Final[frozenset[str]] = frozenset(
+    {"_NO_LINEAGE_KEYWORDS_RE", "_SUBPROGRAM_DECLARATION_RE", "_PLSQL_RETURN_RE"}
 )
 
 
@@ -258,7 +275,7 @@ def build_capability_matrix() -> CapabilityMatrix:
     for construct, regex_name in _CONSTRUCT_REGEX_NAMES.items():
         status = (
             "EXPLICIT_UNPARSED" if regex_name in _EXPLICIT_UNPARSED_REGEXES
-            else "RECOGNISED_NO_LINEAGE" if regex_name == "_NO_LINEAGE_KEYWORDS_RE"
+            else "RECOGNISED_NO_LINEAGE" if regex_name in _NO_LINEAGE_REGEXES
             else "SUPPORTED"
         )
         if regex_name not in live_regex_names:

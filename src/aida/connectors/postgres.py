@@ -1,5 +1,5 @@
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import asyncpg
@@ -1002,7 +1002,18 @@ class PostgresConnector(SqlExecutor):
         finally:
             await connection.close()
 
-    def scope_discovery(self, *, include_schemas: list[str], exclude_schemas: list[str]) -> bool:
+    def scope_discovery(
+        self,
+        *,
+        include_schemas: list[str],
+        exclude_schemas: list[str],
+        object_kinds: Sequence[str] = (),
+        include_objects: Sequence[str] = (),
+        exclude_objects: Sequence[str] = (),
+    ) -> bool:
+        # R11-FP01: this adapter pushes the schema scope only. The object kinds and
+        # `schema.object` patterns are accepted so one call reaches every adapter, and are
+        # left to `discovery_selection.apply_selection`, which runs on every batch anyway.
         self._schema_scope = schema_scope(include_schemas, exclude_schemas)
         return self._schema_scope.restricted
 

@@ -447,8 +447,15 @@ async def test_a_trigger_edge_steers_the_graph_only_once_approved(
     assert (folded.source_columns, folded.target_columns) == (["customer_id"], ["customer_id"])
     assert folded.evidence["source"] == "TRIGGER_DEFINITION"
     assert folded.evidence["trigger_ids"] == [str(trigger.id)]
-    # A SQL Server trigger's own body is not a routine: no reference is invented.
-    assert "transformation_reference" not in folded.evidence
+    # A SQL Server trigger's own body is not a routine, so the reference names the
+    # trigger itself -- one trigger establishes the pair -- and
+    # `get_transformation_detail` serves that body through the routine gate
+    # (`tests/test_trigger_downstream.py`).
+    assert folded.evidence["transformation_reference"] == {
+        "tool": "get_transformation_detail",
+        "entity_id": str(trigger.id),
+        "kind": "TRIGGER_BODY",
+    }
     assert after.counts_by_source["TRIGGER_DEFINITION"] == 1
 
 

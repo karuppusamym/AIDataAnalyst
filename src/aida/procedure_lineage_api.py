@@ -49,6 +49,7 @@ from aida.schemas import (
     ProcedureCapabilityConstructRead,
     ProcedureCapabilityMatrixRead,
     RoutineParseCoverageRead,
+    StatementRangeRead,
     TriggerParseCoverageRead,
 )
 from aida.security import SecurityContext, require_roles
@@ -77,6 +78,7 @@ async def _load_routine(
 
 
 def _edge_read(edge: ProcedureLineageEdgeRecord) -> DeepProcedureLineageEdgeRead:
+    where = edge.statement_range
     return DeepProcedureLineageEdgeRead(
         source_table=edge.source_table,
         source_column=edge.source_column,
@@ -93,6 +95,47 @@ def _edge_read(edge: ProcedureLineageEdgeRecord) -> DeepProcedureLineageEdgeRead
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
         via_routine=edge.via_routine,
+        statement_range=(
+            StatementRangeRead(
+                start_offset=where.start_offset,
+                end_offset=where.end_offset,
+                start_line=where.start_line,
+                start_column=where.start_column,
+                end_line=where.end_line,
+                end_column=where.end_column,
+            )
+            if where is not None
+            else None
+        ),
+        statement_range_status=edge.statement_range_status,
+        statement_text_digest=edge.statement_text_digest,
+        package_member=edge.package_member,
+        member_attribution=edge.member_attribution,
+    )
+
+
+def _row_range(row: DeepProcedureLineageEdge) -> StatementRangeRead | None:
+    """A stored row's range, or None -- all six positions or none (R11-FP07)."""
+    positions = (
+        row.statement_start_offset,
+        row.statement_end_offset,
+        row.statement_start_line,
+        row.statement_start_column,
+        row.statement_end_line,
+        row.statement_end_column,
+    )
+    if any(position is None for position in positions):
+        return None
+    start_offset, end_offset, start_line, start_column, end_line, end_column = (
+        int(position) for position in positions if position is not None
+    )
+    return StatementRangeRead(
+        start_offset=start_offset,
+        end_offset=end_offset,
+        start_line=start_line,
+        start_column=start_column,
+        end_line=end_line,
+        end_column=end_column,
     )
 
 
@@ -161,6 +204,9 @@ async def parse_deep_procedure_lineage_endpoint(
             "is_read_only": result.is_read_only,
             "statement_count": result.statement_count,
             "review_mode": settings.lineage_parsed_edges_review_mode,
+            # R11-FP03: codes only -- the grain a package was attributed at.
+            "member_attribution": result.member_attribution,
+            "member_fallback_reason": result.member_fallback_reason,
         },
     )
     await session.flush()
@@ -175,6 +221,9 @@ async def parse_deep_procedure_lineage_endpoint(
         is_fully_parsed=result.is_fully_parsed,
         is_read_only=result.is_read_only,
         persisted_edge_count=persisted,
+        statement_text_digest=result.statement_text_digest,
+        member_attribution=result.member_attribution,
+        member_fallback_reason=result.member_fallback_reason,
     )
 
 
@@ -219,7 +268,14 @@ async def list_deep_procedure_lineage(
             control_flow_context=row.control_flow_context,
             unparsed_reason=row.unparsed_reason,
             via_temp_table=row.via_temp_table,
+            via_routine=row.via_routine,
             review_status=row.review_status,
+            statement_range=_row_range(row),
+            statement_range_status=row.statement_range_status,
+            statement_text_digest=row.statement_text_digest,
+            package_member=row.package_member,
+            member_attribution=row.member_attribution,
+            member_routine_id=row.member_routine_id,
         )
         for row in rows
     ]
@@ -280,6 +336,8 @@ async def get_routine_parse_coverage(
         confidence=coverage.confidence,
         source_mapping_granularity=coverage.source_mapping_granularity,
         parsed_at=coverage.parsed_at,
+        member_attribution=coverage.member_attribution,
+        member_fallback_reason=coverage.member_fallback_reason,
     )
 
 

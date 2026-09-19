@@ -18,6 +18,10 @@ seen, inside the same transaction as the write that makes it:
 * `PERMISSION_CHANGED` for a source grant, classed `GRANT_ADDED` (new to a schema an earlier run
   already read, or back after a revoke), `GRANT_MODIFIED` or `GRANT_REVOKED`.
 * `MEANING_PUBLISHED` when an ontology version is approved.
+* `MEANING_RETIRED` (R11-FP15, 2026-09-18) when an approved table, column or routine description,
+  or a semantic model or glossary term version, stops being the one a reader is given. Unlike every
+  signal above it is *detected after the fact* rather than recorded at the write -- see
+  `aida.change_signal_meaning` for why, and for what "changed" means there.
 
 **Idempotent without a key.** A change is detected by comparing the stored fingerprint with the
 incoming one. A retried batch whose first attempt committed finds them already equal and records
@@ -46,6 +50,21 @@ SIGNAL_DEPRECATED: Final = "DEPRECATED"
 SIGNAL_REACTIVATED: Final = "REACTIVATED"
 SIGNAL_PERMISSION_CHANGED: Final = "PERMISSION_CHANGED"
 SIGNAL_MEANING_PUBLISHED: Final = "MEANING_PUBLISHED"
+#: R11-FP15: an approved meaning version stopped being the one a reader is given.
+SIGNAL_MEANING_RETIRED: Final = "MEANING_RETIRED"
+#: Another approved version, saying something different, now stands in its place.
+CHANGE_MEANING_REPLACED: Final = "MEANING_REPLACED"
+#: Nothing stands in its place: the reader is now given no approved text at all.
+CHANGE_MEANING_WITHDRAWN: Final = "MEANING_WITHDRAWN"
+#: The meaning stores a MEANING_RETIRED signal can name; its subject id is a version row of each.
+SUBJECT_TABLE_DESCRIPTION: Final = "TABLE_DESCRIPTION"
+SUBJECT_COLUMN_DESCRIPTION: Final = "COLUMN_DESCRIPTION"
+SUBJECT_ROUTINE_DESCRIPTION: Final = "ROUTINE_DESCRIPTION"
+SUBJECT_SEMANTIC_MODEL: Final = "SEMANTIC_MODEL"
+SUBJECT_GLOSSARY_TERM: Final = "GLOSSARY_TERM"
+DESCRIPTION_SUBJECT_KINDS: Final = frozenset(
+    {SUBJECT_TABLE_DESCRIPTION, SUBJECT_COLUMN_DESCRIPTION, SUBJECT_ROUTINE_DESCRIPTION}
+)
 CHANGE_LITERAL_ONLY: Final = "LITERAL_ONLY"
 CHANGE_STRUCTURAL: Final = "STRUCTURAL"
 CHANGE_GRANT_ADDED: Final = "GRANT_ADDED"

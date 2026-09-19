@@ -165,6 +165,33 @@ _CATEGORY_TRIGGER: Final = "TRIGGER"
 _CATEGORY_SEQUENCE: Final = "SEQUENCE"
 _CATEGORY_OTHER: Final = "OTHER"
 
+#: R11-FP01: what a trigger's parsing cell says per engine -- the one place its
+#: degradation differs from a routine body's. Engine knowledge taken from
+#: `procedure_lineage.TRIGGER_SUBJECT_RELATIONS` and `unbound_trigger_subject`.
+_TRIGGER_PARSING_COMMON: Final = (
+    "procedure_lineage.parse_trigger_lineage parses the captured body with the same "
+    "explicit UNPARSED markers a routine body gets; the lineage agent drives it, edges "
+    "land PROPOSED in trigger_lineage_edge for review, and per-trigger completion is "
+    "recorded on trigger_parse_coverage"
+)
+_TRIGGER_PARSING_EVIDENCE: Final[dict[str, str]] = {
+    "postgres": (
+        f"{_TRIGGER_PARSING_COMMON}. A PostgreSQL trigger has no body: the parse follows "
+        "action_routine to the function that holds it, with NEW / OLD bound to the "
+        "firing table"
+    ),
+    "sqlserver": (
+        f"{_TRIGGER_PARSING_COMMON}. INSERTED / DELETED -- aliased or not -- are bound "
+        "to the firing table, so a write from the firing row names its source"
+    ),
+    "oracle": (
+        f"{_TRIGGER_PARSING_COMMON}. Oracle's :NEW / :OLD is recorded as "
+        "UNRESOLVED_TRIGGER_SUBJECT rather than bound: sqlglot reads the leading colon "
+        "as a bind placeholder, so a read from the firing row carries no source table"
+    ),
+    "": _TRIGGER_PARSING_COMMON,
+}
+
 _ALL_IMPLEMENTED: Final[frozenset[str]] = frozenset(_ADAPTER_CLASSES)
 
 
@@ -470,8 +497,8 @@ class SourceMappingCoverage:
     """R11-FP07 / finding F06.4: how precisely a parsed fact can be located.
 
     Published as its own record rather than as prose, because "precise source
-    mapping" is the one thing in F06.4 that is *not* implemented, and the
-    matrix is required to say so.
+    mapping" was the one thing in F06.4 that was not implemented, and the matrix
+    is required to say how far it now goes: statement ranges, not token ranges.
     """
 
     granularity: str
@@ -869,14 +896,17 @@ def _parsing_cell(
             ),
         )
     if kind.graph_category == _CATEGORY_TRIGGER:
-        # R11-FP01, and the honest half of what this pass did not do. The
-        # firing table *is* discovered and carried on the envelope, so the "what
-        # runs when this table changes" edge exists; what does not exist is a
-        # pass that hands a trigger body to `procedure_lineage` and turns its own
-        # reads and writes into edges. UNSUPPORTED with ADAPTER_NOT_IMPLEMENTED
-        # rather than PARTIAL: PARTIAL is a claim, and nothing in this
-        # repository yet produces a lineage edge from a trigger. Named in
-        # `_DECLARED_GAPS` so the deferral is published, not merely decided.
+        # R11-FP01. This cell used to be UNSUPPORTED / ADAPTER_NOT_IMPLEMENTED with
+        # the evidence "no pass hands a trigger body to procedure_lineage" -- true
+        # when written, and published by the live capability-matrix route after it
+        # stopped being true (corrected 2026-09-18). `procedure_lineage.
+        # parse_trigger_lineage` now parses a trigger body with its firing-row
+        # names bound to the firing table; the lineage agent drives it
+        # (`lineage_agent`), edges land PROPOSED in `trigger_lineage_edge` for the
+        # same review every parsed edge gets, and coverage is recorded on
+        # `trigger_parse_coverage`. PARTIAL with PARSER_DEGRADES_EXPLICITLY, the
+        # same claim a routine body earns, because it is the same parser with the
+        # same named UNPARSED markers -- plus one of its own, per engine, below.
         if definition_cell.state not in {
             CapabilityState.SUPPORTED.value,
             CapabilityState.PARTIAL.value,
@@ -887,16 +917,22 @@ def _parsing_cell(
                 reason=definition_cell.reason,
                 evidence=f"no text reaches the parser: {definition_cell.evidence}",
             )
+        if not dialect_supported:
+            return FacetCell(
+                facet=FACET_PARSING,
+                state=CapabilityState.UNSUPPORTED.value,
+                reason=REASON_PARSER_REFUSES_DIALECT,
+                evidence=(
+                    f"dialect {definition.dialect!r} is not a key of "
+                    "sql_lineage_parser._SQLGLOT_DIALECT_MAP, so the trigger body is "
+                    "captured and never parsed"
+                ),
+            )
         return FacetCell(
             facet=FACET_PARSING,
-            state=CapabilityState.UNSUPPORTED.value,
-            reason=REASON_ADAPTER_NOT_IMPLEMENTED,
-            evidence=(
-                "the firing table is discovered and carried on the envelope, so the "
-                "table -> trigger edge is a known fact; no pass hands a trigger body "
-                "to procedure_lineage, so the relations the body itself reads and "
-                "writes produce no edge. Declared as a gap rather than approximated"
-            ),
+            state=CapabilityState.PARTIAL.value,
+            reason=REASON_PARSER_DEGRADES_EXPLICITLY,
+            evidence=_TRIGGER_PARSING_EVIDENCE.get(engine, _TRIGGER_PARSING_EVIDENCE[""]),
         )
     if kind.graph_category == _CATEGORY_OTHER:
         # Any future kind in the catch-all category: carried from the definition
@@ -919,6 +955,27 @@ def _parsing_cell(
                 "outright ('unsupported dialect: ...', Confidence.LOW) rather than "
                 "guessing -- this engine is unsupported for parsing, not absent from "
                 "the parser matrix"
+            ),
+        )
+    if definition_cell.reason == REASON_DEFINITION_HELD_BY_CONTAINER:
+        # R11-FP03 (2026-09-19). A package member has no definition of its own -- its
+        # body lives in the package source, which is why the definition cell above
+        # reads UNAVAILABLE -- but "no definition of its own" stopped meaning "no text
+        # reaches the parser" when the parser learned to split a package body. The
+        # rule below would have inherited UNAVAILABLE and published "no text reaches
+        # the parser", which is false. Matched on the container reason rather than on
+        # the kind's name, so only the case where the text lives one level up is
+        # exempted from inheriting, and any other unavailable definition still is.
+        return FacetCell(
+            facet=FACET_PARSING,
+            state=CapabilityState.PARTIAL.value,
+            reason=REASON_PARSER_DEGRADES_EXPLICITLY,
+            evidence=(
+                "read from the package's own source, split per member: each member's "
+                "edges carry package_member and member_attribution=MEMBER; when the "
+                "package body cannot be split every edge falls back to PACKAGE_FALLBACK "
+                "with the reason recorded, so a member's lineage is never silently "
+                "attributed to the package as a whole"
             ),
         )
     if definition_cell.state != CapabilityState.SUPPORTED.value:
@@ -952,10 +1009,17 @@ def _parsing_cell(
             facet=FACET_PARSING,
             state=CapabilityState.PARTIAL.value,
             reason=REASON_PARSER_DEGRADES_EXPLICITLY,
+            # R11-FP03 (2026-09-18): this read "parsed as one body ... not attributed
+            # to the member subprogram" until the parser learned to split a package
+            # body. PARTIAL still, because the split can fail and then falls back --
+            # recorded with its reason, never a silent mix of the two grains.
             evidence=(
-                "a package body is parsed as one body by the same parser; its "
-                "statements are not attributed to the member subprogram that "
-                "contains them, and tool generation refuses the package outright"
+                "a package body is split into its member subprograms; each member's "
+                "edges carry package_member and member_attribution=MEMBER, package-level "
+                "code is PACKAGE_LEVEL, and a body that cannot be split (NO_PACKAGE_BODY, "
+                "UNBALANCED_BLOCKS, UNREADABLE_MEMBER) is parsed whole with every edge "
+                "PACKAGE_FALLBACK and the reason on the result; tool generation still "
+                "refuses the package"
             ),
         )
     return FacetCell(
@@ -1232,11 +1296,18 @@ def _engine_row(definition: ConnectorDefinition, tests_root: Path | None) -> Eng
 
 
 def _source_mapping_coverage() -> SourceMappingCoverage:
-    """F06.4's "precise source mapping": recorded as unsupported, with the reason.
+    """F06.4's "precise source mapping", read from the parser's own record.
 
-    Derived, not asserted: the position-bearing fields on the two records that
-    carry a parsed fact are enumerated, and anything beyond the statement
-    ordinal would change this cell.
+    Derived, not asserted: the position-bearing fields on the record that carries a
+    parsed fact are enumerated into the granularity, so a positional field added or
+    removed moves this cell. R11-FP07 (2026-09-18) added `statement_range` and
+    `statement_range_status`; this cell was UNSUPPORTED until then, and its own tripwire
+    (`test_adding_a_positional_field_would_change_the_source_mapping_record`) is what
+    made the change visible here rather than leaving the published record stale.
+
+    PARTIAL, not SUPPORTED: a range exists per *statement*, into the stored redacted
+    body, and a fact no statement of that text holds is NOT_LOCATED with NULL positions
+    -- the cell degrades per statement rather than being uniformly available.
     """
     positional = sorted(
         {
@@ -1249,28 +1320,49 @@ def _source_mapping_coverage() -> SourceMappingCoverage:
         }
     )
     granularity = ", ".join(positional) if positional else "none"
+    ranged = "statement_range" in positional
+    if not ranged:
+        # The shape this cell had before R11-FP07, kept so that removing the range
+        # fields would publish the honest answer again rather than a stale PARTIAL.
+        return SourceMappingCoverage(
+            granularity=granularity,
+            state=CapabilityState.UNSUPPORTED.value,
+            reason=REASON_ADAPTER_NOT_IMPLEMENTED,
+            evidence=(
+                "the only positional field on a parsed lineage fact is "
+                f"{granularity}; no line, column, character-offset or range field exists "
+                "on ProcedureLineageEdgeRecord or on deep_procedure_lineage_edge"
+            ),
+            rationale=(
+                "Recorded as unsupported rather than approximated: a precise-looking "
+                "number that points at the wrong text is worse than an honest statement "
+                "ordinal."
+            ),
+        )
     return SourceMappingCoverage(
         granularity=granularity,
-        state=CapabilityState.UNSUPPORTED.value,
-        reason=REASON_ADAPTER_NOT_IMPLEMENTED,
+        state=CapabilityState.PARTIAL.value,
+        reason=REASON_PARSER_DEGRADES_EXPLICITLY,
         evidence=(
-            "the only positional field on a parsed lineage fact is "
-            f"{granularity}; no line, column, character-offset or range field exists "
-            "on ProcedureLineageEdgeRecord or on deep_procedure_lineage_edge"
+            "each parsed lineage fact carries statement_range (half-open code-point "
+            "offsets, 1-based start/end line and column) and statement_range_status "
+            "(STATEMENT / GAP_STATEMENT / CALL_SITE / NOT_LOCATED) into the stored, "
+            "redacted body, pinned by statement_text_digest (SHA-256 of that text); "
+            "persisted on deep_procedure_lineage_edge and trigger_lineage_edge; NULL "
+            "positions with NOT_LOCATED where no statement of the text holds the fact, "
+            "never a range of zero"
         ),
         rationale=(
-            "Recorded as unsupported rather than approximated. A character range "
-            "would have to be an offset into the text the range describes, and Atlas "
-            "does not hold that text: R11-D16 makes storage keep only a re-rendered "
-            "or lexically scrubbed form of a routine body, never the source bytes, so "
-            "an offset computed on stored text does not point at the customer's "
-            "source, and an offset computed on the raw body cannot be stored because "
-            "the raw body is not. Control-flow recognition compounds it -- the "
-            "procedure parser peels IF/WHILE/LOOP bodies with text-level regexes "
-            "before sqlglot ever sees a statement, so offsets would have to survive "
-            "several slicing passes. A precise-looking number that points at the "
-            "wrong text is worse than an honest statement ordinal, and publishing "
-            "one would be exactly the marketed-vs-actual drift review §5 names."
+            "Ranges index the text Atlas holds and parsed -- body_sql_redacted, the text "
+            "a steward is shown -- never the customer's source bytes, which Atlas does not "
+            "keep (R11-D16): a PARSED redaction re-renders the body, so a raw-text offset "
+            "would point at the wrong place, and the digest lets a reader prove a range "
+            "still indexes the stored body. Statement grain, from the parser's own "
+            "splitter and control-flow peel, not token grain: sqlglot's positions are "
+            "relative to the peeled, sometimes rewritten, remainder. An unparsed statement "
+            "reads GAP_STATEMENT with the span of the text it could not read. PARTIAL "
+            "because a fact with no statement of the text is NOT_LOCATED rather than "
+            "approximated."
         ),
     )
 
@@ -1338,17 +1430,18 @@ def _dbt_coverage() -> tuple[DbtCoverageRow, ...]:
 #: Each is a row in the published matrix already; naming them together is what
 #: makes the deferral honest instead of quiet.
 _DECLARED_GAPS: Final[tuple[str, ...]] = (
-    "A trigger's own body produces no lineage: R11-FP01 discovers the trigger, "
-    "its firing table, its events, its timing and (on Oracle and SQL Server) its "
-    "redacted body, so the table -> trigger edge is a known fact -- but no pass "
-    "hands that body to `procedure_lineage`, so the relations the body itself "
-    "reads and writes are still invisible.",
-    "Discovered triggers and sequences are not persisted yet: "
-    "`metadata_trigger` and `metadata_sequence` exist with their migration, and "
-    "`ingestion.persist_envelope_extensions` has no writer for either, so both "
-    "axes reach the envelope and stop there. Until that lands, every trigger "
-    "and sequence count on a discovery receipt is zero for a reason that is not "
-    "the source's.",
+    # Corrected 2026-09-18. Two entries here had stopped being true while this matrix
+    # was served live: "a trigger's own body produces no lineage" (trigger bodies are
+    # parsed by `procedure_lineage.parse_trigger_lineage`, and their reviewed edges are
+    # read by impact, retrieval, description drafting and classification propagation)
+    # and "discovered triggers and sequences are not persisted yet" (persistence,
+    # reconciliation and receipt counting landed in ce98bee, proven live on PostgreSQL
+    # and SQL Server). What is still missing on the trigger axis is stated instead.
+    "An Oracle trigger's read from its firing row names no source table: "
+    "`procedure_lineage` binds PostgreSQL's NEW / OLD and SQL Server's INSERTED / "
+    "DELETED to the firing table, but records Oracle's `:NEW` / `:OLD` as "
+    "UNRESOLVED_TRIGGER_SUBJECT rather than binding it, because sqlglot reads the "
+    "leading colon as a bind placeholder.",
     "Databricks now reads view definitions and routine bodies, and declares no "
     "`grants` axis: Unity Catalog's privilege model is not the SQL grant model "
     "that axis records. Its dialect is also refused by both lineage parsers, so "
@@ -1357,12 +1450,16 @@ _DECLARED_GAPS: Final[tuple[str, ...]] = (
     "identity, signature, parameters and return type, and their definition is "
     "UNAVAILABLE: `pg_get_functiondef` refuses those prokinds, so PostgreSQL "
     "exposes no CREATE statement to capture.",
-    "Schema-scope pushdown reaches the source's own queries on PostgreSQL and "
-    "SQL Server only; the other four adapters filter after reading, so an "
-    "excluded schema is still read.",
-    "The push-ingestion path applies no discovery selection and records no "
-    "invisible-object count, so a pushed estate has no NOT_SELECTED or "
-    "visibility evidence of its own.",
+    "Discovery-selection pushdown: all six adapters take the schema scope into "
+    "their own metadata queries. Oracle, Snowflake and BigQuery also take the "
+    "`schema.object` patterns and object kinds, and Databricks the patterns, into "
+    "the reads whose rows belong to one object; PostgreSQL and SQL Server push the "
+    "schema scope only. No adapter narrows the inventories that establish which "
+    "schemas exist -- a FULL run retires a schema it did not see -- so kinds and "
+    "patterns are still applied to those after reading.",
+    "The push-ingestion path records no invisible-object count, so a pushed estate "
+    "has no visibility evidence of its own. (It does apply the discovery selection, "
+    "since 2026-09-17; this entry used to say it did not.)",
     "There is no definition-history read route: "
     "metadata_routine_definition_version accumulates versions that no endpoint "
     "serves.",
@@ -1371,7 +1468,11 @@ _DECLARED_GAPS: Final[tuple[str, ...]] = (
     "nothing hidden.",
     "Query history is declared False on all six adapters, including the two "
     "(Snowflake, BigQuery) whose method exists, because nothing consumes it.",
-    "Precise source mapping is unsupported: see the source-mapping record.",
+    # R11-FP07 (2026-09-18): was "Precise source mapping is unsupported". Statement
+    # ranges now exist; what remains partial is stated instead.
+    "Source mapping is statement-grain, not token-grain: a parsed fact carries the "
+    "range of its statement in the stored, redacted body, and a fact no statement "
+    "holds is NOT_LOCATED -- see the source-mapping record.",
     "No facet carries a tested engine-version or deployment-variant range; the "
     "matrix key names both as not recorded.",
 )

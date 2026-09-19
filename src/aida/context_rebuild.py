@@ -32,6 +32,16 @@ For each organization:
    them; one pinning an ontology version its ontology has since published past, or a
    semantic model or glossary term version since superseded, gets a version pinned to the
    current one. Each is submitted for review.
+
+   R11-FP12/FP15/FP16 (2026-09-18): so does one whose *covered* basis moved after it was
+   published -- a covered view's or routine's definition, or the approved description of a
+   covered table, view, column or routine (`context_product_coverage.load_coverage_changes`,
+   the very function every door uses to tell a reader the product is stale). The draft is the
+   same definition, re-pointed from a routine that left the source to the one that replaced
+   its signature, or without it: a person re-verifies the product over what it now stands on,
+   and approval is what makes it current again. It waits while a tool it pins has a rebuilt
+   version in review, so one review covers the re-pin too; and one a reviewer rejected is not
+   proposed again until something else moves.
 7. **Holds.** A source-change hold is resolved once nothing standing on its table is stale,
    and its change signals are processed. For a table the source no longer has: no published
    tool reads it, and no published context product includes it or pins a tool reading it.
@@ -39,12 +49,15 @@ For each organization:
    definition; every other published tool reading it still binds to its columns and, where
    the change can alter what SQL that still binds answers (any held view, a column
    retyped), was approved after the change; its approved description matches its
-   definition or columns; and no published context product pins a superseded tool reading
-   it.
+   definition or columns; no published context product pins a superseded tool reading
+   it; and (a held view) no published context product covering it was published before its
+   definition moved -- the product-level twin of a hand-written tool's re-approval.
 
 Before these, approved joins a newer scan has read are re-validated
 (`aida.relationship_drift`): one whose evidence is gone is suspended back to review, and one
-whose evidence is back exactly as approved is restored.
+whose evidence is back exactly as approved is restored. And (R11-FP15) the meaning retirements no
+write site records are swept into signals (`aida.change_signal_meaning`), so an organization
+whose only change is a withdrawn description is visited and has it recorded like any other.
 
 Nothing is drafted where a newer draft already waits for review. A rebuild that cannot be made (a
 view no longer eligible for a tool, a description below the evidence bar) is counted by its code
@@ -77,16 +90,29 @@ from aida.asset_description_service import (
     table_refusal,
     text_fingerprint,
 )
+from aida.change_signal_meaning import (
+    organizations_with_unsignalled_retirements,
+    record_meaning_signals,
+)
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import ACTION_TABLE_RESHAPED, SOURCE_CHANGE_ANOMALY_TYPE
-from aida.change_signals import BINDING_SAFE_SHAPE_CHANGES
+from aida.change_signals import (
+    BINDING_SAFE_SHAPE_CHANGES,
+    CHANGE_SIGNATURE_CHANGED,
+    SIGNAL_DEFINITION_CHANGED,
+    SIGNAL_DEPRECATED,
+    SIGNAL_MEANING_RETIRED,
+    SIGNAL_REACTIVATED,
+)
 from aida.config import Settings
+from aida.context_compiler import ResolvedCoverageChange
 from aida.context_product_api import (
     _definition_from_version,
     apply_context_product_definition,
     replace_context_product_role_bindings,
     validate_context_product_references,
 )
+from aida.context_product_coverage import load_coverage_changes, publication_time
 from aida.cost_metrics import record_parser_spend
 from aida.document_ingestion import remap_document
 from aida.envelope_models import (
@@ -178,6 +204,15 @@ WAIT_PRODUCT_STALE: Final = "PRODUCT_STALE"
 WAIT_TABLE_NOT_STANDING: Final = "TABLE_NOT_STANDING"
 WAIT_TOOL_COLUMNS_MISSING: Final = "TOOL_COLUMNS_MISSING"
 WAIT_RETIRED_TABLE_IN_USE: Final = "RETIRED_TABLE_IN_USE"
+#: R11-FP16: a published context product covering the held view was published before its
+#: definition moved, and no one has re-verified the product over the new one.
+WAIT_PRODUCT_NOT_REVERIFIED: Final = "PRODUCT_NOT_REVERIFIED"
+#: R11-FP12: the definition signals that mean a covered view's or routine's definition moved.
+_DEFINITION_MOVES: Final = frozenset(
+    {SIGNAL_DEFINITION_CHANGED, SIGNAL_DEPRECATED, SIGNAL_REACTIVATED}
+)
+#: How many meaning retirements one pass records per organization; the rest wait a pass.
+MEANING_SWEEP_LIMIT: Final = 500
 #: A person refused this description already, so no pass can draft its replacement.
 WAIT_DESCRIPTION_AWAITING_AUTHOR: Final = "DESCRIPTION_AWAITING_AUTHOR"
 #: The refusal codes that mean a reviewer rejected exactly what a rebuild would propose again.
@@ -234,6 +269,8 @@ class RebuildOutcome:
     products_drafted: int = 0
     holds_released: int = 0
     failed: int = 0
+    #: R11-FP15: meaning retirements this pass swept into signals.
+    meaning_signals_recorded: int = 0
     blocked: dict[str, int] = field(default_factory=dict)
     waiting: dict[str, int] = field(default_factory=dict)
 
@@ -259,6 +296,7 @@ class RebuildOutcome:
                 self.products_drafted,
                 self.holds_released,
                 self.failed,
+                self.meaning_signals_recorded,
                 self.blocked,
             )
         )
@@ -277,6 +315,7 @@ class RebuildOutcome:
             "products_drafted": self.products_drafted,
             "holds_released": self.holds_released,
             "failed": self.failed,
+            "meaning_signals_recorded": self.meaning_signals_recorded,
             "blocked": dict(sorted(self.blocked.items())),
             "waiting": dict(sorted(self.waiting.items())),
         }
@@ -1632,6 +1671,112 @@ async def _current_meaning_replacements(
     return replacements
 
 
+async def _repin_routines(
+    session: AsyncSession, organization_id: UUID, routine_ids: list[str]
+) -> tuple[dict[str, str], set[str]]:
+    """Covered routines the source retired, mapped to what replaced them, or to be dropped.
+
+    R11-FP12: validation admits only ACTIVE routines, so a product naming one the source retired
+    could never be re-drafted -- not for this change, and not for a tool re-pin either. A routine
+    retired because exactly one new signature replaced its one old signature (FP15's
+    `SIGNATURE_CHANGED` pairing) is followed to its replacement when that is ACTIVE in the same
+    organization; any other retired routine is dropped from the draft, as a retired table is. A
+    person sees both in the review.
+    """
+    replacements: dict[str, str] = {}
+    dropped: set[str] = set()
+    ids = [UUID(value) for value in routine_ids]
+    if not ids:
+        return replacements, dropped
+    active = set(
+        await session.scalars(
+            select(MetadataRoutine.id).where(
+                MetadataRoutine.id.in_(ids),
+                MetadataRoutine.organization_id == organization_id,
+                MetadataRoutine.status == "ACTIVE",
+            )
+        )
+    )
+    for routine_id in ids:
+        if routine_id in active:
+            continue
+        successor = await session.scalar(
+            select(MetadataChangeSignal.related_subject_id)
+            .where(
+                MetadataChangeSignal.organization_id == organization_id,
+                MetadataChangeSignal.subject_kind == "ROUTINE",
+                MetadataChangeSignal.subject_id == routine_id,
+                MetadataChangeSignal.signal_type == SIGNAL_DEPRECATED,
+                MetadataChangeSignal.change_class == CHANGE_SIGNATURE_CHANGED,
+                MetadataChangeSignal.related_subject_id.is_not(None),
+            )
+            .order_by(MetadataChangeSignal.detected_at.desc())
+            .limit(1)
+        )
+        replacement = (
+            await session.get(MetadataRoutine, successor) if successor is not None else None
+        )
+        if (
+            replacement is not None
+            and replacement.organization_id == organization_id
+            and replacement.status == "ACTIVE"
+        ):
+            replacements[str(routine_id)] = str(replacement.id)
+        else:
+            dropped.add(str(routine_id))
+    return replacements, dropped
+
+
+async def _reverify_since(
+    session: AsyncSession, previous: ContextProductVersion
+) -> datetime | None:
+    """From when a covered change asks for this published version to be re-verified.
+
+    Its publication -- unless a reviewer has since rejected a re-verification the rebuild
+    proposed for it, in which case only a change after that rejection asks again. Without that
+    a refused proposal would be proposed on every pass, which the tool and description rebuilds
+    above already refuse to do. The product stays *visibly* stale either way: every door
+    compares with the publication itself, never with this.
+    """
+    published = publication_time(previous)
+    if published is None:
+        return None
+    rejected = await session.scalar(
+        select(func.max(ContextProductVersion.updated_at)).where(
+            ContextProductVersion.product_id == previous.product_id,
+            ContextProductVersion.based_on_version_id == previous.id,
+            ContextProductVersion.created_by == CONTEXT_REBUILD_PRINCIPAL,
+            ContextProductVersion.status == "REJECTED",
+        )
+    )
+    if rejected is not None and _aware(rejected) > _aware(published):
+        return _aware(rejected)
+    return _aware(published)
+
+
+async def _pinned_tool_rebuild_waiting(session: AsyncSession, pinned: list[str]) -> bool:
+    """Whether a tool the product pins has a newer version waiting for review.
+
+    A re-verification drafted now would pin the version that review is about to supersede, and
+    need a second review for the re-pin straight after. Waiting lets one review carry both --
+    which is also the order the change reaches a reader in: the tool first, then the product.
+    """
+    if not pinned:
+        return False
+    tool_ids = select(GovernedToolVersion.tool_id).where(
+        GovernedToolVersion.id.in_([UUID(value) for value in pinned])
+    )
+    waiting = await session.scalar(
+        select(GovernedToolVersion.id)
+        .where(
+            GovernedToolVersion.tool_id.in_(tool_ids),
+            GovernedToolVersion.status.in_(_OPEN_TOOL_STATUSES),
+        )
+        .limit(1)
+    )
+    return waiting is not None
+
+
 async def _draft_product_version(
     session: AsyncSession,
     organization_id: UUID,
@@ -1641,6 +1786,9 @@ async def _draft_product_version(
     dropped_versions: set[str],
     dropped_tables: set[UUID],
     meanings: dict[str, str],
+    routines: dict[str, str] | None = None,
+    dropped_routines: set[str] | None = None,
+    changes: list[ResolvedCoverageChange] | None = None,
 ) -> None:
     product = await session.get(ContextProduct, previous.product_id)
     if product is None or product.lifecycle_status != "ACTIVE":
@@ -1648,6 +1796,9 @@ async def _draft_product_version(
     project = await session.get(Project, product.project_id)
     if project is None:
         raise _RebuildRefused("PRODUCT_PROJECT_UNAVAILABLE")
+    routines = routines or {}
+    dropped_routines = dropped_routines or set()
+    changes = changes or []
     definition = _definition_from_version(previous)
     repinned = [
         UUID(replacements.get(str(version_id), str(version_id)))
@@ -1655,11 +1806,20 @@ async def _draft_product_version(
         if str(version_id) not in dropped_versions
     ]
     tables = [table_id for table_id in definition.table_ids if table_id not in dropped_tables]
+    # R11-FP12: a retired routine followed to its replacement, or dropped; never named twice.
+    routine_ids = list(
+        dict.fromkeys(
+            UUID(routines.get(str(routine_id), str(routine_id)))
+            for routine_id in definition.routine_ids
+            if str(routine_id) not in dropped_routines
+        )
+    )
     # Meaning pins are keyed by version id, unique across the three groups.
     definition = definition.model_copy(
         update={
             "eligible_tool_version_ids": repinned,
             "table_ids": tables,
+            "routine_ids": routine_ids,
             **{
                 group: [
                     UUID(meanings.get(str(version_id), str(version_id)))
@@ -1708,6 +1868,16 @@ async def _draft_product_version(
             "dropped_tool_versions": len(dropped_versions),
             "dropped_tables": len(dropped_tables),
             "repinned_meaning_versions": len(meanings),
+            # R11-FP12/FP15: what the product covers that moved since it was published. Counts
+            # of the product's own subjects only -- the reviewer is reviewing this product.
+            "repinned_routines": len(routines),
+            "dropped_routines": len(dropped_routines),
+            "covered_definitions_moved": sum(
+                1 for change in changes if change.change in _DEFINITION_MOVES
+            ),
+            "covered_descriptions_retired": sum(
+                1 for change in changes if change.change == SIGNAL_MEANING_RETIRED
+            ),
         },
     )
 
@@ -1739,7 +1909,22 @@ async def _rebuild_products(
                 list(previous.glossary_term_version_ids),
             ),
         }
-        if not (replacements or dropped or dropped_tables or meanings):
+        # R11-FP12/FP15/FP16: what the product covers that moved since it was published (or
+        # since a reviewer last refused to re-verify it), and any covered routine the source
+        # retired, which no draft of the product could otherwise name.
+        routine_ids = list(previous.routine_ids or [])
+        routines, dropped_routines = await _repin_routines(session, organization_id, routine_ids)
+        changes = await load_coverage_changes(
+            session,
+            organization_id,
+            previous.table_ids,
+            routine_ids,
+            since=await _reverify_since(session, previous),
+        )
+        repins = bool(
+            replacements or dropped or dropped_tables or meanings or routines or dropped_routines
+        )
+        if not (repins or changes):
             continue
         waiting = await session.scalar(
             select(ContextProductVersion.id)
@@ -1750,6 +1935,10 @@ async def _rebuild_products(
             .limit(1)
         )
         if waiting is not None:
+            continue
+        if not repins and await _pinned_tool_rebuild_waiting(
+            session, list(previous.eligible_tool_version_ids)
+        ):
             continue
         try:
             async with session.begin_nested():
@@ -1762,6 +1951,9 @@ async def _rebuild_products(
                     dropped,
                     dropped_tables,
                     meanings,
+                    routines,
+                    dropped_routines,
+                    changes,
                 )
         except _RebuildRefused as refused:
             outcome.block(refused.code)
@@ -1856,6 +2048,28 @@ async def stale_dependent(session: AsyncSession, incident: DataQualityIncident) 
         for version in superseded:
             if table.id in await _tool_table_ids(session, datasource, version):
                 return WAIT_PRODUCT_STALE
+
+    if _is_view(table):
+        # R11-FP16: a product covering a redefined view was approved over the old definition,
+        # exactly as a hand-written tool reading it was -- and a tool keeps the hold until it
+        # is re-approved after the change (WAIT_TOOL_NOT_REVERIFIED above). The product is held
+        # to the same rule, so a product that denies on critical incidents stays refused until
+        # a person re-verifies it, rather than serving again the moment the tools are rebuilt.
+        for product_version in await _published_products(session, incident.organization_id):
+            if str(table.id) not in {str(value) for value in product_version.table_ids}:
+                continue
+            moved = await load_coverage_changes(
+                session,
+                incident.organization_id,
+                [table.id],
+                [],
+                since=publication_time(product_version),
+            )
+            if any(
+                change.subject_kind == "VIEW" and change.change in _DEFINITION_MOVES
+                for change in moved
+            ):
+                return WAIT_PRODUCT_NOT_REVERIFIED
     return None
 
 
@@ -1924,7 +2138,9 @@ async def _release_holds(
 async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
     """Organizations with a source-change hold open, a published source-bound tool, or a
     proposed document a scan has read since it was mapped, or a published context product
-    in an organization where an ontology has published past an earlier version."""
+    in an organization where an ontology has published past an earlier version -- and
+    (R11-FP12/FP15) one holding a meaning retirement not yet swept into a signal, or a
+    published context product older than a definition move or a recorded meaning retirement."""
     held = await session.scalars(
         select(DataQualityIncident.organization_id)
         .where(
@@ -1980,13 +2196,44 @@ async def organizations_needing_rebuild(session: AsyncSession) -> list[UUID]:
         .distinct()
     )
     joins = await relationship_drift_pending(session)
+    # R11-FP15: an organization holding a meaning retirement no sweep has recorded yet -- the only
+    # way one whose sole change is a withdrawn description is ever visited.
+    unswept = await organizations_with_unsignalled_retirements(session)
+    # R11-FP12/FP16: an organization with a published product older than a definition move or a
+    # recorded meaning retirement. Organization-wide rather than per covered subject, so it is one
+    # cheap EXISTS: the pass itself decides, per product, whether that change is one it covers.
+    moved_since = await session.scalars(
+        select(ContextProductVersion.organization_id)
+        .where(
+            ContextProductVersion.status == "PUBLISHED",
+            select(MetadataChangeSignal.id)
+            .where(
+                MetadataChangeSignal.organization_id == ContextProductVersion.organization_id,
+                MetadataChangeSignal.detected_at
+                > func.coalesce(
+                    ContextProductVersion.published_at, ContextProductVersion.approved_at
+                ),
+                or_(
+                    and_(
+                        MetadataChangeSignal.subject_kind.in_(("VIEW", "ROUTINE")),
+                        MetadataChangeSignal.signal_type.in_(_DEFINITION_MOVES),
+                    ),
+                    MetadataChangeSignal.signal_type == SIGNAL_MEANING_RETIRED,
+                ),
+            )
+            .exists(),
+        )
+        .distinct()
+    )
     return sorted(
         set(held)
         | set(bound)
         | set(remapping)
         | set(meaning)
         | set(superseded_meaning)
-        | set(joins),
+        | set(joins)
+        | unswept
+        | set(moved_since),
         key=str,
     )
 
@@ -2006,6 +2253,21 @@ async def run_context_rebuild(
     outcome.joins_suspended += joins.suspended
     outcome.joins_restored += joins.restored
     outcome.failed += joins.failed
+    # R11-FP15: record the meaning retirements no write site records before anything reads them.
+    # The products below do not depend on it (they compare with the stores directly), but the
+    # signal is the record a steward and the change-signal read route see, and this pass is the
+    # one that visits an organization whose only change is meaning. Its own savepoint: a failed
+    # sweep is counted and retried next pass, and costs the rebuild nothing.
+    try:
+        async with session.begin_nested():
+            outcome.meaning_signals_recorded = await record_meaning_signals(
+                session, organization_id=organization_id, limit=MEANING_SWEEP_LIMIT
+            )
+    except Exception:  # noqa: BLE001 -- the sweep must not stop the pass
+        logger.exception(
+            "context_rebuild_meaning_sweep_failed", organization_id=str(organization_id)
+        )
+        outcome.failed += 1
     await _supersede_lineage(session, organization_id, outcome, effective_now)
     await _rebuild_tools(session, organization_id, context, settings, outcome)
     await _rebuild_descriptions(session, organization_id, context, outcome)

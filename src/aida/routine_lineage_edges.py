@@ -40,11 +40,19 @@ live here because both need the catalog:
 
 `record_trigger_parse_coverage` is `record_routine_parse_coverage` for that axis,
 over one shared `_measure`, so "fully understood" means one thing on both.
+
+**Statement ranges and package members (2026-09-18).** Both row builders copy an
+edge's statement range (R11-FP07) -- positions and the digest of the stored body
+they index, never an excerpt -- and a routine row copies its package-member
+attribution (R11-FP03). `resolve_package_member_ids` turns a package parse's
+members into the captured member routines they are, and `reconcile_decided_edges`
+re-points a decided edge the new parse finds again at where it now is, since a
+position describes the current body, not the decision.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -53,7 +61,12 @@ from uuid import UUID
 from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.envelope_models import AVAILABLE, MetadataRoutine, MetadataTrigger
+from aida.envelope_models import (
+    AVAILABLE,
+    MetadataRoutine,
+    MetadataRoutineParameter,
+    MetadataTrigger,
+)
 from aida.ingest_screening import is_eligible_for_model_context
 from aida.lineage_table_resolution import resolve_lineage_table_ids
 from aida.models import DataSource, MetadataSchema
@@ -63,6 +76,7 @@ from aida.procedure_lineage import (
     UNPARSED_TRANSFORMATION_TYPE,
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
+    StatementRangeStatus,
     UnparsedReason,
     unparsed_marker_result,
 )
@@ -75,11 +89,18 @@ from aida.procedure_lineage_models import (
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
 from aida.sql_redaction import VALUE_FREE_REDACTION_STATUSES
 
-#: The positional precision a coverage record's unparsed statements are located
-#: to. A statement index, and deliberately nothing finer -- see the engine
-#: capability matrix's source-mapping record for why a character range would be
-#: an offset into text this platform does not keep.
-SOURCE_MAPPING_GRANULARITY = "STATEMENT_ORDINAL"
+#: The positional precision a coverage record says its parse's statements are
+#: located to. R11-FP07: a line/column span in the *stored* body, pinned by the
+#: SHA-256 of that text. The engine capability matrix used to record this as
+#: unsupported because a range into the customer's source cannot be kept -- the
+#: platform does not hold that text (R11-D16) -- and it still cannot be. What can
+#: be kept is a range into the text the platform does hold and parsed, which is
+#: the text a steward reviewing the routine in Atlas is shown.
+SOURCE_MAPPING_GRANULARITY = "STATEMENT_RANGE"
+#: The precision of a parse that reached no body to locate anything in -- a
+#: trigger whose action routine could not be read -- and of every coverage row
+#: measured before R11-FP07.
+UNLOCATED_SOURCE_MAPPING_GRANULARITY = "STATEMENT_ORDINAL"
 
 #: Cap on the joined reason-code summary, matching the column's own width.
 _MAX_REASON_CODES_LENGTH = 400
@@ -312,7 +333,8 @@ async def reconcile_decided_edges(
                 )
             )
         ).all()
-    keys = {_natural_key(edge) for edge in produced}
+    by_key = {_natural_key(edge): edge for edge in produced}
+    keys = set(by_key)
     superseded = (
         [row for row in decided if row.review_status == "ACTIVE" and _natural_key(row) not in keys]
         if result.is_fully_parsed
@@ -326,7 +348,37 @@ async def reconcile_decided_edges(
         row.review_status = SUPERSEDED
     for row in revived:
         row.review_status = "PROPOSED"
+    # R11-FP07: a decided edge the new parse finds again is re-pointed at where its
+    # statement now is. A person decided the *fact*; the range says where the fact
+    # sits in the body as it stands, and a comment added above it moves every line.
+    # A superseded edge is left pointing into the body it was found in -- its digest
+    # no longer matches the stored body, which is how a reader tells.
+    for row in decided:
+        found = by_key.get(_natural_key(row))
+        if found is not None:
+            apply_statement_range(row, found)
     return DecidedEdgeReconciliation(superseded=tuple(superseded), revived=tuple(revived))
+
+
+def apply_statement_range(
+    row: DeepProcedureLineageEdge | TriggerLineageEdge, edge: ProcedureLineageEdgeRecord
+) -> None:
+    """Copy `edge`'s statement range onto `row` (R11-FP07).
+
+    Positions and the digest of the text they index -- never the text. An edge
+    with no range writes NULL positions and its NOT_LOCATED status, never zeros.
+    """
+    where = edge.statement_range
+    row.statement_start_offset = where.start_offset if where else None
+    row.statement_end_offset = where.end_offset if where else None
+    row.statement_start_line = where.start_line if where else None
+    row.statement_start_column = where.start_column if where else None
+    row.statement_end_line = where.end_line if where else None
+    row.statement_end_column = where.end_column if where else None
+    row.statement_range_status = (
+        edge.statement_range_status if where else StatementRangeStatus.NOT_LOCATED.value
+    )
+    row.statement_text_digest = edge.statement_text_digest if where else None
 
 
 async def resolve_routine_table_ids(
@@ -355,10 +407,15 @@ def routine_edge_row(
     table_ids: dict[str, UUID],
     review_status: str,
     created_by: str | None,
+    member_routine_ids: Mapping[int, UUID] | None = None,
 ) -> DeepProcedureLineageEdge:
+    """One parsed edge as a row. R11-FP03: `member_routine_ids` maps a package
+    parse's statement ordinals to the captured member routine each belongs to
+    (`resolve_package_member_ids`); a caller that does not pass it still records
+    the member by name and grain, and leaves the id NULL rather than guessing."""
     source_name = persistable_table(edge.source_table, edge.source_resolved)
     target_name = persistable_table(edge.target_table, True)
-    return DeepProcedureLineageEdge(
+    row = DeepProcedureLineageEdge(
         organization_id=organization_id,
         datasource_id=datasource_id,
         routine_id=routine_id,
@@ -379,10 +436,84 @@ def routine_edge_row(
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
         via_routine=edge.via_routine,
+        package_member=edge.package_member,
+        member_attribution=edge.member_attribution,
+        member_routine_id=(
+            (member_routine_ids or {}).get(edge.statement_ordinal)
+            if edge.package_member is not None
+            else None
+        ),
         sql_hash=sql_hash,
         review_status=review_status,
         created_by=created_by,
     )
+    apply_statement_range(row, edge)
+    return row
+
+
+async def resolve_package_member_ids(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    package: MetadataRoutine,
+    result: ProcedureParseResult,
+) -> dict[int, UUID]:
+    """R11-FP03: statement ordinal -> the captured member routine it belongs to.
+
+    A member is the routine captured under this package (`package_name`) in the
+    package's own schema with the member's name. Two overloads share a name, so
+    they are told apart by their ordered parameter names -- PL/SQL requires a
+    body's subprogram header to repeat its spec's, which is what the catalog
+    records. A member that still matches more than one routine, or none (not
+    captured, or a private subprogram the spec does not declare), maps to
+    nothing: its edges keep the member's name and grain, and no id is guessed.
+    Every query restates the organization and the datasource (INV-5).
+    """
+    if not result.package_members:
+        return {}
+    candidates = (
+        await session.scalars(
+            select(MetadataRoutine).where(
+                MetadataRoutine.organization_id == datasource.organization_id,
+                MetadataRoutine.datasource_id == datasource.id,
+                MetadataRoutine.schema_id == package.schema_id,
+                MetadataRoutine.package_name == package.name,
+                MetadataRoutine.status == "ACTIVE",
+            )
+        )
+    ).all()
+    if not candidates:
+        return {}
+    parameters: dict[UUID, list[tuple[int, str]]] = {}
+    for parameter in (
+        await session.scalars(
+            select(MetadataRoutineParameter).where(
+                MetadataRoutineParameter.organization_id == datasource.organization_id,
+                MetadataRoutineParameter.datasource_id == datasource.id,
+                MetadataRoutineParameter.routine_id.in_([row.id for row in candidates]),
+            )
+        )
+    ).all():
+        parameters.setdefault(parameter.routine_id, []).append(
+            (parameter.ordinal_position, (parameter.name or "").lower())
+        )
+    signature = {
+        routine_id: tuple(name for _position, name in sorted(entries))
+        for routine_id, entries in parameters.items()
+    }
+    resolved: dict[int, UUID] = {}
+    for member in result.package_members:
+        if member.first_ordinal is None or member.last_ordinal is None:
+            continue
+        named = [row for row in candidates if row.name.lower() == member.name.lower()]
+        if len(named) > 1:
+            wanted = tuple(name.lower() for name in member.parameter_names)
+            named = [row for row in named if signature.get(row.id, ()) == wanted]
+        if len(named) != 1:
+            continue
+        for ordinal in range(member.first_ordinal, member.last_ordinal + 1):
+            resolved[ordinal] = named[0].id
+    return resolved
 
 
 def unparsed_reason_codes(result: ProcedureParseResult) -> tuple[str, ...]:
@@ -476,9 +607,19 @@ def _measure(
     row.dialect = result.dialect
     row.confidence = result.confidence
     row.sql_hash = result.sql_hash
-    row.source_mapping_granularity = SOURCE_MAPPING_GRANULARITY
+    # R11-FP07: a parse that read a body located its statements in it; one that
+    # reached no body (an unreachable action routine) located nothing.
+    row.source_mapping_granularity = (
+        SOURCE_MAPPING_GRANULARITY
+        if result.statement_text_digest is not None
+        else UNLOCATED_SOURCE_MAPPING_GRANULARITY
+    )
     row.parsed_at = datetime.now(UTC)
     row.measured_by = measured_by
+    # R11-FP03: which grain a package's edges were attributed at, and why a
+    # package fell back to the whole-package grain. NULL for anything else.
+    row.member_attribution = result.member_attribution
+    row.member_fallback_reason = result.member_fallback_reason
 
 
 async def persist_routine_edges(
@@ -547,6 +688,10 @@ async def persist_routine_edges(
             ).all()
         }
     table_ids = await resolve_routine_table_ids(session, datasource.id, result.edges)
+    # R11-FP03: a package's edges name the member routine they belong to.
+    member_routine_ids = await resolve_package_member_ids(
+        session, datasource=datasource, package=routine, result=result
+    )
     written = 0
     for edge in result.edges:
         key = routine_edge_key(edge)
@@ -572,6 +717,7 @@ async def persist_routine_edges(
                 table_ids=table_ids,
                 review_status=review_status,
                 created_by=created_by,
+                member_routine_ids=member_routine_ids,
             )
         )
         written += 1
@@ -759,7 +905,7 @@ def trigger_edge_row(
     routine's are. The body text is not a field here and never becomes one."""
     source_name = persistable_table(edge.source_table, edge.source_resolved)
     target_name = persistable_table(edge.target_table, True)
-    return TriggerLineageEdge(
+    row = TriggerLineageEdge(
         organization_id=organization_id,
         datasource_id=datasource_id,
         trigger_id=trigger_id,
@@ -785,6 +931,11 @@ def trigger_edge_row(
         review_status=review_status,
         created_by=created_by,
     )
+    # R11-FP07: on PostgreSQL the range indexes the action routine's stored body
+    # (`routine_id` names it); on an engine whose trigger carries its own body, the
+    # trigger's. The digest says which text either way.
+    apply_statement_range(row, edge)
+    return row
 
 
 async def persist_trigger_edges(

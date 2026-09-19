@@ -43,6 +43,7 @@ from aida.procedure_lineage import (
     UNPARSED_TRANSFORMATION_TYPE,
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
+    StatementRangeStatus,
     UnparsedReason,
     parse_procedure_lineage,
     propagate_intermediate_hops,
@@ -130,6 +131,11 @@ def _at_call_site(
             target, intermediate, write = source_name, True, False
         elif dialect not in _RESULT_STREAMING_DIALECTS:
             target, intermediate, write = PROCEDURE_LOCAL_TARGET, True, False
+    # R11-FP07: the callee's own range indexes the callee's body, a different text
+    # from the caller's -- keeping it would point a reader at the right offsets in the
+    # wrong routine. The edge is the caller's at the call, so it is located at the
+    # call (CALL_SITE), in the caller's text; a call that was not located stays
+    # NOT_LOCATED. R11-FP03: and it belongs to whichever package member made the call.
     return replace(
         edge,
         statement_ordinal=call.statement_ordinal,
@@ -139,6 +145,15 @@ def _at_call_site(
         is_write=write,
         control_flow_context=call.control_flow_context or edge.control_flow_context,
         via_routine=callee,
+        statement_range=call.statement_range,
+        statement_range_status=(
+            StatementRangeStatus.CALL_SITE.value
+            if call.statement_range is not None
+            else StatementRangeStatus.NOT_LOCATED.value
+        ),
+        statement_text_digest=call.statement_text_digest,
+        package_member=call.package_member,
+        member_attribution=call.member_attribution,
     )
 
 
@@ -189,6 +204,12 @@ def _summarised(
         is_read_only=(
             fully_parsed and result.statement_count > 0 and not any(edge.is_write for edge in edges)
         ),
+        # R11-FP07/FP03: descent adds edges to the caller's parse; which text its
+        # ranges index and how its package was attributed are the caller's still.
+        statement_text_digest=result.statement_text_digest,
+        member_attribution=result.member_attribution,
+        member_fallback_reason=result.member_fallback_reason,
+        package_members=result.package_members,
     )
 
 
