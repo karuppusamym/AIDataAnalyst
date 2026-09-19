@@ -108,6 +108,18 @@ FILTER_EVIDENCE_TARGET_COLUMN: Final[str] = "<FILTER_PREDICATE>"
 # the literal star notation, which can never collide with a real column name.
 STAR_COLUMN_MARKER: Final[str] = "*"
 
+# Where the procedure parser (`aida.procedure_column_owners`) leaves, on a column
+# reference, the table it resolved that reference to by scope -- the name
+# `_extract_source_columns` then reports in place of the reference's own
+# qualifier. `""` means no single table can be proved to own it (recorded
+# unresolved, never guessed). Absent on every node this module parses itself, so
+# view lineage is unchanged by it.
+COLUMN_OWNER_META: Final[str] = "aida_column_owner"
+# ... or, in the same place, this: the reference is a routine's variable or a
+# record's field, not a column of any table, so it is no source at all -- as a
+# T-SQL `@variable`, which sqlglot never parses as a column, has never been one.
+VARIABLE_REFERENCE: Final[str] = "<VARIABLE>"
+
 
 @dataclass(frozen=True, slots=True)
 class LineageEdge:
@@ -196,6 +208,8 @@ def _extract_source_columns(
     """Extract (table, column) pairs referenced in an expression.
 
     Walks the AST to find all Column nodes and resolves their table references.
+    A reference the procedure parser resolved by scope (`COLUMN_OWNER_META`)
+    reports that table instead of its qualifier, and a variable is skipped.
     """
     if not _SQLGLOT_AVAILABLE:
         return []
@@ -203,8 +217,11 @@ def _extract_source_columns(
     if not isinstance(expression, exp.Expression):
         return results
     for column in expression.find_all(exp.Column):
-        table_name = ""
-        if column.table:
+        owner = column.meta.get(COLUMN_OWNER_META)
+        if owner == VARIABLE_REFERENCE:
+            continue
+        table_name = owner if isinstance(owner, str) else ""
+        if owner is None and column.table:
             table_name = column.table
         col_name = column.name
         if col_name:

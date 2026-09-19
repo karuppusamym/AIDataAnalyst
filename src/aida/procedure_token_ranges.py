@@ -40,9 +40,11 @@ parse does not know. The candidate sets:
   position, the right side of a SET assignment to it; for a FILTERED edge, every
   WHERE clause. When several remain, the qualifier is resolved through the
   statement's own alias map -- only where that map provably equals the
-  extractor's (no CTE, not CREATE ... AS) -- and a column that did not resolve
-  counts as reading the one table the parse attributed it to, if it did: an
-  attributed `id` and a qualified `r.id` are two references to one fact.
+  extractor's (no CTE, not CREATE ... AS) -- and each reference counts as reading
+  the table its scope resolved it to (`procedure_column_owners`): an unqualified
+  `id` the scope gives `dbo.rejects` and a qualified `r.id` are two references to
+  one fact, while one the scope gives the statement's own target is not. A
+  routine's variable is never a candidate.
 * **Source, table grain** (`source_column == '*'`): table references, other than
   the statement's write target, that resolve to the edge's source.
 * **Target, column grain.** The node that *names* the target column: the INSERT
@@ -66,8 +68,10 @@ from typing import Final, Protocol
 
 from aida.sql_lineage_parser import (
     _SQLGLOT_AVAILABLE,
+    COLUMN_OWNER_META,
     FILTER_EVIDENCE_TARGET_COLUMN,
     STAR_COLUMN_MARKER,
+    VARIABLE_REFERENCE,
     _resolve_table_name,
 )
 
@@ -375,6 +379,8 @@ class _Statement:
             for column in scope.find_all(exp.Column):
                 if id(column) in seen or isinstance(column.this, exp.Star):
                     continue
+                if column.meta.get(COLUMN_OWNER_META) == VARIABLE_REFERENCE:
+                    continue  # a routine's variable: evidence of no edge
                 seen.add(id(column))
                 if column.name == edge.source_column:
                     candidates.append(column)
@@ -384,12 +390,17 @@ class _Statement:
 
     def _reads(self, column: exp.Column, edge: LineageEdgeLike) -> bool:
         """Whether `column` resolves to the edge's source exactly as the parse
-        resolves it: `sql_lineage_parser._resolve_or_mark_unresolved`, then
-        `procedure_lineage._attributed`, which gives a statement's one source every
-        column that did not resolve."""
-        qualifier = column.table
-        resolved = self.aliases.get(qualifier, qualifier) if qualifier else ""
-        if not resolved and self.unqualified_source is not None:
+        resolves it: the table its scope gave it (`procedure_column_owners`, which
+        `sql_lineage_parser._extract_source_columns` reports), then
+        `sql_lineage_parser._resolve_or_mark_unresolved`. A statement parsed without
+        scope owners falls back to its qualifier and `unqualified_source`."""
+        owner = column.meta.get(COLUMN_OWNER_META)
+        if isinstance(owner, str):
+            reference = owner
+        else:
+            reference = column.table
+        resolved = self.aliases.get(reference, reference) if reference else ""
+        if owner is None and not resolved and self.unqualified_source is not None:
             resolved = self.unqualified_source
         return resolved == edge.source_table if edge.source_resolved else resolved == ""
 

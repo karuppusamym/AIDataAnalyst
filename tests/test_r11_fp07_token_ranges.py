@@ -202,19 +202,23 @@ def test_tsql_tokens_name_columns_tables_and_temp_tables_as_written() -> None:
     )
 
 
-def test_an_attributed_column_and_a_qualified_one_are_two_references_to_one_fact() -> None:
-    """Found building this: `WHERE id IN (SELECT r.id FROM dbo.rejects r)` gives two records
-    -- the unqualified `id`, which the parse attributes to the statement's one source, and
-    `r.id` -- that become one fact, `dbo.rejects.id` filtering `dbo.final`. Located before the
-    attribution, the surviving record claimed the unqualified `id` as the fact's only token.
-    Located after it, both references are candidates, and the fact has no single token."""
+def test_an_unqualified_column_and_a_qualified_one_are_two_facts_each_at_its_token() -> None:
+    """Found building this: `WHERE id IN (SELECT r.id FROM dbo.rejects r)` holds two
+    references. This test first pinned them as one fact, `dbo.rejects.id` filtering
+    `dbo.final`, with no single token -- the unqualified `id` was attributed to "the
+    statement's one source", which excluded the DELETE's own target and counted a table only
+    the subquery names. That fact was wrong (2026-09-19, `procedure_column_owners`): the outer
+    `id` is in the DELETE's scope, where only `dbo.final` is, so it is `dbo.final.id`. Two
+    facts now, and each has exactly one reference to be located at."""
     result = parse_procedure_lineage(TSQL, dialect="tsql")
-    [fact] = [
-        edge for edge in result.edges if edge.target_column == "<FILTER_PREDICATE>"
-        and edge.target_table == "dbo.final"
-    ]
-    assert (fact.source_table, fact.source_column) == ("dbo.rejects", "id")
-    assert _tokens(TSQL, fact) == (None, "dbo.final")
+    facts = {
+        (edge.source_table, edge.source_column): edge
+        for edge in result.edges
+        if edge.target_column == "<FILTER_PREDICATE>" and edge.target_table == "dbo.final"
+    }
+    assert set(facts) == {("dbo.final", "id"), ("dbo.rejects", "id")}
+    assert _tokens(TSQL, facts[("dbo.final", "id")]) == ("id", "dbo.final")
+    assert _tokens(TSQL, facts[("dbo.rejects", "id")]) == ("r.id", "dbo.final")
 
 
 def test_an_oracle_merge_names_its_target_column_twice_so_it_is_not_located() -> None:

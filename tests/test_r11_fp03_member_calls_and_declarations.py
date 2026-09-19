@@ -75,7 +75,14 @@ def _real(result: ProcedureParseResult) -> list[Any]:
 # 1. A bare PL/SQL call statement is a call.
 # ---------------------------------------------------------------------------
 
+# The declarations make this valid PL/SQL. They matter since 2026-09-19: a collection
+# method is qualified by a declared collection (`v_ids.EXTEND`), and the same shape on a
+# name the routine does not declare is a call into a package procedure called EXTEND.
 NIGHTLY = """CREATE OR REPLACE PROCEDURE ops.nightly IS
+  TYPE t_ids IS TABLE OF NUMBER;
+  v_ids t_ids := t_ids();
+  v_total NUMBER;
+  v_id NUMBER;
 BEGIN
   refresh_totals(SYSDATE);
   ops_pkg.load_flags;

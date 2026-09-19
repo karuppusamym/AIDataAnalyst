@@ -83,7 +83,9 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     "IF/ELSIF ... THEN (PL/SQL)": "_IF_THEN_RE",
     "WHILE ... BEGIN (T-SQL)": "_WHILE_BEGIN_RE",
     "WHILE ... LOOP (PL/SQL)": "_WHILE_LOOP_RE",
-    "CASE ... WHEN ... THEN (PL/SQL statement form)": "_CASE_WHEN_THEN_RE",
+    "CASE [selector] WHEN ... THEN (PL/SQL statement form, searched or simple)": (
+        "_CASE_WHEN_THEN_RE"
+    ),
     "cursor FOR ... IN (SELECT ...) LOOP (PL/SQL)": "_CURSOR_FOR_LOOP_RE",
     "bare FOR ... LOOP (PL/SQL)": "_BARE_FOR_LOOP_RE",
     "EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL)": "_DYNAMIC_SQL_RE",
@@ -122,6 +124,16 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     "TYPE/SUBTYPE/PRAGMA and item declarations, %TYPE/%ROWTYPE anchors (PL/SQL)": (
         "_PLSQL_LINEAGE_FREE_DECLARATION_RE"
     ),
+    # 2026-09-19: cursor reads that were dropped, PL/pgSQL declaration sections, labels.
+    "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state; "
+    "OPEN c FOR <string> / FOR EXECUTE is dynamic SQL)": "_OPEN_FOR_RE",
+    "DECLARE c CURSOR ... FOR <query> / SET @c = CURSOR FOR <query> (T-SQL; read into "
+    "routine-local state)": "_TSQL_CURSOR_DECLARATION_RE",
+    "c [NO] [SCROLL] CURSOR [(args)] FOR <query> declaration (PL/pgSQL; read into "
+    "routine-local state)": "_PLPGSQL_CURSOR_DECLARATION_RE",
+    "v type := (<query>) declaration (PL/pgSQL; the default read into routine-local state; "
+    "%TYPE/%ROWTYPE anchors and ALIAS FOR are not reads)": "_PLPGSQL_ITEM_DECLARATION_RE",
+    "<<label>> statement label (PL/SQL, PL/pgSQL)": "_LABEL_RE",
 }
 
 # Regex-recognised constructs that end in an explicit UNPARSED marker rather than
