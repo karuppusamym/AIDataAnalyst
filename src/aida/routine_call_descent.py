@@ -48,6 +48,7 @@ from aida.procedure_lineage import (
     ProcedureParseResult,
     StatementRangeStatus,
     UnparsedReason,
+    owned_loop_record,
     parse_procedure_lineage,
     propagate_intermediate_hops,
 )
@@ -146,11 +147,15 @@ def _at_call_site(
     # wrong routine. The edge is the caller's at the call, so it is located at the
     # call (CALL_SITE), in the caller's text; a call that was not located stays
     # NOT_LOCATED. R11-FP03: and it belongs to whichever package member made the call.
+    # 2026-09-19: a loop record's name is unique in one body only; carried into the caller
+    # it takes the callee's name, so the hop pass run over both cannot join two loops.
     return replace(
         edge,
+        source_table=owned_loop_record(edge.source_table, callee) or edge.source_table,
+        via_temp_table=owned_loop_record(edge.via_temp_table, callee),
         statement_ordinal=call.statement_ordinal,
         confidence=confidence,
-        target_table=target,
+        target_table=owned_loop_record(target, callee) or target,
         is_intermediate=intermediate,
         is_write=write,
         control_flow_context=call.control_flow_context or edge.control_flow_context,

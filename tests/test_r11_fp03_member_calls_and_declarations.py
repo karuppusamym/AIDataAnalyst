@@ -482,9 +482,18 @@ def test_a_cursor_declaration_is_read_not_dropped() -> None:
         ("ops.flags", "seen", "DIRECT"),
     } <= reads
     # Rows fetched into routine-local state: never a table write, never the result.
-    assert {e.target_table for e in _real(result)} == {PROCEDURE_LOCAL_TARGET}
+    declared = [e for e in _real(result) if e.control_flow_context == "CURSOR_DECLARATION"]
+    assert {e.target_table for e in declared} == {PROCEDURE_LOCAL_TARGET}
     assert all(not e.is_write and e.is_intermediate for e in _real(result))
-    assert {e.control_flow_context for e in _real(result)} == {"CURSOR_DECLARATION"}
+    # 2026-09-19: `FOR r IN c_open LOOP` fetches that query's rows into `r`, which is
+    # routine-local too (tests/test_r11_fp07_loop_records_and_result_cursors.py).
+    assert {e.control_flow_context for e in _real(result)} == {
+        "CURSOR_DECLARATION",
+        "CURSOR_FOR_LOOP",
+    }
+    fetched = [e for e in _real(result) if e.control_flow_context == "CURSOR_FOR_LOOP"]
+    # The loop is statement 2, after the two cursors' reads.
+    assert {e.target_table for e in fetched} == {"<LOCAL:r@2>"}
     assert result.is_fully_parsed is True
     assert result.is_read_only is True
 
@@ -504,7 +513,10 @@ def test_an_anchored_type_is_a_structure_dependency_not_a_read() -> None:
 
 def test_a_cursor_read_is_located_at_its_declaration() -> None:
     result = parse_procedure_lineage(CURSORS, dialect="oracle")
-    [edge] = [e for e in result.edges if e.source_column == "status"]
+    [edge] = [
+        e for e in result.edges
+        if e.source_column == "status" and e.control_flow_context == "CURSOR_DECLARATION"
+    ]
     where = edge.statement_range
     assert where is not None
     assert edge.statement_range_status == StatementRangeStatus.STATEMENT.value

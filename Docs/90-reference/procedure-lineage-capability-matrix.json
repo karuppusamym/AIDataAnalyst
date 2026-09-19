@@ -91,7 +91,7 @@
       "view_parser_status": "N/A"
     },
     {
-      "construct": "cursor FOR ... IN (SELECT ...) LOOP (PL/SQL)",
+      "construct": "cursor FOR rec IN (SELECT ...) LOOP (PL/SQL; the rows read into the loop record, whose fields carry them to the loop's writes)",
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._CURSOR_FOR_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "SUPPORTED",
       "view_parser_status": "N/A"
@@ -157,8 +157,14 @@
       "view_parser_status": "N/A"
     },
     {
-      "construct": "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query)",
+      "construct": "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query; read into the loop record)",
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._FOR_IN_QUERY_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "FOR rec IN c [(args)] LOOP over a declared cursor (PL/SQL, PL/pgSQL; the cursor's query read into the loop record)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._DECLARED_CURSOR_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "SUPPORTED",
       "view_parser_status": "N/A"
     },
@@ -217,7 +223,7 @@
       "view_parser_status": "N/A"
     },
     {
-      "construct": "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state; OPEN c FOR <string> / FOR EXECUTE is dynamic SQL)",
+      "construct": "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state, or the result set when c is an OUT ref cursor or the one a function returns; OPEN c FOR <string> / FOR EXECUTE is dynamic SQL)",
       "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._OPEN_FOR_RE (text-level, sqlglot cannot parse this as an AST node)",
       "procedure_parser_status": "SUPPORTED",
       "view_parser_status": "N/A"
@@ -254,7 +260,7 @@
     "snowflake",
     "tsql"
   ],
-  "generated_at": "2026-09-19T13:28:10.306820+00:00",
+  "generated_at": "2026-09-19T19:15:54.230142+00:00",
   "unparsed_reasons": [
     "DYNAMIC_SQL",
     "NESTED_PROCEDURE_CALL",

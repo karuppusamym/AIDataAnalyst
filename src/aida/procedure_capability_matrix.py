@@ -86,7 +86,8 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
     "CASE [selector] WHEN ... THEN (PL/SQL statement form, searched or simple)": (
         "_CASE_WHEN_THEN_RE"
     ),
-    "cursor FOR ... IN (SELECT ...) LOOP (PL/SQL)": "_CURSOR_FOR_LOOP_RE",
+    "cursor FOR rec IN (SELECT ...) LOOP (PL/SQL; the rows read into the loop record, whose "
+    "fields carry them to the loop's writes)": "_CURSOR_FOR_LOOP_RE",
     "bare FOR ... LOOP (PL/SQL)": "_BARE_FOR_LOOP_RE",
     "EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL)": "_DYNAMIC_SQL_RE",
     "EXEC/CALL <procedure_name> (nested procedure call)": "_NESTED_CALL_RE",
@@ -99,7 +100,12 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
         "_PLPGSQL_ASSIGNMENT_RE"
     ),
     "CREATE TEMP TABLE ... ON COMMIT ... AS (PostgreSQL)": "_PG_TEMP_ON_COMMIT_RE",
-    "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query)": "_FOR_IN_QUERY_LOOP_RE",
+    "FOR rec IN <query> LOOP (PL/pgSQL, unparenthesised query; read into the loop record)": (
+        "_FOR_IN_QUERY_LOOP_RE"
+    ),
+    # 2026-09-19: a loop over a declared cursor fetches that cursor's query into its record.
+    "FOR rec IN c [(args)] LOOP over a declared cursor (PL/SQL, PL/pgSQL; the cursor's "
+    "query read into the loop record)": "_DECLARED_CURSOR_LOOP_RE",
     "CREATE PROCEDURE/FUNCTION header, and DO $$ ... $$ (anonymous block)": "_HEADER_RE",
     "RETURNS TABLE AS RETURN (...) (T-SQL inline table-valued function body)": (
         "_TSQL_INLINE_RETURN_RE"
@@ -125,7 +131,8 @@ _CONSTRUCT_REGEX_NAMES: Final[dict[str, str]] = {
         "_PLSQL_LINEAGE_FREE_DECLARATION_RE"
     ),
     # 2026-09-19: cursor reads that were dropped, PL/pgSQL declaration sections, labels.
-    "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state; "
+    "OPEN c FOR <query> (PL/SQL ref cursor, PL/pgSQL; read into routine-local state, or the "
+    "result set when c is an OUT ref cursor or the one a function returns; "
     "OPEN c FOR <string> / FOR EXECUTE is dynamic SQL)": "_OPEN_FOR_RE",
     "DECLARE c CURSOR ... FOR <query> / SET @c = CURSOR FOR <query> (T-SQL; read into "
     "routine-local state)": "_TSQL_CURSOR_DECLARATION_RE",

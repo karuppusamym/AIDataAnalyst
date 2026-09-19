@@ -198,6 +198,9 @@ def test_an_outer_column_never_resolves_to_a_table_only_a_subquery_names() -> No
         ("dbo.x", "a", "dbo.out", "a"),
         ("dbo.x", "b", "dbo.out", FILTER),
         (UNRESOLVED_TABLE, "c", "dbo.out", FILTER),
+        # 2026-09-19: no column is attributed to `dbo.y`, yet the statement reads it, so it
+        # is stated at table grain (TABLE_ROWS) -- never by giving it `c`.
+        ("dbo.y", "*", "dbo.out", "*"),
     }
 
 
@@ -380,12 +383,15 @@ def test_an_oracle_open_for_query_is_read_and_located() -> None:
         _sources(result)
     )
     edges = _real(result)
-    assert {e.target_table for e in edges} == {PROCEDURE_LOCAL_TARGET}
-    assert all(e.is_intermediate and not e.is_write for e in edges)
+    # 2026-09-19: `p_rc` is an OUT SYS_REFCURSOR, so what it is opened for is the routine's
+    # result set (tests/test_r11_fp07_loop_records_and_result_cursors.py); it used to be
+    # read into local state, because an OUT ref cursor was not told apart from a local one.
+    assert {e.target_table for e in edges} == {PROCEDURE_RESULT_TARGET}
+    assert all(not e.is_intermediate and not e.is_write for e in edges)
     assert {e.control_flow_context for e in edges} == {procedure_lineage.CURSOR_OPEN_CONTEXT}
     assert result.is_fully_parsed and result.is_read_only
 
-    status = _edge(result, ("ops.orders", "status"), (PROCEDURE_LOCAL_TARGET, FILTER))
+    status = _edge(result, ("ops.orders", "status"), (PROCEDURE_RESULT_TARGET, FILTER))
     where = status.statement_range
     assert where is not None
     assert status.statement_range_status == StatementRangeStatus.STATEMENT.value

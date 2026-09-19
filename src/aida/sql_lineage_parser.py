@@ -73,6 +73,14 @@ class TransformationType(str, Enum):
     # or procedure depends on every column of the named source table, but
     # individual columns could not be resolved (see `parse_view_lineage`).
     TABLE_STAR = "TABLE_STAR"
+    # Table-level evidence for a table a statement reads without naming any of
+    # its columns -- `count(*)`, `EXISTS (SELECT 1 FROM t)`, `SELECT 1 FROM t`:
+    # what depends on it is how many rows it has, or whether any match, and no
+    # column's value flows. Same `STAR_COLUMN_MARKER` ends as TABLE_STAR, which
+    # would claim every column flows. Emitted by the procedure parser
+    # (`procedure_lineage._table_rows_read`) only; this module's view parse is
+    # unchanged by it.
+    TABLE_ROWS = "TABLE_ROWS"
 
 
 class Confidence(str, Enum):
