@@ -113,8 +113,42 @@ def table_function_name(table: object) -> str | None:
     if not isinstance(this, exp.Func):
         return None
     name = this.name or this.sql_name()
+    if name.upper() in _COLLECTION_WRAPPERS:
+        return _unnested_function_name(this)
     parts = [part for part in (table.catalog, table.db, name) if part]
     return ".".join(parts) if parts else None
+
+
+#: Oracle unnests a collection into rows with `TABLE(<expr>)`, and with the older `THE(<expr>)`.
+#: R11-FP07: the wrapper is not the source. `FROM TABLE(pkg.fn(x))` parses as a table whose
+#: function is the wrapper, so the source read as a table named `TABLE` -- a wrong edge, and a
+#: gap naming a routine no source has.
+_COLLECTION_WRAPPERS = frozenset({"TABLE", "THE"})
+
+
+def _unnested_function_name(wrapper: exp.Func) -> str | None:
+    """The function whose rows `TABLE(...)` unnests, or `None` when it unnests something else.
+
+    `TABLE(pkg.fn(x))` is the function's result, named after it, exactly as `FROM pkg.fn(x)`
+    is; a `CAST(... AS a_collection_type)` around it says what type the rows are, not where
+    they come from. `TABLE(l_rows)` unnests a collection the routine declared and filled: it
+    names no function and no table, so it is left unnamed here rather than reported as either.
+    """
+    arguments = wrapper.args.get("expressions") or []
+    if len(arguments) != 1:
+        return None
+    argument = arguments[0]
+    while isinstance(argument, exp.Cast):
+        argument = argument.this
+    if isinstance(argument, exp.Dot):
+        parts = list(argument.flatten())
+        if not parts or not isinstance(parts[-1], exp.Func):
+            return None
+        named = [part.name for part in parts if getattr(part, "name", "")]
+        return ".".join(named) if named else None
+    if isinstance(argument, exp.Func):
+        return argument.name or argument.sql_name()
+    return None
 
 
 def table_reference_name(table: exp.Table) -> str:
