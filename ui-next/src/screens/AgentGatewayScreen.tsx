@@ -678,7 +678,7 @@ export function AgentGatewayScreen() {
         ))}
       </nav>
 
-      {tab === "connect" ? <ConnectTab me={me} /> : null}
+      {tab === "connect" ? <ConnectTab me={me} projectId={projectId} /> : null}
       {tab === "exposure" ? (
         <ExposureTab
           products={products}

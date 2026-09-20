@@ -5,6 +5,7 @@ import { authorizationHeaders } from "../lib/authSession";
 import { useOrgId } from "../lib/org";
 import type { MeRead } from "../lib/types";
 import { Button, Pill, useCopy } from "../components/primitives";
+import { GraphqlExplorer } from "../components/GraphqlExplorer";
 
 /* ---------------------------------------------------------------------------
    The Connect tab of the Agent gateway, and the one definition of the
@@ -292,7 +293,7 @@ export function CopyBlock({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function ConnectTab({ me }: { me: MeRead | null }) {
+export function ConnectTab({ me, projectId }: { me: MeRead | null; projectId: string | null }) {
   const endpoint = mcpEndpoint();
   const oidc = me?.identity_provider === "OIDC";
 
@@ -357,6 +358,8 @@ export function ConnectTab({ me }: { me: MeRead | null }) {
       </section>
 
       <GatewayDiagnostic />
+
+      <GraphqlExplorer projectId={projectId} />
 
       <section className="agcard">
         <h2 className="agcard__h2">Client configuration</h2>

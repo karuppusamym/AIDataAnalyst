@@ -37,6 +37,21 @@
 .agcopy__label{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;color:var(--ink-3)}
 .agcopy__pre{margin:0;padding:12px;font-family:var(--mono);font-size:11.5px;line-height:1.6;color:var(--ink);overflow-x:auto;white-space:pre}
 
+.aggraphql__toolbar{display:grid;grid-template-columns:minmax(180px,1fr) minmax(220px,1fr);gap:12px}
+.aggraphql__toolbar select,.aggraphql__toolbar input{width:100%;box-sizing:border-box;font:inherit;font-size:12.5px;padding:7px 9px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink)}
+.aggraphql__editors{display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,2fr);gap:12px}
+.aggraphql__editors textarea{width:100%;min-height:230px;box-sizing:border-box;resize:vertical;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk);color:var(--ink);padding:10px;font:11.5px/1.55 var(--mono)}
+.aggraphql__confirm{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;line-height:1.5;color:var(--ink-2);padding:9px 10px;border:1px solid var(--warn);border-radius:var(--radius-sm);background:var(--sunk)}
+.aggraphql__confirm input{margin-top:3px}
+.aggraphql__actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.aggraphql__result{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk);padding-top:8px;overflow:hidden}
+.aggraphql__result>span{padding:0 10px}
+.aggraphql__result pre,.aggraphql__sdk pre{margin:0;padding:10px;font:11.5px/1.55 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;color:var(--ink)}
+.aggraphql__sdk summary{cursor:pointer;font-size:12.5px;color:var(--ink-2)}
+.aggraphql__sdkgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px}
+.aggraphql__sdkgrid>div{min-width:0;border:1px solid var(--line-soft);border-radius:var(--radius-sm);background:var(--sunk);padding-top:8px;overflow:hidden}
+.aggraphql__sdkgrid span{padding:0 10px}
+
 .agmethods{width:100%;border-collapse:collapse;font-size:12.5px}
 .agmethods th{text-align:left;font-weight:500;color:var(--ink-3);font-size:11px;padding:4px 10px 6px 0;border-bottom:1px solid var(--line)}
 .agmethods td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line-soft);color:var(--ink-2);vertical-align:top;line-height:1.5}
@@ -69,6 +84,7 @@
   .aglist__row{flex-direction:column}
   .aglist__meta{align-items:flex-start;flex-direction:row}
   .agform__grid{grid-template-columns:1fr}
+  .aggraphql__toolbar,.aggraphql__editors,.aggraphql__sdkgrid{grid-template-columns:1fr}
 }
 
 /* Connection diagnostic (review 2026-09-05, F07). Outcome is carried by the

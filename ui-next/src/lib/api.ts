@@ -60,3 +60,4 @@ export * from "./api/tools";
 export * from "./api/transformations";
 export * from "./api/documents";
 export * from "./api/reviewBatches";
+export * from "./api/graphql";

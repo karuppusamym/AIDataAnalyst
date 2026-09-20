@@ -88,6 +88,11 @@ export default defineConfig(async ({ mode }) => ({
           runtimeEnvironment?.VITE_API_PROXY_TARGET ?? "http://localhost:8000",
         changeOrigin: true,
       },
+      "/graphql": {
+        target:
+          runtimeEnvironment?.VITE_API_PROXY_TARGET ?? "http://localhost:8000",
+        changeOrigin: true,
+      },
     },
   },
   build: {
