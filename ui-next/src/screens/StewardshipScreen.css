@@ -35,7 +35,12 @@
 .stew__resultreason{color:var(--ink-3)}
 
 .stew__backlogcontrols{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.stew__backlogfilters{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
 .stew__routesummary{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);background:var(--sunk);border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 12px}
+
+/* R11-S13 (17B): the explicit-selection summary that replaces the filter
+   fields when Bulk actions opens with `?ids=` from a Catalog row selection. */
+.stew__selection{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 
 .stew__backlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;max-height:520px;overflow-y:auto}
 .stew__backrow{border:1px solid var(--line);border-left:3px solid var(--line);border-radius:var(--radius-sm);padding:9px 12px}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CatalogBulkActionRunRead,
   CatalogBulkCertifyRequest,
@@ -56,17 +56,21 @@ import "./StewardshipScreen.css";
 
    Every bulk-* body carries exactly one of an explicit id list or `filter`
    (datasource + match field/pattern); the backend has no broader "match
-   everything" mode, so — exactly like the legacy form — this screen is
-   built around the filter path as its one, primary selection flow.
+   everything" mode, so — exactly like the legacy form — this screen was
+   built around the filter path as its primary selection flow.
+
+   EXPLICIT SELECTION (17B, 2026-09-19). `CatalogScreen` can now send a row
+   selection here as `?ids=` -- a comma-separated `table_ids` list -- which
+   this form sends instead of `filter`, never both (the four request shapes
+   below make them mutually exclusive; `_require_exactly_one_selection` on
+   the server rejects a body carrying both). No endpoint, role or request
+   shape changed to add this: `table_ids` was already accepted by every
+   bulk-* route, the same as the filter path, with the same audit trail. A
+   steward who checks rows in Catalog and one who opens Bulk actions and
+   types a pattern that happens to match the same rows run the identical
+   code.
 
    Deliberately out of scope, stated rather than silently dropped:
-     - Explicit `table_ids`/`column_ids` selection (e.g. picking specific
-       rows out of a rendered catalog grid): the legacy form itself only
-       ever built the `filter` path -- one datasource `<select>` plus one
-       pattern input, never an id-list picker. `CatalogScreen` (owned by a
-       different, currently-active process, out of this screen's scope) is
-       the only place rows could be multi-selected from; this screen does
-       not reach into it.
      - Resolving `table_id`/`subject_id` to a human-readable table or column
        name: neither `CatalogBulkActionItemRead` nor
        `UnownedAssetEscalationRead` carries one on the wire (no join back to
@@ -227,6 +231,22 @@ export function StewardshipBulkActions() {
   const matchPattern = params.get("pattern") ?? "";
   const datasourceId = params.get("ds") ?? preferredDatasourceId ?? "";
 
+  /* 17B: an explicit selection from Catalog's row checkboxes, carried as
+     `?ids=` -- a comma-separated `table_ids` list -- rather than the
+     `field`/`pattern` filter. Trimmed and emptied entries dropped so a
+     stray comma in a hand-edited URL cannot become an empty-string id in
+     the request body. */
+  const explicitIds = useMemo(() => {
+    const raw = params.get("ids");
+    if (!raw) return [] as string[];
+    return raw
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+  }, [params]);
+  const hasExplicitSelection = explicitIds.length > 0;
+  const clearExplicitSelection = useCallback(() => setParams({ ids: null }), [setParams]);
+
   const [tagKey, setTagKey] = useState("");
   const [tagValue, setTagValue] = useState("");
   const [columnNamePattern, setColumnNamePattern] = useState("*");
@@ -251,7 +271,7 @@ export function StewardshipBulkActions() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [run, setRun] = useState<CatalogBulkActionRunRead | null>(null);
 
-  const filterValid = Boolean(datasourceId) && matchPattern.trim().length > 0;
+  const filterValid = hasExplicitSelection || (Boolean(datasourceId) && matchPattern.trim().length > 0);
   const actionValid =
     action === "tag" ? TAG_KEY_RE.test(tagKey) :
     action === "own" ? ownerPrincipal.trim().length > 0 :
@@ -263,29 +283,37 @@ export function StewardshipBulkActions() {
     if (!canSubmit) return;
     setSubmitting(true);
     setSubmitError(null);
-    const filter: CatalogBulkSelectionFilter = {
-      datasource_id: datasourceId,
-      match_field: matchField,
-      match_pattern: matchPattern.trim(),
-    };
+    /* 17B: `table_ids` and `filter` are mutually exclusive on every bulk-*
+       body (the server's `_require_exactly_one_selection` rejects both), so
+       an explicit Catalog selection replaces the filter entirely rather than
+       riding alongside it. */
+    const selection: { table_ids: string[] } | { filter: CatalogBulkSelectionFilter } = hasExplicitSelection
+      ? { table_ids: explicitIds }
+      : {
+          filter: {
+            datasource_id: datasourceId,
+            match_field: matchField,
+            match_pattern: matchPattern.trim(),
+          },
+        };
     try {
       let result: CatalogBulkActionRunRead;
       if (action === "tag") {
-        const body: CatalogBulkTagRequest = { filter, tag_key: tagKey, tag_value: tagValue.trim() || null };
+        const body: CatalogBulkTagRequest = { ...selection, tag_key: tagKey, tag_value: tagValue.trim() || null };
         result = await bulkTagCatalogTables(ORG, body);
       } else if (action === "classify") {
         const body: CatalogBulkClassifyRequest = {
-          filter,
+          ...selection,
           column_name_pattern: columnNamePattern.trim() || "*",
           classification,
         };
         result = await bulkClassifyCatalogColumns(ORG, body);
       } else if (action === "own") {
-        const body: CatalogBulkOwnRequest = { filter, owner_type: ownerType, owner_principal: ownerPrincipal.trim() };
+        const body: CatalogBulkOwnRequest = { ...selection, owner_type: ownerType, owner_principal: ownerPrincipal.trim() };
         result = await bulkAssignCatalogOwnership(ORG, body);
       } else {
         const body: CatalogBulkCertifyRequest = {
-          filter,
+          ...selection,
           rationale: rationale.trim(),
           expires_at: new Date(expiresAt).toISOString(),
         };
@@ -299,7 +327,7 @@ export function StewardshipBulkActions() {
       setSubmitting(false);
     }
   }, [
-    canSubmit, action, ORG, datasourceId, matchField, matchPattern,
+    canSubmit, action, ORG, hasExplicitSelection, explicitIds, datasourceId, matchField, matchPattern,
     tagKey, tagValue, columnNamePattern, classification, ownerType, ownerPrincipal, rationale, expiresAt,
   ]);
 
@@ -337,35 +365,50 @@ export function StewardshipBulkActions() {
               </select>
             </Field>
 
-            <div className="stew__filterset">
-              <Field label="Datasource">
-                <select
-                  value={datasourceId}
-                  onChange={(e) => setParams({ ds: e.target.value || null })}
-                  required
-                >
-                  <option value="">Select a datasource…</option>
-                  {datasources.map((d) => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Match field">
-                <select value={matchField} onChange={(e) => setParams({ field: e.target.value })}>
-                  {MATCH_FIELD_VALUES.map((f) => (
-                    <option key={f} value={f}>{humanize(f)}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Match pattern">
-                <input
-                  value={matchPattern}
-                  onChange={(e) => setParams({ pattern: e.target.value || null })}
-                  required
-                  placeholder="raw_%"
-                />
-              </Field>
-            </div>
+            {hasExplicitSelection ? (
+              /* 17B: an explicit Catalog selection replaces the filter --
+                 never alongside it, see `submit`'s mutually-exclusive
+                 `selection`. "Use a filter instead" drops `?ids=`, which
+                 re-reveals the filter fields below with whatever they last
+                 held (the URL never dropped them, it just stopped being
+                 read while a selection was in front). */
+              <div className="stew__selection" role="status" aria-label="Explicit selection">
+                <Pill tone="accent">
+                  {explicitIds.length} table{explicitIds.length === 1 ? "" : "s"} selected in Catalog
+                </Pill>
+                <Button onClick={clearExplicitSelection}>Use a filter instead</Button>
+              </div>
+            ) : (
+              <div className="stew__filterset">
+                <Field label="Datasource">
+                  <select
+                    value={datasourceId}
+                    onChange={(e) => setParams({ ds: e.target.value || null })}
+                    required
+                  >
+                    <option value="">Select a datasource…</option>
+                    {datasources.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Match field">
+                  <select value={matchField} onChange={(e) => setParams({ field: e.target.value })}>
+                    {MATCH_FIELD_VALUES.map((f) => (
+                      <option key={f} value={f}>{humanize(f)}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Match pattern">
+                  <input
+                    value={matchPattern}
+                    onChange={(e) => setParams({ pattern: e.target.value || null })}
+                    required
+                    placeholder="raw_%"
+                  />
+                </Field>
+              </div>
+            )}
 
             {action === "tag" ? (
               <div className="stew__actionfields">
@@ -469,6 +512,16 @@ export function StewardshipWorkQueue() {
   const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
 
   const [statusFilter, setStatusFilter] = useState("ALL");
+  /* The advanced filter design 21 §17 asks the Work queue to carry, matching
+     `NegativeKnowledgeScreen`'s own free-text "Assertion type" filter next to
+     its categorical one. `list_unowned_asset_backlog` (stewardship_api.py)
+     takes only `status`/`limit`/`offset` -- no candidate-owner query param
+     exists to send this to server-side -- so, unlike Status, this narrows
+     only the page already loaded rather than the backlog as a whole. That is
+     a real limit worth a steward's own attention on a backlog bigger than
+     one page, not a hidden one: the note below the controls says so whenever
+     the filter is actually hiding a loaded row. */
+  const [candidateOwnerFilter, setCandidateOwnerFilter] = useState("");
   const [backlog, setBacklog] = useState<UnownedAssetEscalationRead[]>([]);
   const [backlogTotal, setBacklogTotal] = useState<number | null>(null);
   const [backlogLoading, setBacklogLoading] = useState(true);
@@ -527,6 +580,13 @@ export function StewardshipWorkQueue() {
      same thing it said before the split. */
   const dsLabel = datasourceName(datasources, params.get("ds") ?? preferredDatasourceId ?? null);
 
+  const candidateOwnerNeedle = candidateOwnerFilter.trim().toLowerCase();
+  const filteredBacklog = useMemo(() => {
+    if (!candidateOwnerNeedle) return backlog;
+    return backlog.filter((row) => (row.candidate_owner ?? "").toLowerCase().includes(candidateOwnerNeedle));
+  }, [backlog, candidateOwnerNeedle]);
+  const hiddenByCandidateOwnerFilter = backlog.length - filteredBacklog.length;
+
   return (
     <div className="stew">
       <header className="stew__head">
@@ -578,6 +638,27 @@ export function StewardshipWorkQueue() {
             </Button>
           </div>
 
+          {/* Advanced filter (design 21 §17): the free-text half of the
+              filtering pattern `NegativeKnowledgeScreen` already establishes
+              -- a categorical select (there: Suppression; here: Status) next
+              to a free-text field (there: Assertion type; here: Candidate
+              owner). Client-side only -- see the state declaration above for
+              why -- so it is scoped to what "Status" already fetched rather
+              than sent as its own request. */}
+          <div className="stew__backlogfilters">
+            <Field label="Candidate owner">
+              <input
+                type="text"
+                value={candidateOwnerFilter}
+                placeholder="e.g. risk-data-stewards@tenant.example"
+                onChange={(e) => setCandidateOwnerFilter(e.target.value)}
+              />
+            </Field>
+            {candidateOwnerFilter ? (
+              <Button onClick={() => setCandidateOwnerFilter("")}>Clear filter</Button>
+            ) : null}
+          </div>
+
           {routeError ? <p className="stew__err" role="alert">{routeError}</p> : null}
           {routeResult ? <RouteResultSummary result={routeResult} /> : null}
 
@@ -585,17 +666,35 @@ export function StewardshipWorkQueue() {
             <ErrorState title="The unowned backlog could not be loaded" detail={backlogError} onRetry={() => void loadBacklog()} />
           ) : backlogLoading ? (
             <p className="stew__note">Loading…</p>
-          ) : backlog.length === 0 ? (
+          ) : filteredBacklog.length === 0 ? (
             <Empty
-              title="No unowned assets in this status"
-              hint={dsLabel ? undefined : "Ownership coverage is clear for the current scope."}
+              title={
+                backlog.length > 0
+                  ? "No loaded assets match this candidate owner"
+                  : "No unowned assets in this status"
+              }
+              hint={
+                backlog.length > 0
+                  ? "Try a different candidate owner, or clear the filter."
+                  : dsLabel
+                    ? undefined
+                    : "Ownership coverage is clear for the current scope."
+              }
             />
           ) : (
-            <ul className="stew__backlist" aria-label="Unowned assets">
-              {backlog.map((row) => (
-                <BacklogRow key={row.id} row={row} />
-              ))}
-            </ul>
+            <>
+              {hiddenByCandidateOwnerFilter > 0 ? (
+                <p className="stew__note" role="status">
+                  {filteredBacklog.length} of {backlog.length} loaded rows match "{candidateOwnerFilter}" —
+                  this filter only narrows what is already loaded, not the whole backlog.
+                </p>
+              ) : null}
+              <ul className="stew__backlist" aria-label="Unowned assets">
+                {filteredBacklog.map((row) => (
+                  <BacklogRow key={row.id} row={row} />
+                ))}
+              </ul>
+            </>
           )}
         </section>
       </div>

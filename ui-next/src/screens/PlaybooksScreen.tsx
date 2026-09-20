@@ -14,6 +14,7 @@ import {
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useDatasourcePicker } from "../lib/useDatasourcePicker";
+import { useUnsavedChanges } from "../lib/unsavedChanges";
 import { PlaybookDryRunPanel } from "../components/PlaybookDryRunPanel";
 import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
@@ -30,6 +31,14 @@ import "./PlaybooksScreen.css";
    fleet scheduler and by this screen's "Run now"). Every call below hits a
    real, already-merged route (`playbooks_api.py`); see `../lib/api.ts`'s own
    Playbooks section for the endpoint-by-endpoint mapping.
+
+   R11-S13 (items 15/17): this screen is now Automation, one view of the
+   Stewardship workspace (`StewardshipWorkspace.tsx`) rather than its own
+   destination. The create form below reports an edited, unsubmitted draft
+   to `lib/unsavedChanges` the same way `StewardshipScreen.tsx`'s bulk form
+   does -- an in-progress playbook is exactly the same shape of unfinished
+   work as an in-progress bulk action, and the workspace's tab bar asks the
+   one registry before either can be silently discarded by a view switch.
 --------------------------------------------------------------------------- */
 
 /** Derived from the generated `PlaybookCreate` shape rather than hand-named
@@ -62,6 +71,11 @@ function relative(iso: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
 }
+
+/** What the create form asks before its typed-but-unsubmitted draft is
+ *  discarded -- the Automation-view analog of `StewardshipScreen.tsx`'s
+ *  `BULK_UNSAVED_MESSAGE`. */
+export const PLAYBOOK_UNSAVED_MESSAGE = "Discard the playbook you have not created?";
 
 function describeRunResult(name: string, result: PlaybookRunResultRead): string {
   const outcome = result.outcome.toLowerCase().replace(/_/g, " ");
@@ -182,6 +196,17 @@ function CreatePlaybookForm({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
+  /* R11-S13: an in-progress, unsubmitted draft is unsaved work -- the same
+     shape of thing as the bulk form's unrun action. `reset()` (a successful
+     create) clears it; collapsing the <details> does not, because the
+     typed values are still sitting in this component's state either way. */
+  const [edited, setEdited] = useState(false);
+  useUnsavedChanges(edited, PLAYBOOK_UNSAVED_MESSAGE);
+  const edit = useCallback(<T,>(set: (value: T) => void, value: T) => {
+    set(value);
+    setEdited(true);
+  }, []);
+
   const run = async (action_: () => Promise<void>) => {
     setBusy(true);
     setMessage("");
@@ -222,6 +247,7 @@ function CreatePlaybookForm({
     setOwnerPrincipal("");
     setRationale("");
     setExpiresAfterDays(90);
+    setEdited(false);
   };
 
   return (
@@ -238,17 +264,17 @@ function CreatePlaybookForm({
         queues a governance review.
       </p>
       <Field label="Name">
-        <input value={name} onChange={(e) => setName(e.target.value)} />
+        <input value={name} onChange={(e) => edit(setName, e.target.value)} />
       </Field>
       <Field label="Action">
-        <select value={action} onChange={(e) => setAction(e.target.value as PlaybookAction)}>
+        <select value={action} onChange={(e) => edit(setAction, e.target.value as PlaybookAction)}>
           {ACTIONS.map((a) => (
             <option key={a} value={a}>{a}</option>
           ))}
         </select>
       </Field>
       <Field label="Datasource">
-        <select value={datasourceId} onChange={(e) => setDatasourceId(e.target.value)}>
+        <select value={datasourceId} onChange={(e) => edit(setDatasourceId, e.target.value)}>
           <option value="">Select datasource</option>
           {datasources.map((d) => (
             <option key={d.id} value={d.id}>{d.name}</option>
@@ -256,7 +282,10 @@ function CreatePlaybookForm({
         </select>
       </Field>
       <Field label="Match field">
-        <select value={matchField} onChange={(e) => setMatchField(e.target.value as PlaybookMatchField)}>
+        <select
+          value={matchField}
+          onChange={(e) => edit(setMatchField, e.target.value as PlaybookMatchField)}
+        >
           {MATCH_FIELDS.map((f) => (
             <option key={f} value={f}>{f}</option>
           ))}
@@ -265,26 +294,26 @@ function CreatePlaybookForm({
       <Field label="Match pattern">
         <input
           value={matchPattern}
-          onChange={(e) => setMatchPattern(e.target.value)}
+          onChange={(e) => edit(setMatchPattern, e.target.value)}
           placeholder="e.g. stg_% or finance.%"
         />
       </Field>
       <Field label={action === "CLASSIFY" ? "Column name pattern (required for CLASSIFY)" : "Column name pattern (optional)"}>
         <input
           value={columnNamePattern}
-          onChange={(e) => setColumnNamePattern(e.target.value)}
+          onChange={(e) => edit(setColumnNamePattern, e.target.value)}
           placeholder="e.g. %email%"
         />
       </Field>
 
       {action === "TAG" ? (
         <Field label="Tag key">
-          <input value={tagKey} onChange={(e) => setTagKey(e.target.value)} />
+          <input value={tagKey} onChange={(e) => edit(setTagKey, e.target.value)} />
         </Field>
       ) : null}
       {action === "CLASSIFY" ? (
         <Field label="Classification">
-          <select value={classification} onChange={(e) => setClassification(e.target.value)}>
+          <select value={classification} onChange={(e) => edit(setClassification, e.target.value)}>
             {CLASSIFICATIONS.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
@@ -294,27 +323,30 @@ function CreatePlaybookForm({
       {action === "OWN" ? (
         <>
           <Field label="Owner type">
-            <select value={ownerType} onChange={(e) => setOwnerType(e.target.value as "INDIVIDUAL" | "GROUP")}>
+            <select
+              value={ownerType}
+              onChange={(e) => edit(setOwnerType, e.target.value as "INDIVIDUAL" | "GROUP")}
+            >
               <option value="INDIVIDUAL">INDIVIDUAL</option>
               <option value="GROUP">GROUP</option>
             </select>
           </Field>
           <Field label="Owner principal">
-            <input value={ownerPrincipal} onChange={(e) => setOwnerPrincipal(e.target.value)} />
+            <input value={ownerPrincipal} onChange={(e) => edit(setOwnerPrincipal, e.target.value)} />
           </Field>
         </>
       ) : null}
       {action === "CERTIFY" ? (
         <>
           <Field label="Rationale (at least 10 characters)">
-            <textarea value={rationale} onChange={(e) => setRationale(e.target.value)} />
+            <textarea value={rationale} onChange={(e) => edit(setRationale, e.target.value)} />
           </Field>
           <Field label="Expires after (days)">
             <input
               type="number"
               min={1}
               value={expiresAfterDays}
-              onChange={(e) => setExpiresAfterDays(Number(e.target.value))}
+              onChange={(e) => edit(setExpiresAfterDays, Number(e.target.value))}
             />
           </Field>
         </>
@@ -326,7 +358,7 @@ function CreatePlaybookForm({
           min={5}
           max={10_080}
           value={scheduleMinutes}
-          onChange={(e) => setScheduleMinutes(Number(e.target.value))}
+          onChange={(e) => edit(setScheduleMinutes, Number(e.target.value))}
         />
       </Field>
       <Field label="Auto-apply max items">
@@ -334,11 +366,15 @@ function CreatePlaybookForm({
           type="number"
           min={0}
           value={autoApplyMax}
-          onChange={(e) => setAutoApplyMax(Number(e.target.value))}
+          onChange={(e) => edit(setAutoApplyMax, Number(e.target.value))}
         />
       </Field>
       <label>
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => edit(setEnabled, e.target.checked)}
+        /> Enabled
       </label>
 
       <Button

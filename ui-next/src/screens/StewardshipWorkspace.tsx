@@ -44,6 +44,9 @@ import "./StewardshipWorkspace.css";
       (`stewardshipViewFrom`). That inference is also why switching back to
       the Work queue while those fields are in the URL writes `view=queue`
       rather than dropping `view`: dropping it would re-infer Bulk actions.
+      `?ids=` (17B, `CatalogScreen`'s row selection) is read the same way --
+      it is the explicit-selection alternative to `field`/`pattern`, not an
+      addition to it.
 
    2. AN UNRUN BULK ACTION SURVIVES A TAB SWITCH, OR IS ASKED ABOUT. A tab
       switch is `patchQuery`, which by design bypasses the shell's navigation
@@ -99,8 +102,9 @@ const DEFAULT_VIEW: StewardshipView = "queue";
 /** The bulk form's own filter fields. A link carrying any of them was written
  *  for the bulk form; `ds` is deliberately absent, because it is estate
  *  context inherited from every datasource-scoped screen and implies nothing
- *  about which view was meant. */
-const BULK_FIELDS = ["action", "field", "pattern"] as const;
+ *  about which view was meant. `ids` (17B) is the explicit-selection
+ *  alternative to `field`/`pattern` that a Catalog row selection writes. */
+const BULK_FIELDS = ["action", "field", "ids", "pattern"] as const;
 
 function carriesBulkFilter(params: URLSearchParams): boolean {
   return BULK_FIELDS.some((field) => params.has(field));

@@ -307,8 +307,15 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
      `ds` is its datasource. Every link written before the workspace existed
      carried those without a `view`, so `stewardshipViewFrom` reads their
      presence as "this was a bulk link" -- see `StewardshipWorkspace.tsx`.
-     Playbooks declared no fields, so absorbing it adds none. */
-  stewardship: ["action", "ds", "field", "pattern", "view"],
+     Playbooks declared no fields, so absorbing it adds none.
+
+     R11-S13 (17B): `ids` is the explicit id-list a Catalog row selection
+     hands to Bulk actions -- an alternative to `field`/`pattern`, never both
+     (the backend's `CatalogBulk*Request.table_ids`/`filter` are mutually
+     exclusive). Declared here for the same reason `pattern` is: an
+     undeclared field is dropped from the link before Bulk actions ever sees
+     it. */
+  stewardship: ["action", "ds", "field", "ids", "pattern", "view"],
   /* R11-S13 (M3): the documentation workspace's three tabs, and the union of
      every field the three screens declared. `view` is the tab discriminator;
      `ranking`/`zero` are Priorities', `focus`/`type` are Drafts', `document`

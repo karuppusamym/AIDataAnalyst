@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
-import { PlaybooksScreen } from "./PlaybooksScreen";
+import { PlaybooksScreen, PLAYBOOK_UNSAVED_MESSAGE } from "./PlaybooksScreen";
+import { pendingUnsavedWarning, resetUnsavedRegistryForTests } from "../lib/unsavedChanges";
 
 const fetchPlaybooks = vi.fn();
 const createPlaybook = vi.fn();
@@ -99,6 +100,11 @@ describe("PlaybooksScreen (AT-1)", () => {
     vi.clearAllMocks();
     fetchPlaybooks.mockResolvedValue({ items: [PLAYBOOK_TAG, PLAYBOOK_OWN_DISABLED], limit: 100, offset: 0, total: 2 });
     listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
+    resetUnsavedRegistryForTests();
+  });
+
+  afterEach(() => {
+    resetUnsavedRegistryForTests();
   });
 
   it("lists existing playbooks with action, schedule and enabled state", async () => {
@@ -162,6 +168,55 @@ describe("PlaybooksScreen (AT-1)", () => {
       ),
     );
     await waitFor(() => expect(screen.getByText("New rule")).toBeInTheDocument());
+  });
+
+  /* ---------------------------------------------------------------------
+     R11-S13: the create form's unsaved-work reporting.
+
+     Automation (this screen) is a view of the Stewardship workspace now, so
+     an in-progress draft has to survive the same tab switch the bulk form's
+     `edited` flag already guards (`StewardshipScreen.test.tsx`'s "the bulk
+     form reports unsaved work"). These cases pin the reporting into the
+     same registry; the tab bar's side of the guard is
+     `StewardshipWorkspace.test.tsx`'s.
+  --------------------------------------------------------------------- */
+  it("reports an edited, unsubmitted draft, and stops once it is created", async () => {
+    createPlaybook.mockResolvedValue({ ...PLAYBOOK_TAG, id: "new-1", name: "New rule" });
+    render(<PlaybooksScreen />);
+    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+    expect(pendingUnsavedWarning()).toBeNull();
+
+    fireEvent.click(screen.getByText("Create playbook", { selector: "summary" }));
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New rule" } });
+    expect(pendingUnsavedWarning()).toBe(PLAYBOOK_UNSAVED_MESSAGE);
+
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: DATASOURCE.id } });
+    fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "stg_%" } });
+    fireEvent.change(screen.getByLabelText("Tag key"), { target: { value: "needs-review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create playbook" }));
+
+    await waitFor(() => expect(createPlaybook).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(pendingUnsavedWarning()).toBeNull());
+  });
+
+  it("keeps reporting when the create call fails, because the draft is still unfinished work", async () => {
+    createPlaybook.mockRejectedValue(new Error("422: match_pattern is required"));
+    render(<PlaybooksScreen />);
+    await waitFor(() => expect(screen.getByText("Tag staging tables")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Create playbook", { selector: "summary" }));
+    await waitFor(() => expect(listOrgDatasources).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New rule" } });
+    fireEvent.change(screen.getByLabelText("Datasource"), { target: { value: DATASOURCE.id } });
+    fireEvent.change(screen.getByLabelText("Match pattern"), { target: { value: "stg_%" } });
+    fireEvent.change(screen.getByLabelText("Tag key"), { target: { value: "needs-review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create playbook" }));
+
+    await waitFor(() => expect(screen.getByText(/match_pattern is required/)).toBeInTheDocument());
+    expect(pendingUnsavedWarning()).toBe(PLAYBOOK_UNSAVED_MESSAGE);
   });
 
   it("runs a playbook now and reports the outcome", async () => {

@@ -159,6 +159,19 @@ describe("links written for the old Stewardship page", () => {
       "automation",
     );
   });
+
+  it("opens Bulk actions with the selection intact for a Catalog explicit-id link, 17B", async () => {
+    // `?ids=` alone (no `action`/`field`/`pattern`) is the explicit-selection
+    // alternative to those fields (`CatalogScreen`'s row selection), read the
+    // same way those already are: present with no `view` still means "this
+    // was a bulk link".
+    expect(stewardshipViewFrom(new URLSearchParams("ids=t1,t2"))).toBe("bulk");
+
+    mount("/?action=certify&ids=t1,t2#/steward/stewardship");
+    expect(await screen.findByText("bulk content")).toBeInTheDocument();
+    expect(tab("Bulk actions")).toHaveAttribute("aria-selected", "true");
+    expect(new URLSearchParams(location.search).get("ids")).toBe("t1,t2");
+  });
 });
 
 describe("an unrun bulk action is not discarded by a view switch", () => {

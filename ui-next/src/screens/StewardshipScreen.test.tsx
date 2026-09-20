@@ -196,6 +196,70 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
     expect((body as { rationale: string }).rationale).toBe("Quarterly certification review completed.");
   });
 
+  it("filters the loaded backlog by candidate owner client-side, without changing what was fetched", async () => {
+    fetchUnownedAssetBacklog.mockResolvedValue(
+      backlogPage([
+        ESCALATION,
+        { ...ESCALATION, id: "unowned_2", table_id: "t_def456", candidate_owner: "risk-data-stewards@tenant.example" },
+      ]),
+    );
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+    expect(screen.getByText("t_def456")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Candidate owner"), { target: { value: "risk-data" } });
+
+    expect(screen.queryByText("t_abc123")).not.toBeInTheDocument();
+    expect(screen.getByText("t_def456")).toBeInTheDocument();
+    // Client-side narrowing of what is already on screen -- not a new fetch.
+    expect(fetchUnownedAssetBacklog).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+    expect(screen.getByText("t_abc123")).toBeInTheDocument();
+  });
+
+  it("17B: an explicit `?ids=` selection replaces the filter fields and sends table_ids, never both", async () => {
+    history.replaceState(null, "", "/?ids=t1,t2&action=certify");
+    const StewardshipBulkActions = await loadBulkActions();
+    render(<StewardshipBulkActions />);
+
+    // The filter fields are gone; the selection is a fact, not a form.
+    expect(screen.queryByLabelText("Datasource")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Match pattern")).not.toBeInTheDocument();
+    expect(screen.getByText("2 tables selected in Catalog")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Rationale"), {
+      target: { value: "Quarterly certification review completed." },
+    });
+    bulkCertifyCatalogTables.mockResolvedValue(bulkRun({ action: "BULK_CERTIFY", selection_mode: "EXPLICIT" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run certify tables" }));
+
+    await waitFor(() =>
+      expect(bulkCertifyCatalogTables).toHaveBeenCalledWith(
+        "00000000-0000-0000-0000-000000000001",
+        expect.objectContaining({ table_ids: ["t1", "t2"] }),
+        undefined,
+      ),
+    );
+    const [, body] = bulkCertifyCatalogTables.mock.calls[0]!;
+    expect(body as object).not.toHaveProperty("filter");
+  });
+
+  it("17B: 'Use a filter instead' clears the selection and brings the filter fields back", async () => {
+    history.replaceState(null, "", "/?ids=t1&action=tag");
+    const StewardshipBulkActions = await loadBulkActions();
+    render(<StewardshipBulkActions />);
+    expect(screen.getByText("1 table selected in Catalog")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Datasource")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use a filter instead" }));
+
+    expect(new URLSearchParams(location.search).has("ids")).toBe(false);
+    await waitFor(() => expect(screen.getByLabelText("Datasource")).toBeInTheDocument());
+    expect(screen.queryByText(/selected in Catalog/)).not.toBeInTheDocument();
+  });
+
   it("routing the backlog calls the route endpoint, shows the summary, and refetches the backlog", async () => {
     routeUnownedAssetBacklog.mockResolvedValue({
       organization_id: "org1",

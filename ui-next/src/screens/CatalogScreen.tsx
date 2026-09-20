@@ -17,10 +17,39 @@ import {
 import { CatalogTable } from "../components/CatalogTable";
 import { EvidencePane } from "../components/EvidencePane";
 import { Button, ErrorState, Field, Pill } from "../components/primitives";
+import { pushLocation } from "../lib/location";
 import "./CatalogScreen.css";
 
 import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
+
+/* ---------------------------------------------------------------------------
+   R11-S13 (17B). A checked row here is sent to Stewardship's Bulk actions as
+   an EXPLICIT selection (`?ids=`), never a second bulk-action UI: the same
+   `bulk-tag`/`bulk-classify`/`bulk-own`/`bulk-certify` endpoints Bulk actions
+   already calls, so a steward who checks rows here and one who opens Bulk
+   actions and types a pattern that happens to match the same rows run the
+   identical write path -- same roles, same request shape, same audit. See
+   `StewardshipScreen.tsx`'s `StewardshipBulkActions` for the receiving side.
+
+   This also retires the "Certify…" stub that used to sit here disabled: bulk
+   certify already existed by filter in Bulk actions, so it needed a way to
+   reach it with these rows rather than a second, parallel implementation. */
+const CATALOG_BULK_ACTIONS = [
+  { value: "tag", label: "Tag" },
+  { value: "classify", label: "Classify" },
+  { value: "own", label: "Assign ownership" },
+  { value: "certify", label: "Certify" },
+] as const;
+type CatalogBulkAction = (typeof CATALOG_BULK_ACTIONS)[number]["value"];
+
+/* Mirrors the cap `generateDrafts` below already applies to a checked batch.
+   Bulk actions' own backend cap is 500 (`CATALOG_BULK_ACTION_MAX_ITEMS`), but
+   the ids travel as a plain `?ids=` query field (see `routes.ts`), and a
+   comma-joined list of UUIDs past a few hundred risks the URL itself rather
+   than anything server-side -- so this is a URL-safety cap, not a copy of the
+   backend's. */
+const BULK_SELECTION_CAP = 100;
 
 
 export function CatalogScreen() {
@@ -41,6 +70,7 @@ export function CatalogScreen() {
   const [error, setError] = useState<string | null>(null);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   const [draftQ, setDraftQ] = useState(q);
+  const [bulkAction, setBulkAction] = useState<CatalogBulkAction>("certify");
 
   // P1-04: batch/single draft generation state. Kept co-located rather than
   // hoisted into `useUrlState` because it is transient by design — the
@@ -176,6 +206,19 @@ export function CatalogScreen() {
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   }, []);
 
+  /* 17B: hand the checked rows to Stewardship's Bulk actions as an explicit
+     id list. Nothing runs here or there until the steward submits that
+     form -- this only opens it pre-filled, same as any other cross-screen
+     link (`buildLink`/`pushLocation`). */
+  const sendToBulkActions = useCallback(() => {
+    const ids = Array.from(checked);
+    if (ids.length === 0 || ids.length > BULK_SELECTION_CAP) return;
+    pushLocation({
+      screen: "stewardship",
+      params: { view: "bulk", action: bulkAction, ids: ids.join(",") },
+    });
+  }, [checked, bulkAction]);
+
   return (
     <div className="cat">
       <header className="cat__head">
@@ -248,11 +291,26 @@ export function CatalogScreen() {
             >
               {draftBusy ? "Generating…" : "Generate table description drafts"}
             </Button>
+            <Field label="Bulk action">
+              <select
+                value={bulkAction}
+                onChange={(e) => setBulkAction(e.target.value as CatalogBulkAction)}
+              >
+                {CATALOG_BULK_ACTIONS.map((a) => (
+                  <option key={a.value} value={a.value}>{a.label}</option>
+                ))}
+              </select>
+            </Field>
             <Button
-              disabled
-              title="Bulk certify is not available yet — certification is managed per asset in stewardship."
+              onClick={sendToBulkActions}
+              disabled={checked.size > BULK_SELECTION_CAP}
+              title={
+                checked.size > BULK_SELECTION_CAP
+                  ? `Select at most ${BULK_SELECTION_CAP} rows to send to Bulk actions at once.`
+                  : "Open Stewardship's Bulk actions with these rows as an explicit selection — nothing runs until you submit there."
+              }
             >
-              Certify…
+              Send to Bulk actions…
             </Button>
             <Button onClick={() => setChecked(new Set())}>Clear</Button>
           </div>
