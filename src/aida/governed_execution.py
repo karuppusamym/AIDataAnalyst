@@ -5,7 +5,7 @@ version, with typed parameters, an explicit row limit and an optional context pr
 no arbitrary SQL here, no Cypher and no native procedure call, and nothing a `query` can reach
 executes -- a status read returns a receipt, never rows.
 
-**One execution path.** The execution itself is `tool_api.execute_tool_version`, the function
+**One execution path.** The execution itself is `tool_execution.execute_tool_version`, the function
 the REST route and persisted tool plans already call: role binding, the agent contract and kill
 switch, datasource admission, quality and source-definition holds, parameter binding, the
 gateway's masking, cost gate and audit. This module adds only what a retried mutation needs and
@@ -69,7 +69,7 @@ from aida.pagination import InvalidCursor, decode_cursor, encode_cursor
 from aida.schemas import ToolExecutionRequest, ToolExecutionResponse
 from aida.security_types import SecurityContext
 from aida.signing import sign_value
-from aida.tool_api import execute_tool_version
+from aida.tool_execution import execute_tool_version
 from atlas.platform.config import Settings
 
 #: The roles `execute_tool_version` itself admits. Checked here first so a caller who may not

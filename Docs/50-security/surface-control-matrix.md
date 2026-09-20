@@ -363,7 +363,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/projects/{project_id}/dbt-projects` | REST | `aida.dbt_api.list_dbt_projects` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/projects/{project_id}/documents` | REST | `aida.document_ingestion_api.list_documents` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/semantic-model-versions` | REST | `aida.semantic_api.list_semantic_model_versions` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/projects/{project_id}/tools` | REST | `aida.tool_api.list_tools` | AgentDeveloper, Analyst, PlatformAdmin, SemanticAdmin, ToolDeveloper, Viewer | yes | yes | writes | yes | not cancellable |
+| `GET /v1/projects/{project_id}/tools` | REST | `aida.tool_api.list_tools` | AgentDeveloper, Analyst, PlatformAdmin, SemanticAdmin, ToolDeveloper, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}` | REST | `aida.operational_api.get_project` | DataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/quality-incidents/{incident_id}/triage` | REST | `aida.quality_api.get_quality_incident_triage` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/quality-rule-packs/{rule_pack_id}/rules` | REST | `aida.quality_api.list_rules` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

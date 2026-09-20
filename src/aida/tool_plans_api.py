@@ -28,7 +28,7 @@ from aida.models import (
 )
 from aida.schemas import ApiModel, Page, ToolExecutionRequest
 from aida.security import SecurityContext, enforce_organization, require_roles
-from aida.tool_api import execute_tool_version
+from aida.tool_execution import execute_tool_version
 from aida.tool_plan_runtime import resolve_plan_tools
 from aida.tool_plans import (
     PlanBudget,

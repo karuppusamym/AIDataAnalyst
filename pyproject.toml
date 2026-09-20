@@ -570,19 +570,23 @@ forbidden_modules = [
 # this pins it, indirect chains included, so the cheapest fix for the next shared decision is a
 # service and not an import back into the router it lives beside.
 #
-# `aida.graphql_schema` is deliberately not a source module yet: through
-# `aida.governed_execution` (R11-GQL02) it reaches `aida.tool_api` -- a router -- so naming it
-# here would fail today. Naming it is the goal; the fix is a service for that path.
+# `aida.graphql_schema` is a source module as of 2026-09-20: the execution path it reaches
+# through `aida.governed_execution` (R11-GQL02) moved out of the `aida.tool_api` router into
+# `aida.tool_execution`, so the whole GraphQL facade -- reads, limits, schema and execution --
+# is held to this line, indirect chains included.
 name = "R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router"
 type = "forbidden"
 source_modules = [
   "aida.context_product_read_service",
   "aida.context_product_reads",
+  "aida.governed_execution",
   "aida.graphql_limits",
   "aida.graphql_okf",
   "aida.graphql_reads",
+  "aida.graphql_schema",
   "aida.okf_read_model",
   "aida.okf_store",
+  "aida.tool_execution",
 ]
 # Every `*_api` module is a router in this codebase, and an import-linter wildcard cannot
 # match a suffix, so they are listed; `tests/test_r11_gql01_compile_read_service.py` fails
