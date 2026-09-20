@@ -38,8 +38,11 @@ describe("GraphqlExplorer", () => {
 
     fireEvent.change(screen.getByLabelText("Example"), { target: { value: "context-products" } });
 
-    expect(screen.getByLabelText("GraphQL variables")).toHaveValue(
-      expect.stringContaining('"projectId": "proj-core"'),
+    // jest-dom's toHaveValue does a deep-equal against expectedValue (isEqualWith), not
+    // Jest's asymmetric-matcher protocol, so expect.stringContaining() never matches a
+    // real string value here -- assert on .value directly instead.
+    expect((screen.getByLabelText("GraphQL variables") as HTMLTextAreaElement).value).toContain(
+      '"projectId": "proj-core"',
     );
   });
 

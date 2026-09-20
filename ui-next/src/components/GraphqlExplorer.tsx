@@ -12,7 +12,11 @@ interface Example {
   variables(projectId: string | null): Record<string, unknown>;
 }
 
-const EXAMPLES: readonly Example[] = [
+// A non-empty tuple, not a plain array: `noUncheckedIndexedAccess` otherwise types
+// `EXAMPLES[0]` as `Example | undefined`, which is what broke `npm run build`'s
+// `tsc -b` step (the bundler itself, `vite build`, does not type-check and stayed
+// green) -- this is a type-level fix only, the four examples below are unchanged.
+const EXAMPLES: readonly [Example, ...Example[]] = [
   {
     id: "datasources",
     label: "List data sources",
