@@ -120,6 +120,24 @@ class DataSourceBulkOnboardResultRead(ApiModel):
     results: list[DataSourceBulkOnboardItemRead]
 
 
+class ConnectorCapabilityEvidenceRead(ApiModel):
+    """Why one capability flag reads as it does (INV-9).
+
+    `capabilities[flag]` is `claimed` narrowed to what the certification result
+    supports. `status` is that result's row (`CERTIFIED`, `NOT_CERTIFIED` or
+    `NOT_APPLICABLE`; null when the result has no row), and `tier` is `LIVE`
+    (probed against a real engine) or `FIXTURE` (proven against the connector's
+    own driver double) when the flag is certified. `held` marks a flag that is
+    advertised without being certified, kept only by an explicit uncertified-claim
+    entry in the certification result.
+    """
+
+    claimed: bool
+    status: str | None = None
+    tier: str | None = None
+    held: bool = False
+
+
 class ConnectorCapabilityRead(ApiModel):
     connector_type: str
     display_name: str
@@ -130,6 +148,11 @@ class ConnectorCapabilityRead(ApiModel):
     version: str
     notes: str
     capabilities: dict[str, bool]
+    #: Additive (INV-9): how each flag in `capabilities` came about. Empty for a
+    #: connector that is not implemented.
+    capability_evidence: dict[str, ConnectorCapabilityEvidenceRead] = Field(
+        default_factory=dict
+    )
 
 
 class ConnectorCertificationRead(ApiModel):

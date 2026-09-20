@@ -40,6 +40,7 @@ from aida.connectors.base import (
     build_sequences,
     rows_to_dicts,
 )
+from aida.connectors.capability_certification import derive_capabilities
 from aida.connectors.discovery import (
     FACET_CONSTRAINTS,
     FACET_GRANTS,
@@ -1058,7 +1059,10 @@ class SnowflakeConnector(SqlExecutor):
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
-        return self.DEFAULT_CAPABILITIES
+        # INV-9: `DEFAULT_CAPABILITIES` is this connector's claim. What it advertises is
+        # that claim narrowed to what its certification result supports
+        # (`aida.connectors.capability_certification`); it can never exceed the claim.
+        return derive_capabilities(self.connector_type, self.DEFAULT_CAPABILITIES)
 
     def scope_discovery(
         self,

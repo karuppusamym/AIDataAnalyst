@@ -346,6 +346,13 @@ def _check(name: str, passed: bool, evidence: str) -> dict[str, Any]:
 
 
 def default_capabilities(definition: ConnectorDefinition) -> dict[str, bool]:
+    """The capabilities the platform advertises for `definition`'s connector.
+
+    INV-9: `definition.capabilities` is the connector's claim narrowed to what its
+    certification result supports, computed once when the connector is registered
+    (`ConnectorRegistry.register`); it is never the hand-written literal. Empty for
+    anything not IMPLEMENTED -- planned capability is displayed as planned.
+    """
     if definition.implementation_status != "IMPLEMENTED":
         return {}
     return dict(definition.capabilities)

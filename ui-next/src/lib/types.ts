@@ -1349,6 +1349,14 @@ export interface Concept {
   deprecated?: boolean;
 }
 
+/** Why one capability flag reads as it does (INV-9). */
+export interface ConnectorCapabilityEvidenceRead {
+  claimed: boolean;
+  status?: string | null;
+  tier?: string | null;
+  held?: boolean;
+}
+
 export interface ConnectorCapabilityRead {
   connector_type: string;
   display_name: string;
@@ -1359,6 +1367,7 @@ export interface ConnectorCapabilityRead {
   version: string;
   notes: string;
   capabilities: Record<string, boolean>;
+  capability_evidence?: Record<string, ConnectorCapabilityEvidenceRead>;
 }
 
 export interface ConnectorCertificationRead {

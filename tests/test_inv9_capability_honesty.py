@@ -18,13 +18,22 @@ matrix endpoint.
 **What is proven here, and the one thing that is not.** The advertised/implemented
 agreement, the planned-is-planned rule, and the load-bearing consequence (a
 connector that cannot explain is refused execution) are all proven by enumeration
-over the live registry. The enforcement clause itself is *not* satisfied by the
-codebase: `ingestion.default_capabilities` returns `definition.capabilities`
-verbatim -- the hand-declared dict -- and the certification suite
-(`connector_certification_evidence`) checks only two of the nine capability flags.
-`test_capability_flags_are_derived_from_certification` records that as a strict
-xfail naming exactly what is missing, rather than letting the suite imply INV-9 is
-enforced when only its observable half is.
+over the live registry.
+
+The enforcement clause is now implemented (tracker R11-C14): every advertised flag is
+derived from a committed certification result
+(`src/aida/connectors/capability_certification.json`, one row per connector and flag,
+LIVE for PostgreSQL and SQL Server and FIXTURE for the other four), and a flag is
+advertised only if the connector claims it *and* its row is CERTIFIED. The derivation
+and its gates are proven in `tests/test_c14_capability_certification.py`.
+
+What is *not* yet true is that every claimed flag is certified. A flag whose probe
+genuinely failed is not lowered by a certification run -- lowering `explain` would make
+the gateway refuse an engine, which is an operator's decision -- so it is listed in the
+result's `uncertified_claims` and stays advertised.
+`test_capability_flags_are_derived_from_certification` is therefore still a strict xfail,
+narrowed to exactly those flags (`KNOWN_UNCERTIFIED_CLAIMS`), and it turns into a
+normal passing test the day that list is empty.
 """
 
 import json
@@ -36,6 +45,7 @@ import pytest
 
 from aida.config import Settings
 from aida.connectors.base import ConnectorCapabilities
+from aida.connectors.capability_certification import load_certification_result
 from aida.connectors.registry import ConnectorDefinition, connector_registry
 from aida.connectors.sql_execution import SqlExecutor
 from aida.ingestion import connector_certification_evidence, default_capabilities
@@ -200,6 +210,22 @@ def test_the_capability_matrix_never_advertises_an_uncertified_capability(
     advertised = default_capabilities(definition)
     if definition.implementation_status == "IMPLEMENTED":
         assert advertised == definition.capabilities
+        # INV-9: `definition.capabilities` is derived, so every flag it advertises is one the
+        # connector claims AND either certified or explicitly held in `uncertified_claims`.
+        result = load_certification_result()
+        certification = result.connectors[definition.connector_type]
+        held = result.held_flags(definition.connector_type)
+        unbacked = []
+        for flag, on in advertised.items():
+            if not on:
+                continue
+            if not definition.claimed_capabilities[flag]:
+                unbacked.append(flag)  # advertised without being claimed
+            elif certification.flags[flag].status != "CERTIFIED" and flag not in held:
+                unbacked.append(flag)  # claimed, but neither certified nor explicitly held
+        assert unbacked == [], (
+            f"{definition.connector_type} advertises {unbacked} with no certification behind it"
+        )
     else:
         assert advertised == {}, (
             f"the capability matrix advertises {advertised} for the not-yet-"
@@ -307,22 +333,38 @@ def test_at_least_one_registered_connector_honestly_declines_a_capability() -> N
     assert declined, "every implemented connector advertises every capability as True"
 
 
-# --- the enforcement clause, which the codebase does not yet satisfy --------
+# --- the enforcement clause: derived from certification, except the held claims --------
 
-# The capability flags `connector_certification_evidence` actually evaluates.
-# `hierarchy_contract` checks `catalogs` and `schemas`; no other check reads a
-# capability flag at all.
-_CERTIFIED_CAPABILITY_FLAGS = frozenset({"catalogs", "schemas"})
+#: The flags that are advertised WITHOUT a CERTIFIED row, exactly, as `connector.flag`.
+#:
+#: Each one is a flag the connector claims whose probe genuinely did not certify it, and each
+#: is held rather than lowered because lowering (`explain` above all) would refuse execution
+#: for that engine -- a decision that belongs to the operator, not to a certification run.
+#: This tuple is the narrowing of the strict xfail below: it names the only flags the
+#: enforcement clause does not yet hold for, and `test_the_flags_advertised_without_a_
+#: certification_are_exactly_the_known_ones` fails if the committed result disagrees with it in
+#: either direction, so a new uncertified claim cannot hide behind the xfail.
+#:
+#: * `snowflake.partitions` -- claimed True since the adapter's first commit, but nothing in
+#:   `snowflake.py` reads a partition (Snowflake's micro-partitions are not listed by any
+#:   catalog view); only EXPLAIN's pruning counters mention them.
+KNOWN_UNCERTIFIED_CLAIMS: tuple[str, ...] = ("snowflake.partitions",)
+
+
+def _uncertified_claims() -> list[str]:
+    claims = load_certification_result().uncertified_claims
+    return sorted(f"{claim.connector_type}.{claim.flag}" for claim in claims)
 
 
 def test_certification_evidence_still_only_covers_the_hierarchy_flags() -> None:
-    """Pins the *size* of the INV-9 gap so the xfail below stays accurate.
+    """Pins what the *per-datasource* certification run reads, so a change to it is noticed.
 
-    Runs the real certification suite against a fully-capable datasource and
-    records which capability flags its checks read. If the suite grows a check for
-    `explain` or `constraints`, this test fails and the xfail's stated reason must
-    be rewritten -- which is the point: an honest gap statement has to be
-    maintained, not written once.
+    `connector_certification_evidence` (behind `POST /datasources/{id}/connector-certifications`)
+    is a readiness suite for one registered datasource: credential reference, connection
+    evidence, inventory. Its `hierarchy_contract` check reads only `catalogs` and `schemas`,
+    and it still does. That is no longer the INV-9 gap: per-flag certification is the
+    connector certification result (`test_c14_capability_certification.py`), and the
+    `datasource.capabilities` this suite reads are copied from the derived flags.
     """
     datasource = _costing_datasource("postgres")
     datasource.capabilities = dict.fromkeys(_CAPABILITY_FLAGS, True)
@@ -339,32 +381,66 @@ def test_certification_evidence_still_only_covers_the_hierarchy_flags() -> None:
     assert status in {"CERTIFIED", "CONDITIONAL", "FAILED"}
     assert 0 <= score <= 100
     assert "hierarchy_contract" in check_names
-    uncovered = sorted(set(_CAPABILITY_FLAGS) - _CERTIFIED_CAPABILITY_FLAGS)
-    assert uncovered, "every capability flag is now certified; update the xfail below"
-    for flag in ("explain", "constraints", "partitions", "delegated_identity"):
-        assert flag in uncovered
+    assert not {"explain", "constraints", "partitions"} & check_names
+
+
+def test_every_advertised_flag_is_derived_from_a_certification_result() -> None:
+    """The enforcement clause, structurally: no flag is advertised on the claim alone.
+
+    For every implemented connector and every flag, the advertised value is exactly
+    `claimed and (CERTIFIED or explicitly held)`. Recomputed here from the committed result
+    rather than trusting the registry, so a registry that went back to reading the literal
+    fails this test.
+    """
+    result = load_certification_result()
+    for definition in _IMPLEMENTED:
+        certification = result.connectors[definition.connector_type]
+        held = result.held_flags(definition.connector_type)
+        for flag in _CAPABILITY_FLAGS:
+            claimed = definition.claimed_capabilities[flag]
+            certified = certification.flags[flag].status == "CERTIFIED"
+            expected = claimed and (certified or flag in held)
+            assert definition.capabilities[flag] is expected, (
+                f"{definition.connector_type}.{flag}: advertised "
+                f"{definition.capabilities[flag]}, but claimed={claimed} certified={certified} "
+                f"held={flag in held}"
+            )
+
+
+def test_the_flags_advertised_without_a_certification_are_exactly_the_known_ones() -> None:
+    """Keeps the xfail below honest: it is narrowed to these flags and to no others.
+
+    A strict xfail passes when *anything* in its body fails, so on its own it would also
+    swallow a brand-new uncertified claim. This test does not: it compares the committed
+    result with `KNOWN_UNCERTIFIED_CLAIMS` in both directions.
+    """
+    assert _uncertified_claims() == sorted(KNOWN_UNCERTIFIED_CLAIMS), (
+        "the set of flags advertised without a certification changed; if that is intended, "
+        "amend KNOWN_UNCERTIFIED_CLAIMS and tell the connector owner"
+    )
 
 
 @pytest.mark.xfail(
+    condition=bool(KNOWN_UNCERTIFIED_CLAIMS),
     strict=True,
     reason=(
-        "INV-9's enforcement clause -- 'capability flags are derived from the "
-        "certification result, not hand-declared' -- is not implemented. "
-        "`ingestion.default_capabilities` returns the hand-written "
-        "`ConnectorDefinition.capabilities` dict verbatim, and "
-        "`connector_certification_evidence` evaluates only `catalogs` and "
-        "`schemas` (via hierarchy_contract); `explain`, `constraints`, `indexes`, "
-        "`partitions`, `query_history`, `delegated_identity` and "
-        "`approximate_statistics` are never certified. Closing this needs the "
-        "certification corpus in gap item E12 plus a derivation step under "
-        "src/aida, neither of which this workstream owns. Strict xfail so it "
-        "becomes a hard failure the day the derivation lands."
+        "INV-9's enforcement clause -- 'capability flags are derived from the certification "
+        "result, not hand-declared' -- is implemented: every advertised flag comes from "
+        "capability_certification.json (aida.connectors.capability_certification), LIVE for "
+        "PostgreSQL and SQL Server and FIXTURE for the other four, and no flag is advertised "
+        "beyond its connector's claim. What is not yet true is that every claimed flag is "
+        "CERTIFIED: " + ", ".join(KNOWN_UNCERTIFIED_CLAIMS) + " is held rather than lowered, "
+        "because lowering a flag can refuse execution for an engine and that is the operator's "
+        "decision. Strict xfail, narrowed to exactly those flags: it becomes a hard failure -- "
+        "and KNOWN_UNCERTIFIED_CLAIMS must then be emptied -- the day the list is empty."
     ),
 )
 def test_capability_flags_are_derived_from_certification() -> None:
-    """INV-9's enforcement clause in full. Currently fails; see the xfail reason."""
-    uncertified = sorted(set(_CAPABILITY_FLAGS) - _CERTIFIED_CAPABILITY_FLAGS)
-    assert uncertified == [], (
-        f"these advertised capability flags are hand-declared, not derived from a "
-        f"certification result: {uncertified}"
+    """INV-9's enforcement clause in full: every claimed flag is certified.
+
+    Expected to fail only for `KNOWN_UNCERTIFIED_CLAIMS`; see the xfail reason.
+    """
+    assert _uncertified_claims() == [], (
+        "these advertised capability flags have no CERTIFIED row behind them, only an explicit "
+        f"uncertified-claim entry: {_uncertified_claims()}"
     )

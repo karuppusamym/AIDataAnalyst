@@ -28,6 +28,7 @@ from aida.connectors.base import (
     text_facets_not_applicable,
     value_free_distribution_expressions,
 )
+from aida.connectors.capability_certification import derive_capabilities
 from aida.connectors.discovery import (
     FACET_CONSTRAINTS,
     FACET_GRANTS,
@@ -1151,7 +1152,10 @@ class OracleConnector(SqlExecutor):
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
-        return self.DEFAULT_CAPABILITIES
+        # INV-9: `DEFAULT_CAPABILITIES` is this connector's claim. What it advertises is
+        # that claim narrowed to what its certification result supports
+        # (`aida.connectors.capability_certification`); it can never exceed the claim.
+        return derive_capabilities(self.connector_type, self.DEFAULT_CAPABILITIES)
 
     def scope_discovery(
         self,

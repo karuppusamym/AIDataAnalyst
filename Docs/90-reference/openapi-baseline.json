@@ -8148,6 +8148,48 @@
         "title": "Concept",
         "type": "object"
       },
+      "ConnectorCapabilityEvidenceRead": {
+        "additionalProperties": false,
+        "description": "Why one capability flag reads as it does (INV-9).\n\n`capabilities[flag]` is `claimed` narrowed to what the certification result\nsupports. `status` is that result's row (`CERTIFIED`, `NOT_CERTIFIED` or\n`NOT_APPLICABLE`; null when the result has no row), and `tier` is `LIVE`\n(probed against a real engine) or `FIXTURE` (proven against the connector's\nown driver double) when the flag is certified. `held` marks a flag that is\nadvertised without being certified, kept only by an explicit uncertified-claim\nentry in the certification result.",
+        "properties": {
+          "claimed": {
+            "title": "Claimed",
+            "type": "boolean"
+          },
+          "held": {
+            "default": false,
+            "title": "Held",
+            "type": "boolean"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tier"
+          }
+        },
+        "required": [
+          "claimed"
+        ],
+        "title": "ConnectorCapabilityEvidenceRead",
+        "type": "object"
+      },
       "ConnectorCapabilityRead": {
         "additionalProperties": false,
         "properties": {
@@ -8156,6 +8198,13 @@
               "type": "boolean"
             },
             "title": "Capabilities",
+            "type": "object"
+          },
+          "capability_evidence": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ConnectorCapabilityEvidenceRead"
+            },
+            "title": "Capability Evidence",
             "type": "object"
           },
           "connector_type": {

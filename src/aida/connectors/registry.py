@@ -4,6 +4,10 @@ from typing import Any
 
 from aida.connectors.base import Connector, ConnectorCapabilities
 from aida.connectors.bigquery import BigQueryConnector
+from aida.connectors.capability_certification import (
+    CertificationResult,
+    derive_flags,
+)
 from aida.connectors.databricks import DatabricksConnector
 from aida.connectors.oracle import OracleConnector
 from aida.connectors.postgres import PostgresConnector
@@ -23,19 +27,36 @@ class ConnectorDefinition:
     maturity: str
     version: str
     notes: str
+    #: What this connector *advertises* (INV-9): its claim, narrowed to what its
+    #: certification result supports (`aida.connectors.capability_certification`).
+    #: Every reader -- the capability endpoint, discovery selection, the engine
+    #: matrix -- reads this field, so none of them can see a flag that no
+    #: certification backs. It is never wider than `claimed_capabilities`.
     capabilities: dict[str, bool] = field(default_factory=dict)
+    #: What the connector's own `DEFAULT_CAPABILITIES` claims. An input to the
+    #: derivation, kept so the two can be compared; not advertised directly.
+    claimed_capabilities: dict[str, bool] = field(default_factory=dict)
+    #: Per flag, how `capabilities` came about: `claimed`, the certification
+    #: `status`, the evidence `tier` (LIVE or FIXTURE) and whether the flag is
+    #: `held` by an explicit uncertified-claim entry rather than certified.
+    capability_evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def as_dict(self, *, capabilities: dict[str, bool] | None = None) -> dict[str, Any]:
         result = asdict(self)
         result["transports"] = list(self.transports)
         result["capabilities"] = dict(self.capabilities) if capabilities is None else capabilities
+        # The claim is an input, not part of the read model: what is served is the
+        # derived `capabilities` and the per-flag `capability_evidence` beside it.
+        result.pop("claimed_capabilities")
         return result
 
 
 class ConnectorRegistry:
-    def __init__(self) -> None:
+    def __init__(self, certification: CertificationResult | None = None) -> None:
+        """`certification` overrides the committed result; only a test passes one."""
         self._factories: dict[str, ConnectorFactory] = {}
         self._definitions: dict[str, ConnectorDefinition] = {}
+        self._certification = certification
 
     def register(
         self,
@@ -53,6 +74,11 @@ class ConnectorRegistry:
         if connector_type in self._factories:
             raise ValueError(f"connector already registered: {connector_type}")
         self._factories[connector_type] = factory
+        derivations = (
+            derive_flags(connector_type, capabilities, self._certification)
+            if capabilities is not None
+            else ()
+        )
         self._definitions[connector_type] = ConnectorDefinition(
             connector_type=connector_type,
             display_name=display_name or connector_type.replace("_", " ").title(),
@@ -62,7 +88,17 @@ class ConnectorRegistry:
             maturity=maturity,
             version=version,
             notes=notes,
-            capabilities=asdict(capabilities) if capabilities is not None else {},
+            capabilities={item.flag: item.derived for item in derivations},
+            claimed_capabilities=asdict(capabilities) if capabilities is not None else {},
+            capability_evidence={
+                item.flag: {
+                    "claimed": item.claimed,
+                    "status": item.status,
+                    "tier": item.tier,
+                    "held": item.held,
+                }
+                for item in derivations
+            },
         )
 
     def declare_planned(

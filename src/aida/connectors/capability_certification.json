@@ -1,0 +1,1473 @@
+{
+  "certified_on": "2026-09-19",
+  "connectors": {
+    "bigquery": {
+      "claimed": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": false,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": false,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": false,
+        "triggers": false,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "derived": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": false,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": false,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": false,
+        "triggers": false,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "environment": {},
+      "fingerprint": {
+        "digest": "ded9176cd59a34322750341cee4dac82702337a48d4b06aea73433913c0d4235",
+        "files": {
+          "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
+          "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
+          "aida/connectors/bigquery.py": "c40a53d60489cb0c2304e4e01c0c6a265344a6171ec4288a09fec07e4e0e2eb1",
+          "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
+          "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
+          "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
+        }
+      },
+      "flags": {
+        "approximate_statistics": {
+          "claimed": true,
+          "evidence": "10 null, 990 non-null, 900 distinct read back from the aggregate; the statement sent uses APPROX_COUNT_DISTINCT",
+          "probe": "profile_table() through the driver double returns null, non-null and distinct counts",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-approximate_statistics]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "catalogs": {
+          "claimed": true,
+          "evidence": "discover() returned one catalog, named for the project",
+          "probe": "discover() returns the project as its catalog",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-catalogs]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "constraints": {
+          "claimed": true,
+          "evidence": "customer: PRIMARY_KEY(customer_id) came back from the fixture's KEY_COLUMN_USAGE rows. Foreign keys are honestly omitted. Fixture only: whether the real view exposes the `constraint_type` column this query filters on is not something a double can show",
+          "probe": "discover() returns the primary-key constraint from the keys view",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-constraints]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "delegated_identity": {
+          "claimed": false,
+          "evidence": "not claimed; bigquery authenticates with the DSN credential alone, so there is no delegated path for a double to exercise",
+          "probe": "not probed: nothing a test double can exercise",
+          "reason_code": "NOT_EXERCISED",
+          "status": "NOT_CERTIFIED",
+          "tests": [],
+          "tier": null
+        },
+        "distribution_entropy_profiling": {
+          "claimed": false,
+          "evidence": "frequency_entropy_bits is None and the facet status is UNSUPPORTED/NOT_IMPLEMENTED",
+          "probe": "profile_table() is asked for a column's entropy through the driver double",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-distribution_entropy_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "explain": {
+          "claimed": true,
+          "evidence": "a dry-run job with the query cache off was issued; 123456789 bytes read back as the score",
+          "probe": "estimate_read_query() issues a dry-run job through a client double and returns the bytes",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-explain]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "grants": {
+          "claimed": false,
+          "evidence": "discover() returned no grant for any of 4 schemas: BigQuery grants are Cloud IAM bindings, which the SQL grant envelope does not model",
+          "probe": "discover() is asked for grants across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-grants]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "indexes": {
+          "claimed": false,
+          "evidence": "discover() returned no index for any of 7 tables: no index read exists",
+          "probe": "discover() is asked for indexes across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-indexes]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "object_comments": {
+          "claimed": true,
+          "evidence": "passed: test_descriptions_land_at_every_level_bigquery_exposes",
+          "probe": "discover() returns schema, table and column descriptions",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_bigquery.py::test_descriptions_land_at_every_level_bigquery_exposes"
+          ],
+          "tier": "FIXTURE"
+        },
+        "partitions": {
+          "claimed": false,
+          "evidence": "discover() returned no partition for any of 7 tables: no partition read",
+          "probe": "discover() is asked for partitions across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-partitions]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "query_history": {
+          "claimed": false,
+          "evidence": "passed: test_bigquery_get_query_history_maps_rows, test_bigquery_get_query_history_drops_incomplete_rows",
+          "probe": "get_query_history() through a client double maps job rows to entries",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_bigquery.py::test_bigquery_get_query_history_maps_rows",
+            "tests/test_connectors_bigquery.py::test_bigquery_get_query_history_drops_incomplete_rows"
+          ],
+          "tier": "FIXTURE"
+        },
+        "routines": {
+          "claimed": true,
+          "evidence": "passed: test_a_routine_round_trips_with_its_parameters_and_description",
+          "probe": "discover() returns a routine with its body and parameters",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_bigquery.py::test_a_routine_round_trips_with_its_parameters_and_description"
+          ],
+          "tier": "FIXTURE"
+        },
+        "schemas": {
+          "claimed": true,
+          "evidence": "dataset retail came back as a schema holding customer and active_customer",
+          "probe": "discover() returns each dataset as a schema with its tables",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-schemas]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "sequences": {
+          "claimed": false,
+          "evidence": "bigquery has no sequence object (aida.discovery_selection._NO_SEQUENCE_KIND)",
+          "probe": "engine fact: the engine has no such object",
+          "reason_code": null,
+          "status": "NOT_APPLICABLE",
+          "tests": [],
+          "tier": null
+        },
+        "triggers": {
+          "claimed": false,
+          "evidence": "bigquery has no trigger object (aida.discovery_selection._NO_TRIGGER_KIND)",
+          "probe": "engine fact: the engine has no such object",
+          "reason_code": null,
+          "status": "NOT_APPLICABLE",
+          "tests": [],
+          "tier": null
+        },
+        "value_range_profiling": {
+          "claimed": false,
+          "evidence": "profile_column_values() fails closed with ConnectorValueProfilingUnsupported",
+          "probe": "profile_column_values() is called to see whether the connector returns ranges and values",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[bigquery-value_range_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "views": {
+          "claimed": true,
+          "evidence": "passed: test_bigquery_discover_round_trips_a_view_definition",
+          "probe": "discover() returns a view's definition text",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_bigquery.py::test_bigquery_discover_round_trips_a_view_definition"
+          ],
+          "tier": "FIXTURE"
+        }
+      }
+    },
+    "databricks": {
+      "claimed": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": false,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": false,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": false,
+        "triggers": false,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "derived": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": false,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": false,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": false,
+        "triggers": false,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "environment": {},
+      "fingerprint": {
+        "digest": "dc6772f5ab447e5e7a2172b68d316bb40128d83113ebf599cf9e0b960ad33883",
+        "files": {
+          "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
+          "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
+          "aida/connectors/databricks.py": "a8283b24d7fec9e78139731a121d2472fc873c8228ffeb177f6c667e8c338521",
+          "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
+          "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
+          "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
+        }
+      },
+      "flags": {
+        "approximate_statistics": {
+          "claimed": true,
+          "evidence": "passed: test_databricks_profile_table_computes_bounded_stats",
+          "probe": "profile_table() through a cursor double returns bounded counts and approximate distincts",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_databricks.py::test_databricks_profile_table_computes_bounded_stats"
+          ],
+          "tier": "FIXTURE"
+        },
+        "catalogs": {
+          "claimed": true,
+          "evidence": "passed: test_databricks_discover_assembles_catalog_with_constraints",
+          "probe": "discover() returns the configured catalog with its comment",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_databricks.py::test_databricks_discover_assembles_catalog_with_constraints"
+          ],
+          "tier": "FIXTURE"
+        },
+        "constraints": {
+          "claimed": true,
+          "evidence": "passed: test_databricks_discover_assembles_catalog_with_constraints",
+          "probe": "discover() returns PRIMARY KEY and FOREIGN KEY constraints from information_schema rows",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_databricks.py::test_databricks_discover_assembles_catalog_with_constraints"
+          ],
+          "tier": "FIXTURE"
+        },
+        "delegated_identity": {
+          "claimed": false,
+          "evidence": "not claimed; databricks authenticates with the DSN credential alone, so there is no delegated path for a double to exercise",
+          "probe": "not probed: nothing a test double can exercise",
+          "reason_code": "NOT_EXERCISED",
+          "status": "NOT_CERTIFIED",
+          "tests": [],
+          "tier": null
+        },
+        "distribution_entropy_profiling": {
+          "claimed": false,
+          "evidence": "frequency_entropy_bits is None and the facet status is UNSUPPORTED/NOT_IMPLEMENTED",
+          "probe": "profile_table() is asked for a column's entropy through the driver double",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[databricks-distribution_entropy_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "explain": {
+          "claimed": true,
+          "evidence": "passed: test_databricks_estimate_read_query_uses_explain_cost",
+          "probe": "estimate_read_query() runs EXPLAIN COST through a cursor double and parses its statistics",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_databricks.py::test_databricks_estimate_read_query_uses_explain_cost"
+          ],
+          "tier": "FIXTURE"
+        },
+        "grants": {
+          "claimed": false,
+          "evidence": "discover() returned no grant for any of 4 schemas: the grant axis is not implemented (Unity Catalog's privilege model is not the SQL grant model)",
+          "probe": "discover() is asked for grants across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[databricks-grants]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "indexes": {
+          "claimed": false,
+          "evidence": "discover() returned no index for any of 7 tables: no index read exists",
+          "probe": "discover() is asked for indexes across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[databricks-indexes]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "object_comments": {
+          "claimed": true,
+          "evidence": "passed: test_databricks_discover_assembles_catalog_with_constraints",
+          "probe": "discover() returns catalog, schema, table and column comments",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_databricks.py::test_databricks_discover_assembles_catalog_with_constraints"
+          ],
+          "tier": "FIXTURE"
+        },
+        "partitions": {
+          "claimed": false,
+          "evidence": "discover() returned no partition for any of 7 tables: no partition read",
+          "probe": "discover() is asked for partitions across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[databricks-partitions]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "query_history": {
+          "claimed": false,
+          "evidence": "get_query_history() fails closed with ConnectorQueryHistoryUnsupported",
+          "probe": "get_query_history() is called to see whether the connector reads warehouse history",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[databricks-query_history]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "routines": {
+          "claimed": true,
+          "evidence": "passed: test_a_databricks_routine_round_trips_with_its_parameters",
+          "probe": "discover() returns a routine with its body and parameters",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_triggers_and_sequences.py::test_a_databricks_routine_round_trips_with_its_parameters"
+          ],
+          "tier": "FIXTURE"
+        },
+        "schemas": {
+          "claimed": true,
+          "evidence": "passed: test_databricks_discover_assembles_catalog_with_constraints",
+          "probe": "discover() returns the schema with its tables",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_databricks.py::test_databricks_discover_assembles_catalog_with_constraints"
+          ],
+          "tier": "FIXTURE"
+        },
+        "sequences": {
+          "claimed": false,
+          "evidence": "databricks has no sequence object (aida.discovery_selection._NO_SEQUENCE_KIND)",
+          "probe": "engine fact: the engine has no such object",
+          "reason_code": null,
+          "status": "NOT_APPLICABLE",
+          "tests": [],
+          "tier": null
+        },
+        "triggers": {
+          "claimed": false,
+          "evidence": "databricks has no trigger object (aida.discovery_selection._NO_TRIGGER_KIND)",
+          "probe": "engine fact: the engine has no such object",
+          "reason_code": null,
+          "status": "NOT_APPLICABLE",
+          "tests": [],
+          "tier": null
+        },
+        "value_range_profiling": {
+          "claimed": false,
+          "evidence": "profile_column_values() fails closed with ConnectorValueProfilingUnsupported",
+          "probe": "profile_column_values() is called to see whether the connector returns ranges and values",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[databricks-value_range_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "views": {
+          "claimed": true,
+          "evidence": "passed: test_a_databricks_view_definition_round_trips",
+          "probe": "discover() returns a view's definition text from information_schema.views",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_triggers_and_sequences.py::test_a_databricks_view_definition_round_trips"
+          ],
+          "tier": "FIXTURE"
+        }
+      }
+    },
+    "oracle": {
+      "claimed": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": false,
+        "grants": true,
+        "indexes": true,
+        "object_comments": true,
+        "partitions": true,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": true,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "derived": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": false,
+        "grants": true,
+        "indexes": true,
+        "object_comments": true,
+        "partitions": true,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": true,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "environment": {},
+      "fingerprint": {
+        "digest": "d350b5a01f5bd60fbb5690f1cfb8bb5d3d8188bc428e9e15907aa35e9e132a98",
+        "files": {
+          "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
+          "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
+          "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
+          "aida/connectors/oracle.py": "b8e5abddb135ccd204eb545a0f1833b93be6c4b4ead73aea8c090b4d46be01b2",
+          "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
+          "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
+        }
+      },
+      "flags": {
+        "approximate_statistics": {
+          "claimed": true,
+          "evidence": "10 null, 990 non-null, 900 distinct read back from the aggregate; the statement sent uses COUNT(DISTINCT",
+          "probe": "profile_table() through the driver double returns null, non-null and distinct counts",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-approximate_statistics]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "catalogs": {
+          "claimed": true,
+          "evidence": "discover() returned one catalog, named for the database",
+          "probe": "discover() returns the database as its catalog",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-catalogs]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "constraints": {
+          "claimed": true,
+          "evidence": "FACT_ORDERS: PRIMARY_KEY(ID) and FOREIGN_KEY(ID) -> DIM_CUSTOMER(ID)",
+          "probe": "discover() returns PRIMARY KEY and FOREIGN KEY constraints",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-constraints]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "delegated_identity": {
+          "claimed": false,
+          "evidence": "not claimed; oracle authenticates with the DSN credential alone, so there is no delegated path for a double to exercise",
+          "probe": "not probed: nothing a test double can exercise",
+          "reason_code": "NOT_EXERCISED",
+          "status": "NOT_CERTIFIED",
+          "tests": [],
+          "tier": null
+        },
+        "distribution_entropy_profiling": {
+          "claimed": false,
+          "evidence": "frequency_entropy_bits is None and the facet status is UNSUPPORTED/NOT_IMPLEMENTED",
+          "probe": "profile_table() is asked for a column's entropy through the driver double",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-distribution_entropy_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "explain": {
+          "claimed": false,
+          "evidence": "EXPLAIN PLAN cost 123, rows 4500 read back; the PLAN_TABLE cleanup and rollback ran. Code path only: whether a least-privilege role may write PLAN_TABLE is unproven (R11-B5)",
+          "probe": "estimate_read_query() runs EXPLAIN PLAN through a driver double and returns its cost",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-explain]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "grants": {
+          "claimed": true,
+          "evidence": "SELECT on FACT_ORDERS and EXECUTE on RISK_PKG, both to REPORTING, came back",
+          "probe": "discover() returns object privileges with grantee and privilege",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-grants]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "indexes": {
+          "claimed": true,
+          "evidence": "FACT_ORDERS: IX_FACT_ORDERS on (ID), unique and primary",
+          "probe": "discover() returns the index rows with their columns and flags",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-indexes]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "object_comments": {
+          "claimed": true,
+          "evidence": "FACT_ORDERS table comment and its first column's comment came back",
+          "probe": "discover() returns table and column comments",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-object_comments]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "partitions": {
+          "claimed": true,
+          "evidence": "FACT_ORDERS: partition P2026, RANGE, key (ID); bounds are deliberately not read",
+          "probe": "discover() returns partition name, type and key columns",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-partitions]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "query_history": {
+          "claimed": false,
+          "evidence": "get_query_history() fails closed with ConnectorQueryHistoryUnsupported",
+          "probe": "get_query_history() is called to see whether the connector reads warehouse history",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-query_history]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "routines": {
+          "claimed": true,
+          "evidence": "PROC_LOAD, FN_TAX, package RISK_PKG and its members SCORE and RECALC came back",
+          "probe": "discover() returns procedures, functions and package members",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-routines]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "schemas": {
+          "claimed": true,
+          "evidence": "SALES, SALES_TMP, HR and FIN came back; SALES holds FACT_ORDERS and DIM_CUSTOMER",
+          "probe": "discover() returns each owner as a schema, with its objects",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-schemas]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "sequences": {
+          "claimed": true,
+          "evidence": "SEQ_ORDERS increment 1, cache 20; no statement read LAST_NUMBER",
+          "probe": "discover() returns a sequence declaration and never its position",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-sequences]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "triggers": {
+          "claimed": true,
+          "evidence": "TRG_ORDERS_AUDIT on FACT_ORDERS: AFTER ROW INSERT, body present",
+          "probe": "discover() returns a trigger with table, timing and event",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-triggers]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "value_range_profiling": {
+          "claimed": false,
+          "evidence": "profile_column_values() fails closed with ConnectorValueProfilingUnsupported",
+          "probe": "profile_column_values() is called to see whether the connector returns ranges and values",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-value_range_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "views": {
+          "claimed": true,
+          "evidence": "V_REVENUE definition came back; the materialized view came back flagged",
+          "probe": "discover() returns view and materialized-view definition text",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[oracle-views]"
+          ],
+          "tier": "FIXTURE"
+        }
+      }
+    },
+    "postgres": {
+      "claimed": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": true,
+        "explain": true,
+        "grants": true,
+        "indexes": true,
+        "object_comments": true,
+        "partitions": true,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": true,
+        "value_range_profiling": true,
+        "views": true
+      },
+      "derived": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": true,
+        "explain": true,
+        "grants": true,
+        "indexes": true,
+        "object_comments": true,
+        "partitions": true,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": true,
+        "value_range_profiling": true,
+        "views": true
+      },
+      "environment": {
+        "driver": "asyncpg 0.31.0",
+        "server_version": "PostgreSQL 17.11"
+      },
+      "fingerprint": {
+        "digest": "68d471a76be6fdb70e90e52b08a3a1c506a095bcdb6d94c60b8ad0b886e3d2c0",
+        "files": {
+          "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
+          "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
+          "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
+          "aida/connectors/postgres.py": "e4ef3835ab336ea5492a1b109ef0f1e316fdcc22c0ebba75999ff34b3fa06358",
+          "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
+          "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
+        }
+      },
+      "flags": {
+        "approximate_statistics": {
+          "claimed": true,
+          "evidence": "segment: 4 distinct, 0 null, 16 non-null over a 16-row scan reported FULL; a 5-row bound sampled 5 and reported SAMPLE",
+          "probe": "profile_table() returns bounded value-free counts matching the fixture, and the scope",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-approximate_statistics]"
+          ],
+          "tier": "LIVE"
+        },
+        "catalogs": {
+          "claimed": true,
+          "evidence": "discover() returned 1 catalog holding 3 schemas",
+          "probe": "discover() returns the connected database as its catalog",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-catalogs]"
+          ],
+          "tier": "LIVE"
+        },
+        "constraints": {
+          "claimed": true,
+          "evidence": "customer: PRIMARY_KEY(customer_id) and UNIQUE(email); order_fact: FOREIGN_KEY(customer_id) -> customer(customer_id)",
+          "probe": "discover() returns the PRIMARY KEY, UNIQUE and FOREIGN KEY constraints the fixture made",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-constraints]"
+          ],
+          "tier": "LIVE"
+        },
+        "delegated_identity": {
+          "claimed": false,
+          "evidence": "the session runs as the DSN's own login; the connector takes no per-caller identity",
+          "probe": "the connector runs as some identity; probe whether it is ever anyone but its own login",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-delegated_identity]"
+          ],
+          "tier": "LIVE"
+        },
+        "distribution_entropy_profiling": {
+          "claimed": true,
+          "evidence": "segment entropy 1.7500 bits, analytic value 1.75",
+          "probe": "profile_table() returns the Shannon entropy of customer.segment, matching the analytic",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-distribution_entropy_profiling]"
+          ],
+          "tier": "LIVE"
+        },
+        "explain": {
+          "claimed": true,
+          "evidence": "EXPLAIN_COST returned plan cost 8.17, estimated rows 1",
+          "probe": "estimate_read_query() returns a real plan cost for a statement, without running it",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-explain]"
+          ],
+          "tier": "LIVE"
+        },
+        "grants": {
+          "claimed": true,
+          "evidence": "SELECT on customer granted to PUBLIC came back",
+          "probe": "discover() returns the SELECT grant to PUBLIC that the fixture made on customer",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-grants]"
+          ],
+          "tier": "LIVE"
+        },
+        "indexes": {
+          "claimed": true,
+          "evidence": "order_fact_customer_idx on (customer_id) came back",
+          "probe": "discover() returns the secondary index the fixture created",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-indexes]"
+          ],
+          "tier": "LIVE"
+        },
+        "object_comments": {
+          "claimed": true,
+          "evidence": "schema, table customer and column customer.segment each returned their comment",
+          "probe": "discover() returns the schema, table and column comments the fixture attached",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-object_comments]"
+          ],
+          "tier": "LIVE"
+        },
+        "partitions": {
+          "claimed": true,
+          "evidence": "order_fact: 2 RANGE partitions keyed on order_date",
+          "probe": "discover() returns the range partitions of order_fact",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-partitions]"
+          ],
+          "tier": "LIVE"
+        },
+        "query_history": {
+          "claimed": false,
+          "evidence": "get_query_history() fails closed with ConnectorQueryHistoryUnsupported",
+          "probe": "get_query_history() is called on the live connector to see whether it reads history",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-query_history]"
+          ],
+          "tier": "LIVE"
+        },
+        "routines": {
+          "claimed": true,
+          "evidence": "order_total FUNCTION (1 parameter) and touch_customer PROCEDURE, both with body text",
+          "probe": "discover() returns a function and a procedure with bodies and parameters",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-routines]"
+          ],
+          "tier": "LIVE"
+        },
+        "schemas": {
+          "claimed": true,
+          "evidence": "schema c14_probe came back with 6 objects, e.g. customer, order_fact",
+          "probe": "discover() returns the fixture schema, with its tables, inside it",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-schemas]"
+          ],
+          "tier": "LIVE"
+        },
+        "sequences": {
+          "claimed": true,
+          "evidence": "invoice_seq declared start 100, increment 5",
+          "probe": "discover() returns the sequence's declaration, never its position",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-sequences]"
+          ],
+          "tier": "LIVE"
+        },
+        "triggers": {
+          "claimed": true,
+          "evidence": "customer_audit on customer: BEFORE UPDATE",
+          "probe": "discover() returns the trigger the fixture created, with table and event",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-triggers]"
+          ],
+          "tier": "LIVE"
+        },
+        "value_range_profiling": {
+          "claimed": true,
+          "evidence": "segment: min alpha, max gamma, top values alpha x8 then beta x4",
+          "probe": "profile_column_values() returns min, max and top values that match the fixture",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-value_range_profiling]"
+          ],
+          "tier": "LIVE"
+        },
+        "views": {
+          "claimed": true,
+          "evidence": "customer_orders: definition_sql present and reads order_fact; customer_orders_mv came back flagged is_materialized",
+          "probe": "discover() returns the view's definition text, not just its name",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[postgres-views]"
+          ],
+          "tier": "LIVE"
+        }
+      }
+    },
+    "snowflake": {
+      "claimed": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": true,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": true,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": true,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": false,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "derived": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": true,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": true,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": true,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": false,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "environment": {},
+      "fingerprint": {
+        "digest": "407352aa64a7f70a238fc0435b2416ef066deeacc42a7e4b532938b62df49989",
+        "files": {
+          "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
+          "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
+          "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
+          "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
+          "aida/connectors/snowflake.py": "cb0c04b13d5de11f483057c81d164e310e76fb65f9165e7d6539fc6a31a2774c",
+          "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
+        }
+      },
+      "flags": {
+        "approximate_statistics": {
+          "claimed": true,
+          "evidence": "10 null, 990 non-null, 900 distinct read back from the aggregate; the statement sent uses APPROX_COUNT_DISTINCT",
+          "probe": "profile_table() through the driver double returns null, non-null and distinct counts",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-approximate_statistics]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "catalogs": {
+          "claimed": true,
+          "evidence": "passed: test_snowflake_discover_assembly",
+          "probe": "discover() returns the database as its catalog",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_snowflake_discover_assembly"
+          ],
+          "tier": "FIXTURE"
+        },
+        "constraints": {
+          "claimed": true,
+          "evidence": "passed: test_snowflake_discover_assembly",
+          "probe": "discover() returns PRIMARY KEY and FOREIGN KEY constraints",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_snowflake_discover_assembly"
+          ],
+          "tier": "FIXTURE"
+        },
+        "delegated_identity": {
+          "claimed": true,
+          "evidence": "authenticator=oauth and the token reached connect(), and no password was sent. Pass-through only: the URI form of the DSN drops `token`, and nothing here supplies a per-user token",
+          "probe": "a DSN carrying authenticator and token reaches the driver connect() as such, with no password",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-delegated_identity]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "distribution_entropy_profiling": {
+          "claimed": false,
+          "evidence": "frequency_entropy_bits is None and the facet status is UNSUPPORTED/NOT_IMPLEMENTED",
+          "probe": "profile_table() is asked for a column's entropy through the driver double",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-distribution_entropy_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "explain": {
+          "claimed": true,
+          "evidence": "EXPLAIN USING JSON sent; plan parsed to 50000 rows, 10 MiB, 85% partition pruning. An unparseable plan falls back to score 1.0, the cheapest, which this does not exercise",
+          "probe": "estimate_read_query() runs EXPLAIN USING JSON through a driver double and parses the plan",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-explain]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "grants": {
+          "claimed": true,
+          "evidence": "passed: test_schema_grants_land_on_the_schema",
+          "probe": "discover() returns schema-level grants",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_schema_grants_land_on_the_schema"
+          ],
+          "tier": "FIXTURE"
+        },
+        "indexes": {
+          "claimed": false,
+          "evidence": "discover() returned no index for any of 8 tables: no index read exists",
+          "probe": "discover() is asked for indexes across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-indexes]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "object_comments": {
+          "claimed": true,
+          "evidence": "passed: test_comments_land_at_every_level_snowflake_exposes",
+          "probe": "discover() returns catalog, schema, table and column comments",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_comments_land_at_every_level_snowflake_exposes"
+          ],
+          "tier": "FIXTURE"
+        },
+        "partitions": {
+          "claimed": true,
+          "evidence": "discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions",
+          "probe": "discover() is asked for partitions across the whole estate",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-partitions]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "query_history": {
+          "claimed": false,
+          "evidence": "passed: test_snowflake_get_query_history_maps_rows, test_snowflake_get_query_history_drops_incomplete_rows",
+          "probe": "get_query_history() through a cursor double maps history rows to entries",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_snowflake_get_query_history_maps_rows",
+            "tests/test_connectors_snowflake.py::test_snowflake_get_query_history_drops_incomplete_rows"
+          ],
+          "tier": "FIXTURE"
+        },
+        "routines": {
+          "claimed": true,
+          "evidence": "passed: test_a_routine_round_trips_with_parameters_parsed_from_its_signature",
+          "probe": "discover() returns a routine with its body, return type and parsed parameters",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_a_routine_round_trips_with_parameters_parsed_from_its_signature"
+          ],
+          "tier": "FIXTURE"
+        },
+        "schemas": {
+          "claimed": true,
+          "evidence": "passed: test_snowflake_discover_assembly",
+          "probe": "discover() returns the schema with its tables and columns",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_snowflake_discover_assembly"
+          ],
+          "tier": "FIXTURE"
+        },
+        "sequences": {
+          "claimed": true,
+          "evidence": "passed: test_a_snowflake_sequence_is_its_declaration_and_never_its_position",
+          "probe": "discover() returns a sequence's declaration and never its position",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_a_snowflake_sequence_is_its_declaration_and_never_its_position"
+          ],
+          "tier": "FIXTURE"
+        },
+        "triggers": {
+          "claimed": false,
+          "evidence": "snowflake has no trigger object (aida.discovery_selection._NO_TRIGGER_KIND)",
+          "probe": "engine fact: the engine has no such object",
+          "reason_code": null,
+          "status": "NOT_APPLICABLE",
+          "tests": [],
+          "tier": null
+        },
+        "value_range_profiling": {
+          "claimed": false,
+          "evidence": "profile_column_values() fails closed with ConnectorValueProfilingUnsupported",
+          "probe": "profile_column_values() is called to see whether the connector returns ranges and values",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_fixture_capability_probes.py::test_fixture_probe[snowflake-value_range_profiling]"
+          ],
+          "tier": "FIXTURE"
+        },
+        "views": {
+          "claimed": true,
+          "evidence": "passed: test_snowflake_discover_round_trips_a_view_definition",
+          "probe": "discover() returns a view's definition text",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_connectors_snowflake.py::test_snowflake_discover_round_trips_a_view_definition"
+          ],
+          "tier": "FIXTURE"
+        }
+      }
+    },
+    "sqlserver": {
+      "claimed": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": true,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": false,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": true,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "derived": {
+        "approximate_statistics": true,
+        "catalogs": true,
+        "constraints": true,
+        "delegated_identity": false,
+        "distribution_entropy_profiling": false,
+        "explain": true,
+        "grants": true,
+        "indexes": false,
+        "object_comments": true,
+        "partitions": false,
+        "query_history": false,
+        "routines": true,
+        "schemas": true,
+        "sequences": true,
+        "triggers": true,
+        "value_range_profiling": false,
+        "views": true
+      },
+      "environment": {
+        "driver": "python-tds 1.17.1",
+        "server_version": "SQL Server 16.0.4265.3 (Developer Edition (64-bit))"
+      },
+      "fingerprint": {
+        "digest": "74661199e7b1f5831e5b4e7be34c52001cf624a044f4a4d300d907c01c24d27d",
+        "files": {
+          "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
+          "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
+          "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
+          "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
+          "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa",
+          "aida/connectors/sqlserver.py": "794f8148a2dee1411f7f9d8d6cde6cefb1e83347f0e960022b0d0f148fe0e667"
+        }
+      },
+      "flags": {
+        "approximate_statistics": {
+          "claimed": true,
+          "evidence": "segment: 4 distinct, 0 null, 16 non-null over a 16-row scan reported FULL; a 5-row bound sampled 5 and reported SAMPLE",
+          "probe": "profile_table() returns bounded value-free counts matching the fixture, and the scope",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-approximate_statistics]"
+          ],
+          "tier": "LIVE"
+        },
+        "catalogs": {
+          "claimed": true,
+          "evidence": "discover() returned 1 catalog holding 1 schemas",
+          "probe": "discover() returns the connected database as its catalog",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-catalogs]"
+          ],
+          "tier": "LIVE"
+        },
+        "constraints": {
+          "claimed": true,
+          "evidence": "customer: PRIMARY_KEY(customer_id) and UNIQUE(email); order_fact: FOREIGN_KEY(customer_id) -> customer(customer_id)",
+          "probe": "discover() returns the PRIMARY KEY, UNIQUE and FOREIGN KEY constraints the fixture made",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-constraints]"
+          ],
+          "tier": "LIVE"
+        },
+        "delegated_identity": {
+          "claimed": false,
+          "evidence": "the session runs as the DSN's own login; the connector takes no per-caller identity",
+          "probe": "the connector runs as some identity; probe whether it is ever anyone but its own login",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-delegated_identity]"
+          ],
+          "tier": "LIVE"
+        },
+        "distribution_entropy_profiling": {
+          "claimed": false,
+          "evidence": "frequency_entropy_bits is None and the facet status is UNSUPPORTED/NOT_IMPLEMENTED",
+          "probe": "profile_table() is asked for the entropy of customer.segment",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-distribution_entropy_profiling]"
+          ],
+          "tier": "LIVE"
+        },
+        "explain": {
+          "claimed": true,
+          "evidence": "SHOWPLAN_XML returned plan cost 0.003283, estimated rows 1",
+          "probe": "estimate_read_query() returns a real plan cost for a statement, without running it",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-explain]"
+          ],
+          "tier": "LIVE"
+        },
+        "grants": {
+          "claimed": true,
+          "evidence": "SELECT on customer granted to the connector's own login came back",
+          "probe": "discover() returns the object-level SELECT grant the fixture gave the connector's login",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-grants]"
+          ],
+          "tier": "LIVE"
+        },
+        "indexes": {
+          "claimed": false,
+          "evidence": "order_fact has ix_order_customer, and discover() returned no index for it",
+          "probe": "discover() is asked for the index on order_fact (ix_order_customer) the fixture created",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-indexes]"
+          ],
+          "tier": "LIVE"
+        },
+        "object_comments": {
+          "claimed": true,
+          "evidence": "schema, table customer and column customer.segment each returned their comment",
+          "probe": "discover() returns the schema, table and column comments the fixture attached",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-object_comments]"
+          ],
+          "tier": "LIVE"
+        },
+        "partitions": {
+          "claimed": false,
+          "evidence": "part_t is partitioned into 3 ranges, and discover() returned no partition",
+          "probe": "discover() is asked for the partitions of c14_probe.part_t, which the fixture partitioned",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-partitions]"
+          ],
+          "tier": "LIVE"
+        },
+        "query_history": {
+          "claimed": false,
+          "evidence": "get_query_history() fails closed with ConnectorQueryHistoryUnsupported",
+          "probe": "get_query_history() is called on the live connector to see whether it reads history",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-query_history]"
+          ],
+          "tier": "LIVE"
+        },
+        "routines": {
+          "claimed": true,
+          "evidence": "order_total FUNCTION (1 parameter) and touch_customer PROCEDURE, both with body text",
+          "probe": "discover() returns a function and a procedure with bodies and parameters",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-routines]"
+          ],
+          "tier": "LIVE"
+        },
+        "schemas": {
+          "claimed": true,
+          "evidence": "schema c14_probe came back with 4 objects, e.g. customer, order_fact",
+          "probe": "discover() returns the fixture schema, with its tables, inside it",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-schemas]"
+          ],
+          "tier": "LIVE"
+        },
+        "sequences": {
+          "claimed": true,
+          "evidence": "invoice_seq declared start 100, increment 5",
+          "probe": "discover() returns the sequence's declaration, never its position",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-sequences]"
+          ],
+          "tier": "LIVE"
+        },
+        "triggers": {
+          "claimed": true,
+          "evidence": "customer_audit on customer: AFTER UPDATE",
+          "probe": "discover() returns the trigger the fixture created, with table and event",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-triggers]"
+          ],
+          "tier": "LIVE"
+        },
+        "value_range_profiling": {
+          "claimed": false,
+          "evidence": "profile_column_values() fails closed with ConnectorValueProfilingUnsupported",
+          "probe": "profile_column_values() is called to see if the connector returns ranges and top values",
+          "reason_code": "NOT_IMPLEMENTED",
+          "status": "NOT_CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-value_range_profiling]"
+          ],
+          "tier": "LIVE"
+        },
+        "views": {
+          "claimed": true,
+          "evidence": "customer_orders: definition_sql present and reads order_fact",
+          "probe": "discover() returns the view's definition text, not just its name",
+          "reason_code": null,
+          "status": "CERTIFIED",
+          "tests": [
+            "tests/test_c14_live_capability_probes.py::test_live_probe[sqlserver-views]"
+          ],
+          "tier": "LIVE"
+        }
+      }
+    }
+  },
+  "flags": [
+    "catalogs",
+    "schemas",
+    "constraints",
+    "indexes",
+    "partitions",
+    "explain",
+    "query_history",
+    "delegated_identity",
+    "approximate_statistics",
+    "views",
+    "routines",
+    "object_comments",
+    "grants",
+    "triggers",
+    "sequences",
+    "value_range_profiling",
+    "distribution_entropy_profiling"
+  ],
+  "schema_version": 1,
+  "suite": "connector-capability-certification-v1",
+  "uncertified_claims": [
+    {
+      "connector_type": "snowflake",
+      "evidence": "discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions",
+      "flag": "partitions",
+      "reason_code": "NOT_IMPLEMENTED",
+      "what_failed": "discover() is asked for partitions across the whole estate -- the probe ran and the connector does not provide this behaviour"
+    }
+  ]
+}
