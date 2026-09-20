@@ -34,6 +34,9 @@ const KIND_WORDS: Record<string, string> = {
   SOURCE_READS_REFUSED: "Reads refused by the source",
   SOURCE_CHANGE_HOLDS: "Tables held after a source change",
   CHANGE_SIGNALS_PENDING: "Source changes not yet processed",
+  // R11-FP01: counted per trigger -- a reviewed trigger edge that classification propagation
+  // could not follow to a column. Without a label it would print as a code.
+  TRIGGER_PROPAGATION_GAPS: "Triggers classification cannot follow",
 };
 
 const RESOLUTION_WORDS: Record<string, string> = {

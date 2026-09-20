@@ -40,7 +40,12 @@ from aida.envelope_models import (
     MetadataTrigger,
     MetadataViewDefinition,
 )
-from aida.footprint_gaps import GAP_DEFINITIONS, grain_uncertain, trigger_awaits_parse
+from aida.footprint_gaps import (
+    GAP_DEFINITIONS,
+    grain_uncertain,
+    trigger_awaits_parse,
+    trigger_propagation_gaps,
+)
 from aida.ingest_screening import CLEAN
 from aida.models import (
     AnalysisRun,
@@ -254,10 +259,16 @@ async def _code_objects(
     return views + routines
 
 
-def _trigger_objects(organization_id: UUID, datasource_id: UUID, *condition: Any) -> Select[Any]:
+def _trigger_objects(
+    organization_id: UUID, datasource_id: UUID, *condition: Any, active_only: bool = True
+) -> Select[Any]:
     """Triggers of this source matching `condition`, named by schema, name and the
     table they fire on -- a trigger name is scoped to its table on PostgreSQL, so
-    two tables in one schema may each own an `audit_trg`."""
+    two tables in one schema may each own an `audit_trg`.
+
+    `active_only` is the default a catalog list wants. A propagation gap is not one of those:
+    propagation follows a since-dropped trigger's reviewed edges, so its list must name it too.
+    """
     return (
         select(
             MetadataTrigger.id,
@@ -272,7 +283,7 @@ def _trigger_objects(organization_id: UUID, datasource_id: UUID, *condition: Any
         .where(
             MetadataTrigger.organization_id == organization_id,
             MetadataTrigger.datasource_id == datasource_id,
-            MetadataTrigger.status == "ACTIVE",
+            *([MetadataTrigger.status == "ACTIVE"] if active_only else []),
             *condition,
         )
     )
@@ -425,6 +436,33 @@ def _reason_code(reason: str | None) -> str | None:
     if reason is None or not reason.endswith(")") or "(" not in reason:
         return None
     return reason.rsplit("(", 1)[1][:-1] or None
+
+
+async def _trigger_propagation_gap_objects(
+    session: AsyncSession, organization_id: UUID, datasource_id: UUID
+) -> list[FootprintGapObjectRead]:
+    """R11-FP01: the triggers `footprint_gaps` counts as TRIGGER_PROPAGATION_GAPS, each with
+    every reason propagation gives for it, as the stable codes and nothing else.
+
+    Read through `trigger_propagation_gaps`, the function the count reads, so the list and the
+    count are the same triggers by construction. One entry per trigger -- the screen keys a row by
+    object -- with its reasons joined in sorted order (`COLUMN_NOT_IN_CATALOG,TABLE_STAR`).
+    """
+    reasons = await trigger_propagation_gaps(
+        session, organization_id=organization_id, datasource_id=datasource_id
+    )
+    if not reasons:
+        return []
+    return await _named_triggers(
+        session,
+        _trigger_objects(
+            organization_id,
+            datasource_id,
+            MetadataTrigger.id.in_(list(reasons)[: MAX_OBJECTS + 1]),
+            active_only=False,
+        ),
+        {trigger_id: ",".join(found) for trigger_id, found in reasons.items()},
+    )
 
 
 async def _awaiting_review(
@@ -733,6 +771,8 @@ async def footprint_gap_objects(
         )
     elif kind == "LINEAGE_AWAITING_REVIEW":
         objects = await _awaiting_review(session, organization_id, datasource_id)
+    elif kind == "TRIGGER_PROPAGATION_GAPS":
+        objects = await _trigger_propagation_gap_objects(session, organization_id, datasource_id)
     elif kind == "SOURCE_CHANGE_HOLDS":
         objects = await _held_tables(session, organization_id, datasource_id)
     elif kind == "CHANGE_SIGNALS_PENDING":

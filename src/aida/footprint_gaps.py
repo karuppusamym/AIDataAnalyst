@@ -19,6 +19,15 @@ never a new orchestrator and never a retry loop -- and the backlog figures are F
 metrics. **Authorized dimensions:** a datasource the caller may not read is left out entirely,
 not counted, so the totals never disclose that it has gaps. Value-free: counts and codes only.
 
+**Classification propagation (R11-FP01, 2026-09-20).** A classification travels a reviewed
+trigger edge only when both ends resolve to columns; one that does not is a declared gap in what
+`collect_propagation_inputs` returns, which was logged and returned and counted nowhere -- so a
+register that read clean sat beside a PII column that stopped at an audit trigger.
+`TRIGGER_PROPAGATION_GAPS` counts the triggers behind those gaps, from that collector itself
+(`trigger_propagation_gaps`), so the count and the drill-down cannot drift from what propagation
+reports. The collector runs only for a source that has an ACTIVE trigger edge, so the register
+costs a source without triggers one grouped read and reads exactly as it did.
+
 **Uncertain grain (R11-FP05, 2026-09-18).** A table or view whose row grain the platform cannot
 establish is what makes an answer double-count, and it was the one gap FP05 named that nothing
 counted. `GRAIN_UNCERTAIN` counts it from evidence already held -- declared keys and unique
@@ -45,6 +54,7 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.capability_states import CapabilityState
 from aida.change_signal_models import MetadataChangeSignal
 from aida.change_signal_processing import SOURCE_CHANGE_ANOMALY_TYPE
+from aida.classification_propagation import collect_propagation_inputs
 from aida.config import Settings
 from aida.envelope_models import (
     AVAILABLE,
@@ -124,6 +134,21 @@ GAP_DEFINITIONS: Final[dict[str, tuple[str, str, str]]] = {
         "HUMAN_REVIEW",
         "data steward",
         "Proposed lineage edges nobody has decided. They steer no answer until approved.",
+    ),
+    # R11-FP01: see `trigger_propagation_gaps`.
+    "TRIGGER_PROPAGATION_GAPS": (
+        "EXPLAINED",
+        "none",
+        "Triggers with a reviewed lineage edge that classification propagation could not follow "
+        "to a column: a `SELECT *` copy (TABLE_STAR), a firing row the parser could not bind to "
+        "a table (SOURCE_UNRESOLVED), a column the catalog does not hold "
+        "(COLUMN_NOT_IN_CATALOG) or two that differ only by case (COLUMN_AMBIGUOUS). The "
+        "classification stops at the trigger rather than being stamped on every column of the "
+        "table it writes, so those columns are not classified from what the trigger copies into "
+        "them; a steward can assert it on them directly. Counted per trigger, however many of "
+        "its edges are gapped, and including a trigger the source has since dropped, because "
+        "propagation still follows what it wrote. Read from the reviewed edges each time, so a "
+        "rescan that holds the column, or a trigger that names its columns, closes it.",
     ),
     "SOURCE_CHANGE_HOLDS": (
         "HUMAN_REVIEW",
@@ -325,6 +350,64 @@ def trigger_awaits_parse() -> ColumnElement[bool]:
             TriggerParseCoverage.trigger_id == MetadataTrigger.id,
         ),
     )
+
+
+#: The unified graph's `edge_source` literal for a `trigger_lineage_edge` row: what
+#: `collect_propagation_inputs` stamps on a `PropagationGap` it read from a trigger.
+_TRIGGER_EDGE_SOURCE: Final = "TRIGGER_DEFINITION"
+
+
+async def trigger_propagation_gaps(
+    session: AsyncSession, *, organization_id: UUID, datasource_id: UUID
+) -> dict[UUID, tuple[str, ...]]:
+    """`trigger id -> every reason` for the triggers with a reviewed edge classification
+    propagation could not follow to a column, for one source.
+
+    Exactly what `collect_propagation_inputs` reports on `gaps` for `TRIGGER_DEFINITION`, and
+    nothing recomputed beside it: the count in the register and the list in
+    `footprint_gap_detail` both call this, so neither can drift from what propagation returns.
+    One entry per trigger however many of its edges are gapped, its reasons sorted and distinct.
+    The trigger's own status is not asked, as propagation does not ask it: the rows a
+    since-dropped trigger copied are still in the table it wrote. A routine's gap comes back from
+    the same collector and is not a trigger's, so it is left out by its edge source.
+    """
+    inputs = await collect_propagation_inputs(
+        session, organization_id=organization_id, datasource_id=datasource_id
+    )
+    reasons: dict[UUID, set[str]] = {}
+    for gap in inputs.gaps:
+        if gap.edge_source == _TRIGGER_EDGE_SOURCE:
+            reasons.setdefault(UUID(gap.owner_ref), set()).add(gap.reason)
+    return {trigger_id: tuple(sorted(found)) for trigger_id, found in reasons.items()}
+
+
+async def _trigger_propagation_gap_counts(
+    session: AsyncSession, organization_id: UUID, ids: Iterable[UUID]
+) -> dict[UUID, int]:
+    """Triggers with a propagation gap, per source -- for the sources that could have one.
+
+    A trigger gap is read out of an ACTIVE trigger edge, so a source with none has none, and is
+    not swept: the register is read on every Operations page load and by the metrics pass.
+    """
+    with_edges = set(
+        await session.scalars(
+            select(TriggerLineageEdge.datasource_id)
+            .where(
+                TriggerLineageEdge.organization_id == organization_id,
+                TriggerLineageEdge.datasource_id.in_(list(ids)),
+                TriggerLineageEdge.review_status == "ACTIVE",
+            )
+            .distinct()
+        )
+    )
+    counts: dict[UUID, int] = {}
+    for datasource_id in sorted(with_edges, key=str):
+        owners = await trigger_propagation_gaps(
+            session, organization_id=organization_id, datasource_id=datasource_id
+        )
+        if owners:
+            counts[datasource_id] = len(owners)
+    return counts
 
 
 def _code_counts(
@@ -544,6 +627,10 @@ async def footprint_gaps(
                 )
                 .group_by(TriggerLineageEdge.datasource_id),
             ),
+        )
+        # R11-FP01: triggers whose reviewed edges classification could not travel.
+        counts["TRIGGER_PROPAGATION_GAPS"] = await _trigger_propagation_gap_counts(
+            session, organization_id, ids
         )
         # R11-FP05: tables and views whose grain nothing the platform holds states.
         counts["GRAIN_UNCERTAIN"] = await _grouped(

@@ -235,6 +235,35 @@ describe("OperationsScreen against the real operational_api.py", () => {
     expect(panel).not.toHaveTextContent("SOURCE_READS_REFUSED");
   });
 
+  it("names the trigger-propagation gap in words rather than printing its kind code (R11-FP01)", async () => {
+    fetchFootprintGaps.mockResolvedValue({
+      organization_id: ORG,
+      generated_at: "2026-09-20T12:00:00Z",
+      datasources: [
+        {
+          datasource_id: "ds_snowflake_prod",
+          datasource_name: "snowflake_prod",
+          oldest_pending_signal_minutes: null,
+          gaps: [
+            {
+              kind: "TRIGGER_PROPAGATION_GAPS", count: 3, resolution: "EXPLAINED",
+              owner: "none",
+              explanation: "Triggers with a reviewed lineage edge that classification propagation could not follow to a column.",
+            },
+          ],
+        },
+      ],
+      totals: { TRIGGER_PROPAGATION_GAPS: 3 },
+    });
+    const OperationsScreen = await loadScreen();
+    render(<OperationsScreen />);
+    const panel = await screen.findByRole("article", { name: "Gaps in snowflake_prod" });
+
+    expect(panel).toHaveTextContent("Triggers classification cannot follow");
+    // A row headed with the code is a missing label, and reads as an internal leak.
+    expect(panel).not.toHaveTextContent("TRIGGER_PROPAGATION_GAPS");
+  });
+
   it("loads and renders fleet-summary tiles plus the analysis-runs list", async () => {
     const OperationsScreen = await loadScreen();
 
