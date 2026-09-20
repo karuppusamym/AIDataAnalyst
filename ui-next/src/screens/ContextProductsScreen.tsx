@@ -25,6 +25,13 @@ import { CompilerPanel, useCompiler } from "./ContextProductCompiler";
 import { KnowledgeView } from "../components/KnowledgeView";
 import { NO_ROLLOUT, RolloutPanel, useRollout } from "./ContextProductRollout";
 import { CreateDraftPanel, NewVersionPanel } from "./ContextProductDraft";
+import {
+  FreshnessNote,
+  FreshnessPill,
+  canCheckFreshness,
+  useVersionFreshness,
+} from "./ContextProductFreshness";
+import type { VersionFreshness } from "./ContextProductFreshness";
 import "./ContextProductsScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -51,6 +58,9 @@ import "./ContextProductsScreen.css";
                       already-approved references; and, from a row, a new
                       version of that product built from the same pickers
                       (R11-FP12), routines included.
+   A fifth, small one hangs off the row itself: `ContextProductFreshness.tsx`,
+   the on-demand "has anything this version covers moved since it was
+   published?" check and the stale badge it puts on the row (R11-FP12).
 
    What stays here is the registry itself plus the one thing the four share:
    the single message strip. That mirrors the legacy screen's own single
@@ -81,6 +91,8 @@ function ProductRow({
   onAsk,
   onNewVersion,
   newVersionOpen,
+  freshness,
+  onCheckFreshness,
 }: {
   product: ContextProductRead;
   busy: string | null;
@@ -98,6 +110,10 @@ function ProductRow({
   /** R11-FP12: open the new-version panel for this product. */
   onNewVersion: () => void;
   newVersionOpen: boolean;
+  /** R11-FP12: what an on-demand check for changes since publication said about this
+   *  version -- `undefined` until it was asked, which shows nothing (never "fresh"). */
+  freshness: VersionFreshness | undefined;
+  onCheckFreshness: () => void;
 }) {
   const v = product.latest_version;
   const isBusy = busy === v.id;
@@ -106,6 +122,7 @@ function ProductRow({
       <div className="cprow__main">
         <div className="cprow__badges">
           <Pill tone={versionStatusTone(v.status)}>{v.status.toLowerCase().replace(/_/g, " ")}</Pill>
+          <FreshnessPill state={freshness} />
         </div>
         <h3 className="cprow__title">{v.name}</h3>
         <div className="cprow__key">
@@ -125,6 +142,7 @@ function ProductRow({
             <code>{v.fingerprint.slice(0, 12)}</code>
           </div>
         </div>
+        <FreshnessNote state={freshness} version={v.version} />
       </div>
       {/* Which actions exist is decided by the version's real lifecycle
           status, never by a client-side guess: a DRAFT cannot be deprecated
@@ -139,6 +157,19 @@ function ProductRow({
         >
           {knowledgeOpen ? "Knowledge ✓" : "Knowledge"}
         </Button>
+        {/* R11-FP12: has anything this version covers moved since it was published?
+            Asked per row, on request, and only for a version consumers are served:
+            each read is recorded as a consumption of the version (see
+            `fetchContextProductChangesSincePublished`), so nothing probes on load. */}
+        {canCheckFreshness(v.status) ? (
+          <Button
+            onClick={onCheckFreshness}
+            disabled={freshness?.kind === "checking"}
+            title="Read whether a view, routine or approved description this version covers has changed since it was published"
+          >
+            {freshness?.kind === "checking" ? "Checking…" : freshness ? "Check again" : "Check for changes"}
+          </Button>
+        ) : null}
         {/* R11-FP12 (F08): the consumer's own door. A published product was
             something you could roll out, deprecate and compile from here, with
             no way to actually ask a question through it -- so demonstrating one
@@ -209,6 +240,9 @@ export function ContextProductsScreen() {
 
   const lifecycle = useVersionLifecycle(channel, reloadRegistry);
   const compiler = useCompiler(channel);
+  /* R11-FP12: which versions were asked whether what they cover has moved since
+     publication, and the answer. Empty until a person asks; never filled on load. */
+  const freshness = useVersionFreshness(channel);
 
   /* R11-FP12 (F08): Ask is scoped to a DATASOURCE and resolves its product list
      from that datasource's project, so "ask through this product" has to hand it
@@ -337,6 +371,13 @@ export function ContextProductsScreen() {
                     knowledgeOpen={knowledgeProduct?.id === p.id}
                     onNewVersion={() => setVersionProduct((current) => (current?.id === p.id ? null : p))}
                     newVersionOpen={versionProduct?.id === p.id}
+                    freshness={freshness.byVersion[p.latest_version.id]}
+                    onCheckFreshness={() =>
+                      void freshness.check(
+                        p.latest_version.id,
+                        `${p.product_key} v${p.latest_version.version}`,
+                      )
+                    }
                     onAsk={
                       askDatasourceId
                         ? () =>

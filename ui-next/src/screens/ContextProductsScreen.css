@@ -33,6 +33,20 @@
 .cprow__grid code{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
 .cprow__actions{display:flex;gap:6px;flex:none;flex-wrap:wrap}
 
+/* R11-FP12: the on-demand "changed since publication" reading (ContextProductFreshness.tsx).
+   Text carries the meaning; the left bar and tint only echo it. Body text stays --ink on
+   every variant -- --warn on --warn-soft is under 4.5:1 at this size. */
+.cprow__fresh{margin-top:10px;padding:7px 10px;border-radius:var(--radius-sm);background:var(--sunk);color:var(--ink-2);font-size:12px;line-height:1.5}
+.cprow__fresh--stale{background:var(--warn-soft);color:var(--ink);box-shadow:inset 3px 0 0 var(--warn)}
+.cprow__fresh--ok{box-shadow:inset 3px 0 0 var(--ok)}
+.cprow__fresh--unknown{box-shadow:inset 3px 0 0 var(--ink-3)}
+.cprow__freshhead,.cprow__freshmore{margin:0}
+.cprow__freshhead strong{font-weight:600}
+.cprow__freshlist{margin:4px 0 0;padding-left:18px}
+.cprow__freshlist li{margin:2px 0}
+.cprow__freshlist code{font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}
+.cprow__freshmore{margin-top:2px}
+
 .cpcompiler{display:flex;flex-direction:column;gap:10px;flex:none}
 .cpcompiler__head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap}
 .cpcompiler__eyebrow{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}

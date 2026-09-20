@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ContextCompilationRead, ContextProductCreate, ContextProductRead, GovernanceReviewRead, ProjectRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
+import type { ContextProductChangesSincePublished } from "../lib/api";
 import { ApiError } from "../lib/api";
+import { expectNoAxeViolations, unnamedFocusableElements } from "../test/a11y";
 
 /* ---------------------------------------------------------------------------
    Context products, ported from the legacy portal's `context-products` view
@@ -52,6 +54,11 @@ const fetchContextProductVersions = vi.fn();
 const fetchContextProductBindings = vi.fn();
 const setContextProductBinding = vi.fn();
 const removeContextProductBinding = vi.fn();
+/* R11-FP12: the on-demand "changed since publication" read. Mocked at the same
+   boundary as every other call; its own mapping of the GraphQL answer is proven in
+   `lib/api/products.test.ts`. */
+const fetchContextProductChangesSincePublished =
+  vi.fn<(versionId: string, signal?: AbortSignal) => Promise<ContextProductChangesSincePublished>>();
 
 vi.mock("../lib/_api_append", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/_api_append")>();
@@ -70,6 +77,8 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchContextProductBindings: (...args: unknown[]) => fetchContextProductBindings(...args),
     setContextProductBinding: (...args: unknown[]) => setContextProductBinding(...args),
     removeContextProductBinding: (...args: unknown[]) => removeContextProductBinding(...args),
+    fetchContextProductChangesSincePublished: (versionId: string, signal?: AbortSignal) =>
+      fetchContextProductChangesSincePublished(versionId, signal),
     listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
     fetchContextProducts: (projectId: string, query: unknown, signal?: AbortSignal) =>
@@ -142,6 +151,7 @@ beforeEach(() => {
   submitContextProductVersion.mockReset();
   requestContextProductDeprecation.mockReset();
   compileContextProductVersion.mockReset();
+  fetchContextProductChangesSincePublished.mockReset();
   for (const fn of [
     fetchCatalogRows, fetchSemanticModelVersions, fetchTools, listGlossaryTerms,
     fetchContextProductRoutineOptions, listOntologyVersions,
@@ -578,5 +588,271 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     expect(
       await screen.findByText("bound_version_id is not a version of this context product"),
     ).toBeInTheDocument();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-FP12: a stale badge on the registry row.
+
+   A published version whose covered source moved after publication is stale, and
+   the row has to say so and say why. No list or read shape carries it, so it is
+   asked for on demand per row (`contextProductCoverage`'s `changedSincePublished`,
+   through `fetchContextProductChangesSincePublished`) -- never on load, because
+   every such read is recorded as a consumption of the version.
+
+   Three answers, and the third is the one that is easy to get wrong: stale (with
+   what moved), nothing changed (with what was looked at), and *could not check*,
+   which is neither of the first two.
+--------------------------------------------------------------------------- */
+
+const VIEW_ID = "3f2a9c1e-7b64-4d0a-9e51-0c8a5b7d2e11";
+const ROUTINE_ID = "9d81c4a2-15fe-4a7b-8c3d-6e2f0a9b7c44";
+
+/** In the server's own order: (subject kind, subject id, change). */
+const STALE_ANSWER: ContextProductChangesSincePublished = {
+  total: 2,
+  changes: [
+    { subjectKind: "ROUTINE", subjectId: ROUTINE_ID, change: "MEANING_RETIRED", changeClass: "MEANING_WITHDRAWN" },
+    { subjectKind: "VIEW", subjectId: VIEW_ID, change: "DEFINITION_CHANGED", changeClass: "STRUCTURAL" },
+  ],
+};
+const NOTHING_MOVED: ContextProductChangesSincePublished = { total: 0, changes: [] };
+
+/** A second and third published product, distinct in every id the screen keys on. */
+function anotherPublished(n: number, key: string, name: string): ContextProductRead {
+  return {
+    ...PUBLISHED_PRODUCT,
+    id: `cp_${n}`,
+    product_key: key,
+    latest_version: {
+      ...PUBLISHED_PRODUCT.latest_version,
+      id: `cpv_${n}`,
+      product_id: `cp_${n}`,
+      product_key: key,
+      name,
+    },
+  };
+}
+const PAYMENTS_PRODUCT = anotherPublished(9, "payments-context", "Payments context");
+const SETTLEMENTS_PRODUCT = anotherPublished(10, "settlements-context", "Settlements context");
+
+async function openRegistry(items: ContextProductRead[]) {
+  fetchContextProducts.mockResolvedValue({ items, limit: 200, offset: 0, total: items.length });
+  const ContextProductsScreen = await loadScreen();
+  const view = render(<ContextProductsScreen />);
+  fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+  await waitFor(() => expect(screen.getByText(items[0]!.latest_version.name)).toBeInTheDocument());
+  return view;
+}
+
+const rowOf = (name: string) => screen.getByRole("article", { name });
+
+describe("ContextProductsScreen: changed since publication (R11-FP12)", () => {
+  it("reads nothing on load and shows neither stale nor current until a person asks", async () => {
+    await openRegistry([PUBLISHED_PRODUCT, PAYMENTS_PRODUCT]);
+
+    // Each read is recorded as a consumption of the version; a probe per row on load would
+    // put N consumptions in the ledger for a screen that was merely opened.
+    expect(fetchContextProductChangesSincePublished).not.toHaveBeenCalled();
+    expect(screen.queryByText("stale")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Stale since publication/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Checked\./)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Check for changes" })).toHaveLength(2);
+  });
+
+  it("marks a version stale and says what moved, from the server's own entries", async () => {
+    fetchContextProductChangesSincePublished.mockResolvedValue(STALE_ANSWER);
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    await waitFor(() => expect(fetchContextProductChangesSincePublished).toHaveBeenCalledWith("cpv_1", undefined));
+    // A word on the badge line beside the version's own status -- text, not colour alone.
+    expect(await within(row).findByText("stale")).toBeInTheDocument();
+    expect(within(row).getByText("published")).toBeInTheDocument();
+    // And why: which covered things moved and how, from subject kind / id / change / class.
+    expect(within(row).getByText(/2 changes to what v2 covers/)).toBeInTheDocument();
+    const reasons = within(within(row).getByRole("list", { name: "What changed since publication" })).getAllByRole(
+      "listitem",
+    );
+    expect(reasons).toHaveLength(2);
+    expect(reasons[0]).toHaveTextContent(
+      `Routine ${ROUTINE_ID} — approved description withdrawn (no approved text stands now)`,
+    );
+    expect(reasons[1]).toHaveTextContent(`View ${VIEW_ID} — definition changed (structural)`);
+    // The message strip carries the one announcement; the row itself holds no live region.
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "consumer-risk-context v2 is stale: 2 changes to what it covers since it was published.",
+    );
+    expect(row.querySelector('[role="status"],[role="alert"],[aria-live]')).toBeNull();
+    // Asking again is offered, because the reading is a moment in time.
+    expect(within(row).getByRole("button", { name: "Check again" })).toBeEnabled();
+  });
+
+  it("does not mark a version stale when nothing it covers changed -- a table reshape is not a change", async () => {
+    // A covered table that only gained or lost a column records STRUCTURE_CHANGED, which is not one
+    // of the coverage section's definition moves (`_DEFINITION_MOVES`, context_product_coverage.py):
+    // deliberately, or every product would go stale whenever a column was added. So the server
+    // answers with no entries, and that empty answer is the only shape a reshape-only version can
+    // take. The row must not turn it into a badge, and must say what "nothing changed" means.
+    fetchContextProductChangesSincePublished.mockResolvedValue(NOTHING_MOVED);
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    expect(await within(row).findByText(/No view or routine definition that v2 covers/)).toBeInTheDocument();
+    expect(within(row).getByText(/A column added or removed is not counted/)).toBeInTheDocument();
+    expect(within(row).queryByText("stale")).not.toBeInTheDocument();
+    expect(within(row).queryByText(/Stale since publication/)).not.toBeInTheDocument();
+    expect(within(row).queryByRole("list", { name: "What changed since publication" })).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "consumer-risk-context v2: nothing it covers has changed since it was published.",
+    );
+  });
+
+  it("says a version could not be checked when the read fails: neither stale nor current", async () => {
+    fetchContextProductChangesSincePublished.mockRejectedValueOnce(
+      new Error("The coverage read was refused: NOT_FOUND."),
+    );
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    expect(
+      await within(row).findByText(
+        /The coverage read was refused: NOT_FOUND\. v2 is neither marked stale nor confirmed current\./,
+      ),
+    ).toBeInTheDocument();
+    expect(within(row).getByText("Not checked.")).toBeInTheDocument();
+    // Not a badge, not a reason list, and not the "nothing changed" claim either.
+    expect(within(row).queryByText("stale")).not.toBeInTheDocument();
+    expect(within(row).queryByText(/Stale since publication/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/No view or routine definition/)).not.toBeInTheDocument();
+    expect(within(row).queryByRole("list", { name: "What changed since publication" })).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Could not check consumer-risk-context v2 for changes since publication. The coverage read was refused: NOT_FOUND.",
+    );
+
+    // The failure is not sticky: asking again reads again.
+    fetchContextProductChangesSincePublished.mockResolvedValueOnce(STALE_ANSWER);
+    fireEvent.click(within(row).getByRole("button", { name: "Check again" }));
+    expect(await within(row).findByText("stale")).toBeInTheDocument();
+    expect(within(row).queryByText("Not checked.")).not.toBeInTheDocument();
+    expect(fetchContextProductChangesSincePublished).toHaveBeenCalledTimes(2);
+  });
+
+  it("claims nothing while the read is in flight", async () => {
+    fetchContextProductChangesSincePublished.mockReturnValue(new Promise(() => {}));
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    expect(await within(row).findByRole("button", { name: "Checking…" })).toBeDisabled();
+    expect(within(row).queryByText("stale")).not.toBeInTheDocument();
+    expect(within(row).queryByText(/Checked\./)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/Not checked\./)).not.toBeInTheDocument();
+  });
+
+  it("still marks a version stale for a kind of change it has no wording for", async () => {
+    // The presence of an entry is the server saying the product is stale; a code this client does
+    // not know must be shown as itself, not filtered away into a reassuring silence.
+    fetchContextProductChangesSincePublished.mockResolvedValue({
+      total: 1,
+      changes: [{ subjectKind: "TRIGGER", subjectId: "trg-1", change: "BODY_REWRITTEN", changeClass: null }],
+    });
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    expect(await within(row).findByText("stale")).toBeInTheDocument();
+    expect(within(row).getByText(/1 change to what v2 covers/)).toBeInTheDocument();
+    expect(within(row).getByRole("listitem")).toHaveTextContent("trigger trg-1 — body rewritten");
+  });
+
+  it("lists the first few and counts the rest, from the server's total", async () => {
+    const many = Array.from({ length: 8 }, (_, i) => ({
+      subjectKind: "VIEW",
+      subjectId: `view-${i + 1}`,
+      change: "DEFINITION_CHANGED",
+      changeClass: "LITERAL_ONLY",
+    }));
+    fetchContextProductChangesSincePublished.mockResolvedValue({ total: 25, changes: many });
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    expect(await within(row).findByText(/25 changes to what v2 covers/)).toBeInTheDocument();
+    expect(within(row).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(row).getByText("and 20 more.")).toBeInTheDocument();
+    expect(within(row).getAllByText(/definition changed \(literal values only\)/)).toHaveLength(5);
+  });
+
+  it("asks about the row it was asked about and no other", async () => {
+    fetchContextProductChangesSincePublished.mockResolvedValue(STALE_ANSWER);
+    await openRegistry([PUBLISHED_PRODUCT, PAYMENTS_PRODUCT]);
+
+    fireEvent.click(within(rowOf("Payments context")).getByRole("button", { name: "Check for changes" }));
+
+    expect(await within(rowOf("Payments context")).findByText("stale")).toBeInTheDocument();
+    expect(fetchContextProductChangesSincePublished).toHaveBeenCalledTimes(1);
+    expect(fetchContextProductChangesSincePublished).toHaveBeenCalledWith("cpv_9", undefined);
+    const other = rowOf("Consumer risk analysis");
+    expect(within(other).queryByText("stale")).not.toBeInTheDocument();
+    expect(within(other).getByRole("button", { name: "Check for changes" })).toBeEnabled();
+  });
+
+  it.each(["DRAFT", "REVIEW_REQUIRED", "REJECTED", "DEPRECATED", "RETIRED"])(
+    "offers no check for a %s version: it is not what a consumer is served",
+    async (status) => {
+      // A version never published has no baseline to be stale against, and a deprecated or retired
+      // one is no longer what anyone is given; offering the check would be offering a read the server
+      // answers empty (or refuses), which the row would then have to explain.
+      await openRegistry([
+        { ...DRAFT_PRODUCT, latest_version: { ...DRAFT_PRODUCT.latest_version, status } },
+      ]);
+
+      expect(screen.queryByRole("button", { name: /Check for changes|Check again/ })).not.toBeInTheDocument();
+    },
+  );
+
+  it("offers the check for a SUPPORTED version, which is still served", async () => {
+    await openRegistry([
+      { ...PUBLISHED_PRODUCT, latest_version: { ...PUBLISHED_PRODUCT.latest_version, status: "SUPPORTED" } },
+    ]);
+
+    expect(screen.getByRole("button", { name: "Check for changes" })).toBeEnabled();
+  });
+
+  it("has no WCAG A/AA violations with a stale, a current and an unchecked row on screen", async () => {
+    fetchContextProductChangesSincePublished.mockImplementation(async (versionId) => {
+      if (versionId === "cpv_1") return STALE_ANSWER;
+      if (versionId === "cpv_9") return NOTHING_MOVED;
+      throw new Error("The coverage read was refused: FORBIDDEN (ROLE_REQUIRED).");
+    });
+    const { container } = await openRegistry([PUBLISHED_PRODUCT, PAYMENTS_PRODUCT, SETTLEMENTS_PRODUCT]);
+
+    for (const name of ["Consumer risk analysis", "Payments context", "Settlements context"]) {
+      fireEvent.click(within(rowOf(name)).getByRole("button", { name: "Check for changes" }));
+    }
+    expect(await within(rowOf("Consumer risk analysis")).findByText("stale")).toBeInTheDocument();
+    expect(await within(rowOf("Payments context")).findByText(/No view or routine definition/)).toBeInTheDocument();
+    expect(await within(rowOf("Settlements context")).findByText("Not checked.")).toBeInTheDocument();
+
+    await expectNoAxeViolations(container);
+    expect(
+      unnamedFocusableElements(container).map(
+        (element) => `${element.tagName.toLowerCase()}.${(element as HTMLElement).className}`,
+      ),
+    ).toEqual([]);
+    // No row speaks for itself: the message strip is the only live region a check touches.
+    for (const name of ["Consumer risk analysis", "Payments context", "Settlements context"]) {
+      expect(rowOf(name).querySelector('[role="status"],[role="alert"],[aria-live]')).toBeNull();
+    }
   });
 });

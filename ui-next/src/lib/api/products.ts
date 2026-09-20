@@ -13,6 +13,8 @@
 --------------------------------------------------------------------------- */
 
 import { deleteRequest, demoOr, get, postJson, putJson } from "./transport";
+import { executeGraphQL } from "./graphql";
+import type { GraphQLResponse } from "./graphql";
 import { USE_FIXTURES } from "../appConfig";
 import { requestBlob } from "../http";
 import type {
@@ -214,6 +216,8 @@ export function fetchPortfolioAnalyticsTrends(
      - POST   /v1/context-product-versions/{id}/deprecate                 request_context_product_deprecation :887
      - GET    /v1/context-product-versions/{id}/compile                   compile_context_product_version
        (`src/aida/context_compiler_api.py:208`)
+     - POST   /graphql  contextProductCoverage { changedSincePublished }  what moved since publication
+       (`src/aida/graphql_reads.py`, R11-FP12; see `fetchContextProductChangesSincePublished`)
 
    Deliberately not ported: `GET /context-products/{id}/versions` (:445,
    version history — the legacy screen never showed it, only the latest
@@ -352,6 +356,137 @@ export function compileContextProductVersion(
         signal,
       );
     },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Staleness: what a published version covers that moved after it was published
+   (R11-FP12).
+
+   NO LIST OR READ SHAPE CARRIES IT. `ContextProductRead` / `ContextProductVersionRead`
+   are the version's own definition, and a version's definition never changes -- what
+   moves is what it *stands on* (a covered view's or routine's definition, an approved
+   description). The server answers that in exactly two places, both computed on demand
+   from `load_coverage_changes`: the compiled artifact's `context.coverage`
+   (`changed_since_published`, Atlas-native targets only, inside an opaque `content`
+   string), and GraphQL's `contextProductCoverage`, which renders the same section as a
+   typed connection and is the read used here -- target-independent, nothing parsed out
+   of an artifact, and no `context.product_compiled.v1` outbox event because nothing is
+   compiled.
+
+   COST. One request per version asked about, never on load. Each is recorded as a read
+   (an audit event and, for a PUBLISHED version, a consumption edge on channel
+   `GRAPHQL_COVERAGE`, exactly as a compile records `COMPILER`), which is why a caller
+   should ask only for a version a person asked about rather than probing every row.
+
+   A TABLE RESHAPE IS NOT A CHANGE. A column added or removed is deliberately outside
+   `changed_since_published` (`STRUCTURE_CHANGED` is not one of its definition moves), or
+   every product would read stale whenever a column was added. So a version whose covered
+   table was only reshaped comes back empty here, and this client does not second-guess it.
+--------------------------------------------------------------------------- */
+
+/** One covered thing that moved after publication: an entry of the coverage section
+ *  `changed_since_published`, exactly as GraphQL renders it. */
+export interface ContextProductCoverageChange {
+  /** What moved: VIEW, ROUTINE, TABLE or COLUMN. */
+  readonly subjectKind: string;
+  /** The moved object's id. Always inside the product's own scope. */
+  readonly subjectId: string;
+  /** DEFINITION_CHANGED, DEPRECATED or REACTIVATED (a view or routine), or
+   *  MEANING_RETIRED (an approved description). */
+  readonly change: string;
+  /** STRUCTURAL or LITERAL_ONLY for a definition; MEANING_REPLACED or MEANING_WITHDRAWN
+   *  for a description; SIGNATURE_CHANGED for a routine replaced by a new signature. */
+  readonly changeClass: string | null;
+}
+
+export interface ContextProductChangesSincePublished {
+  /** How many entries the server holds; `changes` may be a first page of them. */
+  readonly total: number;
+  readonly changes: readonly ContextProductCoverageChange[];
+}
+
+const CHANGES_SINCE_PUBLISHED_OPERATION = "ContextProductChangesSincePublished";
+const CHANGES_SINCE_PUBLISHED_PAGE = 20;
+const CHANGES_SINCE_PUBLISHED_QUERY = `query ContextProductChangesSincePublished($versionId: ID!, $first: Int!) {
+  contextProductCoverage(versionId: $versionId) {
+    changedSincePublished(first: $first) {
+      totalCount
+      nodes { subjectKind subjectId change changeClass }
+    }
+  }
+}`;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The answer, or a thrown reason. Every branch that is not a well-formed answer throws:
+ *  a refused field resolves to `null` beside an `errors` entry, and reading that as "no
+ *  changes" would tell a reader a version it could not check is current. */
+function readChangesSincePublished(response: GraphQLResponse): ContextProductChangesSincePublished {
+  const refusal = response.errors?.[0];
+  if (refusal) {
+    const extensions = refusal.extensions ?? {};
+    const rawCode = extensions["code"];
+    const rawReason = extensions["reason"];
+    const code = typeof rawCode === "string" ? rawCode : refusal.message;
+    throw new Error(
+      `The coverage read was refused: ${code}${typeof rawReason === "string" ? ` (${rawReason})` : ""}.`,
+    );
+  }
+  const data: unknown = response.data;
+  const coverage: unknown = isRecord(data) ? data["contextProductCoverage"] : null;
+  const page: unknown = isRecord(coverage) ? coverage["changedSincePublished"] : null;
+  const nodes: unknown = isRecord(page) ? page["nodes"] : null;
+  if (!isRecord(page) || !Array.isArray(nodes)) {
+    throw new Error("The coverage read returned no answer, so this version was not checked.");
+  }
+  const changes = nodes.map((node: unknown): ContextProductCoverageChange => {
+    const subjectKind = isRecord(node) ? node["subjectKind"] : null;
+    const subjectId = isRecord(node) ? node["subjectId"] : null;
+    const change = isRecord(node) ? node["change"] : null;
+    const changeClass = isRecord(node) ? node["changeClass"] : null;
+    if (typeof subjectKind !== "string" || typeof subjectId !== "string" || typeof change !== "string") {
+      throw new Error(
+        "The coverage read returned an entry that could not be read, so this version was not checked.",
+      );
+    }
+    return {
+      subjectKind,
+      subjectId,
+      change,
+      changeClass: typeof changeClass === "string" ? changeClass : null,
+    };
+  });
+  const totalCount = page["totalCount"];
+  const total = typeof totalCount === "number" ? totalCount : 0;
+  return { total: Math.max(total, changes.length), changes };
+}
+
+/** What the version covers that moved after it was published (`contextProductCoverage`'s
+ *  `changedSincePublished`, R11-FP12). Empty means nothing covered moved -- and *only* that:
+ *  a version never published has no baseline and is always empty, and a table reshape is not
+ *  counted (see the block above). Rejects, rather than returning empty, whenever the server
+ *  refused or did not answer, so a caller cannot mistake "could not check" for "not stale".
+ *  Demo mode has no source scans to move under a version and answers empty. */
+export function fetchContextProductChangesSincePublished(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductChangesSincePublished> {
+  return demoOr(
+    async () => ({ total: 0, changes: [] }),
+    async () =>
+      readChangesSincePublished(
+        await executeGraphQL(
+          {
+            query: CHANGES_SINCE_PUBLISHED_QUERY,
+            operationName: CHANGES_SINCE_PUBLISHED_OPERATION,
+            variables: { versionId, first: CHANGES_SINCE_PUBLISHED_PAGE },
+          },
+          signal,
+        ),
+      ),
   );
 }
 
