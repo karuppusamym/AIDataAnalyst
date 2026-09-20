@@ -11,11 +11,13 @@
 //   * WCAG 1.4.10 reflow: at 320 CSS px (a 1280px window at 400% zoom) the page must not scroll
 //     sideways -- measured as the document being wider than its viewport.
 //
-// It only navigates and reads: it clicks nothing, submits nothing, and writes nothing to the stack.
-// It sees what the deployment renders -- a region collapsed by default (the scope picker's fields),
-// or a screen showing an empty state, is not audited in its other states. The journey suite's
+// It only navigates and opens things: it submits nothing and writes nothing to the stack. Beyond
+// the screens it audits three states that exist only once something is opened -- the scope picker's
+// fields (collapsed by default), the command palette, and the mobile drawer -- in both themes. A
+// screen showing an empty state is still audited only in that state. The journey suite's
 // `tests/accessibility.spec.ts` is the CI guard for the screens its stub can populate; this is the
-// wide, deployed-data pass. The last run (2026-09-19) found `--ink-3` failing on 36 of 37 screens.
+// wide, deployed-data pass. Its first run (2026-09-19) found `--ink-3` failing on 36 of 37 screens;
+// that and the rest of that run are fixed (R11-C2), so a failure here is now a regression.
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
@@ -128,17 +130,77 @@ for (const id of ids) {
   }
 }
 await narrow.close();
+
+// Opened states: read-only UI state, nothing is written to the stack.
+results.states = [];
+async function auditOpen(page, label) {
+  await page.evaluate(axeSource);
+  const raw = await page.evaluate(
+    async (tags) =>
+      // eslint-disable-next-line no-undef
+      await axe.run(document, { runOnly: { type: "tag", values: tags }, resultTypes: ["violations"] }),
+    TAGS,
+  );
+  results.states.push({
+    state: label,
+    violations: raw.violations.map((v) => ({
+      rule: v.id,
+      nodes: v.nodes.length,
+      first: v.nodes[0].target.join(" ").slice(0, 90),
+    })),
+  });
+}
+for (const theme of ["light", "dark"]) {
+  try {
+    const wide = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: theme });
+    const page = await wide.newPage();
+    await page.goto(`${baseUrl}/#/inbox/home`, { waitUntil: "load" });
+    await page.waitForSelector(".sview", { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+    const toggle = page.locator(".scopepicker__toggle").first();
+    if (await toggle.count()) {
+      await toggle.click();
+      await page.waitForTimeout(400);
+      await auditOpen(page, `${theme}: scope picker expanded`);
+      await toggle.click();
+    } else results.errors.push({ theme, id: "scope picker", error: "toggle not found" });
+    await page.keyboard.press("Control+k");
+    await page.waitForTimeout(500);
+    if (await page.locator('[role="dialog"]').count()) {
+      await auditOpen(page, `${theme}: command palette open`);
+      await page.keyboard.press("Escape");
+    } else results.errors.push({ theme, id: "command palette", error: "did not open" });
+    await wide.close();
+
+    const phone = await browser.newContext({ viewport: { width: 320, height: 640 }, colorScheme: theme });
+    const m = await phone.newPage();
+    await m.goto(`${baseUrl}/#/inbox/home`, { waitUntil: "load" });
+    await m.waitForSelector(".sview", { timeout: 15000 }).catch(() => {});
+    await m.waitForTimeout(1500);
+    const opener = m.locator('button[aria-label="Open navigation"]').first();
+    if (await opener.count()) {
+      await opener.click();
+      await m.waitForTimeout(500);
+      await auditOpen(m, `${theme}: mobile drawer open (320px)`);
+    } else results.errors.push({ theme, id: "mobile drawer", error: "opener not found" });
+    await phone.close();
+  } catch (error) {
+    results.errors.push({ theme, id: "states", error: String(error).slice(0, 200) });
+  }
+}
 await browser.close();
 
 fs.writeFileSync(outFile, JSON.stringify(results, null, 2));
 const bad = (themeMap) => Object.values(themeMap).filter((s) => s.violations.length > 0).length;
 console.log(
   `${ids.length} screens | light: ${bad(results.themes.light)} with violations | dark: ${bad(results.themes.dark)} with violations | ` +
-    `reflow: ${results.reflow.filter((r) => r.overflows).length} scroll sideways | errors: ${results.errors.length} | written ${outFile}`,
+    `reflow: ${results.reflow.filter((r) => r.overflows).length} scroll sideways | ` +
+    `opened states: ${results.states.filter((s) => s.violations.length > 0).length} of ${results.states.length} with violations | ` +
+    `errors: ${results.errors.length} | written ${outFile}`,
 );
 process.exitCode =
   bad(results.themes.light) + bad(results.themes.dark) + results.reflow.filter((r) => r.overflows).length +
-    results.errors.length >
+    results.states.filter((s) => s.violations.length > 0).length + results.errors.length >
   0
     ? 1
     : 0;
