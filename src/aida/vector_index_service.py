@@ -64,6 +64,7 @@ from aida.events import record_audit
 from aida.models import (
     Embedding,
     GlossaryTerm,
+    GlossaryTermVersion,
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
@@ -275,9 +276,11 @@ async def stale_index_entries(
 
     The same check closes two older gaps in passing, because a *missing* entry
     is stale too: a routine or column discovered after the last build (the
-    freshness rule only watches tables), and GLOSSARY_TERM, which the collector
-    has never indexed (see `_indexable_objects`) -- both used to leave the stage
-    with no vector score at all under `PERSISTED_INDEX`, the R11-B2 shape.
+    freshness rule only watches tables), and a glossary term approved since it
+    -- both used to leave the stage with no vector score at all under
+    `PERSISTED_INDEX`, the R11-B2 shape. (Until 2026-09-20 *every* glossary term
+    was missing, because the collector filtered on a lifecycle nothing writes;
+    see `_indexable_objects`.)
 
     One statement, narrowed on the indexed `owner_id` and matched on the full
     pair in Python -- the portable form `PostgresBruteForceIndex.search` uses.
@@ -369,21 +372,46 @@ async def _indexable_objects(
     # datasource-scoped rebuild deliberately leaves them alone rather than
     # re-embedding the whole glossary on every source's schedule.
     #
-    # Known and left as found (R11-FP08, 2026-09-18): nothing in this codebase writes
-    # `lifecycle_status = 'PUBLISHED'` -- terms are ACTIVE or DEPRECATED -- so this collector
-    # has never produced a glossary entry; and a GLOSSARY_TERM hit's display name is its
-    # approved version's `display_name`, not `term_key`, so an entry built from this text would
-    # not match what the live path embeds. `stale_index_entries` now treats the missing entries
-    # as stale and the live path scores glossary candidates, so nothing is silently unscored;
-    # indexing them for cost is a separate change (the text must come from the same approved
-    # version the lexical stage reads).
+    # R11-FP08, 2026-09-20: this used to filter `lifecycle_status == 'PUBLISHED'` -- a value
+    # nothing in this codebase writes, since terms are ACTIVE or DEPRECATED -- so no glossary
+    # term had ever been indexed and every question that surfaced one paid a provider call to
+    # embed it live. Two constraints fix what an entry must be, and both come from the live
+    # path, which this collector has to match exactly:
+    #
+    # * **The name is the approved version's `display_name`, never `term_key`.** A GLOSSARY_TERM
+    #   hit carries the APPROVED `GlossaryTermVersion.display_name` (`retrieval.hybrid_retrieve`,
+    #   the lexical stage), and `compose_vector_texts` builds the text from that name -- so an
+    #   entry built from the key would encode text the live path never composes, and
+    #   `stale_index_entries` would report it stale on arrival and never serve it.
+    # * **The text comes from the same approved version the lexical stage reads.** Only APPROVED
+    #   counts: a draft or a version awaiting review is a proposal, and SUPERSEDED, REJECTED or
+    #   DEPRECATED text is what Atlas no longer asserts. An approval supersedes the previous
+    #   approved version, so a term has one; if a history ever held two, the newest wins, as it
+    #   does for a routine's description. A DEPRECATED term is not indexed at all.
+    #
+    # Only the display name reaches the text (`vector_text` adds the owner type and nothing
+    # else): the definition and synonyms feed the lexical stage and are not embedded on either
+    # side. Both organizations' ids are restated (INV-5): on the term and on its version.
     if datasource_id is None:
-        term_stmt = select(GlossaryTerm.id, GlossaryTerm.term_key).where(
-            GlossaryTerm.organization_id == organization_id,
-            GlossaryTerm.lifecycle_status == "PUBLISHED",
+        term_stmt = (
+            select(GlossaryTerm.id, GlossaryTermVersion.display_name)
+            .join(GlossaryTermVersion, GlossaryTermVersion.term_id == GlossaryTerm.id)
+            .where(
+                GlossaryTerm.organization_id == organization_id,
+                GlossaryTerm.lifecycle_status == "ACTIVE",
+                GlossaryTermVersion.organization_id == organization_id,
+                GlossaryTermVersion.status == "APPROVED",
+            )
+            # Ascending, so the last write per term is the newest approved version.
+            .order_by(GlossaryTermVersion.version)
         )
-        for term_id, name in (await session.execute(term_stmt)).all():
-            named.append(("GLOSSARY_TERM", str(term_id), name))
+        current_names: dict[UUID, str] = {}
+        for term_id, display_name in (await session.execute(term_stmt)).all():
+            current_names[term_id] = display_name
+        named.extend(
+            ("GLOSSARY_TERM", str(term_id), display_name)
+            for term_id, display_name in current_names.items()
+        )
 
     texts = await compose_vector_texts(session, organization_id, named)
     return [
