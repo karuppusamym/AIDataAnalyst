@@ -332,6 +332,7 @@ def _graphql_rows() -> list[SurfaceRow]:
         context_product_reads,
         governed_execution,
         graphql_reads,
+        okf_read_model,
         unified_lineage_service,
     )
 
@@ -346,6 +347,8 @@ def _graphql_rows() -> list[SurfaceRow]:
         "UNIFIED_LINEAGE_READER_ROLES": set(unified_lineage_service.UNIFIED_LINEAGE_READER_ROLES),
         # R11-GQL01: `contextProductCoverage` decides as the compile route, with its roles.
         "CONTEXT_COMPILER_ROLES": set(graphql_reads.CONTEXT_COMPILER_ROLES),
+        # R11-GQL01: the stored OKF bundle reads decide as the OKF routes do, with their roles.
+        "OKF_ROLES": set(okf_read_model.OKF_ROLES),
     }
     module = "aida.graphql_schema"
     source_path = REPO_ROOT / "src" / "aida" / "graphql_schema.py"

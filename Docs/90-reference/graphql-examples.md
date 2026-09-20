@@ -279,6 +279,105 @@ query RoutineParseCoverage($datasourceId: ID!, $routineId: ID!) {
 {"datasourceId": "<datasource-id>", "routineId": "<routine-id>"}
 ```
 
+## Knowledge bundles
+
+A stored OKF knowledge bundle is the approved, portable rendering of what Atlas knows: a context
+product version's selected references, or one datasource's discovered objects as the caller may
+read them. These fields read the *stored* publication the REST routes serve
+(`GET /v1/context-product-versions/{id}/okf-bundle` and `GET /v1/datasources/{id}/okf-bundle`),
+through the same store, so the same decisions apply: the version's envelope, consumer-role,
+purpose and quality gates, and for a datasource the workspace's `READ_METADATA` decision on the
+datasource and on each schema. A caller a datasource's gate refuses is answered `FORBIDDEN` with
+the gate's own reason (`NO_WORKSPACE_MEMBERSHIP`, ...) -- never an empty bundle. The first read of
+a bundle publishes it, so it can take longer than a later read and shares the request deadline.
+
+What a list carries is identity, never text: a document's `path`, `kind`, `sha256`, `bytes` and a
+`citation` (`okf:<publicationId>:<path>@<sha256>`, the reference an answer carries to cite
+exactly that document). Its text is read one path at a time. Naming a `publicationId` reads that
+retained publication of your own lineage instead of the current one; one that is not in your
+lineage is `NOT_FOUND`. Every read is recorded as REST records its own, once per request, on the
+`GRAPHQL_OKF_*` channels. A `CONFLICT` with reason `OKF_BUNDLE_UNAVAILABLE` means the store
+declined to publish (a scope over its limits, or a capture that raced a change): retry.
+
+### OkfBundleOfAVersion
+
+A version's bundle in one read: what it is (profile, validity, counts), the publication that was
+read, a page of its documents and its publication history. Priced at 21 objects -- the bundle, its
+counts and publication, then each connection's own object, its `pageInfo` and its page. Recorded
+as a read: an audit event, and for a PUBLISHED version a consumption on channel
+`GRAPHQL_OKF_MANIFEST`.
+
+**Caller roles:** `Analyst`
+
+```graphql
+query OkfBundleOfAVersion($versionId: ID!) {
+  contextProductOkfBundle(versionId: $versionId) {
+    profile
+    valid
+    documentCount
+    counts { tables views routines documents }
+    publication { publicationId sequence trigger isCurrent bundleContentDigest }
+    documents(first: 10) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes { path kind sha256 bytes citation }
+    }
+    publications(first: 5) { nodes { sequence trigger isCurrent changedCount } }
+  }
+}
+```
+
+```json
+{"versionId": "<context-product-version-id>"}
+```
+
+### OkfDocument
+
+One document's exact stored text -- the bytes whose digest the list gave -- as
+`GET .../okf-bundle/document?path=` returns it. A path that is not in the bundle (or is in another
+lineage) is `NOT_FOUND` with reason `OKF_DOCUMENT_NOT_FOUND`; the path is at most 512 characters.
+Recorded with the path, on channel `GRAPHQL_OKF_DOCUMENT`.
+
+**Caller roles:** `Analyst`
+
+```graphql
+query OkfDocument($versionId: ID!, $path: String!) {
+  contextProductOkfBundle(versionId: $versionId) {
+    document(path: $path) { path kind citation sha256 bytes renderedInSequence text }
+  }
+}
+```
+
+```json
+{"versionId": "<context-product-version-id>", "path": "<document-path>"}
+```
+
+### OkfBundleOfADatasource
+
+A datasource's bundle: every table, view, routine and package the caller may read, and nothing the
+datasource's gate did not admit -- a schema a policy refuses is absent from the counts and the
+documents alike. `findings` is the publish policy's verdict, empty for a bundle that satisfies it.
+A datasource is not a context product, so a read leaves the audit and outbox evidence and no
+consumption edge.
+
+**Caller roles:** `Analyst`
+
+```graphql
+query OkfBundleOfADatasource($datasourceId: ID!) {
+  datasourceOkfBundle(datasourceId: $datasourceId) {
+    valid
+    counts { tables views routines documents }
+    publication { sequence trigger isCurrent }
+    documents(first: 10) { totalCount nodes { path kind sha256 } }
+    findings(first: 5) { totalCount nodes { code detail } }
+  }
+}
+```
+
+```json
+{"datasourceId": "<datasource-id>"}
+```
+
 ## Governed execution
 
 ### ExecuteGovernedTool

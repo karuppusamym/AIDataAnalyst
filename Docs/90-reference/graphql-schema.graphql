@@ -495,6 +495,211 @@ type Mutation {
   executeGovernedTool(request: ExecuteGovernedToolInput!): GovernedExecutionOutcome
 }
 
+"""
+A stored OKF knowledge bundle -- a context product version's approved references, or one datasource's discovered objects as this caller may read them -- as `GET .../okf-bundle` describes it: the manifest's summary, the counts, the publication read and the publish policy's verdict. The documents, the history and the findings are connections beneath it; a document's text is read one path at a time. Every object in it is one this caller's own authorization admitted; nothing else is named or counted.
+"""
+type OkfBundle {
+  scope: OkfBundleScope!
+
+  """The version a product bundle is of; null for a datasource's."""
+  contextProductVersionId: ID
+  productKey: String
+  productVersion: Int
+
+  """The datasource a source bundle is of; null for a product's."""
+  datasourceId: ID
+  okfVersion: String!
+  specRevision: String!
+
+  """
+  Exactly what was tested against the pinned specification -- never a certification.
+  """
+  specConformance: String!
+  profile: String!
+  contentSnapshotDigest: String!
+  bundleContentDigest: String!
+  scopeDigest: String!
+  documentCount: Int!
+
+  """
+  Whether the bundle satisfies the Atlas publish policy -- an Atlas policy answer, not a statement that the bundle is unreadable. A download of an invalid bundle is refused; this read is not.
+  """
+  valid: Boolean!
+  findingCount: Int!
+  counts: OkfBundleCounts!
+  publication: OkfPublication!
+
+  """
+  When the caller's lineage was last confirmed current, which may be later than the publication: a no-op revalidation confirms without publishing.
+  """
+  validatedAt: DateTime!
+
+  """
+  This bundle's documents, a page at a time in path order, without their text. Each carries its path, kind, digest, size and citation.
+  """
+  documents(first: Int! = 20, after: String = null): OkfDocumentSummaryConnection
+
+  """
+  One document with its exact stored text, as `GET .../okf-bundle/document?path=` reads it: looked up only among the stored rows of this publication, so a path that is not in the bundle reads as NOT_FOUND. Recorded, with the path.
+  """
+  document(path: String!): OkfDocument
+
+  """
+  The caller's own lineage of stored publications, newest first, as `GET .../okf-bundle/publications` lists it: what changed, when, and why. A publication built under another authority is neither listed nor counted.
+  """
+  publications(first: Int! = 20, after: String = null): OkfPublicationConnection
+
+  """The publish policy's findings for this publication, a page at a time."""
+  findings(first: Int! = 20, after: String = null): OkfFindingConnection
+}
+
+"""What a bundle's manifest counts, by kind of thing it holds."""
+type OkfBundleCounts {
+  sources: Int!
+  schemas: Int!
+  tables: Int!
+  views: Int!
+  routines: Int!
+  packages: Int!
+  concepts: Int!
+  tools: Int!
+  documents: Int!
+}
+
+"""Which kind of stored bundle a read is of."""
+enum OkfBundleScope {
+  CONTEXT_PRODUCT_VERSION
+  DATASOURCE
+}
+
+"""
+One stored document with its exact stored text, as `GET .../okf-bundle/document` returns it: the Markdown a reader of the downloaded archive finds at `path`, whose digest is `sha256`.
+"""
+type OkfDocument {
+  publicationId: ID!
+  publicationSequence: Int!
+  path: String!
+  kind: OkfDocumentKind!
+  citation: String!
+  sha256: String!
+  bytes: Int!
+  renderedInSequence: Int!
+  subjectKey: String
+  text: String!
+}
+
+"""
+What a stored document is, by where the renderer put it. A pure function of the path -- no document is opened to say.
+"""
+enum OkfDocumentKind {
+  BUNDLE_INDEX
+  SOURCE_INDEX
+  SCHEMA_INDEX
+  TABLE
+  VIEW
+  COLUMN_SET
+  ROUTINE
+  PACKAGE
+  CONCEPT_INDEX
+  CONCEPT
+  TOOL_INDEX
+  TOOL
+  LOG
+  OTHER
+}
+
+"""
+One stored document as a list shows it: where it sits, what it is, the digest of its bytes and how to cite it. Never its text -- read one document by path with `OkfBundle.document`.
+"""
+type OkfDocumentSummary {
+  publicationId: ID!
+  publicationSequence: Int!
+
+  """The bundle's own opaque, safe path."""
+  path: String!
+  kind: OkfDocumentKind!
+
+  """
+  `okf:<publicationId>:<path>@<sha256>` -- the reference an answer carries to cite exactly this document: the publication it was read from, its path and the digest of its bytes.
+  """
+  citation: String!
+  sha256: String!
+  bytes: Int!
+
+  """
+  The publication that first rendered these exact bytes: earlier than `publicationSequence` when a rebuild carried the document forward unchanged.
+  """
+  renderedInSequence: Int!
+
+  """
+  The identity key of the object, concept or tool the document is about; null for an index or a log.
+  """
+  subjectKey: String
+}
+
+"""A page of stored documents, in path order."""
+type OkfDocumentSummaryConnection {
+  nodes: [OkfDocumentSummary!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+One finding of the Atlas publish policy for a publication. `code` is its machine code; `detail` the path and target it names, where it names any.
+"""
+type OkfFinding {
+  text: String!
+  code: String!
+  detail: String
+}
+
+"""A page of publish-policy findings, in text order."""
+type OkfFindingConnection {
+  nodes: [OkfFinding!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+"""
+One stored, immutable publication of a bundle in the reader's own lineage. `publicationId` is the snapshot identity a caller pins: the manifest it inspected and any document it reads are the same bytes when both name it. `renderedCount` documents were rendered by this publication; `carriedCount` kept the prior publication's stored bytes without being rendered at all.
+"""
+type OkfPublication {
+  publicationId: ID!
+  sequence: Int!
+  trigger: String!
+  capturedAt: DateTime!
+  isCurrent: Boolean!
+  bundleContentDigest: String!
+  contentSnapshotDigest: String!
+  documentCount: Int!
+  renderedCount: Int!
+  carriedCount: Int!
+  valid: Boolean!
+
+  """Documents this publication added."""
+  addedCount: Int!
+
+  """Documents whose bytes it changed."""
+  changedCount: Int!
+
+  """Documents it removed."""
+  removedCount: Int!
+
+  """Identity keys whose frozen facts moved."""
+  changedSubjects: Int!
+
+  """Catalog subjects whose change marks triggered the rebuild."""
+  markedSubjects: Int!
+  fullRender: Boolean!
+}
+
+"""A page of stored publications, newest first."""
+type OkfPublicationConnection {
+  nodes: [OkfPublication!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
 """Where a page ends and whether another follows it."""
 type PageInfo {
   hasNextPage: Boolean!
@@ -559,6 +764,16 @@ type Query {
   How completely a trigger's body was understood, as `GET /v1/datasources/{id}/triggers/{trigger_id}/parse-coverage` decides and reads it, workspace gate included. NOT_FOUND with reason COVERAGE_NOT_MEASURED when no parse has measured it.
   """
   triggerParseCoverage(datasourceId: ID!, triggerId: ID!): TriggerParseCoverage
+
+  """
+  A context product version's stored OKF knowledge bundle, as `GET /v1/context-product-versions/{id}/okf-bundle` reads it: the same store, and so the same envelope, consumer-role, purpose, quality and per-datasource decisions, and the same lineage keyed on what this caller's authorization admits. `publicationId` reads that retained publication of the caller's own lineage instead of the current one. Recorded as a read: an audit event, and a consumption for a PUBLISHED version.
+  """
+  contextProductOkfBundle(versionId: ID!, publicationId: ID = null): OkfBundle
+
+  """
+  One datasource's stored OKF knowledge bundle, as `GET /v1/datasources/{id}/okf-bundle` reads it: the datasource's `READ_METADATA` decision, and each schema's where a workspace decides, is taken on every read, and a caller it refuses is answered FORBIDDEN with the gate's own reason -- never an empty bundle. Only objects that decision admitted are named or counted. Recorded as a read.
+  """
+  datasourceOkfBundle(datasourceId: ID!, publicationId: ID = null): OkfBundle
 
   """One table by id, decided as its columns route decides it."""
   table(id: ID!): Table

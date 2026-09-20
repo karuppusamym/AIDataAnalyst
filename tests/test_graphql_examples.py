@@ -57,6 +57,8 @@ _REQUIRED_ROOTS = {
     "contextProductVersion",
     "contextProductCoverage",  # coverage
     "routineParseCoverage",
+    "contextProductOkfBundle",  # stored knowledge bundles (R11-OKF02)
+    "datasourceOkfBundle",
     "executeGovernedTool",  # the governed execution mutation (R11-GQL02)
     "governedExecutions",
 }
@@ -139,6 +141,8 @@ def test_each_example_is_admitted_at_the_default_limits(example: Example) -> Non
     if example.name == "CatalogOverview":
         # The page states this price; hold it to it.
         assert cost.estimated_nodes == 112
+    if example.name == "OkfBundleOfAVersion":
+        assert cost.estimated_nodes == 21
 
 
 # --- behavioural: every example runs against a seeded estate ------------------------------
@@ -306,6 +310,13 @@ async def test_every_example_runs_against_the_endpoint_without_an_error(
         assert "errors" not in body, (example.name, body)
         assert all(value is not None for value in body["data"].values()), (example.name, body)
         answered[example.name] = body["data"]
+        if example.name == "OkfBundleOfAVersion":
+            # A document's path is an opaque digest only the published bundle knows, so the
+            # next example reads the first table document this one listed.
+            listed = body["data"]["contextProductOkfBundle"]["documents"]["nodes"]
+            placeholders["<document-path>"] = next(
+                node["path"] for node in listed if node["kind"] == "TABLE"
+            )
 
     # The examples answer with something, not merely without an error.
     catalog = answered["CatalogOverview"]["datasources"]
@@ -321,6 +332,18 @@ async def test_every_example_runs_against_the_endpoint_without_an_error(
         "warehouse.retail.rebuild_orders"
     ]
     assert answered["RoutineParseCoverage"]["routineParseCoverage"]["state"] == "SUPPORTED"
+    bundle = answered["OkfBundleOfAVersion"]["contextProductOkfBundle"]
+    assert bundle["valid"] is True and bundle["counts"]["tables"] == 2
+    counted = bundle["documents"]["totalCount"]
+    assert counted == bundle["documentCount"] == bundle["counts"]["documents"]
+    assert {node["kind"] for node in bundle["documents"]["nodes"]} >= {"TABLE", "ROUTINE"}
+    assert [node["sequence"] for node in bundle["publications"]["nodes"]] == [1]
+    document = answered["OkfDocument"]["contextProductOkfBundle"]["document"]
+    assert document["kind"] == "TABLE" and document["text"].startswith("---")
+    assert document["citation"].endswith("@" + document["sha256"])
+    source = answered["OkfBundleOfADatasource"]["datasourceOkfBundle"]
+    assert source["valid"] is True and source["counts"]["tables"] >= 2
+    assert source["findings"]["totalCount"] == 0
     execution = answered["ExecuteGovernedTool"]["executeGovernedTool"]
     assert execution["receipt"]["status"] == "COMPLETED"
     assert execution["result"]["rows"] == [["O-1"], ["O-2"]]

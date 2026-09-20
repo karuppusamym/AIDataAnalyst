@@ -2277,6 +2277,57 @@ def is_log_path(path: str) -> bool:
     return path == "log.md" or path.endswith("/log.md")
 
 
+#: What a stored document is, by where the renderer put it (`_resolve_paths`). Listed so a reader
+#: can choose documents without opening any -- the path grammar is the renderer's, so the
+#: classifier lives beside it, and `tests/test_graphql_okf.py` holds every path a real bundle
+#: holds to a kind other than `OTHER` and every kind's count to the manifest's own counts.
+DOCUMENT_KINDS: Final = (
+    "BUNDLE_INDEX",
+    "SOURCE_INDEX",
+    "SCHEMA_INDEX",
+    "TABLE",
+    "VIEW",
+    "COLUMN_SET",
+    "ROUTINE",
+    "PACKAGE",
+    "CONCEPT_INDEX",
+    "CONCEPT",
+    "TOOL_INDEX",
+    "TOOL",
+    "LOG",
+    "OTHER",
+)
+_SCHEMA_DIR: Final = r"sources/source-[^/]+/schemas/schema-[^/]+"
+#: In match order: a wide object's column sets sit beside it and would otherwise read as it.
+_KIND_PATTERNS: Final = (
+    ("BUNDLE_INDEX", re.compile(r"index\.md")),
+    ("LOG", re.compile(r"(?:sources/source-[^/]+/)?log\.md")),
+    ("SOURCE_INDEX", re.compile(r"sources/source-[^/]+/index\.md")),
+    ("SCHEMA_INDEX", re.compile(rf"{_SCHEMA_DIR}/index\.md")),
+    (
+        "COLUMN_SET",
+        re.compile(rf"{_SCHEMA_DIR}/(?:tables/table|views/view)-[^/]+-columns-[^/]+\.md"),
+    ),
+    ("TABLE", re.compile(rf"{_SCHEMA_DIR}/tables/table-[^/]+\.md")),
+    ("VIEW", re.compile(rf"{_SCHEMA_DIR}/views/view-[^/]+\.md")),
+    ("ROUTINE", re.compile(rf"{_SCHEMA_DIR}/routines/routine-[^/]+\.md")),
+    ("PACKAGE", re.compile(rf"{_SCHEMA_DIR}/packages/package-[^/]+\.md")),
+    ("CONCEPT_INDEX", re.compile(r"concepts/index\.md")),
+    ("CONCEPT", re.compile(r"concepts/concept-[^/]+\.md")),
+    ("TOOL_INDEX", re.compile(r"tools/index\.md")),
+    ("TOOL", re.compile(r"tools/tool-version-[^/]+\.md")),
+)
+
+
+def document_kind(path: str) -> str:
+    """What the document at `path` is: one of `DOCUMENT_KINDS`, `OTHER` for a path the renderer
+    does not produce. A pure function of the path -- no document is opened."""
+    for kind, pattern in _KIND_PATTERNS:
+        if pattern.fullmatch(path):
+            return kind
+    return "OTHER"
+
+
 def log_entry(
     stamp: OkfPublicationStamp,
     *,

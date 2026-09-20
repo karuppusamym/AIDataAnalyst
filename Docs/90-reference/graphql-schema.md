@@ -18,10 +18,14 @@ the SDL beside it is stale, or when a breaking schema change keeps its version.
 - Authenticated and role-gated like the REST catalog reads. Each field is
   decided exactly as the REST route it answers for decides it -- the mapping
   is in the docstring of `aida.graphql_reads`.
-- Two queries record the read, as their REST routes do: `contextProductVersion`
-  (a consumer's consumption, audit and outbox event, channel `GRAPHQL`) and
+- Some queries record the read, as their REST routes do: `contextProductVersion`
+  (a consumer's consumption, audit and outbox event, channel `GRAPHQL`),
   `contextProductCoverage` (decided as the compile route decides; an audit event,
-  and for a PUBLISHED version a consumption on channel `GRAPHQL_COVERAGE`).
+  and for a PUBLISHED version a consumption on channel `GRAPHQL_COVERAGE`), and the
+  stored OKF knowledge bundle reads `contextProductOkfBundle` and
+  `datasourceOkfBundle`, with the document and history fields beneath them (an audit
+  event, an outbox event and, for a PUBLISHED version, a consumption, once per
+  request, on channels `GRAPHQL_OKF_*`).
 - One named operation per request (`operationName` is required); HTTP
   batching and multi-operation documents are refused.
 - Cursors are the same opaque keyset cursors the REST list routes return.
@@ -98,13 +102,13 @@ code itself: never SQL, a credential or an object name.
 | Code | Meaning |
 |---|---|
 | `FORBIDDEN` | the caller may not read this object; `extensions.reason` carries the value-free reason code the equivalent REST route puts in its 403 |
-| `NOT_FOUND` | no such object (the REST route answers 404); reason COVERAGE_NOT_MEASURED when the routine or trigger exists but no parse has measured it |
+| `NOT_FOUND` | no such object (the REST route answers 404); reason COVERAGE_NOT_MEASURED when the routine or trigger exists but no parse has measured it; reason OKF_DOCUMENT_NOT_FOUND when a document path is not in the stored bundle |
 | `GONE` | the context product version was retired and this caller read it before; re-pin to the current published version (the REST route answers 410) |
 | `INVALID_ARGUMENT` | an argument is out of range; `extensions.reason` says which rule |
 | `INVALID_CURSOR` | `after` is not a cursor this field issued |
 | `SCOPE_TOO_BROAD` | an organization-wide listing spans too many datasources; name one |
 | `VALIDATION_FAILED` | a variable did not coerce to its declared type |
-| `CONFLICT` | R11-GQL02: the idempotency key was already used with different inputs, or the tool cannot run now (a quality hold, an unpublished version); for `contextProductCoverage`, the version names a table, routine or ontology version that no longer resolves (the REST route answers 409); `extensions.reason` says which |
+| `CONFLICT` | R11-GQL02: the idempotency key was already used with different inputs, or the tool cannot run now (a quality hold, an unpublished version); for `contextProductCoverage`, the version names a table, routine or ontology version that no longer resolves (the REST route answers 409); for the stored OKF bundle reads, the store declined to publish or serve one (a scope over its limits, a capture that raced a change -- retry -- or a stored bundle that is not whole); `extensions.reason` says which |
 | `REJECTED` | R11-GQL02: the gateway or parameter binding refused the execution |
 | `EXECUTION_FAILED` | R11-GQL02: the source failed the execution; the receipt says so |
 | `INTERNAL_ERROR` | an unexpected failure; the message is withheld, the correlation id is not |

@@ -84,7 +84,7 @@ from aida.authorization_gate import AuthorizationDenied
 from aida.change_signal_models import MetadataChangeSignal
 from aida.config import Settings
 from aida.context import get_correlation_id
-from aida.context_compiler_api import _load_source
+from aida.context_product_read_service import _load_source
 from aida.envelope_models import (
     MetadataRoutine,
     MetadataRoutineDefinitionVersion,
@@ -185,6 +185,11 @@ BUNDLE_ROLE_CHANNELS: Final = {
     "context": "OKF_CONTEXT",
     "mcp_context": "MCP_OKF_CONTEXT",
     "ask": "ASK_OKF_CONTEXT",
+    # R11-GQL01: the GraphQL reads of a stored bundle (`aida.graphql_okf`) -- its manifest, one
+    # document, its publication history.
+    "graphql_manifest": "GRAPHQL_OKF_MANIFEST",
+    "graphql_document": "GRAPHQL_OKF_DOCUMENT",
+    "graphql_history": "GRAPHQL_OKF_HISTORY",
 }
 #: R11-OKF02 source bundles: the same doors onto one datasource's bundle. Recorded in the audit
 #: and outbox evidence only -- a source is not a context product, so no consumption edge.
@@ -194,6 +199,11 @@ SOURCE_BUNDLE_CHANNELS: Final = {
     "document": "OKF_SOURCE_DOCUMENT",
     "history": "OKF_SOURCE_HISTORY",
     "context": "OKF_SOURCE_CONTEXT",
+    # R11-GQL01: the same three GraphQL reads, and the MCP knowledge tool, onto a source bundle.
+    "graphql_manifest": "GRAPHQL_OKF_SOURCE_MANIFEST",
+    "graphql_document": "GRAPHQL_OKF_SOURCE_DOCUMENT",
+    "graphql_history": "GRAPHQL_OKF_SOURCE_HISTORY",
+    "mcp_context": "MCP_OKF_SOURCE_CONTEXT",
 }
 
 #: Findings that mean a document may carry code text. Never stored, whatever else is true.

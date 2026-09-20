@@ -10,7 +10,7 @@ contract if necessary rather than putting a ZIP into a text-content field." So
 is returned by its own route with its own media type.
 
 **Scope resolution is the compiler's, not a second copy.** Every handler reaches
-`context_compiler_api._load_source` (through the store), which is where the capability
+`context_product_read_service._load_source` (through the store), which is where the capability
 envelope, the published/consumer-role check, the purpose gate, the quality gate and the resolved
 routine/view/ontology/freshness references already live. The design requires exactly this --
 "Source/object preview and product export must reuse the compiler's scope resolver" -- and a
@@ -55,7 +55,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.okf_context import OkfContext, citation_ids, render_markdown
-from aida.okf_export import OKF_CONFORMANCE_STATUS, OkfBundle, bundle_archive_bytes
+from aida.okf_export import OkfBundle, bundle_archive_bytes
+from aida.okf_read_model import OKF_ROLES, bundle_read, document_read, publication_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     SOURCE_BUNDLE_CHANNELS,
@@ -75,12 +76,10 @@ from aida.okf_store import (
     record_okf_read,
     record_okf_source_read,
 )
-from aida.okf_store_models import OkfBundleDocument, OkfBundlePublication
+from aida.okf_store_models import OkfBundlePublication
 from aida.schemas import (
     ApiModel,
-    OkfBundleFileRead,
     OkfBundleRead,
-    OkfChangeSummaryRead,
     OkfContextDocumentRead,
     OkfContextOmissionRead,
     OkfContextRead,
@@ -94,19 +93,17 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, require_roles
 
-router = APIRouter(prefix="/v1", tags=["okf-export"])
+# R11-GQL01: the role set and the stored-bundle mappers live in `aida.okf_read_model`, so
+# GraphQL can describe a stored bundle the same way without importing a router. Re-exported
+# here for the importers this module already had (the MCP server among them).
+__all__ = [
+    "OKF_ROLES",
+    "bundle_read",
+    "document_read",
+    "publication_read",
+]
 
-#: The same role set the context compiler's own read uses. A role here is necessary and never
-#: sufficient: the capability envelope, the version's consumer roles, the purpose and quality
-#: gates and the per-datasource authorization decision all still apply below.
-OKF_ROLES = (
-    "PlatformAdmin",
-    "MetadataAdmin",
-    "DataProductOwner",
-    "DataSteward",
-    "AgentDeveloper",
-    "Analyst",
-)
+router = APIRouter(prefix="/v1", tags=["okf-export"])
 
 _PINNED_READ = (
     "Read this stored publication of the caller's own lineage instead of the current one. "
@@ -116,50 +113,6 @@ _PINNED_DOWNLOAD = (
     "Download this stored publication -- the one a manifest named -- rather than the current "
     "one, so an inspected manifest and its archive are the same bytes."
 )
-
-
-def publication_read(
-    publication: OkfBundlePublication, *, is_current: bool
-) -> OkfPublicationRead:
-    """One stored publication as the API describes it. Shared with the MCP reader."""
-    summary: dict[str, Any] = dict(publication.change_summary or {})
-    verdict: dict[str, Any] = dict(summary.get("validation") or {})
-    return OkfPublicationRead(
-        publication_id=publication.id,
-        sequence=publication.sequence,
-        trigger=publication.trigger,
-        captured_at=publication.captured_at,
-        is_current=is_current,
-        bundle_content_digest=publication.bundle_content_digest,
-        content_snapshot_digest=publication.content_snapshot_digest,
-        document_count=publication.document_count,
-        rendered_count=publication.rendered_count,
-        carried_count=publication.carried_count,
-        valid=bool(verdict.get("valid", False)),
-        changes=OkfChangeSummaryRead(
-            added=[str(item) for item in summary.get("added") or []],
-            changed=[str(item) for item in summary.get("changed") or []],
-            removed=[str(item) for item in summary.get("removed") or []],
-            changed_subjects=len(summary.get("changed_subjects") or []),
-            marked_subjects=len(summary.get("marked_subjects") or []),
-            full_render=bool(summary.get("full_render", False)),
-        ),
-    )
-
-
-def document_read(
-    publication: OkfBundlePublication, document: OkfBundleDocument
-) -> OkfDocumentRead:
-    return OkfDocumentRead(
-        publication_id=publication.id,
-        publication_sequence=publication.sequence,
-        path=document.path,
-        sha256=document.sha256,
-        bytes=document.byte_length,
-        rendered_in_sequence=document.rendered_in_sequence,
-        subject_key=document.subject_key,
-        content=document.content,
-    )
 
 
 class OkfSourcePublicationHistoryRead(ApiModel):
@@ -192,30 +145,6 @@ class OkfSourceContextRead(ApiModel):
     used_chars: int
     guidance: str
     markdown: str
-
-
-def bundle_read(stored: OkfPublishedBundle | OkfPublishedSourceBundle) -> OkfBundleRead:
-    """The manifest view of a stored publication. Built from stored columns only -- no document
-    body is loaded to answer it."""
-    publication = stored.publication
-    manifest: dict[str, Any] = dict(publication.manifest)
-    validation = stored.validation
-    return OkfBundleRead(
-        okf_version=str(manifest["okf_version"]),
-        spec_revision=str(manifest["specification"]["revision"]),
-        spec_conformance=OKF_CONFORMANCE_STATUS,
-        profile=f"{manifest['compiler']['profile']}/{manifest['compiler']['profile_version']}",
-        content_snapshot_digest=publication.content_snapshot_digest,
-        bundle_content_digest=publication.bundle_content_digest,
-        scope_digest=publication.scope_digest,
-        document_count=publication.document_count,
-        valid=validation.valid,
-        findings=list(validation.findings),
-        files=[OkfBundleFileRead(**entry) for entry in manifest.get("files") or []],
-        manifest=manifest,
-        publication=publication_read(publication, is_current=stored.is_current),
-        validated_at=stored.head.validated_at,
-    )
 
 
 def context_read(found: OkfStoredContext) -> OkfContextRead:

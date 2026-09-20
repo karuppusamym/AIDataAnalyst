@@ -197,7 +197,7 @@ async def _call(
 def test_the_native_tool_inventory_is_what_this_fix_assumes() -> None:
     """The finding, asserted rather than assumed.
 
-    Eight native tools in four families. If a family gains a tool, or a
+    Nine native tools in four families. If a family gains a tool, or a
     family is added, this fails and whoever added it has to re-answer "does
     the contract reach it" -- which is the question this whole row exists
     because nobody asked.
@@ -210,6 +210,15 @@ def test_the_native_tool_inventory_is_what_this_fix_assumes() -> None:
     and never writes knowledge; the product it names in its arguments is
     bounded by the envelope's `context_product_ids` inside the store's scope
     resolver.
+
+    Re-answered 2026-09-20 for the knowledge family's second tool,
+    `get_source_knowledge_context` (R11-GQL01): yes, by the same dispatch --
+    it is served by `_handle_native_knowledge_tool_call`, after the denial, so
+    the kill switch, contract existence and the `native_tools` allowlist apply
+    to it through `NATIVE_ALL_TOOL_SLUGS`. It names a datasource, which an
+    envelope has no dimension for, so what bounds it beyond this gate is the
+    datasource's own `READ_METADATA` decision inside
+    `read_published_source_bundle`; it reads and never writes knowledge.
     """
     assert NATIVE_LINEAGE_TOOL_SLUGS == {
         "get_lineage_graph",
@@ -220,14 +229,14 @@ def test_the_native_tool_inventory_is_what_this_fix_assumes() -> None:
     }
     assert NATIVE_MARKETPLACE_TOOL_SLUGS == {"request_data_product_access"}
     assert NATIVE_VALIDATION_TOOL_SLUGS == {"validate_sql"}
-    assert NATIVE_KNOWLEDGE_TOOL_SLUGS == {"get_knowledge_context"}
+    assert NATIVE_KNOWLEDGE_TOOL_SLUGS == {"get_knowledge_context", "get_source_knowledge_context"}
     assert NATIVE_ALL_TOOL_SLUGS == (
         NATIVE_LINEAGE_TOOL_SLUGS
         | NATIVE_MARKETPLACE_TOOL_SLUGS
         | NATIVE_VALIDATION_TOOL_SLUGS
         | NATIVE_KNOWLEDGE_TOOL_SLUGS
     )
-    assert len(NATIVE_ALL_TOOL_SLUGS) == 8
+    assert len(NATIVE_ALL_TOOL_SLUGS) == 9
 
 
 def test_the_marketplace_native_tool_really_does_write() -> None:

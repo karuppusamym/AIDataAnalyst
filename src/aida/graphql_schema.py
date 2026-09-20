@@ -1,8 +1,9 @@
 """The Atlas metadata GraphQL schema (R11-GQL01, design section 13A).
 
 Typed metadata reads -- datasources, tables, columns, constraints, approved
-descriptions, context products, lineage and coverage (a context product's, and a
-routine's or trigger's parse coverage) -- with cursor paging. Every resolver is a thin call into
+descriptions, context products, lineage, coverage (a context product's, and a
+routine's or trigger's parse coverage) and the stored OKF knowledge bundle of a
+context product version or a datasource -- with cursor paging. Every resolver is a thin call into
 `aida.graphql_reads`, which makes the decision the equivalent REST route makes;
 no resolver builds a query of its own, imports a router, or calls over HTTP.
 
@@ -16,12 +17,15 @@ carries a source value either -- no column default, partition bound, view or
 routine body, profile statistic or sample row; the metadata types expose what the
 REST reads expose and nothing more (`tests/test_graphql_api.py` scans for it).
 
-**Two reads record something.** `contextProductVersion` is the governed read REST's
+**Some reads record something.** `contextProductVersion` is the governed read REST's
 `GET /v1/context-product-versions/{id}` is: for a consumer it records the consumption
 edge, audit and outbox event (channel `GRAPHQL`), exactly as that route does for REST.
 `contextProductCoverage` is decided as the compile route decides, and recorded as it
 records a compilation less the artifact: an audit event, and for a PUBLISHED version a
-consumption edge on channel `GRAPHQL_COVERAGE`.
+consumption edge on channel `GRAPHQL_COVERAGE`. The OKF bundle reads
+(`contextProductOkfBundle`, `datasourceOkfBundle` and the fields beneath them) are recorded as
+REST's bundle routes record theirs -- an audit event, an outbox event and, for a PUBLISHED
+version, a consumption edge -- on channels `GRAPHQL_OKF_*`.
 
 **Refusals are per field.** A field the caller may not read resolves to `null`
 with an error whose `extensions.code` is stable and whose message is that code.
@@ -66,6 +70,18 @@ from aida.governed_execution import (
 )
 from aida.governed_execution_models import GovernedExecutionRequest
 from aida.graphql_limits import LIMIT_CEILINGS
+from aida.graphql_okf import (
+    PRODUCT,
+    SOURCE,
+    OkfBundleHandle,
+    OkfDocumentBody,
+    OkfDocumentEntry,
+    get_okf_bundle,
+    list_okf_documents,
+    list_okf_findings,
+    list_okf_publications,
+    read_okf_document,
+)
 from aida.graphql_reads import (
     ColumnDescription,
     Page,
@@ -97,6 +113,7 @@ from aida.graphql_reads import (
     table_description,
 )
 from aida.models import MetadataTable
+from aida.okf_read_model import BundleSummary, bundle_summary
 from aida.schemas import (
     ContextProductRead,
     ContextProductVersionRead,
@@ -104,6 +121,7 @@ from aida.schemas import (
     MetadataColumnRead,
     MetadataConstraintRead,
     MetadataTableRead,
+    OkfPublicationRead,
     RoutineParseCoverageRead,
     TriggerParseCoverageRead,
     UnifiedLineageEdgeRead,
@@ -156,6 +174,10 @@ def _uuid(value: strawberry.ID) -> UUID:
         return UUID(str(value))
     except ValueError as exc:
         raise ReadRefused("INVALID_ARGUMENT", "INVALID_ID") from exc
+
+
+def _optional_uuid(value: strawberry.ID | None) -> UUID | None:
+    return None if value is None else _uuid(value)
 
 
 @strawberry.type(description="Where a page ends and whether another follows it.")
@@ -1174,6 +1196,347 @@ class TriggerParseCoverage:
         )
 
 
+# --- stored OKF bundles (R11-GQL01, R11-OKF02) -----------------------------------------
+
+
+@strawberry.enum(description="Which kind of stored bundle a read is of.")
+class OkfBundleScope(Enum):
+    CONTEXT_PRODUCT_VERSION = "CONTEXT_PRODUCT_VERSION"
+    DATASOURCE = "DATASOURCE"
+
+
+@strawberry.enum(
+    description="What a stored document is, by where the renderer put it. A pure function of "
+    "the path -- no document is opened to say."
+)
+class OkfDocumentKind(Enum):
+    BUNDLE_INDEX = "BUNDLE_INDEX"
+    SOURCE_INDEX = "SOURCE_INDEX"
+    SCHEMA_INDEX = "SCHEMA_INDEX"
+    TABLE = "TABLE"
+    VIEW = "VIEW"
+    COLUMN_SET = "COLUMN_SET"
+    ROUTINE = "ROUTINE"
+    PACKAGE = "PACKAGE"
+    CONCEPT_INDEX = "CONCEPT_INDEX"
+    CONCEPT = "CONCEPT"
+    TOOL_INDEX = "TOOL_INDEX"
+    TOOL = "TOOL"
+    LOG = "LOG"
+    OTHER = "OTHER"
+
+
+@strawberry.type(description="What a bundle's manifest counts, by kind of thing it holds.")
+class OkfBundleCounts:
+    sources: int
+    schemas: int
+    tables: int
+    views: int
+    routines: int
+    packages: int
+    concepts: int
+    tools: int
+    documents: int
+
+    @classmethod
+    def of(cls, counts: dict[str, int]) -> OkfBundleCounts:
+        return cls(
+            sources=counts.get("sources", 0),
+            schemas=counts.get("schemas", 0),
+            tables=counts.get("tables", 0),
+            views=counts.get("views", 0),
+            routines=counts.get("routines", 0),
+            packages=counts.get("packages", 0),
+            concepts=counts.get("concepts", 0),
+            tools=counts.get("tools", 0),
+            documents=counts.get("documents", 0),
+        )
+
+
+@strawberry.type(
+    description="One stored, immutable publication of a bundle in the reader's own lineage. "
+    "`publicationId` is the snapshot identity a caller pins: the manifest it inspected and any "
+    "document it reads are the same bytes when both name it. `renderedCount` documents were "
+    "rendered by this publication; `carriedCount` kept the prior publication's stored bytes "
+    "without being rendered at all."
+)
+class OkfPublication:
+    publication_id: strawberry.ID
+    sequence: int
+    trigger: str
+    captured_at: datetime
+    is_current: bool
+    bundle_content_digest: str
+    content_snapshot_digest: str
+    document_count: int
+    rendered_count: int
+    carried_count: int
+    valid: bool
+    added_count: int = strawberry.field(description="Documents this publication added.")
+    changed_count: int = strawberry.field(description="Documents whose bytes it changed.")
+    removed_count: int = strawberry.field(description="Documents it removed.")
+    changed_subjects: int = strawberry.field(
+        description="Identity keys whose frozen facts moved."
+    )
+    marked_subjects: int = strawberry.field(
+        description="Catalog subjects whose change marks triggered the rebuild."
+    )
+    full_render: bool
+
+    @classmethod
+    def of(cls, read: OkfPublicationRead) -> OkfPublication:
+        return cls(
+            publication_id=_id(read.publication_id),
+            sequence=read.sequence,
+            trigger=read.trigger,
+            captured_at=read.captured_at,
+            is_current=read.is_current,
+            bundle_content_digest=read.bundle_content_digest,
+            content_snapshot_digest=read.content_snapshot_digest,
+            document_count=read.document_count,
+            rendered_count=read.rendered_count,
+            carried_count=read.carried_count,
+            valid=read.valid,
+            added_count=len(read.changes.added),
+            changed_count=len(read.changes.changed),
+            removed_count=len(read.changes.removed),
+            changed_subjects=read.changes.changed_subjects,
+            marked_subjects=read.changes.marked_subjects,
+            full_render=read.changes.full_render,
+        )
+
+
+@strawberry.type(
+    description="One finding of the Atlas publish policy for a publication. `code` is its "
+    "machine code; `detail` the path and target it names, where it names any."
+)
+class OkfFinding:
+    text: str
+    code: str
+    detail: str | None
+
+    @classmethod
+    def of(cls, text: str) -> OkfFinding:
+        code, separator, detail = text.partition(":")
+        return cls(text=text, code=code, detail=detail if separator else None)
+
+
+@strawberry.type(
+    description="One stored document as a list shows it: where it sits, what it is, the digest "
+    "of its bytes and how to cite it. Never its text -- read one document by path with "
+    "`OkfBundle.document`."
+)
+class OkfDocumentSummary:
+    publication_id: strawberry.ID
+    publication_sequence: int
+    path: str = strawberry.field(description="The bundle's own opaque, safe path.")
+    kind: OkfDocumentKind
+    citation: str = strawberry.field(
+        description="`okf:<publicationId>:<path>@<sha256>` -- the reference an answer carries to "
+        "cite exactly this document: the publication it was read from, its path and the digest "
+        "of its bytes."
+    )
+    sha256: str
+    bytes: int
+    rendered_in_sequence: int = strawberry.field(
+        description="The publication that first rendered these exact bytes: earlier than "
+        "`publicationSequence` when a rebuild carried the document forward unchanged."
+    )
+    subject_key: str | None = strawberry.field(
+        description="The identity key of the object, concept or tool the document is about; "
+        "null for an index or a log."
+    )
+
+    @classmethod
+    def of(cls, entry: OkfDocumentEntry) -> OkfDocumentSummary:
+        return cls(
+            publication_id=_id(entry.publication_id),
+            publication_sequence=entry.publication_sequence,
+            path=entry.path,
+            kind=OkfDocumentKind(entry.kind),
+            citation=entry.citation,
+            sha256=entry.sha256,
+            bytes=entry.bytes,
+            rendered_in_sequence=entry.rendered_in_sequence,
+            subject_key=entry.subject_key,
+        )
+
+
+@strawberry.type(
+    description="One stored document with its exact stored text, as "
+    "`GET .../okf-bundle/document` returns it: the Markdown a reader of the downloaded archive "
+    "finds at `path`, whose digest is `sha256`."
+)
+class OkfDocument:
+    publication_id: strawberry.ID
+    publication_sequence: int
+    path: str
+    kind: OkfDocumentKind
+    citation: str
+    sha256: str
+    bytes: int
+    rendered_in_sequence: int
+    subject_key: str | None
+    text: str
+
+    @classmethod
+    def of(cls, body: OkfDocumentBody) -> OkfDocument:
+        entry = body.entry
+        return cls(
+            publication_id=_id(entry.publication_id),
+            publication_sequence=entry.publication_sequence,
+            path=entry.path,
+            kind=OkfDocumentKind(entry.kind),
+            citation=entry.citation,
+            sha256=entry.sha256,
+            bytes=entry.bytes,
+            rendered_in_sequence=entry.rendered_in_sequence,
+            subject_key=entry.subject_key,
+            text=body.text,
+        )
+
+
+@strawberry.type(description="A page of stored documents, in path order.")
+class OkfDocumentSummaryConnection:
+    nodes: list[OkfDocumentSummary]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(description="A page of stored publications, newest first.")
+class OkfPublicationConnection:
+    nodes: list[OkfPublication]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(description="A page of publish-policy findings, in text order.")
+class OkfFindingConnection:
+    nodes: list[OkfFinding]
+    page_info: PageInfo
+    total_count: int | None
+
+
+@strawberry.type(
+    description="A stored OKF knowledge bundle -- a context product version's approved "
+    "references, or one datasource's discovered objects as this caller may read them -- as "
+    "`GET .../okf-bundle` describes it: the manifest's summary, the counts, the publication "
+    "read and the publish policy's verdict. The documents, the history and the findings are "
+    "connections beneath it; a document's text is read one path at a time. Every object in it "
+    "is one this caller's own authorization admitted; nothing else is named or counted."
+)
+class OkfBundle:
+    scope: OkfBundleScope
+    context_product_version_id: strawberry.ID | None = strawberry.field(
+        description="The version a product bundle is of; null for a datasource's."
+    )
+    product_key: str | None
+    product_version: int | None
+    datasource_id: strawberry.ID | None = strawberry.field(
+        description="The datasource a source bundle is of; null for a product's."
+    )
+    okf_version: str
+    spec_revision: str
+    spec_conformance: str = strawberry.field(
+        description="Exactly what was tested against the pinned specification -- never a "
+        "certification."
+    )
+    profile: str
+    content_snapshot_digest: str
+    bundle_content_digest: str
+    scope_digest: str
+    document_count: int
+    valid: bool = strawberry.field(
+        description="Whether the bundle satisfies the Atlas publish policy -- an Atlas policy "
+        "answer, not a statement that the bundle is unreadable. A download of an invalid "
+        "bundle is refused; this read is not."
+    )
+    finding_count: int
+    counts: OkfBundleCounts
+    publication: OkfPublication
+    validated_at: datetime = strawberry.field(
+        description="When the caller's lineage was last confirmed current, which may be later "
+        "than the publication: a no-op revalidation confirms without publishing."
+    )
+    read: strawberry.Private[OkfBundleHandle]
+
+    @classmethod
+    def of(cls, handle: OkfBundleHandle) -> OkfBundle:
+        summary: BundleSummary = bundle_summary(handle.stored)
+        product = handle.target == PRODUCT
+        return cls(
+            scope=(
+                OkfBundleScope.CONTEXT_PRODUCT_VERSION if product else OkfBundleScope.DATASOURCE
+            ),
+            context_product_version_id=_id(handle.target_id) if product else None,
+            product_key=handle.product_key,
+            product_version=handle.product_version,
+            datasource_id=None if product else _id(handle.target_id),
+            okf_version=summary.okf_version,
+            spec_revision=summary.spec_revision,
+            spec_conformance=summary.spec_conformance,
+            profile=summary.profile,
+            content_snapshot_digest=summary.content_snapshot_digest,
+            bundle_content_digest=summary.bundle_content_digest,
+            scope_digest=summary.scope_digest,
+            document_count=summary.document_count,
+            valid=summary.valid,
+            finding_count=len(summary.findings),
+            counts=OkfBundleCounts.of(summary.counts),
+            publication=OkfPublication.of(summary.publication),
+            validated_at=summary.validated_at,
+            read=handle,
+        )
+
+    @field_resolver(
+        "This bundle's documents, a page at a time in path order, without their text. Each "
+        "carries its path, kind, digest, size and citation."
+    )
+    async def documents(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> OkfDocumentSummaryConnection | None:
+        page = await list_okf_documents(info.context, self.read, first=first, after=after)
+        return OkfDocumentSummaryConnection(
+            nodes=[OkfDocumentSummary.of(entry) for entry in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+    @field_resolver(
+        "One document with its exact stored text, as `GET .../okf-bundle/document?path=` reads "
+        "it: looked up only among the stored rows of this publication, so a path that is not "
+        "in the bundle reads as NOT_FOUND. Recorded, with the path."
+    )
+    async def document(self, info: Info, path: str) -> OkfDocument | None:
+        return OkfDocument.of(await read_okf_document(info.context, self.read, path=path))
+
+    @field_resolver(
+        "The caller's own lineage of stored publications, newest first, as "
+        "`GET .../okf-bundle/publications` lists it: what changed, when, and why. A "
+        "publication built under another authority is neither listed nor counted."
+    )
+    async def publications(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> OkfPublicationConnection | None:
+        page = await list_okf_publications(info.context, self.read, first=first, after=after)
+        return OkfPublicationConnection(
+            nodes=[OkfPublication.of(item) for item in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+    @field_resolver("The publish policy's findings for this publication, a page at a time.")
+    async def findings(
+        self, info: Info, first: int = _DEFAULT_PAGE, after: str | None = None
+    ) -> OkfFindingConnection | None:
+        page = await list_okf_findings(info.context, self.read, first=first, after=after)
+        return OkfFindingConnection(
+            nodes=[OkfFinding.of(text) for text in page.items],
+            page_info=_page_info(page),
+            total_count=page.total,
+        )
+
+
 @strawberry.type(description="Metadata reads. Nothing here executes against a source.")
 class Query:
     @field_resolver("One datasource by id, as `GET /v1/datasources/{id}`.")
@@ -1361,6 +1724,39 @@ class Query:
             info.context, _uuid(datasource_id), _uuid(trigger_id)
         )
         return TriggerParseCoverage.of(read)
+
+    @field_resolver(
+        "A context product version's stored OKF knowledge bundle, as "
+        "`GET /v1/context-product-versions/{id}/okf-bundle` reads it: the same store, and so "
+        "the same envelope, consumer-role, purpose, quality and per-datasource decisions, and "
+        "the same lineage keyed on what this caller's authorization admits. `publicationId` "
+        "reads that retained publication of the caller's own lineage instead of the current "
+        "one. Recorded as a read: an audit event, and a consumption for a PUBLISHED version."
+    )
+    async def context_product_okf_bundle(
+        self, info: Info, version_id: strawberry.ID, publication_id: strawberry.ID | None = None
+    ) -> OkfBundle | None:
+        return OkfBundle.of(
+            await get_okf_bundle(
+                info.context, PRODUCT, _uuid(version_id), _optional_uuid(publication_id)
+            )
+        )
+
+    @field_resolver(
+        "One datasource's stored OKF knowledge bundle, as `GET /v1/datasources/{id}/okf-bundle` "
+        "reads it: the datasource's `READ_METADATA` decision, and each schema's where a "
+        "workspace decides, is taken on every read, and a caller it refuses is answered "
+        "FORBIDDEN with the gate's own reason -- never an empty bundle. Only objects that "
+        "decision admitted are named or counted. Recorded as a read."
+    )
+    async def datasource_okf_bundle(
+        self, info: Info, datasource_id: strawberry.ID, publication_id: strawberry.ID | None = None
+    ) -> OkfBundle | None:
+        return OkfBundle.of(
+            await get_okf_bundle(
+                info.context, SOURCE, _uuid(datasource_id), _optional_uuid(publication_id)
+            )
+        )
 
     @field_resolver("One table by id, decided as its columns route decides it.")
     async def table(self, info: Info, id: strawberry.ID) -> Table | None:

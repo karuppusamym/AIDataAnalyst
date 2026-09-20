@@ -23,7 +23,7 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException
 
-from aida import context_compiler_api
+from aida import context_product_read_service
 from aida.context_compiler_api import (
     compile_context_product_version,
     download_context_compilation,
@@ -52,8 +52,10 @@ def quality_tripwire(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
         reached.append(True)
         raise _ReachedQualityGate
 
+    # R11-GQL01: the decision moved out of the router into the shared service, so that is the
+    # module whose quality evaluation the compile routes now reach.
     monkeypatch.setattr(
-        context_compiler_api, "evaluate_context_product_quality_from_db", _tripwire
+        context_product_read_service, "evaluate_context_product_quality_from_db", _tripwire
     )
     return reached
 

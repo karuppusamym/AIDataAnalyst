@@ -556,7 +556,13 @@ def _module_imports(path: Path) -> set[str]:
     return found
 
 
-_GRAPHQL_MODULES = ("graphql_api", "graphql_limits", "graphql_reads", "graphql_schema")
+_GRAPHQL_MODULES = (
+    "graphql_api",
+    "graphql_limits",
+    "graphql_okf",
+    "graphql_reads",
+    "graphql_schema",
+)
 
 
 def test_no_graphql_module_imports_a_router_the_gateway_or_a_connector() -> None:

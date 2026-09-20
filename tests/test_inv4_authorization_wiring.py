@@ -237,6 +237,15 @@ _GRAPHQL_GATED_RESOLVERS = [
     "Table.description",
     "Column.business_description",
     "Constraint.referenced_table",
+    # R11-GQL01: the stored OKF bundle reads. Each reaches the gate through the store's read
+    # (`read_published_bundle` -> `admit_datasources`, `read_published_source_bundle` ->
+    # `admit_source`), the same decision the REST bundle routes above reach.
+    "Query.context_product_okf_bundle",
+    "Query.datasource_okf_bundle",
+    "OkfBundle.documents",
+    "OkfBundle.document",
+    "OkfBundle.publications",
+    "OkfBundle.findings",
 ]
 
 

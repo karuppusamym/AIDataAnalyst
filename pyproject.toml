@@ -560,3 +560,109 @@ forbidden_modules = [
   "aida.tool_api",
   "aida.view_lineage_api",
 ]
+
+[[tool.importlinter.contracts]]
+# R11-GQL01. GraphQL's read modules, the stored-OKF read model and the shared context-product
+# read services answer for REST routes without importing them ("reuse domain services, not HTTP
+# loopback calls or router imports", design section 13). That was held by one test reading the
+# direct imports of four GraphQL modules -- and `okf_store`, which GraphQL reaches, imported the
+# compile router for its scope resolver. `aida.context_product_read_service` closed that edge;
+# this pins it, indirect chains included, so the cheapest fix for the next shared decision is a
+# service and not an import back into the router it lives beside.
+#
+# `aida.graphql_schema` is deliberately not a source module yet: through
+# `aida.governed_execution` (R11-GQL02) it reaches `aida.tool_api` -- a router -- so naming it
+# here would fail today. Naming it is the goal; the fix is a service for that path.
+name = "R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router"
+type = "forbidden"
+source_modules = [
+  "aida.context_product_read_service",
+  "aida.context_product_reads",
+  "aida.graphql_limits",
+  "aida.graphql_okf",
+  "aida.graphql_reads",
+  "aida.okf_read_model",
+  "aida.okf_store",
+]
+# Every `*_api` module is a router in this codebase, and an import-linter wildcard cannot
+# match a suffix, so they are listed; `tests/test_r11_gql01_compile_read_service.py` fails
+# when a new one is missing from this list.
+forbidden_modules = [
+  "aida.api",
+  "aida.main",
+  "aida.mcp_server",
+  "aida.access_review_api",
+  "aida.agent_contract_api",
+  "aida.agent_contract_request_api",
+  "aida.agent_roster_api",
+  "aida.ai_decision_lineage_api",
+  "aida.ai_governance_api",
+  "aida.ai_registry_api",
+  "aida.asset_description_api",
+  "aida.asset_evidence_api",
+  "aida.audit_export_api",
+  "aida.bi_api",
+  "aida.change_signals_api",
+  "aida.column_description_api",
+  "aida.column_documentation_api",
+  "aida.compliance_api",
+  "aida.composite_key_api",
+  "aida.consumption_lineage_api",
+  "aida.context_compiler_api",
+  "aida.context_product_api",
+  "aida.dbt_api",
+  "aida.definition_history_api",
+  "aida.delegation_api",
+  "aida.description_withdrawal_api",
+  "aida.detokenization_api",
+  "aida.document_ingestion_api",
+  "aida.engine_capability_api",
+  "aida.footprint_gaps_api",
+  "aida.glossary_api",
+  "aida.ingestion_api",
+  "aida.intelligence_api",
+  "aida.lineage_agent_api",
+  "aida.lineage_evidence_export_api",
+  "aida.metric_suggestion_api",
+  "aida.model_export_api",
+  "aida.model_import_api",
+  "aida.negative_knowledge_api",
+  "aida.notification_api",
+  "aida.observability_api",
+  "aida.okf_export_api",
+  "aida.okf_import_api",
+  "aida.ontology_api",
+  "aida.openlineage_api",
+  "aida.operational_api",
+  "aida.parsed_lineage_review_api",
+  "aida.persona_api",
+  "aida.playbooks_api",
+  "aida.policy_native_sync_api",
+  "aida.procedure_lineage_api",
+  "aida.procedure_tool_api",
+  "aida.product_marketplace_api",
+  "aida.quality_agent_api",
+  "aida.quality_api",
+  "aida.relationship_validation_api",
+  "aida.retrieval_ops_api",
+  "aida.review_batch_api",
+  "aida.review_queue_api",
+  "aida.routine_description_api",
+  "aida.runtime_contracts_api",
+  "aida.search_api",
+  "aida.semantic_api",
+  "aida.semantic_intelligence_api",
+  "aida.sql_validation_api",
+  "aida.sql_workspace_api",
+  "aida.steward_agent_api",
+  "aida.stewardship_api",
+  "aida.studio_api",
+  "aida.table_family_api",
+  "aida.task_agent_api",
+  "aida.token_revocation_api",
+  "aida.tool_agent_api",
+  "aida.tool_api",
+  "aida.tool_plans_api",
+  "aida.unified_lineage_api",
+  "aida.workspace_api",
+]

@@ -340,7 +340,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `dq_itsm_webhook_timeout_seconds` | `int` | `10` | 1 |
 | `agent_retrieval_limit` | `int` | `25` | 6 |
 | `agent_retrieval_scan_limit` | `int` | `5000` | 9 |
-| `okf_context_default_max_chars` | `int` | `16000` | 3 |
+| `okf_context_default_max_chars` | `int` | `16000` | 4 |
 | `okf_context_ask_max_chars` | `int` | `8000` | 1 |
 | `okf_import_enabled` | `bool` | `False` | 1 |
 | `sql_draft_receipt_ttl_minutes` | `int` | `15` | 1 |

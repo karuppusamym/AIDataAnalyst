@@ -634,7 +634,7 @@ async def freeze_snapshot(
     possibly different decision; when absent the freeze decides itself, as R11-OKF01 did.
 
     `routines`, `views`, `ontology` and `freshness` arrive already resolved by the context
-    compiler's own scope resolver (`context_compiler_api._load_source`), which is what the
+    compiler's own scope resolver (`context_product_read_service._load_source`), which is what the
     design requires: "Source/object preview and product export must reuse the compiler's scope
     resolver." Everything this function adds -- schemas, columns, descriptions, capture
     versions, dependency edges, packages -- is loaded here and cut to what

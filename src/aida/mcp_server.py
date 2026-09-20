@@ -138,14 +138,24 @@ from aida.models import (
     MetadataTable,
     TableProfile,
 )
-from aida.okf_context import MAX_CHARS_LIMIT, MAX_QUESTION_CHARS
-from aida.okf_export_api import OKF_ROLES, context_read, publication_read
+from aida.okf_context import (
+    MAX_CHARS_LIMIT,
+    MAX_QUESTION_CHARS,
+    section_texts,
+    without_sections,
+)
+from aida.okf_export_api import OKF_ROLES, context_read, publication_read, source_context_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
+    MAX_AUDITED_SECTIONS,
+    SOURCE_BUNDLE_CHANNELS,
+    OkfStoredSourceContext,
     load_document,
     read_okf_context,
+    read_okf_source_context,
     read_published_bundle,
     record_okf_read,
+    record_okf_source_read,
 )
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
@@ -429,6 +439,13 @@ NATIVE_VALIDATION_TOOL_SLUGS = frozenset(
 # store function as `resources/read` and the REST routes (`aida.okf_store.read_okf_context`), so
 # scope, the capability envelope's `context_product_ids`, admission and the lineage key are
 # exactly theirs. Read-only and value-free: it returns knowledge, never rows.
+#
+# R11-OKF02 / R11-GQL01: its source-scoped sibling, `get_source_knowledge_context`, asks the
+# same of one datasource's stored bundle (`aida.okf_store.read_okf_source_context`, the store
+# function `POST /v1/datasources/{id}/okf-bundle/context` calls), and so the datasource's
+# `READ_METADATA` decision -- on the datasource and on each schema where a workspace decides.
+# A datasource is not in a contract's envelope, so what bounds it is what bounds every native
+# tool here (`_native_tool_contract_denial`) and that workspace decision.
 
 NATIVE_KNOWLEDGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -460,11 +477,45 @@ NATIVE_KNOWLEDGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["product_key", "version", "question"],
             "additionalProperties": False,
         },
-    }
+    },
+    {
+        "slug": "get_source_knowledge_context",
+        "description": (
+            "Select the sections of one data source's stored OKF knowledge bundle that a "
+            "question needs -- the tables, views, routines and packages the caller may read, "
+            "their columns, dependencies and approved descriptions -- with each section's "
+            "document path, heading anchor and sha256 for citation. Returns NO_MATCH when "
+            "the bundle holds nothing on the question. A source bundle holds no business "
+            "concepts or tools: for meaning, ask a context product's knowledge. Holds no "
+            "source values: for a current figure, call an approved tool. Text the egress "
+            "screen refuses is withheld and counted, never returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource_id": {"type": "string", "description": "Datasource UUID"},
+                "question": {
+                    "type": "string",
+                    "description": f"The question, 1-{MAX_QUESTION_CHARS} characters",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": (
+                        f"Characters of section text to return, 1000-{MAX_CHARS_LIMIT}; "
+                        "default: the deployment's configured budget"
+                    ),
+                },
+            },
+            "required": ["datasource_id", "question"],
+            "additionalProperties": False,
+        },
+    },
 ]
 NATIVE_KNOWLEDGE_TOOL_SLUGS = frozenset(
     item["slug"] for item in NATIVE_KNOWLEDGE_TOOL_DEFINITIONS
 )
+#: The tool that reads a datasource's bundle rather than a context product's.
+SOURCE_KNOWLEDGE_TOOL_SLUG = "get_source_knowledge_context"
 
 #: Every tool `tools/call` serves without a `GovernedToolVersion` behind it.
 #: R11-C6: the three families were dispatched by three near-identical
@@ -909,6 +960,10 @@ async def _handle_native_knowledge_tool_call(
             "isError": True,
             "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
         }
+    if slug == SOURCE_KNOWLEDGE_TOOL_SLUG:
+        return await _handle_native_source_knowledge_tool_call(
+            arguments, session, context, settings
+        )
 
     def refuse(text: str) -> dict[str, Any]:
         return {"isError": True, "content": [{"type": "text", "text": text}]}
@@ -964,6 +1019,107 @@ async def _handle_native_knowledge_tool_call(
     read = context_read(found)
     await session.commit()
     structured = read.model_dump(mode="json", exclude={"markdown"})
+    return {
+        "content": [
+            {"type": "text", "text": read.markdown},
+            {"type": "text", "text": "```json\n" + json.dumps(structured, indent=2) + "\n```"},
+        ]
+    }
+
+
+async def _handle_native_source_knowledge_tool_call(
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+) -> dict[str, Any]:
+    """`get_source_knowledge_context`: question-specific sections of a datasource's stored bundle.
+
+    The product tool's structure, for one datasource: the caller's role was checked by the
+    dispatcher (`OKF_ROLES`), the agent's contract by `_native_tool_contract_denial`, and the
+    endpoint has already applied workload identity and the budgets. What is left is the read --
+    through `read_okf_source_context`, and so `read_published_source_bundle`, whose datasource
+    decision is the workspace's `READ_METADATA` (on the datasource and on each schema where a
+    workspace decides). A refusal of any kind -- an unknown datasource, another tenant's, a
+    workspace that refuses the caller -- reads as "not found or not accessible", as the other
+    context doors do, and answers with no bundle: not an empty one.
+
+    Egress (INV-6, AR-10): what is handed to the agent is screened on the way out, live, with the
+    platform's own `screen_text` -- the screen Ask applies to the same sections before a model
+    sees them. A section that fails it is withheld, counted and audited by path and anchor
+    (never its text), and the answer says how many were withheld. The question is never
+    recorded: the audit names the sections handed out, and nothing else of the request.
+    """
+
+    def refuse(text: str) -> dict[str, Any]:
+        return {"isError": True, "content": [{"type": "text", "text": text}]}
+
+    datasource_arg = arguments.get("datasource_id")
+    question = arguments.get("question")
+    max_chars = arguments.get("max_chars", settings.okf_context_default_max_chars)
+    if not isinstance(datasource_arg, str):
+        return refuse("datasource_id must be a UUID string.")
+    try:
+        datasource_id = UUID(datasource_arg)
+    except ValueError:
+        return refuse("datasource_id must be a UUID string.")
+    if not isinstance(question, str) or not 1 <= len(question.strip()) <= MAX_QUESTION_CHARS:
+        return refuse(f"question must contain 1-{MAX_QUESTION_CHARS} characters.")
+    if (
+        isinstance(max_chars, bool)
+        or not isinstance(max_chars, int)
+        or not 1_000 <= max_chars <= MAX_CHARS_LIMIT
+    ):
+        return refuse(f"max_chars must be an integer between 1000 and {MAX_CHARS_LIMIT}.")
+    try:
+        found = await read_okf_source_context(
+            session, datasource_id, context, settings, question, max_chars=max_chars
+        )
+    except HTTPException:
+        return refuse("Data source not found or not accessible.")
+    withheld = [
+        (path, anchor)
+        for path, anchor, text in section_texts(found.context)
+        if not is_eligible_for_model_context(
+            screen_text(text, content_origin=f"okf_source_context:{datasource_id}").status
+        )
+    ]
+    handed_out = OkfStoredSourceContext(
+        stored=found.stored, context=without_sections(found.context, withheld)
+    )
+    if withheld:
+        record_audit(
+            session,
+            context,
+            action="mcp.datasource.okf_context_egress_quarantined",
+            resource_type="datasource",
+            resource_id=str(datasource_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "publication_id": str(found.stored.publication.id),
+                "withheld_count": len(withheld),
+                "withheld_sections": [
+                    f"{path}#{anchor}" for path, anchor in withheld[:MAX_AUDITED_SECTIONS]
+                ],
+                "screening_version": SCREENING_VERSION,
+            },
+        )
+    record_okf_source_read(
+        session,
+        context,
+        found.stored,
+        action="mcp.datasource.okf_context_read",
+        channel=SOURCE_BUNDLE_CHANNELS["mcp_context"],
+        sections=handed_out.context.receipts(),
+    )
+    read = source_context_read(handed_out)
+    await session.commit()
+    structured = read.model_dump(mode="json", exclude={"markdown"})
+    structured["egress"] = {
+        "screening_version": SCREENING_VERSION,
+        "withheld_sections": len(withheld),
+    }
     return {
         "content": [
             {"type": "text", "text": read.markdown},
@@ -2078,7 +2234,10 @@ async def _native_tool_contract_denial(
       native tool that names a product in its *arguments*,
       `get_knowledge_context`, reads through `read_published_bundle`, whose
       scope resolver applies `context_product_ids` itself -- so the envelope
-      bounds it there rather than here.
+      bounds it there rather than here. Its sibling `get_source_knowledge_context`
+      names a *datasource*, which an envelope has no dimension for; what bounds it
+      is this function (kill switch, contract existence, `native_tools`) and the
+      datasource's own `READ_METADATA` decision inside `read_published_source_bundle`.
 
     Returns the MCP error result to hand back, or `None` to proceed. A human
     principal holds no contract and is unaffected.

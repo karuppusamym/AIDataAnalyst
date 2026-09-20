@@ -2,8 +2,8 @@
 
 A product scoped by `table_ids` alone can say "these tables", but not "this procedure builds that
 one", nor "this view's definition was withheld from us". The resolvers here feed both doors a
-version is read through -- compilation (`context_compiler_api._load_source`) and MCP's resource
-read -- so the two cannot describe the same version differently:
+version is read through -- compilation (`context_product_read_service._load_source`) and MCP's
+resource read -- so the two cannot describe the same version differently:
 
 * `load_routine_references` resolves the routines a version names in `routine_ids`: identity,
   status, whether its body would be released on request, the state of its lineage, and the

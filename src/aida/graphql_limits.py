@@ -249,7 +249,8 @@ EXECUTION_ERROR_CODES: dict[str, str] = {
     ),
     "NOT_FOUND": (
         "no such object (the REST route answers 404); reason COVERAGE_NOT_MEASURED when the "
-        "routine or trigger exists but no parse has measured it"
+        "routine or trigger exists but no parse has measured it; reason OKF_DOCUMENT_NOT_FOUND "
+        "when a document path is not in the stored bundle"
     ),
     "GONE": (
         "the context product version was retired and this caller read it before; "
@@ -263,7 +264,10 @@ EXECUTION_ERROR_CODES: dict[str, str] = {
         "R11-GQL02: the idempotency key was already used with different inputs, or the "
         "tool cannot run now (a quality hold, an unpublished version); for "
         "`contextProductCoverage`, the version names a table, routine or ontology version "
-        "that no longer resolves (the REST route answers 409); `extensions.reason` says which"
+        "that no longer resolves (the REST route answers 409); for the stored OKF bundle "
+        "reads, the store declined to publish or serve one (a scope over its limits, a capture "
+        "that raced a change -- retry -- or a stored bundle that is not whole); "
+        "`extensions.reason` says which"
     ),
     "REJECTED": "R11-GQL02: the gateway or parameter binding refused the execution",
     "EXECUTION_FAILED": "R11-GQL02: the source failed the execution; the receipt says so",

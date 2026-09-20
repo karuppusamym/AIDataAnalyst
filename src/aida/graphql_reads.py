@@ -85,22 +85,16 @@ from aida.capability_states import parse_coverage_state
 from aida.catalog_read_model import _latest_approved_documentation
 from aida.column_documentation import current_descriptions_for_table
 from aida.context_compiler import coverage_section, freshness_section
-from aida.context_product_coverage import (
-    load_coverage_changes,
-    load_ontology_meaning,
-    load_pinned_meaning,
-    load_routine_references,
-    load_source_freshness,
-    load_view_coverage,
-    publication_time,
-)
-from aida.context_product_policy import (
-    evaluate_context_product_purpose,
-    evaluate_context_product_quality_from_db,
+from aida.context_product_read_service import (
+    COMPILER_LIFECYCLE_READERS,
+    COMPILER_ROLES,
+    UnresolvedReferencesError,
+    decide_compiled_read,
+    load_coverage_extras,
+    resolve_pinned_references,
 )
 from aida.context_product_reads import (
     CONTEXT_PRODUCT_READERS,
-    _enforce_capability_envelope,
     _product_read,
     _version_read,
     context_product_listing,
@@ -117,10 +111,8 @@ from aida.models import (
     ContextProductConsumptionEdge,
     ContextProductVersion,
     DataSource,
-    MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
-    MetadataSchema,
     MetadataTable,
     Organization,
 )
@@ -210,20 +202,13 @@ CATALOG_READ_ROLES: tuple[str, ...] = ("PlatformAdmin", "MetadataAdmin", "Analys
 #: The roles `GET /v1/context-product-versions/{id}/compile` declares: the one REST route
 #: whose answer carries a version's coverage (the Atlas-native targets' `context.coverage`,
 #: and `generated_from.source_freshness` beside it), so the roles `contextProductCoverage`
-#: requires. `tests/test_graphql_coverage.py` reads them back from the live route.
-CONTEXT_COMPILER_ROLES: tuple[str, ...] = (
-    "PlatformAdmin",
-    "MetadataAdmin",
-    "DataProductOwner",
-    "DataSteward",
-    "AgentDeveloper",
-    "Analyst",
-)
+#: requires. The route and this field import the one tuple from
+#: `aida.context_product_read_service`; `tests/test_graphql_coverage.py` still reads it back
+#: from the live route.
+CONTEXT_COMPILER_ROLES: tuple[str, ...] = COMPILER_ROLES
 #: Who the compile route lets read a version whatever its status, purpose or quality -- its
 #: own set, not the version read's `CONTEXT_PRODUCT_LIFECYCLE_READERS`.
-CONTEXT_COMPILER_LIFECYCLE_READERS: frozenset[str] = frozenset(
-    {"PlatformAdmin", "MetadataAdmin", "DataProductOwner", "DataSteward"}
-)
+CONTEXT_COMPILER_LIFECYCLE_READERS: frozenset[str] = COMPILER_LIFECYCLE_READERS
 #: The consumption channel a coverage read records under, beside the compile route's
 #: `COMPILER` and `COMPILER_DOWNLOAD`.
 COVERAGE_CONSUMPTION_CHANNEL = "GRAPHQL_COVERAGE"
@@ -334,6 +319,9 @@ class ReadScope:
     #: A version's coverage, or the refusal, once per request: an alias asking again is
     #: the same read, decided and recorded once.
     coverage: dict[UUID, ProductCoverage | ReadRefused] = field(default_factory=dict)
+    #: The stored OKF bundles (and the recorded child reads of them) this request has read, or
+    #: the refusal each got, once per request -- `aida.graphql_okf`'s memo, of the same kind.
+    okf: dict[tuple[Any, ...], object] = field(default_factory=dict)
     datasources: DataLoader[UUID, DataSource | None] = field(init=False)
     tables: DataLoader[UUID, MetadataTable | None] = field(init=False)
     column_pages: DataLoader[_ChildPageKey, Page[MetadataColumnRead]] = field(init=False)
@@ -1217,101 +1205,22 @@ async def list_lineage_graph_edges(
 # --- coverage (R11-GQL01) ------------------------------------------------------
 
 
-async def _compiled_read_decision(
-    session: AsyncSession, context: SecurityContext, version_id: UUID
-) -> tuple[ContextProduct, ContextProductVersion, Any]:
-    """The decision `GET /v1/context-product-versions/{id}/compile` makes before it resolves
-    anything (`context_compiler_api._load_source`), check for check and in its order: the
-    version, its tenant, an ACTIVE product, the agent's capability envelope
-    (`_enforce_capability_envelope`, shared with every context-product door), then -- for
-    anyone outside the compiler's lifecycle readers -- PUBLISHED and a consumer role, purpose
-    and quality. Every "no" is the route's anti-enumeration 404 (NOT_FOUND here).
-
-    The composition lives in a route module, which a resolver may not import, so it is
-    composed here from the same shared checks; `tests/test_graphql_coverage.py` holds the two
-    together for every reader class and every refusal.
-    """
-    version = await session.get(ContextProductVersion, version_id)
-    if version is None:
-        raise ReadRefused("NOT_FOUND")
-    enforce_organization(context, version.organization_id)
-    product = await session.get(ContextProduct, version.product_id)
-    if product is None or product.lifecycle_status != "ACTIVE":
-        raise ReadRefused("NOT_FOUND")
-    await _enforce_capability_envelope(session, context, product, version)
-    lifecycle_reader = not context.roles.isdisjoint(CONTEXT_COMPILER_LIFECYCLE_READERS)
-    if not lifecycle_reader and (
-        version.status != "PUBLISHED" or context.roles.isdisjoint(version.allowed_consumer_roles)
-    ):
-        raise ReadRefused("NOT_FOUND")
-    purpose = evaluate_context_product_purpose(context.business_purpose, version.policy_summary)
-    if not lifecycle_reader and not purpose.allowed:
-        raise ReadRefused("NOT_FOUND")
-    quality = await evaluate_context_product_quality_from_db(
-        session,
-        organization_id=version.organization_id,
-        table_id_values=version.table_ids,
-        requirements=version.quality_requirements,
-    )
-    if not lifecycle_reader and not quality.allowed:
-        raise ReadRefused("NOT_FOUND")
-    return product, version, quality
-
-
 async def _resolved_coverage(
     session: AsyncSession, version: ContextProductVersion
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """What the compile route resolves after its decision, minus the two sections that are not
-    coverage (negative knowledge and exemplars): the same loaders, the same unresolved-reference
-    refusals (REST's 409, CONFLICT here), rendered by the same `coverage_section` and
-    `freshness_section`."""
-    organization_id = version.organization_id
-    table_ids = [UUID(value) for value in version.table_ids]
-    if table_ids:
-        resolved = (
-            await session.execute(
-                select(MetadataTable.id)
-                .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
-                .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
-                .where(
-                    MetadataTable.id.in_(table_ids),
-                    MetadataTable.organization_id == organization_id,
-                )
-            )
-        ).all()
-        if len(resolved) != len(table_ids):
-            raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED")
-    routine_ids = list(version.routine_ids or [])
-    routines = await load_routine_references(
-        session, organization_id, routine_ids, version.table_ids
+    coverage (negative knowledge and exemplars): the same `resolve_pinned_references` and
+    `load_coverage_extras` the route calls, so a stale pin is the route's 409 (CONFLICT here),
+    rendered by the same `coverage_section` and `freshness_section`."""
+    try:
+        pinned = await resolve_pinned_references(session, version)
+    except UnresolvedReferencesError as unresolved:
+        raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED") from unresolved
+    meaning, changes = await load_coverage_extras(session, version)
+    return (
+        coverage_section(pinned.routines, pinned.views, meaning, changes),
+        freshness_section(pinned.sources),
     )
-    if len(routines) != len(routine_ids):
-        raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED")
-    views = await load_view_coverage(session, organization_id, version.table_ids)
-    sources = await load_source_freshness(session, organization_id, version.table_ids)
-    ontology_version_ids = list(version.ontology_version_ids or [])
-    ontology = await load_ontology_meaning(
-        session, organization_id, ontology_version_ids, version.table_ids, routine_ids
-    )
-    if len(ontology) != len(ontology_version_ids):
-        raise ReadRefused("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED")
-    meaning = await load_pinned_meaning(
-        session,
-        organization_id,
-        ontology_version_ids=ontology_version_ids,
-        semantic_model_version_ids=list(version.semantic_model_version_ids),
-        glossary_term_version_ids=list(version.glossary_term_version_ids),
-        scope_table_ids=version.table_ids,
-        scope_routine_ids=routine_ids,
-    )
-    changes = await load_coverage_changes(
-        session,
-        organization_id,
-        version.table_ids,
-        routine_ids,
-        since=publication_time(version),
-    )
-    return coverage_section(routines, views, meaning, changes), freshness_section(sources)
 
 
 async def get_context_product_coverage(scope: ReadScope, version_id: UUID) -> ProductCoverage:
@@ -1344,11 +1253,10 @@ async def _product_coverage(scope: ReadScope, version_id: UUID) -> ProductCovera
     """Decide, resolve and record one version's coverage. The caller holds `scope.lock`."""
     session = scope.session
     try:
-        product, version, quality = await _compiled_read_decision(
-            session, scope.context, version_id
-        )
+        decision = await decide_compiled_read(session, scope.context, version_id)
     except HTTPException as exc:
         raise _shared_refusal(exc) from exc
+    product, version, quality = decision.product, decision.version, decision.quality
     section, freshness = await _resolved_coverage(session, version)
     correlation_id = get_correlation_id()
     record_audit(

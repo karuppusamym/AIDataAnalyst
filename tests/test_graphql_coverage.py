@@ -127,6 +127,7 @@ async def _product(
     version: int = 1,
     routine_ids: list[UUID] | None = None,
     glossary_term_version_ids: list[UUID] | None = None,
+    ontology_version_ids: list[UUID] | None = None,
     consumer_roles: list[str] | None = None,
     policy_summary: dict[str, Any] | None = None,
     quality_requirements: dict[str, Any] | None = None,
@@ -159,6 +160,7 @@ async def _product(
         table_ids=[str(value) for value in table_ids],
         routine_ids=[str(value) for value in routine_ids or []],
         glossary_term_version_ids=[str(value) for value in glossary_term_version_ids or []],
+        ontology_version_ids=[str(value) for value in ontology_version_ids or []],
         allowed_consumer_roles=consumer_roles or ["Analyst"],
         policy_summary=policy_summary or {"source_values": "GATEWAY_ONLY"},
         quality_requirements=quality_requirements or {},
@@ -449,6 +451,14 @@ async def estate() -> AsyncIterator[Estate]:
             ),
             "dangling": await _product(
                 db, project, "dangling-context", table_ids=[orders.id], routine_ids=[uuid4()]
+            ),
+            # R11-GQL01: the other two pins the shared resolution refuses when they go stale.
+            "dangling-table": await _product(
+                db, project, "ghost-table-context", table_ids=[orders.id, uuid4()]
+            ),
+            "dangling-ontology": await _product(
+                db, project, "ghost-ontology-context", table_ids=[orders.id],
+                ontology_version_ids=[uuid4()],
             ),
             "retired": await _product(
                 db, project, "retired-context", table_ids=[orders.id], status="SUPERSEDED"
@@ -832,6 +842,22 @@ _REFUSALS: list[tuple[str, str, str, dict[str, str], int, tuple[str, str | None]
     (
         "unresolved-routine",
         "dangling",
+        "DataSteward",
+        {},
+        409,
+        ("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED"),
+    ),
+    (
+        "unresolved-table",
+        "dangling-table",
+        "DataSteward",
+        {},
+        409,
+        ("CONFLICT", "CONTEXT_PRODUCT_REFERENCES_UNRESOLVED"),
+    ),
+    (
+        "unresolved-ontology",
+        "dangling-ontology",
         "DataSteward",
         {},
         409,

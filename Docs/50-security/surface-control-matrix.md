@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **548**
-- By family: BULK 11, EXPORT 8, GRAPHQL 31, JOB 29, MCP 9, REST 459, SDK 1
+- Surfaces covered: **554**
+- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 29, MCP 9, REST 459, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -91,9 +91,15 @@ graph. Nothing here is hand-maintained.
 | `GRAPHQL LineageImpact.downstream` | GRAPHQL | `aida.graphql_schema.LineageImpact.downstream` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL LineageImpact.upstream` | GRAPHQL | `aida.graphql_schema.LineageImpact.upstream` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | yes | read | no | not cancellable |
 | `GRAPHQL Mutation.executeGovernedTool` | GRAPHQL | `aida.graphql_schema.Mutation.execute_governed_tool` | AgentDeveloper, Analyst, PlatformAdmin, ToolConsumer | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL OkfBundle.document` | GRAPHQL | `aida.graphql_schema.OkfBundle.document` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL OkfBundle.documents` | GRAPHQL | `aida.graphql_schema.OkfBundle.documents` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL OkfBundle.findings` | GRAPHQL | `aida.graphql_schema.OkfBundle.findings` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
+| `GRAPHQL OkfBundle.publications` | GRAPHQL | `aida.graphql_schema.OkfBundle.publications` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GRAPHQL Query.contextProductCoverage` | GRAPHQL | `aida.graphql_schema.Query.context_product_coverage` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `GRAPHQL Query.contextProductOkfBundle` | GRAPHQL | `aida.graphql_schema.Query.context_product_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GRAPHQL Query.contextProductVersion` | GRAPHQL | `aida.graphql_schema.Query.context_product_version` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GRAPHQL Query.contextProducts` | GRAPHQL | `aida.graphql_schema.Query.context_products` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
+| `GRAPHQL Query.datasourceOkfBundle` | GRAPHQL | `aida.graphql_schema.Query.datasource_okf_bundle` | AgentDeveloper, Analyst, DataProductOwner, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `GRAPHQL Query.datasource` | GRAPHQL | `aida.graphql_schema.Query.datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.datasources` | GRAPHQL | `aida.graphql_schema.Query.datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GRAPHQL Query.governedExecution` | GRAPHQL | `aida.graphql_schema.Query.governed_execution` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, ToolConsumer | yes | no | writes | no | not cancellable |

@@ -20,6 +20,12 @@ Also under R11-OKF02, a bundle has two scopes: a context product version's, and 
 datasource's (`DATASOURCE`). See [Source bundles](#source-bundles-r11-okf02). Tests:
 `tests/test_okf_source_bundles.py`.
 
+The stored bundle is also read over GraphQL (`src/aida/graphql_okf.py`, R11-GQL01; tests
+`tests/test_graphql_okf.py`) and, for a datasource, asked a question of over MCP
+(`atlas__get_source_knowledge_context`; tests `tests/test_mcp_source_knowledge.py`). Both go
+through the same store functions as the REST routes, so they apply the same gates. See
+[Surfaces](#surfaces).
+
 ## The pinned specification, and what is actually tested
 
 | Field | Value |
@@ -457,6 +463,8 @@ decides; see [Source bundles](#source-bundles-r11-okf02).
 | `GET /v1/datasources/{datasource_id}/okf-bundle/document?path=` | One stored document of the source bundle. Optional `publication_id`. |
 | `GET /v1/datasources/{datasource_id}/okf-bundle/publications` | The reader's own lineage of source-bundle publications. |
 | `POST /v1/datasources/{datasource_id}/okf-bundle/context` | The sections of the source bundle a question needs, with receipts; the product context route's contract, with the datasource in place of the product. |
+| MCP `tools/call` of `atlas__get_source_knowledge_context` | The source bundle's selection for an agent that has a question: the source context route's store function, so the datasource's `READ_METADATA` decision applies and a refused caller is told what an unknown datasource is told. What it returns is screened live -- a section that fails is withheld, counted and audited by path and anchor, never returned -- and the question is never recorded. Behind the same native-tool gates as its product sibling (kill switch, `native_tools`), workload identity and the MCP budgets. |
+| GraphQL `contextProductOkfBundle(versionId, publicationId)` and `datasourceOkfBundle(datasourceId, publicationId)` on `POST /graphql` | The stored bundle's manifest summary (profile, digests, counts, validity), the publication read, and beneath it connections priced before they run: `documents` (path, kind, digest, size, citation -- never text), `publications` (the reader's own lineage) and `findings`; `document(path)` returns one document's exact stored text. Read-only, through `read_published_bundle` / `read_published_source_bundle`, with the same role, envelope, workspace and lineage decisions as the routes above; recorded once per request on the `GRAPHQL_OKF_*` channels. Worked examples: [graphql-examples.md](graphql-examples.md#knowledge-bundles). |
 
 These are new surfaces beside the single-file context compiler, which is untouched: no
 `ContextCompilerTarget` value was added and no compile response shape changed, so an existing
