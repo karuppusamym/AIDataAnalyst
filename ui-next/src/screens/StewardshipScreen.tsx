@@ -514,14 +514,16 @@ export function StewardshipWorkQueue() {
   const [statusFilter, setStatusFilter] = useState("ALL");
   /* The advanced filter design 21 §17 asks the Work queue to carry, matching
      `NegativeKnowledgeScreen`'s own free-text "Assertion type" filter next to
-     its categorical one. `list_unowned_asset_backlog` (stewardship_api.py)
-     takes only `status`/`limit`/`offset` -- no candidate-owner query param
-     exists to send this to server-side -- so, unlike Status, this narrows
-     only the page already loaded rather than the backlog as a whole. That is
-     a real limit worth a steward's own attention on a backlog bigger than
-     one page, not a hidden one: the note below the controls says so whenever
-     the filter is actually hiding a loaded row. */
+     its categorical one. It used to narrow only the page already loaded,
+     because `list_unowned_asset_backlog` (stewardship_api.py) took nothing but
+     `status`; it takes `candidate_owner` now, so it is sent like Status is and
+     the backlog is narrowed as a whole -- before paging, and `total` counts the
+     matches. The server matches exactly and case-sensitively, so a value is
+     applied when the steward asks for it (Enter, or the button) rather than on
+     every keystroke, and the names already seen are offered as suggestions. */
+  const [candidateOwnerDraft, setCandidateOwnerDraft] = useState("");
   const [candidateOwnerFilter, setCandidateOwnerFilter] = useState("");
+  const [knownCandidateOwners, setKnownCandidateOwners] = useState<string[]>([]);
   const [backlog, setBacklog] = useState<UnownedAssetEscalationRead[]>([]);
   const [backlogTotal, setBacklogTotal] = useState<number | null>(null);
   const [backlogLoading, setBacklogLoading] = useState(true);
@@ -537,18 +539,29 @@ export function StewardshipWorkQueue() {
     try {
       const page = await fetchUnownedAssetBacklog(
         ORG,
-        { status: statusFilter === "ALL" ? null : statusFilter, limit: 100 },
+        {
+          status: statusFilter === "ALL" ? null : statusFilter,
+          limit: 100,
+          ...(candidateOwnerFilter ? { candidateOwner: candidateOwnerFilter } : {}),
+        },
         ac.signal,
       );
       setBacklog(page.items);
       setBacklogTotal(page.total);
+      // What a steward can pick from is what they have seen, across filters: a page narrowed
+      // to one owner would otherwise offer only that owner.
+      setKnownCandidateOwners((known) => {
+        const seen = new Set(known);
+        for (const row of page.items) if (row.candidate_owner) seen.add(row.candidate_owner);
+        return seen.size === known.length ? known : [...seen].sort();
+      });
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
       setBacklogError(e instanceof ApiError ? e.detail : (e as Error).message);
     } finally {
       setBacklogLoading(false);
     }
-  }, [ORG, statusFilter]);
+  }, [ORG, statusFilter, candidateOwnerFilter]);
 
   useEffect(() => {
     void loadBacklog();
@@ -580,13 +593,6 @@ export function StewardshipWorkQueue() {
      same thing it said before the split. */
   const dsLabel = datasourceName(datasources, params.get("ds") ?? preferredDatasourceId ?? null);
 
-  const candidateOwnerNeedle = candidateOwnerFilter.trim().toLowerCase();
-  const filteredBacklog = useMemo(() => {
-    if (!candidateOwnerNeedle) return backlog;
-    return backlog.filter((row) => (row.candidate_owner ?? "").toLowerCase().includes(candidateOwnerNeedle));
-  }, [backlog, candidateOwnerNeedle]);
-  const hiddenByCandidateOwnerFilter = backlog.length - filteredBacklog.length;
-
   return (
     <div className="stew">
       <header className="stew__head">
@@ -613,7 +619,11 @@ export function StewardshipWorkQueue() {
               <p className="stew__eyebrow">STEWARDSHIP BACKLOG</p>
               <h2 className="stew__h2">Unowned assets</h2>
             </div>
-            {backlogTotal !== null ? <Pill tone="mute">{backlogTotal} total</Pill> : null}
+            {backlogTotal !== null ? (
+              <Pill tone="mute">
+                {backlogTotal} {candidateOwnerFilter ? "for this owner" : "total"}
+              </Pill>
+            ) : null}
           </div>
 
           <div className="stew__backlogcontrols">
@@ -642,22 +652,43 @@ export function StewardshipWorkQueue() {
               filtering pattern `NegativeKnowledgeScreen` already establishes
               -- a categorical select (there: Suppression; here: Status) next
               to a free-text field (there: Assertion type; here: Candidate
-              owner). Client-side only -- see the state declaration above for
-              why -- so it is scoped to what "Status" already fetched rather
-              than sent as its own request. */}
-          <div className="stew__backlogfilters">
+              owner). Sent to the server with Status, so it narrows the whole
+              backlog; applied on submit because the match is exact. */}
+          <form
+            className="stew__backlogfilters"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setCandidateOwnerFilter(candidateOwnerDraft.trim());
+            }}
+          >
             <Field label="Candidate owner">
               <input
                 type="text"
-                value={candidateOwnerFilter}
+                list="stew-candidate-owners"
+                value={candidateOwnerDraft}
                 placeholder="e.g. risk-data-stewards@tenant.example"
-                onChange={(e) => setCandidateOwnerFilter(e.target.value)}
+                onChange={(e) => setCandidateOwnerDraft(e.target.value)}
               />
             </Field>
-            {candidateOwnerFilter ? (
-              <Button onClick={() => setCandidateOwnerFilter("")}>Clear filter</Button>
+            <datalist id="stew-candidate-owners">
+              {knownCandidateOwners.map((owner) => (
+                <option key={owner} value={owner} />
+              ))}
+            </datalist>
+            <Button type="submit" disabled={candidateOwnerDraft.trim() === candidateOwnerFilter}>
+              Apply filter
+            </Button>
+            {candidateOwnerFilter || candidateOwnerDraft ? (
+              <Button
+                onClick={() => {
+                  setCandidateOwnerDraft("");
+                  setCandidateOwnerFilter("");
+                }}
+              >
+                Clear filter
+              </Button>
             ) : null}
-          </div>
+          </form>
 
           {routeError ? <p className="stew__err" role="alert">{routeError}</p> : null}
           {routeResult ? <RouteResultSummary result={routeResult} /> : null}
@@ -666,35 +697,27 @@ export function StewardshipWorkQueue() {
             <ErrorState title="The unowned backlog could not be loaded" detail={backlogError} onRetry={() => void loadBacklog()} />
           ) : backlogLoading ? (
             <p className="stew__note">Loading…</p>
-          ) : filteredBacklog.length === 0 ? (
+          ) : backlog.length === 0 ? (
             <Empty
               title={
-                backlog.length > 0
-                  ? "No loaded assets match this candidate owner"
+                candidateOwnerFilter
+                  ? "No unowned assets for this candidate owner"
                   : "No unowned assets in this status"
               }
               hint={
-                backlog.length > 0
-                  ? "Try a different candidate owner, or clear the filter."
+                candidateOwnerFilter
+                  ? "The candidate owner is matched exactly as stored, capital letters included. Clear the filter to see the whole backlog."
                   : dsLabel
                     ? undefined
                     : "Ownership coverage is clear for the current scope."
               }
             />
           ) : (
-            <>
-              {hiddenByCandidateOwnerFilter > 0 ? (
-                <p className="stew__note" role="status">
-                  {filteredBacklog.length} of {backlog.length} loaded rows match "{candidateOwnerFilter}" —
-                  this filter only narrows what is already loaded, not the whole backlog.
-                </p>
-              ) : null}
-              <ul className="stew__backlist" aria-label="Unowned assets">
-                {filteredBacklog.map((row) => (
-                  <BacklogRow key={row.id} row={row} />
-                ))}
-              </ul>
-            </>
+            <ul className="stew__backlist" aria-label="Unowned assets">
+              {backlog.map((row) => (
+                <BacklogRow key={row.id} row={row} />
+              ))}
+            </ul>
           )}
         </section>
       </div>

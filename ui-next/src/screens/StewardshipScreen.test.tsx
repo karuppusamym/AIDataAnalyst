@@ -196,27 +196,182 @@ describe("StewardshipScreen against the real catalog bulk-action + stewardship e
     expect((body as { rationale: string }).rationale).toBe("Quarterly certification review completed.");
   });
 
-  it("filters the loaded backlog by candidate owner client-side, without changing what was fetched", async () => {
-    fetchUnownedAssetBacklog.mockResolvedValue(
-      backlogPage([
-        ESCALATION,
-        { ...ESCALATION, id: "unowned_2", table_id: "t_def456", candidate_owner: "risk-data-stewards@tenant.example" },
-      ]),
-    );
+  /* The candidate-owner filter is the server's now (`candidate_owner`, exact and case-sensitive,
+     applied before paging). These cases use a fake that filters the way the route does, so what
+     the screen shows is what the request asked for -- and a screen that still narrowed the page
+     itself would show a different set than the fake returns. */
+  const OWNED_BY_RISK = "risk-data-stewards@tenant.example";
+  const BACKLOG_ROWS: UnownedAssetEscalationRead[] = [
+    ESCALATION,
+    { ...ESCALATION, id: "unowned_2", table_id: "t_def456", candidate_owner: OWNED_BY_RISK },
+    { ...ESCALATION, id: "unowned_3", table_id: "t_ghi789", candidate_owner: "Finance Data" },
+    { ...ESCALATION, id: "unowned_4", table_id: "t_jkl012", candidate_owner: OWNED_BY_RISK, status: "ROUTED" },
+  ];
+
+  function serveBacklogLikeTheRoute() {
+    fetchUnownedAssetBacklog.mockImplementation(async (_org, query) => {
+      const { status, candidateOwner } = query as { status?: string | null; candidateOwner?: string | null };
+      const rows = BACKLOG_ROWS.filter(
+        (row) =>
+          (!status || row.status === status) &&
+          (!candidateOwner || row.candidate_owner === candidateOwner),
+      );
+      return { items: rows, limit: 100, offset: 0, total: rows.length };
+    });
+  }
+
+  function lastBacklogQuery(): unknown {
+    return fetchUnownedAssetBacklog.mock.calls.at(-1)![1];
+  }
+
+  async function applyCandidateOwner(value: string) {
+    fireEvent.change(screen.getByLabelText("Candidate owner"), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filter" }));
+  }
+
+  it("asks the server for one candidate owner instead of narrowing the loaded page itself", async () => {
+    serveBacklogLikeTheRoute();
     const StewardshipWorkQueue = await loadWorkQueue();
     render(<StewardshipWorkQueue />);
     await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
-    expect(screen.getByText("t_def456")).toBeInTheDocument();
+    expect(lastBacklogQuery()).toEqual({ status: null, limit: 100 });
+    expect(screen.getByText("4 total")).toBeInTheDocument();
 
+    await applyCandidateOwner(OWNED_BY_RISK);
+
+    await waitFor(() =>
+      expect(lastBacklogQuery()).toEqual({ status: null, limit: 100, candidateOwner: OWNED_BY_RISK }),
+    );
+    await waitFor(() => expect(screen.queryByText("t_abc123")).not.toBeInTheDocument());
+    expect(screen.getByText("t_def456")).toBeInTheDocument();
+    expect(screen.getByText("t_jkl012")).toBeInTheDocument();
+    expect(screen.queryByText("t_ghi789")).not.toBeInTheDocument();
+    // The total is the server's count of the matches, not the loaded page's length.
+    expect(screen.getByText("2 for this owner")).toBeInTheDocument();
+  });
+
+  it("shows every row the server returns, and never says the filter only narrows what is loaded", async () => {
+    // The server's answer is the answer: a row it returns is shown even when its owner is not the
+    // text that was typed (a client-side filter would hide it), and no note claims otherwise.
+    fetchUnownedAssetBacklog.mockResolvedValue(backlogPage(BACKLOG_ROWS));
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+
+    await applyCandidateOwner("Finance Data");
+
+    await waitFor(() => expect(fetchUnownedAssetBacklog).toHaveBeenCalledTimes(2));
+    for (const table of ["t_abc123", "t_def456", "t_ghi789", "t_jkl012"]) {
+      expect(screen.getByText(table)).toBeInTheDocument();
+    }
+    expect(screen.queryByText(/only narrows what is already loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/loaded rows match/)).not.toBeInTheDocument();
+  });
+
+  it("does not ask until the steward applies the value: typing alone makes no request", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Candidate owner"), { target: { value: "risk" } });
     fireEvent.change(screen.getByLabelText("Candidate owner"), { target: { value: "risk-data" } });
 
-    expect(screen.queryByText("t_abc123")).not.toBeInTheDocument();
-    expect(screen.getByText("t_def456")).toBeInTheDocument();
-    // Client-side narrowing of what is already on screen -- not a new fetch.
     expect(fetchUnownedAssetBacklog).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("t_abc123")).toBeInTheDocument();
+  });
+
+  it("applies on Enter, trims what was typed, and sends nothing else about the owner", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+
+    const input = screen.getByLabelText("Candidate owner");
+    fireEvent.change(input, { target: { value: `  ${OWNED_BY_RISK}  ` } });
+    fireEvent.submit(input.closest("form")!);
+
+    await waitFor(() =>
+      expect(lastBacklogQuery()).toEqual({ status: null, limit: 100, candidateOwner: OWNED_BY_RISK }),
+    );
+  });
+
+  it("matches exactly: a different case finds nothing, and the empty state says why", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+
+    await applyCandidateOwner("FINANCE DATA");
+
+    expect(await screen.findByText("No unowned assets for this candidate owner")).toBeInTheDocument();
+    expect(screen.getByText(/matched exactly as stored, capital letters included/)).toBeInTheDocument();
+    expect(screen.queryByText("t_ghi789")).not.toBeInTheDocument();
+  });
+
+  it("keeps the status filter beside the candidate owner, and asks again when either changes", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+
+    await applyCandidateOwner(OWNED_BY_RISK);
+    await waitFor(() => expect(screen.queryByText("t_abc123")).not.toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "ROUTED" } });
+
+    await waitFor(() =>
+      expect(lastBacklogQuery()).toEqual({ status: "ROUTED", limit: 100, candidateOwner: OWNED_BY_RISK }),
+    );
+    await waitFor(() => expect(screen.queryByText("t_def456")).not.toBeInTheDocument());
+    expect(screen.getByText("t_jkl012")).toBeInTheDocument();
+  });
+
+  it("Clear filter asks for the whole backlog again", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+    await applyCandidateOwner(OWNED_BY_RISK);
+    await waitFor(() => expect(screen.queryByText("t_abc123")).not.toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
-    expect(screen.getByText("t_abc123")).toBeInTheDocument();
+
+    await waitFor(() => expect(lastBacklogQuery()).toEqual({ status: null, limit: 100 }));
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+    expect(screen.getByLabelText("Candidate owner")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Clear filter" })).not.toBeInTheDocument();
+    expect(screen.getByText("4 total")).toBeInTheDocument();
+  });
+
+  it("offers the owners it has seen as suggestions, and keeps offering them once the page is narrowed", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    const { container } = render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+    const offered = () =>
+      [...container.querySelectorAll("#stew-candidate-owners option")].map((option) =>
+        option.getAttribute("value"),
+      );
+    expect(offered()).toEqual(["Finance Data", OWNED_BY_RISK]);
+
+    await applyCandidateOwner(OWNED_BY_RISK);
+    await waitFor(() => expect(screen.queryByText("t_ghi789")).not.toBeInTheDocument());
+
+    expect(offered()).toEqual(["Finance Data", OWNED_BY_RISK]);
+  });
+
+  it("does not offer Apply when the value is already the applied one", async () => {
+    serveBacklogLikeTheRoute();
+    const StewardshipWorkQueue = await loadWorkQueue();
+    render(<StewardshipWorkQueue />);
+    await waitFor(() => expect(screen.getByText("t_abc123")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Apply filter" })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Candidate owner"), { target: { value: "Finance Data" } });
+    expect(screen.getByRole("button", { name: "Apply filter" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Apply filter" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply filter" })).toBeDisabled());
   });
 
   it("17B: an explicit `?ids=` selection replaces the filter fields and sends table_ids, never both", async () => {

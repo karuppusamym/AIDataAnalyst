@@ -44,7 +44,7 @@ the data: input validity, server-reported agent state, and the server-computed p
 
 | Action | API | API roles | UI gate | Was | Design home |
 |---|---|---|---|---|---|
-| Browse the unowned-table backlog (status filter, local state) | `GET /v1/organizations/{organization_id}/stewardship/unowned-backlog` | ORG-READ | none | Stewardship, right panel | Work queue |
+| Browse the unowned-table backlog (status filter and an exact candidate-owner filter, both sent as query parameters and applied before paging) | `GET /v1/organizations/{organization_id}/stewardship/unowned-backlog` | ORG-READ | none | Stewardship, right panel | Work queue |
 | Route the backlog (optional one-source scope) | `POST …/stewardship/unowned-backlog/route` (`aida.stewardship_api.route_unowned_asset_backlog`) | STEW (DataAdmin may run bulk actions but **not** route) | disabled while routing | Stewardship, right panel | Work queue |
 | See your own expiring ownerships (14-day window) | `GET /v1/organizations/{organization_id}/ownership-assignments` | ORG-READ | shows only rows owned by the session principal | Stewardship, top banner | Work queue |
 | Reaffirm one ownership | `POST /v1/ownership-assignments/{assignment_id}/reaffirm` | STEW | none | banner | Work queue |

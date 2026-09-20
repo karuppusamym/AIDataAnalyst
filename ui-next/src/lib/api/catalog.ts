@@ -377,6 +377,10 @@ export function bulkCertifyCatalogTables(
 
 export interface UnownedAssetBacklogQuery {
   status?: string | null;
+  /** Sent as `candidate_owner`: an exact, case-sensitive match on the candidate
+   *  owner as stored (`list_unowned_asset_backlog`). The server applies it
+   *  before paging, so `total` counts the matches and not the whole backlog. */
+  candidateOwner?: string | null;
   limit?: number;
   offset?: number;
 }
@@ -396,6 +400,7 @@ export function fetchUnownedAssetBacklog(
     async () => {
       const params = new URLSearchParams();
       if (query.status) params.set("status", query.status);
+      if (query.candidateOwner) params.set("candidate_owner", query.candidateOwner);
       params.set("limit", String(query.limit ?? 100));
       params.set("offset", String(query.offset ?? 0));
       return get<PageOf<UnownedAssetEscalationRead>>(

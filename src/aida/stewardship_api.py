@@ -1,7 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -1755,14 +1755,35 @@ async def list_unowned_asset_backlog(
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(require_roles(*READ_ROLES)),
     session: AsyncSession = Depends(get_session),
+    # Last, and `Annotated` with a plain `None`, on purpose: a caller that reaches this function
+    # directly and leaves it out must get `None` -- not the `Query(...)` object a `= Query(...)`
+    # default would hand it -- and the positional calls that predate the parameter still bind.
+    candidate_owner: Annotated[
+        str | None,
+        Query(
+            max_length=255,
+            description=(
+                "Only entries whose candidate owner is exactly this, as stored (case-sensitive). "
+                "Applied before paging, so `total` counts the matches. Empty is no filter."
+            ),
+        ),
+    ] = None,
 ) -> Page:
-    """The current unowned-asset backlog and where each entry stands in routing."""
+    """The current unowned-asset backlog and where each entry stands in routing.
+
+    `status` and `candidate_owner` narrow it in the query, before paging, so `total` and every
+    page are of the narrowed backlog -- not of a wider one a client then narrows itself. An entry
+    with no candidate owner never matches one. The organization is the first filter and the only
+    one a caller cannot leave out (INV-5).
+    """
     enforce_organization(context, organization_id)
     filters = [UnownedAssetEscalation.organization_id == organization_id]
     if backlog_status:
         filters.append(UnownedAssetEscalation.status == backlog_status.upper())
     else:
         filters.append(UnownedAssetEscalation.status != "RESOLVED")
+    if candidate_owner:
+        filters.append(UnownedAssetEscalation.candidate_owner == candidate_owner)
     total = await session.scalar(
         select(func.count()).select_from(UnownedAssetEscalation).where(*filters)
     )

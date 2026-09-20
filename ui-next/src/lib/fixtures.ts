@@ -5590,6 +5590,10 @@ export async function makeFixtureUnownedAssetBacklog(
   await wait(90);
   let items = FIXTURE_UNOWNED_BACKLOG.filter((item) => item.organization_id === organizationId);
   if (query.status) items = items.filter((item) => item.status === query.status);
+  // Exact and case-sensitive, before paging, as the real route matches it.
+  if (query.candidateOwner) {
+    items = items.filter((item) => item.candidate_owner === query.candidateOwner);
+  }
   const offset = query.offset ?? 0;
   const limit = query.limit ?? 100;
   return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };

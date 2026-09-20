@@ -90870,7 +90870,7 @@
     },
     "/v1/organizations/{organization_id}/stewardship/unowned-backlog": {
       "get": {
-        "description": "The current unowned-asset backlog and where each entry stands in routing.",
+        "description": "The current unowned-asset backlog and where each entry stands in routing.\n\n`status` and `candidate_owner` narrow it in the query, before paging, so `total` and every\npage are of the narrowed backlog -- not of a wider one a client then narrows itself. An entry\nwith no candidate owner never matches one. The organization is the first filter and the only\none a caller cannot leave out (INV-5).",
         "operationId": "list_unowned_asset_backlog_v1_organizations__organization_id__stewardship_unowned_backlog_get",
         "parameters": [
           {
@@ -90921,6 +90921,25 @@
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Only entries whose candidate owner is exactly this, as stored (case-sensitive). Applied before paging, so `total` counts the matches. Empty is no filter.",
+            "in": "query",
+            "name": "candidate_owner",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only entries whose candidate owner is exactly this, as stored (case-sensitive). Applied before paging, so `total` counts the matches. Empty is no filter.",
+              "title": "Candidate Owner"
             }
           },
           {
