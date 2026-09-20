@@ -146,6 +146,10 @@ async def list_organization_data_domains(
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
+        # R11-C15: a DataSteward/MetadataReviewer can decide relationship, rename and
+        # cross-source-object-resolution candidates scoped to a domain's datasources
+        # (intelligence_api.py), so Cross-source needs this list to offer a domain to
+        # look at -- without it, the domain picker read as empty rather than refused.
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
@@ -153,6 +157,8 @@ async def list_organization_data_domains(
             "DataAdmin",
             "Operations",
             "Viewer",
+            "MetadataReviewer",
+            "DataSteward",
         )
     ),
     session: AsyncSession = Depends(get_session),

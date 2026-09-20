@@ -1188,7 +1188,13 @@ async def list_relationship_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: a DataSteward/MetadataReviewer can already decide these candidates
+        # (decide_relationship_candidate below); without list access the queue read
+        # a caller can't answer for renders empty rather than refused.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -1411,7 +1417,11 @@ async def list_rename_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: same list/decide asymmetry as list_relationship_candidates above.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -1742,7 +1752,12 @@ async def list_cross_source_object_resolution_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: same list/decide asymmetry as list_relationship_candidates above --
+        # this is the "same-object" (cross-source) candidate queue Cross-source reads.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -2743,7 +2758,11 @@ async def list_composite_relationship_candidates(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+        # R11-C15: same list/decide asymmetry as list_relationship_candidates above.
+        require_roles(
+            "PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer",
+            "MetadataReviewer", "DataSteward",
+        )
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
