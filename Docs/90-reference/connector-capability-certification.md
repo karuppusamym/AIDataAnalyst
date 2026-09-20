@@ -11,7 +11,7 @@ only if the connector claims it (`DEFAULT_CAPABILITIES`) and its row here is CER
 the connector's own driver double; it says the connector's logic works and says nothing
 about a real engine. A fixture result is never labelled live.
 
-Suite `connector-capability-certification-v1`, produced 2026-09-19. Regenerating a connector's LIVE
+Suite `connector-capability-certification-v1`, produced 2026-09-20. Regenerating a connector's LIVE
 rows needs the sample containers running; `--check` needs nothing.
 
 ## Summary
@@ -22,19 +22,12 @@ rows needs the sample containers running; `--check` needs nothing.
 | databricks | 8 | 0 | 8 | 7 | 2 | 0 |
 | oracle | 12 | 0 | 13 | 4 | 0 | 0 |
 | postgres | 15 | 15 | 0 | 2 | 0 | 0 |
-| snowflake | 12 | 0 | 12 | 4 | 1 | 1 |
+| snowflake | 11 | 0 | 12 | 4 | 1 | 0 |
 | sqlserver | 11 | 11 | 0 | 6 | 0 | 0 |
 
 ## Uncertified claims
 
-These flags are claimed by the connector, were **not** certified by their probe,
-and are still advertised because this list says to keep them. Lowering one is a
-decision about query execution (`explain` gates the gateway), so a certification run
-never does it: lower the claim in the connector's `DEFAULT_CAPABILITIES` instead.
-
-| Connector | Flag | Reason | What failed | Evidence |
-|---|---|---|---|---|
-| snowflake | `partitions` | NOT_IMPLEMENTED | discover() is asked for partitions across the whole estate -- the probe ran and the connector does not provide this behaviour | discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions |
+None: every claimed flag is certified.
 
 ## Certified but not claimed
 
@@ -176,7 +169,7 @@ LIVE rows ran against: driver asyncpg 0.31.0, server_version PostgreSQL 17.11.
 
 ## snowflake
 
-Code fingerprint `407352aa64a7f70a` over:
+Code fingerprint `bb5f50ad1e0176df` over:
 
 - `aida/capability_states.py`
 - `aida/connectors/base.py`
@@ -191,7 +184,7 @@ Code fingerprint `407352aa64a7f70a` over:
 | `schemas` | yes | yes | CERTIFIED | FIXTURE | discover() returns the schema with its tables and columns | passed: test_snowflake_discover_assembly |
 | `constraints` | yes | yes | CERTIFIED | FIXTURE | discover() returns PRIMARY KEY and FOREIGN KEY constraints | passed: test_snowflake_discover_assembly |
 | `indexes` | no | no | NOT_CERTIFIED (NOT_IMPLEMENTED) | FIXTURE | discover() is asked for indexes across the whole estate | discover() returned no index for any of 8 tables: no index read exists |
-| `partitions` | yes | yes (held) | NOT_CERTIFIED (NOT_IMPLEMENTED) | FIXTURE | discover() is asked for partitions across the whole estate | discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions |
+| `partitions` | no | no | NOT_CERTIFIED (NOT_IMPLEMENTED) | FIXTURE | discover() is asked for partitions across the whole estate | discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions |
 | `explain` | yes | yes | CERTIFIED | FIXTURE | estimate_read_query() runs EXPLAIN USING JSON through a driver double and parses the plan | EXPLAIN USING JSON sent; plan parsed to 50000 rows, 10 MiB, 85% partition pruning. An unparseable plan falls back to score 1.0, the cheapest, which this does not exercise |
 | `query_history` | no | no | CERTIFIED | FIXTURE | get_query_history() through a cursor double maps history rows to entries | passed: test_snowflake_get_query_history_maps_rows, test_snowflake_get_query_history_drops_incomplete_rows |
 | `delegated_identity` | yes | yes | CERTIFIED | FIXTURE | a DSN carrying authenticator and token reaches the driver connect() as such, with no password | authenticator=oauth and the token reached connect(), and no password was sent. Pass-through only: the URI form of the DSN drops `token`, and nothing here supplies a per-user token |

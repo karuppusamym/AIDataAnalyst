@@ -220,7 +220,7 @@
         "grants": "SUPPORTED",
         "indexes": "UNSUPPORTED",
         "object_comments": "SUPPORTED",
-        "partitions": "SUPPORTED",
+        "partitions": "UNSUPPORTED",
         "query_history": "UNSUPPORTED",
         "routines": "SUPPORTED",
         "schemas": "SUPPORTED",

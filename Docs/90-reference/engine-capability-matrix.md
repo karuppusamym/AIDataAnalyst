@@ -36,7 +36,7 @@ Every field of `ConnectorCapabilities`, per engine. A `PLANNED` engine advertise
 | db2 | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no |
 | oracle | yes | yes | yes | yes | yes | no | no | no | yes | yes | yes | yes | yes | yes | yes | no | no |
 | postgres | yes | yes | yes | yes | yes | yes | no | no | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| snowflake | yes | yes | yes | no | yes | yes | no | yes | yes | yes | yes | yes | yes | no | yes | no | no |
+| snowflake | yes | yes | yes | no | no | yes | no | yes | yes | yes | yes | yes | yes | no | yes | no | no |
 | sqlserver | yes | yes | yes | no | no | yes | no | no | yes | yes | yes | yes | yes | yes | yes | no | no |
 | teradata | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no | no |
 

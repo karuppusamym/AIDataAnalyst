@@ -628,6 +628,32 @@ async def test_the_capability_endpoint_serves_the_derived_flags(
     assert served["capabilities"]["constraints"] is True
 
 
+async def test_the_endpoint_says_a_held_claim_is_advertised_without_a_certification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Held, not certified: still advertised, and the endpoint says so instead of implying a proof.
+
+    The committed result holds no claim any more (Snowflake partitions was lowered), so the
+    behaviour is proven on a synthetic result.
+    """
+    rows = _all_rows(
+        True, explain=_row("explain", claimed=True, status=STATUS_NOT_CERTIFIED, tier=TIER_LIVE)
+    )
+    registry = ConnectorRegistry(certification=_result("postgres", rows, held=("explain",)))
+    registry.register(
+        "postgres", PostgresConnector, capabilities=PostgresConnector.DEFAULT_CAPABILITIES
+    )
+    served = (await _matrix(monkeypatch, registry))["postgres"]
+
+    evidence = served["capability_evidence"]["explain"]
+    assert served["capabilities"]["explain"] is True, "a held claim is advertised, not lowered"
+    assert (evidence["status"], evidence["tier"], evidence["held"]) == (
+        STATUS_NOT_CERTIFIED,
+        None,
+        True,
+    ), "a held flag has no certified tier, and the endpoint must not invent one"
+
+
 async def test_the_endpoint_says_which_tier_certified_each_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -636,14 +662,16 @@ async def test_the_endpoint_says_which_tier_certified_each_flag(
     assert served["sqlserver"]["capability_evidence"]["explain"]["tier"] == TIER_LIVE
     assert served["bigquery"]["capability_evidence"]["explain"]["tier"] == TIER_FIXTURE
     assert served["snowflake"]["capability_evidence"]["delegated_identity"]["tier"] == TIER_FIXTURE
-    # Held, not certified: advertised, and the endpoint says so instead of implying a proof.
+    # Snowflake never reads partitions, so it neither claims the flag nor holds it (R11-C14):
+    # not advertised, not certified, and the endpoint does not invent a tier for it.
     partitions = served["snowflake"]["capability_evidence"]["partitions"]
-    assert served["snowflake"]["capabilities"]["partitions"] is True
-    assert (partitions["status"], partitions["tier"], partitions["held"]) == (
-        STATUS_NOT_CERTIFIED,
-        None,
-        True,
-    ), "a held flag has no certified tier, and the endpoint must not invent one"
+    assert served["snowflake"]["capabilities"]["partitions"] is False
+    assert (
+        partitions["claimed"],
+        partitions["status"],
+        partitions["tier"],
+        partitions["held"],
+    ) == (False, STATUS_NOT_CERTIFIED, None, False)
     # A flag that is False keeps its evidence too.
     assert served["oracle"]["capabilities"]["explain"] is False
     assert served["oracle"]["capability_evidence"]["explain"]["claimed"] is False

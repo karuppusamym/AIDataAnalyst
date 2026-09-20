@@ -1016,7 +1016,13 @@ class SnowflakeConnector(SqlExecutor):
         schemas=True,
         constraints=True,
         indexes=False,
-        partitions=True,
+        # INV-9 (R11-C14, 2026-09-20). Was `True` since the adapter's first commit, but
+        # `discover()` never asks Snowflake for partitions -- this module does not import
+        # `FACET_PARTITIONS` -- so a discovery receipt reported the facet SUPPORTED though it
+        # is never fetched. Snowflake's micro-partitions are not user-defined partitions, and
+        # the `partitionsTotal` figures in the EXPLAIN estimate below are pruning statistics,
+        # not this facet. Returns to `True` only once a partition read exists and is certified.
+        partitions=False,
         explain=True,
         # INV-9 (tracker AT-D3, 2026-08-30). Advertised `True` while nothing in the
         # platform consumes it -- there is no `get_query_history()` on any connector.

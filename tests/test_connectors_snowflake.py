@@ -109,7 +109,8 @@ def test_snowflake_registry_definition() -> None:
     assert defn.capabilities["schemas"] is True
     assert defn.capabilities["constraints"] is True
     assert defn.capabilities["explain"] is True
-    assert defn.capabilities["partitions"] is True
+    # INV-9 (R11-C14): the adapter never reads partitions, so the flag is not advertised.
+    assert defn.capabilities["partitions"] is False
 
 
 @pytest.mark.asyncio

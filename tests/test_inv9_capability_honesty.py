@@ -27,13 +27,15 @@ LIVE for PostgreSQL and SQL Server and FIXTURE for the other four), and a flag i
 advertised only if the connector claims it *and* its row is CERTIFIED. The derivation
 and its gates are proven in `tests/test_c14_capability_certification.py`.
 
-What is *not* yet true is that every claimed flag is certified. A flag whose probe
-genuinely failed is not lowered by a certification run -- lowering `explain` would make
-the gateway refuse an engine, which is an operator's decision -- so it is listed in the
-result's `uncertified_claims` and stays advertised.
-`test_capability_flags_are_derived_from_certification` is therefore still a strict xfail,
-narrowed to exactly those flags (`KNOWN_UNCERTIFIED_CLAIMS`), and it turns into a
-normal passing test the day that list is empty.
+Every claimed flag is now certified, so
+`test_capability_flags_are_derived_from_certification` is an ordinary passing test and
+`KNOWN_UNCERTIFIED_CLAIMS` is empty. (Snowflake `partitions` was the one exception until
+2026-09-20: claimed, never implemented, held rather than lowered so that landing the
+derivation changed no behaviour, then lowered.) A flag whose probe genuinely fails is still
+not lowered by a certification run -- lowering `explain` would make the gateway refuse an
+engine, which is an operator's decision -- so it would be listed in the result's
+`uncertified_claims` and stay advertised; adding it to `KNOWN_UNCERTIFIED_CLAIMS` then turns
+the test back into a strict xfail narrowed to exactly that flag.
 """
 
 import json
@@ -345,10 +347,12 @@ def test_at_least_one_registered_connector_honestly_declines_a_capability() -> N
 #: certification_are_exactly_the_known_ones` fails if the committed result disagrees with it in
 #: either direction, so a new uncertified claim cannot hide behind the xfail.
 #:
-#: * `snowflake.partitions` -- claimed True since the adapter's first commit, but nothing in
-#:   `snowflake.py` reads a partition (Snowflake's micro-partitions are not listed by any
-#:   catalog view); only EXPLAIN's pruning counters mention them.
-KNOWN_UNCERTIFIED_CLAIMS: tuple[str, ...] = ("snowflake.partitions",)
+#: Empty since 2026-09-20 (R11-C14). `snowflake.partitions` was the only entry: claimed True
+#: since the adapter's first commit, but nothing in `snowflake.py` reads a partition
+#: (Snowflake's micro-partitions are not listed by any catalog view; only EXPLAIN's pruning
+#: counters mention them). Lowering it emptied this tuple, so the strict xfail below no
+#: longer applies and the test runs as an ordinary assertion.
+KNOWN_UNCERTIFIED_CLAIMS: tuple[str, ...] = ()
 
 
 def _uncertified_claims() -> list[str]:

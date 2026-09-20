@@ -1,5 +1,5 @@
 {
-  "certified_on": "2026-09-19",
+  "certified_on": "2026-09-20",
   "connectors": {
     "bigquery": {
       "claimed": {
@@ -966,7 +966,7 @@
         "grants": true,
         "indexes": false,
         "object_comments": true,
-        "partitions": true,
+        "partitions": false,
         "query_history": false,
         "routines": true,
         "schemas": true,
@@ -985,7 +985,7 @@
         "grants": true,
         "indexes": false,
         "object_comments": true,
-        "partitions": true,
+        "partitions": false,
         "query_history": false,
         "routines": true,
         "schemas": true,
@@ -996,13 +996,13 @@
       },
       "environment": {},
       "fingerprint": {
-        "digest": "407352aa64a7f70a238fc0435b2416ef066deeacc42a7e4b532938b62df49989",
+        "digest": "bb5f50ad1e0176df89215b9d4b2938e0074751a3eb2bee6a000db68fc52c165a",
         "files": {
           "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
           "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
           "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
           "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
-          "aida/connectors/snowflake.py": "cb0c04b13d5de11f483057c81d164e310e76fb65f9165e7d6539fc6a31a2774c",
+          "aida/connectors/snowflake.py": "f975882f5ee264646661d60c9390feafad0890371491755b707c51515be2afdc",
           "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
         }
       },
@@ -1107,7 +1107,7 @@
           "tier": "FIXTURE"
         },
         "partitions": {
-          "claimed": true,
+          "claimed": false,
           "evidence": "discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions",
           "probe": "discover() is asked for partitions across the whole estate",
           "reason_code": "NOT_IMPLEMENTED",
@@ -1461,13 +1461,5 @@
   ],
   "schema_version": 1,
   "suite": "connector-capability-certification-v1",
-  "uncertified_claims": [
-    {
-      "connector_type": "snowflake",
-      "evidence": "discover() returned no partition for any of 8 tables: the adapter has no partition read; only EXPLAIN's pruning counters mention partitions",
-      "flag": "partitions",
-      "reason_code": "NOT_IMPLEMENTED",
-      "what_failed": "discover() is asked for partitions across the whole estate -- the probe ran and the connector does not provide this behaviour"
-    }
-  ]
+  "uncertified_claims": []
 }
