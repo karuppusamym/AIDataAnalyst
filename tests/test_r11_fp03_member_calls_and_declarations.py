@@ -596,9 +596,17 @@ def test_package_and_member_declarations_are_read_at_their_grain() -> None:
     # The member's span of statements covers its declarations, so the member routine id
     # reaches the cursor's edges too.
     [refresh] = result.package_members
-    [cursor] = [e for e in result.edges if e.source_table == "ops.orders"]
+    cursor_edges = [e for e in result.edges if e.source_table == "ops.orders"]
+    # (2026-09-19) The declaration's read, and the `FETCH c_orders INTO v_row` that lands its
+    # rows in the record: two statements of the member, both read.
+    assert {e.control_flow_context for e in cursor_edges} == {
+        "CURSOR_DECLARATION",
+        "CURSOR_FETCH",
+    }
     assert refresh.first_ordinal is not None and refresh.last_ordinal is not None
-    assert refresh.first_ordinal <= cursor.statement_ordinal <= refresh.last_ordinal
+    assert all(
+        refresh.first_ordinal <= e.statement_ordinal <= refresh.last_ordinal for e in cursor_edges
+    )
 
 
 UNREADABLE = """CREATE OR REPLACE PROCEDURE ops.broken IS

@@ -167,7 +167,12 @@ def test_update_from_join_with_an_unqualified_source_stays_ambiguous() -> None:
         _tsql("UPDATE o SET total = amt FROM dbo.orders o JOIN dbo.src s ON s.id = o.id"),
         dialect="tsql",
     )
-    assert _facts(result) == {(UNRESOLVED_TABLE, "amt", "dbo.orders", "total")}
+    assert _facts(result) == {
+        (UNRESOLVED_TABLE, "amt", "dbo.orders", "total"),
+        # (2026-09-19) `dbo.src` is joined, and only its ON names it: no column of it is an
+        # edge, so its rows are read at table grain. `amt` is still attributed to neither.
+        ("dbo.src", "*", "dbo.orders", "*"),
+    }
 
 
 def test_a_merge_branch_sees_what_that_branch_can_see() -> None:
@@ -229,11 +234,14 @@ def test_a_derived_table_passes_a_column_through_only_by_the_same_name() -> None
     result = parse_procedure_lineage(_plpgsql(body), dialect="postgres")
 
     assert ("s.x", "a", "s.t", "a") in _facts(result)  # the third statement only
-    by_ordinal = {
-        e.statement_ordinal: (e.source_table, e.source_column) for e in _real(result)
-    }
+    columns = [e for e in _real(result) if e.source_column != "*"]
+    by_ordinal = {e.statement_ordinal: (e.source_table, e.source_column) for e in columns}
     assert by_ordinal == {0: (UNRESOLVED_TABLE, "a"), 1: (UNRESOLVED_TABLE, "a"), 2: ("s.x", "a")}
     assert "d" not in {table for table, _column in _sources(result)}
+    # (2026-09-19) What the derived table reads is still read: `s.x` is named by no edge in the
+    # first two statements, so it is a table-grain read there -- a table, not a column claim.
+    table_grain = [e for e in _real(result) if (e.source_table, e.source_column) == ("s.x", "*")]
+    assert {e.statement_ordinal for e in table_grain} == {0, 1}
 
 
 def test_an_insert_with_a_column_list_keeps_its_filter_evidence() -> None:

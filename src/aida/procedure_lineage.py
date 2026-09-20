@@ -238,6 +238,44 @@ Loop records, result cursors and reads that name no column (R11-FP07, 2026-09-19
   discarded with its header.
 * **T-SQL `END` then `IF`/`WHILE`** is two statements (`_ends_compound`); it was read
   as `END IF`/`END WHILE`, and the body's BEGIN never closed.
+
+What the loop-record pass left wrong or missing (R11-FP07, 2026-09-19, second pass):
+
+* **`FOREACH x IN ARRAY <expr> LOOP` is a loop** (`_FOREACH_HEADER_RE`). It was not peeled, so
+  it glued itself to the loop's first statement -- one PARSE_ERROR gap, every write inside it
+  lost -- but its `END LOOP` was still counted, and closed the *enclosing* loop's record
+  binding: a `rec.col` read after it lost its source, and where an inner loop shadows an
+  outer record of the same name the popped binding uncovered the outer's rows, a write
+  recorded as coming from the wrong table. It binds no record of its own: its variable is
+  scalar state, and no scalar variable's value is followed anywhere in this parse (the same
+  holds for `SELECT INTO v` and a positional `FOR a, b IN <query>`). An array that holds a
+  query is a read into routine-local state (`FOREACH_ARRAY_CONTEXT`).
+* **A gap marker's identity is its statement ordinal**, in `_dedupe_edges` and in the stored
+  natural key, and every marker read out of one statement carried the statement's own: a
+  second table function, or a call in the same statement, was dropped as a duplicate, and
+  descent could read the first through and report the routine fully parsed with the second
+  never read. Each table-function marker now sits in the counter slot the walk already
+  advanced past for it (`_emit`); nothing that is not a marker is renumbered.
+* **T-SQL `SET @v = (SELECT ...)`** reads its tables into routine-local state
+  (`_TSQL_SET_ASSIGNMENT_RE`). Only an expression that holds a query is read; a scalar
+  function's call in a SET is still no call site, as it was.
+* **`FETCH c INTO r`** (an explicit open/fetch/close cursor loop) reads a declared cursor's
+  rows into the record `r` (`_fetch_read`, `CURSOR_FETCH_CONTEXT`), bound from the FETCH to
+  the end of its unit, so `r.col` in what follows carries the cursor's sources to the writes.
+  Only where that is sound: a cursor this parse read, ONE target name (several are scalar
+  variables; `BULK COLLECT` fills a collection), and a record fetched from one cursor in the
+  unit -- two cursors' rows in one record have no one intermediate to stand for them (a shared
+  one would put `b -> out1` in the lineage of `FETCH c1 INTO r; INSERT out1 ...r; FETCH c2
+  INTO r`), so such a record stays unbound, as before. The same cursor fetched again (the
+  priming read) fills the same intermediate. Not modelled: a record's value after its loop.
+* **A table counts as read when an edge names it, and only then** (`_table_rows_read`). A
+  column in `JOIN ... ON`, a MERGE's `ON` or `WHEN ... AND` condition, `GROUP BY`, `HAVING`,
+  `ORDER BY` or a derived table's own clauses named its table without producing an edge, so
+  a table read only there was in no answer at all; it is now a table-grain `TABLE_ROWS` read.
+  In T-SQL the FROM item an UPDATE or DELETE designates *is* the target
+  (`_from_items_the_target_designates`), and a DELETE's `this` is its first FROM item, not
+  necessarily its target (`_delete_target`): `DELETE t FROM dbo.a a JOIN dbo.tgt t ON ...` was
+  recorded as writing `dbo.a`.
 """
 
 from __future__ import annotations
@@ -266,11 +304,9 @@ from aida.procedure_token_ranges import (
 from aida.sql_lineage_parser import (
     _SQLGLOT_AVAILABLE,
     _SQLGLOT_DIALECT_MAP,
-    COLUMN_OWNER_META,
     PROCEDURE_RESULT_TARGET,
     STAR_COLUMN_MARKER,
     UNRESOLVED_TABLE,
-    VARIABLE_REFERENCE,
     Confidence,
     LineageEdge,
     TransformationType,
@@ -1122,6 +1158,19 @@ _DECLARED_CURSOR_LOOP_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _BARE_LOOP_RE = re.compile(r"^\s*LOOP\b\s*", re.IGNORECASE)
+# (2026-09-19) PL/pgSQL `FOREACH x [SLICE n] IN ARRAY <expression> LOOP`, up to the start of the
+# expression: the expression ends at the LOOP keyword (`_foreach_loop`). `FOR\b` never matched
+# it, so its header was not peeled -- it glued itself to the loop's first statement, one
+# PARSE_ERROR gap, and every write inside a FOREACH was lost -- while its END LOOP was still
+# counted, and closed the enclosing loop's record binding.
+_FOREACH_HEADER_RE = re.compile(
+    r"^\s*FOREACH\s+[A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*\s+(?:SLICE\s+\d+\s+)?"
+    r"IN\s+ARRAY\b\s*",
+    re.IGNORECASE,
+)
+#: The `control_flow_context` of the read a FOREACH loop's array holds -- `FOREACH x IN ARRAY
+#: (SELECT array_agg(...) FROM t) LOOP`.
+FOREACH_ARRAY_CONTEXT: Final[str] = "FOREACH_ARRAY"
 # A bare BEGIN/END with more text following in the same chunk: T-SQL does
 # not require a `;` after a bare BEGIN/END, so the statement splitter (which
 # only splits on `;`) legitimately produces e.g. "END\n\nINSERT INTO ..." as
@@ -1183,6 +1232,9 @@ class _Condition:
 
     text: str
     offset: int
+    #: What the read is labelled: None for a branch or loop condition (`CONDITION_CONTEXT`),
+    #: `FOREACH_ARRAY_CONTEXT` for the array a FOREACH walks.
+    context: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1219,6 +1271,23 @@ def _parenthesised_loop(text: str, opened: int) -> tuple[int, int] | None:
             close = opened + start
             after = _LOOP_KEYWORD_RE.match(text, close + 1)
             return (close, after.end()) if after else None
+    return None
+
+
+def _foreach_loop(text: str, start: int) -> tuple[int, int] | None:
+    """For a `FOREACH x IN ARRAY <expression> LOOP` whose expression begins at `start`: where
+    the expression ends -- at the LOOP keyword -- and where the header does, past it and the
+    space after. The keyword is the first LOOP outside parentheses, quotes and comments, so a
+    `LOOP` inside a string literal in the expression ends nothing. None when no LOOP follows:
+    a header this cannot find the end of is left for the caller to report."""
+    depth = 0
+    for first, last, kind in _scan_tokens(text[start:]):
+        at = start + first
+        if kind == "other":
+            depth += 1 if text[at] == "(" else -1
+        elif kind == "word" and depth == 0 and text[at : start + last].upper() == "LOOP":
+            after = _LOOP_KEYWORD_RE.match(text, at)
+            return (at, after.end()) if after else None
     return None
 
 
@@ -1338,6 +1407,21 @@ def _peel_control_flow_prefix(chunk: str) -> _PeelResult:
             context = "CURSOR_FOR_LOOP"
             consumed += match.end()
             remainder = remainder[match.end() :]
+            continue
+        if (match := _FOREACH_HEADER_RE.match(remainder)) and (
+            spans := _foreach_loop(remainder, match.end())
+        ):
+            # A loop of its own: it pushes one entry so its END LOOP pops that entry and no
+            # other. It binds no record -- its variable is scalar state, whose value is the
+            # array's, and no scalar variable's value is followed anywhere in this parse.
+            array_end, header_end = spans
+            array = remainder[match.end() : array_end]
+            if _has_query_word(array):
+                conditions.append(_Condition(array, consumed + match.end(), FOREACH_ARRAY_CONTEXT))
+            loops.append(None)
+            context = "FOR_LOOP"
+            consumed += header_end
+            remainder = remainder[header_end:]
             continue
         if match := _BARE_FOR_LOOP_RE.match(remainder):
             loops.append(None)
@@ -1490,6 +1574,17 @@ _OPEN_FOR_RE = re.compile(
 )
 #: What starts a query rather than an expression that evaluates to one.
 _QUERY_START_RE = re.compile(r"^\s*(?:\(\s*)*(?:SELECT|WITH)\b", re.IGNORECASE)
+#: `FETCH c INTO r` (PL/SQL) and `FETCH [NEXT] [FROM | IN] c INTO r` (PL/pgSQL) into ONE name --
+#: a record, which the rows of a cursor the routine declared are fetched into (2026-09-19).
+#: Several targets are scalar variables, `BULK COLLECT` fills a collection, and T-SQL's `@v`
+#: never matches a bare name: none of those is a record whose fields a later statement reads.
+_FETCH_INTO_RE = re.compile(
+    r"^\s*FETCH\s+(?:(?:NEXT|PRIOR|FIRST|LAST|FORWARD|BACKWARD)\s+)?(?:(?:FROM|IN)\s+)?"
+    r"(?P<cursor>[A-Za-z_][\w$#]*)\s+INTO\s+(?P<target>[A-Za-z_][\w$#]*)\s*$",
+    re.IGNORECASE,
+)
+#: The `control_flow_context` of the read a `FETCH c INTO r` states.
+CURSOR_FETCH_CONTEXT: Final[str] = "CURSOR_FETCH"
 #: T-SQL `DECLARE c [INSENSITIVE] [SCROLL] CURSOR [options] FOR <query>` and a cursor
 #: variable's `SET @c = CURSOR [options] FOR <query>`. The module docstring has long
 #: said the declaration's query was captured; it was dropped by the DECLARE keyword.
@@ -1502,6 +1597,14 @@ _TSQL_CURSOR_DECLARATION_RE = re.compile(
 #: updatability, not the query's lineage, and not T-SQL sqlglot reads.
 _TSQL_CURSOR_TAIL_RE = re.compile(
     r"\s+FOR\s+(?:READ\s+ONLY|UPDATE(?:\s+OF\s+.+)?)\s*$", re.IGNORECASE | re.DOTALL
+)
+#: T-SQL `SET @v = <expression>` -- and `+=`, `-=` and the other compound forms -- up to the
+#: expression. The `SET` keyword marks a statement lineage-free (`_NO_LINEAGE_KEYWORDS_RE`), which
+#: is right for `SET NOCOUNT ON` and `SET @v = @v + 1` and wrong for `SET @v = (SELECT ...)`: a
+#: scalar subquery read into a variable is a read of its tables (2026-09-19). Only an
+#: expression that holds a query is read here (`_has_query_word`, quote-aware).
+_TSQL_SET_ASSIGNMENT_RE = re.compile(
+    r"^\s*SET\s+@[\w@#$]+\s*[-+*/%&|^]?=\s*(?P<expr>.+)$", re.IGNORECASE | re.DOTALL
 )
 #: PL/pgSQL `name [[NO] SCROLL] CURSOR [(args)] {FOR | IS} <query>` -- a bound cursor
 #: declaration -- led by DECLARE when it is a nested block's first declaration.
@@ -2340,10 +2443,16 @@ CONDITION_CONTEXT: Final[str] = "CONDITION"
 _OpenLoop = tuple[str, str] | None
 
 
-def _bound(names: DeclaredNames, loops: list[_OpenLoop]) -> _ScopedNames:
-    """`names`, with every loop record open around the statement bound."""
+def _bound(context: _WalkContext, loops: list[_OpenLoop]) -> _ScopedNames:
+    """The routine's declared names, with every record bound around the statement: the records
+    a FETCH filled, then each open loop's -- the innermost binding of a name wins, so a loop
+    variable of the same name shadows a fetched record inside its loop."""
     return replace(
-        _scoped(names), records=tuple(binding for binding in loops if binding is not None)
+        _scoped(context.names),
+        records=(
+            *context.fetched.items(),
+            *(binding for binding in loops if binding is not None),
+        ),
     )
 
 
@@ -2371,7 +2480,7 @@ def _classify_chunk(
     results: list[ParsedStatement] = []
     for condition in peeled.conditions:
         results.append(
-            _condition_read(ordinal, condition, chunk_offset, context, _bound(context.names, loops))
+            _condition_read(ordinal, condition, chunk_offset, context, _bound(context, loops))
         )
     for position, header in enumerate(peeled.loops_opened):
         if header is None:
@@ -2386,9 +2495,7 @@ def _classify_chunk(
             # its place among them.
             else loop_record_target(header.record, ordinal, position or None)
         )
-        read = _loop_read(
-            ordinal, header, target, chunk_offset, context, _bound(context.names, loops)
-        )
+        read = _loop_read(ordinal, header, target, chunk_offset, context, _bound(context, loops))
         if read is not None:
             results.append(read)
         # Only a loop whose rows were read binds its record: a `rec.col` of rows this
@@ -2403,6 +2510,9 @@ def _classify_chunk(
         )
     start = chunk_offset + peeled.remainder_offset
     where = context.locator.span(start, start + len(peeled.remainder))
+    if (fetch := _fetch_read(ordinal, peeled, context)) is not None:
+        results.append(_located(fetch, where, context.digest))
+        return results
     results.extend(
         _located(statement, where, context.digest)
         for statement in _classify_and_extract(
@@ -2412,7 +2522,7 @@ def _classify_chunk(
             context.sqlglot_dialect,
             context.plpgsql,
             context.subject,
-            _bound(context.names, loops),
+            _bound(context, loops),
         )
     )
     return results
@@ -2439,7 +2549,7 @@ def _condition_read(
     text, offset = _trimmed(condition.text, chunk_offset + condition.offset)
     statement = _parse_local_query(
         ordinal, f"SELECT {text}", context.dialect, context.sqlglot_dialect,
-        CONDITION_CONTEXT, context.subject, names,
+        condition.context or CONDITION_CONTEXT, context.subject, names,
     )
     return _located(statement, context.locator.span(offset, offset + len(text)), context.digest)
 
@@ -2485,12 +2595,31 @@ def _loop_read(
     declared = context.cursors.get((header.cursor or "").lower())
     if not declared:
         return None
+    statement = _cursor_rows_into(ordinal, declared, target, CURSOR_FOR_LOOP_CONTEXT)
+    start = chunk_offset + header.header_start
+    return _located(
+        statement, context.locator.span(start, chunk_offset + header.header_end), context.digest
+    )
+
+
+def _cursor_rows_into(
+    ordinal: int,
+    declared: tuple[ProcedureLineageEdgeRecord, ...],
+    target: str,
+    control_flow_context: str,
+) -> ParsedStatement:
+    """A declared cursor's read, re-stated into `target` at the statement that fetches it.
+
+    The declaration already named the query's sources column by column; the statement that
+    fetches the rows -- a cursor FOR loop, a `FETCH c INTO r` -- is where they land in a
+    record. Located by the caller at that statement, with no token: the query's tokens are in
+    the declaration, which keeps its own read."""
     edges = tuple(
         replace(
             edge,
             target_table=target,
             statement_ordinal=ordinal,
-            control_flow_context=CURSOR_FOR_LOOP_CONTEXT,
+            control_flow_context=control_flow_context,
             is_write=False,
             is_intermediate=True,
             statement_range=None,
@@ -2501,15 +2630,39 @@ def _loop_read(
         )
         for edge in declared
     )
-    statement = ParsedStatement(
+    return ParsedStatement(
         ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=False,
-        unparsed_reason=None, control_flow_context=CURSOR_FOR_LOOP_CONTEXT,
+        unparsed_reason=None, control_flow_context=control_flow_context,
         target_table=target, is_intermediate_target=True, node=None, edges=edges,
     )
-    start = chunk_offset + header.header_start
-    return _located(
-        statement, context.locator.span(start, chunk_offset + header.header_end), context.digest
-    )
+
+
+def _fetch_read(
+    ordinal: int, peeled: _PeelResult, context: _WalkContext
+) -> ParsedStatement | None:
+    """`FETCH c INTO r`: the rows of the declared cursor `c`, fetched into the record `r`
+    (2026-09-19). They are read into an intermediate of the record's own, `<LOCAL:r@N>`, and
+    `r` is bound to it from here to the end of the unit -- so `r.col` in what follows reads
+    that intermediate and the hop pass joins the cursor's sources to what the routine writes,
+    as it does for a cursor FOR loop's record.
+
+    Only where it is sound. The cursor is one this parse read (declared in scope), the target
+    is one name, and the record is fetched from one cursor in the unit: two cursors' rows in
+    one record have no one intermediate to stand for them. The same cursor fetched again --
+    the priming read of `FETCH c INTO r; WHILE c%FOUND LOOP ... FETCH c INTO r;` -- fills the
+    same intermediate. Anything else stays what it was: lineage-free, the record's fields
+    reading nothing."""
+    if not (context.dialect == "oracle" or context.plpgsql):
+        return None
+    fetched = _FETCH_INTO_RE.match(peeled.remainder)
+    if fetched is None:
+        return None
+    record = fetched.group("target").lower()
+    declared = context.cursors.get(_bare(fetched.group("cursor")))
+    if not declared or record in context.fetch_conflicts:
+        return None
+    target = context.fetched.setdefault(record, loop_record_target(record, ordinal))
+    return _cursor_rows_into(ordinal, declared, target, CURSOR_FETCH_CONTEXT)
 
 
 def _located(
@@ -2589,6 +2742,19 @@ def _classify_and_extract(
         results.append(
             _tsql_cursor(
                 ordinal, remainder[declared.end() :], dialect, sqlglot_dialect, subject, names
+            )
+        )
+        return results
+    if dialect == "tsql" and (
+        assigned := _TSQL_SET_ASSIGNMENT_RE.match(remainder)
+    ) and _has_query_word(assigned.group("expr")):
+        # (2026-09-19) `SET @v = (SELECT ...)` reads the tables its subquery names, into the
+        # variable -- routine-local state, as `v := (<query>)` does in PL/pgSQL. The cursor form
+        # above is checked first; a SET whose expression holds no query stays lineage-free.
+        results.append(
+            _parse_local_query(
+                ordinal, f"SELECT {assigned.group('expr')}", dialect, sqlglot_dialect,
+                peeled.control_flow_context, subject, names,
             )
         )
         return results
@@ -2772,7 +2938,7 @@ def _classify_and_extract(
 
     if isinstance(node, exp.Delete):
         aliases, temp_set = _collect_table_aliases_with_temp(node, subject)
-        target_expr = node.this
+        target_expr = _delete_target(node, dialect)
         target = _resolve_table_name(target_expr) if isinstance(target_expr, exp.Table) else ""
         target = aliases.get(target, target)
         temp = target in temp_set
@@ -3468,6 +3634,13 @@ class _WalkContext:
     #: declaration read: what `FOR rec IN c LOOP` fetches into `rec`. A unit walks with a
     #: copy, so one member's cursors are not another's.
     cursors: dict[str, tuple[ProcedureLineageEdgeRecord, ...]] = field(default_factory=dict)
+    #: (2026-09-19) Each record a `FETCH c INTO r` filled, by lower-cased name, with the
+    #: intermediate its rows are read into: bound from the FETCH to the end of the unit. A unit
+    #: walks with a dict of its own, as it does for `cursors`.
+    fetched: dict[str, str] = field(default_factory=dict)
+    #: A record fetched from more than one cursor in the span being walked, which no single
+    #: intermediate can stand for: left unbound, as it was.
+    fetch_conflicts: frozenset[str] = frozenset()
 
 
 def _walk_span(
@@ -3483,13 +3656,29 @@ def _walk_span(
     body = sql[start:end]
     statements: list[ParsedStatement] = []
     loops: list[_OpenLoop] = []
-    for chunk_start, chunk_end in _split_top_level_statement_spans(body):
+    spans = _split_top_level_statement_spans(body)
+    context = replace(context, fetch_conflicts=_fetch_conflicts(body, spans))
+    for chunk_start, chunk_end in spans:
         chunk = body[chunk_start:chunk_end]
         for parsed in _classify_chunk(ordinal, chunk, start + chunk_start, context, loops):
             emitted = len(statements)
             ordinal = _emit(statements, parsed, ordinal, context)
             _remember_cursor(context, chunk, statements[emitted])
     return statements, ordinal
+
+
+def _fetch_conflicts(body: str, spans: list[tuple[int, int]]) -> frozenset[str]:
+    """The records `body` fetches from more than one cursor (`_fetch_read` leaves them alone)."""
+    cursors: dict[str, set[str]] = {}
+    for first, last in spans:
+        chunk = body[first:last]
+        if "fetch" not in chunk.lower():
+            continue
+        if match := _FETCH_INTO_RE.match(_peel_control_flow_prefix(chunk).remainder):
+            cursors.setdefault(match.group("target").lower(), set()).add(
+                _bare(match.group("cursor"))
+            )
+    return frozenset(name for name, found in cursors.items() if len(found) > 1)
 
 
 def _remember_cursor(context: _WalkContext, text: str, statement: ParsedStatement) -> None:
@@ -3519,9 +3708,25 @@ def _emit(
     statements.append(statement)
     ordinal += 1
     for marker in _table_function_markers(statement, context.dialect, context.digest):
-        statements.append(marker)
+        # (2026-09-19) A gap marker's identity -- in `_dedupe_edges` and in the stored natural
+        # key -- is its statement ordinal, and every marker read out of one statement carried the
+        # statement's own. A second table function, or a call in the same statement, was dropped
+        # as a duplicate of the first; descent then read the first through, removed its marker,
+        # and reported the routine fully parsed with the second never read. The counter was
+        # already advanced once per marker, so each marker sits in its own slot -- and nothing
+        # that is not a marker is renumbered, which is what a decided edge's key depends on.
+        statements.append(_renumbered(marker, ordinal))
         ordinal += 1
     return ordinal
+
+
+def _renumbered(statement: ParsedStatement, ordinal: int) -> ParsedStatement:
+    """`statement`, and every edge it carries, numbered `ordinal`."""
+    return replace(
+        statement,
+        ordinal=ordinal,
+        edges=tuple(replace(edge, statement_ordinal=ordinal) for edge in statement.edges),
+    )
 
 
 #: Oracle's one-row dummy table. `SELECT seq.NEXTVAL INTO v FROM dual` reads nothing from
@@ -3541,12 +3746,17 @@ def _table_rows_read(statement: ParsedStatement, context: _WalkContext) -> Parse
     `_edges_from_values` and a `SELECT *` do), under its own transformation type,
     `TABLE_ROWS`: `TABLE_STAR` says every column flows, and here none does.
 
-    A table counts as named when an edge reads it or a column reference resolves to it
-    (`aida.procedure_column_owners`); a reference the parse could not attribute names
-    no table. Never a source: the statement's own write target (a DELETE with no WHERE
-    reads nothing), an INTO target (a variable), a CTE (its body's tables are what is
-    read), a table function (its TABLE_FUNCTION_READ gap already states the read), Oracle's
-    DUAL. PARTIAL, as every table-grain edge is.
+    A table counts as named when an edge reads it, and only then. It also counted when any
+    column reference resolved to it, but the edge extractors read the select list and the
+    WHERE and nothing else: a column in `JOIN b ON a.id = b.id`, in `MERGE ... ON t.id =
+    s.id AND EXISTS (SELECT 1 FROM c WHERE c.k = s.k)`, in `GROUP BY`, `HAVING`, `ORDER BY`,
+    or in a derived table's own clauses, named its table without producing an edge, so a
+    table read only there appeared in no answer at all (2026-09-19). Never a source: the
+    statement's own write target (a DELETE with no WHERE reads nothing) -- in T-SQL the
+    FROM item the target designates (`_from_items_the_target_designates`) -- an INTO target
+    (a variable), a CTE (its body's tables are what is read), a table function (its
+    TABLE_FUNCTION_READ gap already states the read), Oracle's DUAL. PARTIAL, as every
+    table-grain edge is.
     """
     node = statement.node
     if (
@@ -3557,21 +3767,15 @@ def _table_rows_read(statement: ParsedStatement, context: _WalkContext) -> Parse
         return statement
     aliases = _collect_table_aliases_with_temp(node, context.subject)[0]
     named = {edge.source_table.lower() for edge in statement.edges if edge.source_resolved}
-    for column in node.find_all(exp.Column):
-        owner = column.meta.get(COLUMN_OWNER_META)
-        if isinstance(owner, str):
-            if owner and owner != VARIABLE_REFERENCE:
-                named.add(owner.lower())
-        elif column.table:
-            named.add(aliases.get(column.table, column.table).lower())
     ctes = {cte.alias.lower() for cte in node.find_all(exp.CTE) if cte.alias}
-    target = _write_target_table(node)
+    target = _write_target_table(node, context.dialect)
     written = [target] if target is not None else []
     if isinstance(node, exp.Delete):
         # T-SQL `DELETE f FROM ...` lists what it deletes from in `tables`; sqlglot also
         # puts `DELETE TOP (1) FROM q`'s TOP there, as a table called TOP. Excluded by
         # node, not by name: `DELETE FROM q WHERE EXISTS (SELECT 1 FROM q)` does read q.
         written += [item for item in node.args.get("tables") or [] if isinstance(item, exp.Table)]
+    written += _from_items_the_target_designates(node, context.dialect)
     unnamed: list[str] = []
     for table in node.find_all(exp.Table):
         if any(table is item for item in written) or table.find_ancestor(exp.Into) is not None:
@@ -3620,12 +3824,73 @@ def _table_rows_read(statement: ParsedStatement, context: _WalkContext) -> Parse
     return replace(statement, is_no_lineage=False, edges=(*statement.edges, *added))
 
 
-def _write_target_table(node: exp.Expression) -> exp.Table | None:
+def _from_items_the_target_designates(node: exp.Expression, dialect: str) -> list[exp.Table]:
+    """T-SQL names the table an UPDATE or DELETE writes through its FROM clause: `UPDATE t SET
+    ... FROM dbo.tgt t`, `UPDATE dbo.tgt SET ... FROM dbo.tgt`, `DELETE t FROM dbo.a a JOIN
+    dbo.tgt t ON ...`. The FROM item the target designates *is* the target, not a source --
+    the same table node the statement writes, spelled again -- so it is never a table the
+    statement reads. Those items, and only those, at the statement's own level: a table in a
+    subquery is a read, and a second instance of the target under another alias
+    (`FROM dbo.a a JOIN dbo.tgt t2 ON ...` for `UPDATE dbo.tgt`) is one too.
+
+    A designation names an item by its alias -- or, when the item has none, by its own name --
+    if it is unqualified; a qualified designation names the one item spelled the same and
+    unaliased, as SQL Server does. Every other dialect writes a target its FROM never names
+    (PostgreSQL's `UPDATE t ... FROM t t2` reads `t2`), so nothing is designated there."""
+    if dialect != "tsql":
+        return []
+    if isinstance(node, exp.Update):
+        designations = [node.this]
+    elif isinstance(node, exp.Delete):
+        designations = list(node.args.get("tables") or [])
+    else:
+        return []
+    designators = [item for item in designations if isinstance(item, exp.Table)]
+    designated: list[exp.Table] = []
+    for item in node.find_all(exp.Table):
+        if (
+            any(item is designator for designator in designators)
+            or item.find_ancestor(exp.Select, exp.Subquery, exp.CTE) is not None
+        ):
+            continue
+        for designator in designators:
+            if not designator.db and not designator.catalog:
+                same = (item.alias or item.name).lower() == designator.name.lower()
+            else:
+                same = not item.alias and (
+                    (item.catalog or "").lower(),
+                    (item.db or "").lower(),
+                    item.name.lower(),
+                ) == (
+                    (designator.catalog or "").lower(),
+                    (designator.db or "").lower(),
+                    designator.name.lower(),
+                )
+            if same:
+                designated.append(item)
+                break
+    return designated
+
+
+def _delete_target(node: exp.Delete, dialect: str) -> exp.Expression | None:
+    """The table node a DELETE deletes from.
+
+    sqlglot's `this` is the *first* FROM item; T-SQL's `DELETE t FROM dbo.a a JOIN dbo.tgt t ON
+    ...` deletes from the item its `tables` designate -- here the joined one. Taking `this`
+    recorded the delete, and the filter evidence in its WHERE, as a write to `dbo.a`, a table
+    it only reads (2026-09-19). The designated FROM item when there is one, else `this`."""
+    designated = _from_items_the_target_designates(node, dialect)
+    return designated[0] if designated else node.this
+
+
+def _write_target_table(node: exp.Expression, dialect: str = "") -> exp.Table | None:
     """The table node a statement writes -- never one of its sources."""
     target: object = None
     if isinstance(node, exp.Insert | exp.Create):
         target = node.this.this if isinstance(node.this, exp.Schema) else node.this
-    elif isinstance(node, exp.Update | exp.Delete | exp.Merge):
+    elif isinstance(node, exp.Delete):
+        target = _delete_target(node, dialect)
+    elif isinstance(node, exp.Update | exp.Merge):
         target = node.this
     return target if isinstance(target, exp.Table) else None
 
@@ -4455,6 +4720,7 @@ def _walk_unit(
         context,
         names=replace(names.with_names(declared), result_cursors=results),
         cursors=dict(context.cursors),
+        fetched={},
     )
     statements: list[ParsedStatement] = []
     for item in unit.declarations:

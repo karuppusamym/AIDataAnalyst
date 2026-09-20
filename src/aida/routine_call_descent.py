@@ -477,9 +477,14 @@ def descend_nested_calls(
     return _summarised(reconciled, _deduplicated(spliced))
 
 
-def _name_parts(name: str) -> tuple[str | None, str]:
+def _split_name(name: str) -> list[str]:
+    """A called name's dotted parts, unquoted and lower-cased, most significant first."""
     parts = [part.strip('[]"`').lower() for part in name.split(".")]
-    parts = [part for part in parts if part]
+    return [part for part in parts if part]
+
+
+def _name_parts(name: str) -> tuple[str | None, str]:
+    parts = _split_name(name)
     if not parts:
         return None, ""
     return (parts[-2] if len(parts) >= 2 else None), parts[-1]
@@ -495,13 +500,18 @@ async def routine_resolver(
     schema and the rest one of its members -- `other_pkg.member(...)`, a call this
     parser leaves for descent because it is not the caller's own package (an
     in-package sibling call is already read through before descent ever runs).
-    Narrower than the in-package case on purpose: only a package in the caller's
-    own schema, found by name; a fully schema-qualified `schema.pkg.member` is not
-    read (`_name_parts` keeps only the last two dotted parts, the same limit a
-    plain two-part schema-qualified routine call already has here). An overloaded
-    member name (more than one member of that package sharing it) is AMBIGUOUS,
-    never a guess -- the same rule the in-package resolver uses, and, like it, by
-    name only: this gap marker never carried the call's arguments.
+    An overloaded member name (more than one member of that package sharing it) is
+    AMBIGUOUS, never a guess -- the same rule the in-package resolver uses, and, like
+    it, by name only: this gap marker never carried the call's arguments.
+
+    (2026-09-19) On Oracle a name of three parts is `schema.package.member`, and the
+    schema is read: `hr.util.log` is `util.log` in `hr`, where it was looked up in the
+    *caller's* schema -- so a caller whose own schema had a package `util` was recorded
+    as making a call it did not. Any other dialect keeps the last two parts, as it
+    always has (`db.schema.proc` on SQL Server ignores the database). A cross-package
+    splice carries the callee's own captured routine id (`Callee.routine_id`): the
+    ACTIVE routine captured under the package's name, in the package's schema, with the
+    member's name -- NULL, never a guess, when there is not exactly one.
     """
     rows = (
         await session.execute(
@@ -520,18 +530,28 @@ async def routine_resolver(
     by_qualified: dict[tuple[str, str], list[tuple[MetadataRoutine, str]]] = {}
     by_name: dict[str, list[tuple[MetadataRoutine, str]]] = {}
     by_package: dict[tuple[str, str], list[tuple[MetadataRoutine, str]]] = {}
+    #: (schema, package, member) -> the ACTIVE routines captured as that member. A package's
+    #: members are captured as routines of their own, named after the member and carrying the
+    #: package's name; two under one name are an overload the catalog holds twice.
+    by_member: dict[tuple[UUID, str, str], list[MetadataRoutine]] = {}
     for routine, schema_name in rows:
         entry = (routine, schema_name)
         by_qualified.setdefault((schema_name.lower(), routine.name.lower()), []).append(entry)
         by_name.setdefault(routine.name.lower(), []).append(entry)
         if routine.routine_type.strip().upper() == "PACKAGE":
             by_package.setdefault((schema_name.lower(), routine.name.lower()), []).append(entry)
+        if routine.package_name:
+            by_member.setdefault(
+                (routine.schema_id, routine.package_name.lower(), routine.name.lower()), []
+            ).append(routine)
     #: Cache: a package resolved cross-package is parsed once even if several
     #: calls (or several members) reach it.
     package_parses: dict[UUID, ProcedureParseResult] = {}
 
-    def cross_package_member(package_name: str, member_name: str) -> Callee:
-        packages = by_package.get((caller_schema or "", package_name), [])
+    def cross_package_member(
+        package_name: str, member_name: str, schema: str | None = None
+    ) -> Callee:
+        packages = by_package.get((schema or caller_schema or "", package_name), [])
         if not packages:
             return Callee(None, None, None, CALLEE_NOT_CAPTURED)
         if len(packages) > 1:
@@ -558,11 +578,20 @@ async def routine_resolver(
         member = pkg_result.package_members[matches[0]]
         qualified = f"{schema_name}.{package_routine.name}.{member.name}"
         key = f"{package_routine.id}:{matches[0]}"
+        captured = by_member.get(
+            (package_routine.schema_id, package_routine.name.lower(), member.name.lower()), []
+        )
         return Callee(
-            key, qualified, None, parsed=_member_parse_result(pkg_result, matches[0])
+            key, qualified, None,
+            routine_id=captured[0].id if len(captured) == 1 else None,
+            parsed=_member_parse_result(pkg_result, matches[0]),
         )
 
     def resolve(name: str) -> Callee:
+        parts = _split_name(name)
+        if datasource.dialect == "oracle" and len(parts) == 3:
+            # `schema.package.member`: never a routine in a schema called after the package.
+            return cross_package_member(parts[1], parts[2], schema=parts[0])
         schema, routine_name = _name_parts(name)
         if schema is not None:
             candidates = by_qualified.get((schema, routine_name), [])
