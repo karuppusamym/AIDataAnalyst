@@ -173,7 +173,10 @@ async def test_an_analyst_can_list_the_products_they_consume(
     analyst = _context(estate, roles={"Analyst"})
 
     assert await _list(db, estate, analyst) == (["orders-context", "shared-context"], 2)
-    assert await _list(db, estate, analyst, askable=True) == (["orders-context", "shared-context"], 2)
+    assert await _list(db, estate, analyst, askable=True) == (
+        ["orders-context", "shared-context"],
+        2,
+    )
 
 
 async def test_a_viewer_lists_only_what_is_bound_to_viewer(
