@@ -9,6 +9,10 @@ name, so its routes and their callers are untouched.
 
 Nothing here reads, freezes, renders or stores anything: every function takes what
 `aida.okf_store` already returned. The gates are the store's.
+
+R11-OKF02 adds the Catalog object view's two mappers, `object_coverage` (a product entry's and a
+source entry's coverage row, one rule) and `object_source_read` (what a datasource's own bundle
+says about one object), for the same reason: a second door must not restate them.
 """
 
 from __future__ import annotations
@@ -18,13 +22,20 @@ from datetime import datetime
 from typing import Any
 
 from aida.okf_export import OKF_CONFORMANCE_STATUS
-from aida.okf_store import OkfPublishedBundle, OkfPublishedSourceBundle
+from aida.okf_store import (
+    SOURCE_NOT_IN_BUNDLE,
+    SOURCE_REFUSED,
+    OkfObjectSourceKnowledge,
+    OkfPublishedBundle,
+    OkfPublishedSourceBundle,
+)
 from aida.okf_store_models import OkfBundleDocument, OkfBundlePublication
 from aida.schemas import (
     OkfBundleFileRead,
     OkfBundleRead,
     OkfChangeSummaryRead,
     OkfDocumentRead,
+    OkfObjectSourceRead,
     OkfPublicationRead,
 )
 
@@ -34,6 +45,8 @@ __all__ = [
     "bundle_read",
     "bundle_summary",
     "document_read",
+    "object_coverage",
+    "object_source_read",
     "publication_read",
 ]
 
@@ -91,6 +104,49 @@ def document_read(
         rendered_in_sequence=document.rendered_in_sequence,
         subject_key=document.subject_key,
         content=document.content,
+    )
+
+
+def object_coverage(
+    publication: OkfBundlePublication, subject_key: str | None
+) -> dict[str, Any]:
+    """The manifest's value-free `source_objects` row for one subject: definition digest and
+    capture version, description state and version. Empty when the manifest lists no such
+    subject. One rule for a product bundle's entry and a source bundle's."""
+    manifest: dict[str, Any] = dict(publication.manifest)
+    return next(
+        (
+            dict(row)
+            for row in manifest.get("source_objects") or []
+            if row.get("key") == subject_key
+        ),
+        {},
+    )
+
+
+def object_source_read(found: OkfObjectSourceKnowledge) -> OkfObjectSourceRead:
+    """A datasource's own bundle's answer about one object, carrying only what its state may.
+
+    A refusal names no bundle; an absence names the datasource the reader was admitted to and
+    nothing about the publication, so `NOT_IN_BUNDLE` cannot be used to count what was left out.
+    """
+    if found.state == SOURCE_REFUSED:
+        return OkfObjectSourceRead(state="REFUSED", reason=found.reason)
+    stored = found.stored
+    if stored is None:
+        raise ValueError(f"{found.state} needs the stored source bundle it was read from")
+    datasource = stored.datasource
+    if found.state == SOURCE_NOT_IN_BUNDLE or found.document is None:
+        return OkfObjectSourceRead(
+            state="NOT_IN_BUNDLE", datasource_id=datasource.id, datasource_name=datasource.name
+        )
+    return OkfObjectSourceRead(
+        state="DOCUMENT",
+        datasource_id=datasource.id,
+        datasource_name=datasource.name,
+        publication=publication_read(stored.publication, is_current=stored.is_current),
+        document=document_read(stored.publication, found.document),
+        coverage=object_coverage(stored.publication, found.document.subject_key),
     )
 
 

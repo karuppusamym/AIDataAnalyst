@@ -3802,10 +3802,22 @@ export interface OkfObjectKnowledgeItemRead {
   coverage: Record<string, unknown>;
 }
 
-/** Every authorized product bundle's document about one catalog object (R11-OKF02). */
+/** One catalog object's stored knowledge: product bundles, else its source's (R11-OKF02). */
 export interface OkfObjectKnowledgeRead {
   table_id: string;
   items: OkfObjectKnowledgeItemRead[];
+  source?: OkfObjectSourceRead | null;
+}
+
+/** What a datasource's own stored OKF bundle says about one catalog object (R11-OKF02). */
+export interface OkfObjectSourceRead {
+  state: "DOCUMENT" | "NOT_IN_BUNDLE" | "REFUSED";
+  reason?: string | null;
+  datasource_id?: string | null;
+  datasource_name?: string | null;
+  publication?: OkfPublicationRead | null;
+  document?: OkfDocumentRead | null;
+  coverage?: Record<string, unknown> | null;
 }
 
 /** The reader's own lineage of stored publications for one version, newest first. */

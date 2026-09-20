@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -199,6 +200,9 @@ SOURCE_BUNDLE_CHANNELS: Final = {
     "document": "OKF_SOURCE_DOCUMENT",
     "history": "OKF_SOURCE_HISTORY",
     "context": "OKF_SOURCE_CONTEXT",
+    # R11-OKF02: the Catalog's document about one object, read from its datasource's bundle when
+    # no product bundle holds it.
+    "object": "OKF_SOURCE_OBJECT",
     # R11-GQL01: the same three GraphQL reads, and the MCP knowledge tool, onto a source bundle.
     "graphql_manifest": "GRAPHQL_OKF_SOURCE_MANIFEST",
     "graphql_document": "GRAPHQL_OKF_SOURCE_DOCUMENT",
@@ -1508,6 +1512,31 @@ class OkfObjectKnowledge:
     document: OkfBundleDocument
 
 
+async def _object_subject(
+    session: AsyncSession, table_id: UUID, context: SecurityContext
+) -> tuple[MetadataTable, str]:
+    """A catalog object and its bundle identity key, once the caller's organization is confirmed
+    to own it (404 absent, 403 across the tenant boundary).
+
+    One place for both reads of an object -- the product bundles' and the datasource's own -- so
+    they name the same subject and a change to how objects are keyed cannot reach one and not
+    the other.
+    """
+    row = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema, MetadataCatalog)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(MetadataTable.id == table_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    table, schema, catalog = row
+    enforce_organization(context, table.organization_id)
+    return table, object_key(str(table.datasource_id), catalog.name, schema.name, table.name)
+
+
 async def read_object_knowledge(
     session: AsyncSession,
     table_id: UUID,
@@ -1524,19 +1553,7 @@ async def read_object_knowledge(
     only where its datasource was admitted for that reader; otherwise that bundle contributes
     nothing, not a placeholder.
     """
-    row = (
-        await session.execute(
-            select(MetadataTable, MetadataSchema, MetadataCatalog)
-            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
-            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
-            .where(MetadataTable.id == table_id)
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="table not found")
-    table, schema, catalog = row
-    enforce_organization(context, table.organization_id)
-    subject = object_key(str(table.datasource_id), catalog.name, schema.name, table.name)
+    table, subject = await _object_subject(session, table_id, context)
     versions = (
         await session.scalars(
             select(ContextProductVersion)
@@ -1573,6 +1590,76 @@ async def read_object_knowledge(
         if len(found) >= MAX_OBJECT_PRODUCTS:
             break
     return found
+
+
+#: What `read_object_source_knowledge` found: the object's document, a bundle that holds none, or
+#: a refusal of the reader. Named once so the store, the read model and the tests agree.
+SOURCE_DOCUMENT: Final = "DOCUMENT"
+SOURCE_NOT_IN_BUNDLE: Final = "NOT_IN_BUNDLE"
+SOURCE_REFUSED: Final = "REFUSED"
+#: A 403's `detail` is handed on as a reason code only when it looks like one -- the gate's own
+#: (`NO_BINDING_FOR_DATASOURCE`, `DENIED_BY_POLICY`). A message or a structure is never echoed.
+_REASON_CODE: Final = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
+GENERIC_REFUSAL: Final = "FORBIDDEN"
+
+
+@dataclass(frozen=True, slots=True)
+class OkfObjectSourceKnowledge:
+    """One catalog object as its datasource's own stored bundle holds it (R11-OKF02).
+
+    `stored` is present for `DOCUMENT` and `NOT_IN_BUNDLE` -- the bundle was read, so the read
+    is audited -- and absent for `REFUSED`, which read nothing. `document` is present only for
+    `DOCUMENT`.
+    """
+
+    state: str
+    reason: str | None = None
+    stored: OkfPublishedSourceBundle | None = None
+    document: OkfBundleDocument | None = None
+
+
+async def read_object_source_knowledge(
+    session: AsyncSession,
+    table_id: UUID,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> OkfObjectSourceKnowledge:
+    """The stored document about one catalog object from its own datasource's bundle
+    (R11-OKF02) -- what the Catalog shows when no product bundle holds the object.
+
+    Through `read_published_source_bundle`, so the datasource's `READ_METADATA` decision (and
+    the per-schema one where a workspace decides), the lineage that decision keys and the
+    serve-or-rebuild rules are exactly the source routes'. Three outcomes, none of them an
+    error: the document; a bundle that holds no document for the object, which reads the same
+    whether the object is absent, no longer ACTIVE or in a schema this reader was refused; and
+    the reader's refusal (403) carried as the bare reason code, so a refusal is never mistaken
+    for an absence. Everything else `read_published_source_bundle` raises -- a capture racing a
+    change, a source over the limits -- propagates, because an unreadable bundle is not an
+    answer about the object.
+    """
+    table, subject = await _object_subject(session, table_id, context)
+    try:
+        stored = await read_published_source_bundle(
+            session, table.datasource_id, context, settings, now=now
+        )
+    except HTTPException as refusal:
+        if refusal.status_code != 403:
+            raise
+        detail = refusal.detail
+        code = detail if isinstance(detail, str) and _REASON_CODE.match(detail) else GENERIC_REFUSAL
+        return OkfObjectSourceKnowledge(state=SOURCE_REFUSED, reason=code)
+    document = await session.scalar(
+        select(OkfBundleDocument).where(
+            OkfBundleDocument.organization_id == table.organization_id,
+            OkfBundleDocument.publication_id == stored.publication.id,
+            OkfBundleDocument.subject_key == subject,
+        )
+    )
+    if document is None:
+        return OkfObjectSourceKnowledge(state=SOURCE_NOT_IN_BUNDLE, stored=stored)
+    return OkfObjectSourceKnowledge(state=SOURCE_DOCUMENT, stored=stored, document=document)
 
 
 # --- evidence ---------------------------------------------------------------------------

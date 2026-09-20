@@ -22858,7 +22858,7 @@
       },
       "OkfObjectKnowledgeRead": {
         "additionalProperties": false,
-        "description": "Every authorized product bundle's document about one catalog object (R11-OKF02).",
+        "description": "One catalog object's stored knowledge: product bundles, else its source's (R11-OKF02).\n\n`items` is the object's document from every authorized product bundle. `source` is null\nwhenever `items` is not empty: a product bundle is the reading a steward asked for, so it\nwins and the source bundle is not even consulted. When `items` is empty, `source` says what\nthe object's own datasource bundle holds -- see `OkfObjectSourceRead`.",
         "properties": {
           "items": {
             "items": {
@@ -22866,6 +22866,16 @@
             },
             "title": "Items",
             "type": "array"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OkfObjectSourceRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "table_id": {
             "format": "uuid",
@@ -22878,6 +22888,92 @@
           "items"
         ],
         "title": "OkfObjectKnowledgeRead",
+        "type": "object"
+      },
+      "OkfObjectSourceRead": {
+        "additionalProperties": false,
+        "description": "What a datasource's own stored OKF bundle says about one catalog object (R11-OKF02).\n\nOffered only when no product bundle the caller may read holds the object. `state` is one of\nthree answers, and each carries only what it may:\n\n* `DOCUMENT` -- the object's document from the caller's own publication of the source\n  bundle: the datasource, the publication it came from, the document and the manifest's\n  value-free `coverage` row, exactly as a product's entry carries them.\n* `NOT_IN_BUNDLE` -- the bundle the caller may read holds no document for this object. An\n  object never discovered, one no longer ACTIVE and one in a schema this caller's workspace\n  refuses all read alike, and nothing about the bundle (its size, its publication) is\n  counted, so the answer cannot be used to probe what was left out.\n* `REFUSED` -- the datasource's read decision refused this caller. `reason` is the bare\n  reason code the datasource's own routes answer 403 with, and nothing else is carried: a\n  refusal names no bundle. It is a refusal and not an absence.\n\nA bundle that could not be built or read (a capture racing a change, a source over the\nlimits) is an HTTP error, never a state. The fields a state does not carry are null, and\na value that does not match its state is refused at construction.",
+        "properties": {
+          "coverage": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage"
+          },
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "datasource_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Name"
+          },
+          "document": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OkfDocumentRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publication": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OkfPublicationRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "DOCUMENT",
+              "NOT_IN_BUNDLE",
+              "REFUSED"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "OkfObjectSourceRead",
         "type": "object"
       },
       "OkfPublicationHistoryRead": {
@@ -71810,7 +71906,7 @@
     },
     "/v1/metadata/tables/{table_id}/okf-knowledge": {
       "get": {
-        "description": "The Catalog door: this object's document from each product bundle the caller may read.\n\nEach bundle is read through the same store, scope resolver and admission as the product\nroutes; a product the caller may not consume, or whose bundle does not admit this object's\ndatasource for them, contributes nothing -- not an empty entry, not a count.",
+        "description": "The Catalog door: this object's document from each product bundle the caller may read.\n\nEach bundle is read through the same store, scope resolver and admission as the product\nroutes; a product the caller may not consume, or whose bundle does not admit this object's\ndatasource for them, contributes nothing -- not an empty entry, not a count.\n\nWhen no product bundle holds the object, `source` answers from the object's own datasource\nbundle (R11-OKF02): the document, a bundle that holds none, or the reader's refusal as the\nbare reason code. It is consulted only then, so a product bundle is never accompanied by a\nsecond reading and a source is not read -- or built -- needlessly. The datasource's own\n`READ_METADATA` decision applies; a bundle that cannot be read is an HTTP error.",
         "operationId": "read_object_okf_knowledge_v1_metadata_tables__table_id__okf_knowledge_get",
         "parameters": [
           {

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import type { OkfObjectKnowledgeRead } from "../lib/types";
 import { describeKnowledgeError, downloadOkfBundle, fetchObjectKnowledge } from "../lib/api/knowledge";
+import type { ObjectKnowledgeRead } from "../lib/api/knowledge";
 import { Button } from "./primitives";
 import { useAsyncResource } from "./screenState";
 import { KnowledgeDocument } from "./KnowledgeDocument";
+import { ObjectSourceKnowledge } from "./ObjectSourceKnowledge";
 import "./Knowledge.css";
 
 /* ---------------------------------------------------------------------------
@@ -20,11 +21,16 @@ import "./Knowledge.css";
    may not read, or whose bundle does not admit this object's source for you,
    contributes nothing: the empty state says "none you may read", never "N
    hidden".
+
+   When no product bundle holds the object, the server also answers from the
+   object's own datasource bundle (`source`), and this shows it: the document,
+   an absence, or -- as a refusal, never as an absence -- the source's own "no".
+   A product's reading wins: with any product entry, the source is not shown.
 --------------------------------------------------------------------------- */
 
 export function ObjectKnowledge({ tableId }: { tableId: string }) {
   const [open, setOpen] = useState(false);
-  const knowledge = useAsyncResource<OkfObjectKnowledgeRead>(
+  const knowledge = useAsyncResource<ObjectKnowledgeRead>(
     async (signal) => {
       try {
         return await fetchObjectKnowledge(tableId, signal);
@@ -57,9 +63,13 @@ export function ObjectKnowledge({ tableId }: { tableId: string }) {
           {knowledge.error}
         </p>
       ) : (knowledge.data?.items ?? []).length === 0 ? (
-        <p className="kview__note">
-          No published knowledge bundle you may read includes this object.
-        </p>
+        knowledge.data?.source ? (
+          <ObjectSourceKnowledge source={knowledge.data.source} />
+        ) : (
+          <p className="kview__note">
+            No published knowledge bundle you may read includes this object.
+          </p>
+        )
       ) : (
         <>
           {downloadError ? (

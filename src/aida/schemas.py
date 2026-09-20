@@ -4533,11 +4533,74 @@ class OkfObjectKnowledgeItemRead(ApiModel):
     coverage: dict[str, Any]
 
 
+class OkfObjectSourceRead(ApiModel):
+    """What a datasource's own stored OKF bundle says about one catalog object (R11-OKF02).
+
+    Offered only when no product bundle the caller may read holds the object. `state` is one of
+    three answers, and each carries only what it may:
+
+    * `DOCUMENT` -- the object's document from the caller's own publication of the source
+      bundle: the datasource, the publication it came from, the document and the manifest's
+      value-free `coverage` row, exactly as a product's entry carries them.
+    * `NOT_IN_BUNDLE` -- the bundle the caller may read holds no document for this object. An
+      object never discovered, one no longer ACTIVE and one in a schema this caller's workspace
+      refuses all read alike, and nothing about the bundle (its size, its publication) is
+      counted, so the answer cannot be used to probe what was left out.
+    * `REFUSED` -- the datasource's read decision refused this caller. `reason` is the bare
+      reason code the datasource's own routes answer 403 with, and nothing else is carried: a
+      refusal names no bundle. It is a refusal and not an absence.
+
+    A bundle that could not be built or read (a capture racing a change, a source over the
+    limits) is an HTTP error, never a state. The fields a state does not carry are null, and
+    a value that does not match its state is refused at construction.
+    """
+
+    state: Literal["DOCUMENT", "NOT_IN_BUNDLE", "REFUSED"]
+    reason: str | None = None
+    datasource_id: UUID | None = None
+    datasource_name: str | None = None
+    publication: OkfPublicationRead | None = None
+    document: OkfDocumentRead | None = None
+    coverage: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_state_fields(self) -> "OkfObjectSourceRead":
+        carried = {
+            name
+            for name in (
+                "reason",
+                "datasource_id",
+                "datasource_name",
+                "publication",
+                "document",
+                "coverage",
+            )
+            if getattr(self, name) is not None
+        }
+        allowed = {
+            "DOCUMENT": {"datasource_id", "datasource_name", "publication", "document", "coverage"},
+            "NOT_IN_BUNDLE": {"datasource_id", "datasource_name"},
+            "REFUSED": {"reason"},
+        }[self.state]
+        if carried != allowed:
+            raise ValueError(
+                f"{self.state} carries exactly {sorted(allowed)}, not {sorted(carried)}"
+            )
+        return self
+
+
 class OkfObjectKnowledgeRead(ApiModel):
-    """Every authorized product bundle's document about one catalog object (R11-OKF02)."""
+    """One catalog object's stored knowledge: product bundles, else its source's (R11-OKF02).
+
+    `items` is the object's document from every authorized product bundle. `source` is null
+    whenever `items` is not empty: a product bundle is the reading a steward asked for, so it
+    wins and the source bundle is not even consulted. When `items` is empty, `source` says what
+    the object's own datasource bundle holds -- see `OkfObjectSourceRead`.
+    """
 
     table_id: UUID
     items: list[OkfObjectKnowledgeItemRead]
+    source: OkfObjectSourceRead | None = None
 
 
 class OkfContextRequest(ApiModel):

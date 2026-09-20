@@ -24,6 +24,14 @@
    `/v1/datasources/{id}/okf-bundle`. The server takes the datasource's own
    read decision on every request; a refusal is a 403, and the view says so
    rather than showing an empty bundle.
+
+   THE CATALOG OBJECT READ ALSO CARRIES A SOURCE ENTRY (R11-OKF02). When no
+   product bundle holds a table, `GET /v1/metadata/tables/{id}/okf-knowledge`
+   answers from the table's own datasource bundle, resolved on the server: a
+   document's path is a digest of catalog, schema and name, which no table read
+   exposes, so a client cannot form it and does not try. The answer is one of
+   three states -- see `ObjectKnowledgeSource` -- and a refusal is never an
+   absence.
 --------------------------------------------------------------------------- */
 
 import { demoOr, get, postJson } from "./transport";
@@ -53,6 +61,41 @@ export type OkfSourceContextRead = Omit<
 > & {
   datasource_id: string;
   datasource_name: string;
+};
+
+/** The sentence the Sources screen says beside "Open knowledge bundle", said again wherever a
+ *  source bundle's content is shown, so the two surfaces make one claim in one wording.
+ *  `SourcesScreen.tsx` holds the original; a test compares the two. */
+export const SOURCE_BUNDLE_READABLE_ONLY =
+  "Only what you may read of this source is in it, and nothing else is counted.";
+
+/** `OkfObjectSourceRead` on `GET /v1/metadata/tables/{id}/okf-knowledge`: what the object's own
+ *  datasource bundle holds, offered only when no product bundle does. Declared here, beside the
+ *  read that returns it, until `lib/types.ts` is next regenerated from the API. Each state
+ *  carries only what it may -- a refusal names no bundle, an absence counts nothing -- so the
+ *  three are told apart by `state` alone.
+ *
+ *  DOCUMENT       the object's document from the caller's own publication, with its coverage.
+ *  NOT_IN_BUNDLE  the bundle the caller may read holds no document for it. An object that was
+ *                 never discovered, is retired, or sits in a schema the caller's workspace
+ *                 refuses all read alike.
+ *  REFUSED        the datasource's read decision refused the caller; `reason` is the bare code. */
+export type ObjectKnowledgeSource =
+  | {
+      state: "DOCUMENT";
+      datasource_id: string;
+      datasource_name: string;
+      publication: OkfPublicationRead;
+      document: OkfDocumentRead;
+      coverage: Record<string, unknown>;
+    }
+  | { state: "NOT_IN_BUNDLE"; datasource_id: string; datasource_name: string }
+  | { state: "REFUSED"; reason: string };
+
+/** `OkfObjectKnowledgeRead` with its `source` entry: null (or absent, from a server that predates
+ *  it) whenever a product bundle holds the object. */
+export type ObjectKnowledgeRead = Omit<OkfObjectKnowledgeRead, "source"> & {
+  source?: ObjectKnowledgeSource | null;
 };
 
 const DEMO_REFUSAL = "Knowledge bundles are read from a live Atlas deployment; demo data has none.";
@@ -114,15 +157,18 @@ export function selectOkfContext(
 }
 
 /** `GET /v1/metadata/tables/{id}/okf-knowledge` -- this object's document from
- *  every product bundle the caller may read. Demo mode: none. */
+ *  every product bundle the caller may read and, when none holds it, the answer of
+ *  its own datasource's bundle (`source`). One request: the fallback is the
+ *  server's, so this never asks a source route for a path it cannot form.
+ *  Demo mode: none. */
 export function fetchObjectKnowledge(
   tableId: string,
   signal?: AbortSignal,
-): Promise<OkfObjectKnowledgeRead> {
-  return demoOr(
+): Promise<ObjectKnowledgeRead> {
+  return demoOr<ObjectKnowledgeRead>(
     async () => ({ table_id: tableId, items: [] }),
     () =>
-      get<OkfObjectKnowledgeRead>(
+      get<ObjectKnowledgeRead>(
         `/v1/metadata/tables/${encodeURIComponent(tableId)}/okf-knowledge`,
         signal,
       ),

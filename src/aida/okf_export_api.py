@@ -56,7 +56,14 @@ from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.okf_context import OkfContext, citation_ids, render_markdown
 from aida.okf_export import OkfBundle, bundle_archive_bytes
-from aida.okf_read_model import OKF_ROLES, bundle_read, document_read, publication_read
+from aida.okf_read_model import (
+    OKF_ROLES,
+    bundle_read,
+    document_read,
+    object_coverage,
+    object_source_read,
+    publication_read,
+)
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     SOURCE_BUNDLE_CHANNELS,
@@ -69,6 +76,7 @@ from aida.okf_store import (
     load_document,
     load_documents,
     read_object_knowledge,
+    read_object_source_knowledge,
     read_okf_context,
     read_okf_source_context,
     read_published_bundle,
@@ -88,6 +96,7 @@ from aida.schemas import (
     OkfDocumentRead,
     OkfObjectKnowledgeItemRead,
     OkfObjectKnowledgeRead,
+    OkfObjectSourceRead,
     OkfPublicationHistoryRead,
     OkfPublicationRead,
 )
@@ -601,20 +610,18 @@ async def read_object_okf_knowledge(
     Each bundle is read through the same store, scope resolver and admission as the product
     routes; a product the caller may not consume, or whose bundle does not admit this object's
     datasource for them, contributes nothing -- not an empty entry, not a count.
+
+    When no product bundle holds the object, `source` answers from the object's own datasource
+    bundle (R11-OKF02): the document, a bundle that holds none, or the reader's refusal as the
+    bare reason code. It is consulted only then, so a product bundle is never accompanied by a
+    second reading and a source is not read -- or built -- needlessly. The datasource's own
+    `READ_METADATA` decision applies; a bundle that cannot be read is an HTTP error.
     """
     found = await read_object_knowledge(session, table_id, context, settings)
     items: list[OkfObjectKnowledgeItemRead] = []
     for entry in found:
         stored = entry.stored
-        manifest: dict[str, Any] = dict(stored.publication.manifest)
-        coverage = next(
-            (
-                dict(row)
-                for row in manifest.get("source_objects") or []
-                if row.get("key") == entry.document.subject_key
-            ),
-            {},
-        )
+        coverage = object_coverage(stored.publication, entry.document.subject_key)
         items.append(
             OkfObjectKnowledgeItemRead(
                 context_product_version_id=stored.version.id,
@@ -634,5 +641,19 @@ async def read_object_okf_knowledge(
             channel=BUNDLE_ROLE_CHANNELS["object"],
             path=entry.document.path,
         )
+    source: OkfObjectSourceRead | None = None
+    if not found:
+        from_source = await read_object_source_knowledge(session, table_id, context, settings)
+        source = object_source_read(from_source)
+        if from_source.stored is not None:
+            # A refusal read nothing and records nothing; an absence still read a bundle.
+            record_okf_source_read(
+                session,
+                context,
+                from_source.stored,
+                action="datasource.okf_object_read",
+                channel=SOURCE_BUNDLE_CHANNELS["object"],
+                path=from_source.document.path if from_source.document is not None else None,
+            )
     await session.commit()
-    return OkfObjectKnowledgeRead(table_id=table_id, items=items)
+    return OkfObjectKnowledgeRead(table_id=table_id, items=items, source=source)
