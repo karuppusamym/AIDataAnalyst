@@ -249,6 +249,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Final
+from uuid import UUID
 
 from aida.procedure_column_owners import (
     NO_DECLARED_NAMES,
@@ -639,6 +640,21 @@ class ProcedureLineageEdgeRecord:
     # R11-FP07: set only on an edge read from a routine this one calls -- that callee's
     # qualified name (`aida.routine_call_descent`).
     via_routine: str | None = None
+    # R11-FP03: the callee's own captured routine id -- the routine `via_routine` names,
+    # never the caller's -- when it is already known (a cross-routine call resolved by
+    # `aida.routine_call_descent`, which has the catalog in hand). `None` either because
+    # the edge is not spliced at all, or because it is spliced from an in-package sibling
+    # call, whose callee is resolved from `via_routine_locator` instead (below): the pure
+    # parser has no catalog to ask.
+    via_routine_id: UUID | None = None
+    # R11-FP03: set only on an edge spliced in from an in-package sibling member call
+    # (`_read_through`) or from this module's own post-descent reconciliation of one --
+    # a statement ordinal inside the *callee* member's own `[first_ordinal, last_ordinal]`
+    # span, in this same parse's numbering. `routine_edge_row` resolves it to the
+    # callee's captured routine id the same way `member_routine_id` is resolved, via
+    # `resolve_package_member_ids`, because only that lookup can tell two overloads of
+    # one member name apart. Never set alongside `via_routine_id`.
+    via_routine_locator: int | None = None
     # R11-FP07 source-range maps: where `statement_ordinal`'s statement is in the
     # text this parse read, what the range is the range of, and the digest of that
     # text. Defaults are the honest "not located" -- an edge built on a path that
@@ -656,6 +672,29 @@ class ProcedureLineageEdgeRecord:
     # from any other routine.
     package_member: str | None = None
     member_attribution: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingMemberCall:
+    """R11-FP03: a sibling-member call whose completeness `_member_calls_read_through`
+    could not decide at parse time, because a member it reaches still had its own
+    not-yet-resolved external call -- one only catalog descent (`aida.routine_call_descent`,
+    which runs *after* this parse) can resolve. Recorded so descent can re-check the
+    call once it has resolved every ordinary gap in this same pass, instead of the
+    call being stuck with the pessimistic marker `_member_calls_read_through` had to
+    write when it could not yet know better.
+
+    `statement_ordinal` identifies the call's own UNPARSED marker edge (one call site
+    per statement, so this is unique). `reached_member_indices` are the members this
+    call reads through, in resolution order and indexing `ProcedureParseResult.
+    package_members` -- the first is the member named at the call, matching
+    `via_routine`, which is the display name an eager in-package resolution would
+    have used.
+    """
+
+    statement_ordinal: int
+    reached_member_indices: tuple[int, ...]
+    via_routine: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -723,6 +762,10 @@ class ProcedureParseResult:
     member_attribution: str | None = None
     member_fallback_reason: str | None = None
     package_members: tuple[PackageMember, ...] = ()
+    # R11-FP03: sibling calls whose completeness `_member_calls_read_through` deferred
+    # to descent; see `PendingMemberCall`. Empty for anything but a split package with
+    # at least one such call. Cleared once `aida.routine_call_descent` reconciles them.
+    pending_member_calls: tuple[PendingMemberCall, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -2056,6 +2099,115 @@ def _matching_paren(text: str, open_index: int) -> int | None:
     return None
 
 
+#: R11-FP03: a function call inside an expression -- `SELECT pkg.fn(x) FROM t`,
+#: `v := pkg.fn(x) + 1` -- is a call for descent purposes too, not just a bare
+#: statement-level `CALL`/`EXEC`/`PERFORM`. See `_augmented_with_expression_call`.
+def _dot_chain_names(node: exp.Expression) -> list[str] | None:
+    """`node` read as a plain qualifier chain -- `s.pkg` from
+    `Dot(Identifier(s), Identifier(pkg))`, which is how sqlglot hangs a qualified
+    call's prefix off the call itself -- most significant part first. None when
+    some part of it is not a plain name (an expression, a subquery, a function
+    call of its own): nothing this parser would use as a schema/package name."""
+    if isinstance(node, exp.Identifier):
+        return [node.this]
+    if (
+        isinstance(node, exp.Column)
+        and not node.args.get("table")
+        and isinstance(node.this, exp.Identifier)
+    ):
+        return [node.this.this]
+    if isinstance(node, exp.Dot):
+        left = _dot_chain_names(node.this)
+        right = _dot_chain_names(node.expression)
+        return [*left, *right] if left is not None and right is not None else None
+    return None
+
+
+def _expression_call_site(call: exp.Anonymous) -> CallSite | None:
+    """`call` -- an `exp.Anonymous`, sqlglot's own catch-all for a function call it
+    does not recognise as one of its dialect's builtins -- read as a `CallSite`,
+    qualified by however many `Dot` levels sqlglot hung it under (`pkg.fn`,
+    `s.pkg.fn`), the same shape a written call has. `argument_names` reads
+    Oracle's `p => x` inside a call written this way too, exactly as a bare
+    `CALL`/`EXEC` statement's does; everything else is positional. None when the
+    call carries no name sqlglot kept as plain text."""
+    name = call.this if isinstance(call.this, str) and call.this else None
+    if name is None:
+        return None
+    parent = call.parent
+    if isinstance(parent, exp.Dot) and parent.expression is call:
+        prefix = _dot_chain_names(parent.this)
+        if prefix is not None:
+            name = ".".join([*prefix, name])
+    return CallSite(
+        name,
+        tuple(
+            argument.this.this
+            if isinstance(argument, exp.Kwarg) and isinstance(argument.this, exp.Var)
+            else None
+            for argument in call.expressions
+        ),
+    )
+
+
+def _augmented_with_expression_call(
+    statement: ParsedStatement, node: object, dialect: str
+) -> ParsedStatement:
+    """`statement`, with a NESTED_PROCEDURE_CALL gap added for the first function
+    call inside `node` that sqlglot could not classify as one of its own builtins.
+    `statement`'s own edges -- whatever ordinary lineage its table references gave
+    it -- are kept exactly as they were: this only adds the fact that the routine
+    also touches whatever the call touches, for the same gap-reading pass
+    (in-package splicing, or catalog descent) that already reads a bare call
+    through, resolved by the same rules (`aida.routine_call_descent.called_routine`
+    reads either shape identically).
+
+    At most one: `ParsedStatement.call_site` is a single field, the same
+    assumption a bare call statement has always made, so only the first call
+    sqlglot's own tree order finds is recognised; a second, in the same
+    statement, is not read as a separate call. Never applied to a statement that
+    is already unparsed, or already has a call site of its own (a bare
+    `CALL p()`/`EXEC p` never reaches here with an unset `call_site`).
+
+    A function sqlglot's dialect grammar does not special-case (an Oracle
+    `SYS_CONTEXT`, a PostgreSQL `jsonb_build_object`) looks exactly like a real
+    call here and resolves NOT_CAPTURED like any other name nothing captured --
+    honest, not silent, but noisier than a hand-written exception list would be;
+    every resolver in this module is name-only already and takes the same risk.
+    """
+    if statement.call_site is not None or statement.is_unparsed or not isinstance(
+        node, exp.Expression
+    ):
+        return statement
+    # A table-valued function reference (`FROM s.fn(x) n`) parses as
+    # `Table(this=Anonymous(...))` -- sqlglot's shape for a function-as-table, which
+    # `_table_function_markers` already reads as its own TABLE_FUNCTION_READ gap.
+    # Skip it here so the two mechanisms never race over the same call.
+    call = next(
+        (
+            found
+            for found in node.find_all(exp.Anonymous)
+            if not isinstance(found.parent, exp.Table)
+        ),
+        None,
+    )
+    site = _expression_call_site(call) if call is not None else None
+    if site is None:
+        return statement
+    marker = _unparsed_statement(
+        statement.ordinal, dialect, statement.control_flow_context,
+        f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: {site.callee}",
+    )
+    return replace(
+        statement,
+        is_unparsed=True,
+        is_no_lineage=False,
+        unparsed_reason=marker.unparsed_reason,
+        call_site=site,
+        edges=(*statement.edges, marker.edges[0]),
+    )
+
+
 def _local_statement(
     ordinal: int,
     node: exp.Expr,
@@ -2074,20 +2226,28 @@ def _local_statement(
     caller (2026-09-19), `PROCEDURE_RESULT_TARGET`, which is not intermediate."""
     intermediate = target != PROCEDURE_RESULT_TARGET
     if not isinstance(node, exp.Expression) or node.find(exp.Table) is None:
-        return ParsedStatement(
-            ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=True,
-            unparsed_reason=None, control_flow_context=context,
-            target_table=None, is_intermediate_target=False, node=node, edges=(),
+        return _augmented_with_expression_call(
+            ParsedStatement(
+                ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=True,
+                unparsed_reason=None, control_flow_context=context,
+                target_table=None, is_intermediate_target=False, node=node, edges=(),
+            ),
+            node,
+            dialect,
         )
     _resolve_owners(node, subject, names)
     edges = _extract_edges_from_select(
         node, target, dialect, _collect_table_aliases_with_temp(node, subject)[0]
     )
-    return ParsedStatement(
-        ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=False,
-        unparsed_reason=None, control_flow_context=context,
-        target_table=target, is_intermediate_target=intermediate, node=node,
-        edges=tuple(_wrap(edges, ordinal, False, intermediate, context)),
+    return _augmented_with_expression_call(
+        ParsedStatement(
+            ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=False,
+            unparsed_reason=None, control_flow_context=context,
+            target_table=target, is_intermediate_target=intermediate, node=node,
+            edges=tuple(_wrap(edges, ordinal, False, intermediate, context)),
+        ),
+        node,
+        dialect,
     )
 
 
@@ -2561,11 +2721,17 @@ def _classify_and_extract(
         is_write = target != PROCEDURE_RESULT_TARGET
         temp = target in _collect_table_aliases_with_temp(node)[1] if is_write else False
         results.append(
-            ParsedStatement(
-                ordinal=ordinal, is_write=is_write, is_unparsed=False, is_no_lineage=False,
-                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
-                target_table=target, is_intermediate_target=temp, node=node,
-                edges=tuple(_wrap(edges, ordinal, is_write, temp, peeled.control_flow_context)),
+            _augmented_with_expression_call(
+                ParsedStatement(
+                    ordinal=ordinal, is_write=is_write, is_unparsed=False, is_no_lineage=False,
+                    unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                    target_table=target, is_intermediate_target=temp, node=node,
+                    edges=tuple(
+                        _wrap(edges, ordinal, is_write, temp, peeled.control_flow_context)
+                    ),
+                ),
+                node,
+                dialect,
             )
         )
         return results
@@ -2574,11 +2740,15 @@ def _classify_and_extract(
         edges, target = _extract_edges_from_insert(node, dialect, subject)
         temp = target in _collect_table_aliases_with_temp(node)[1]
         results.append(
-            ParsedStatement(
-                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
-                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
-                target_table=target or None, is_intermediate_target=temp, node=node,
-                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            _augmented_with_expression_call(
+                ParsedStatement(
+                    ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                    unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                    target_table=target or None, is_intermediate_target=temp, node=node,
+                    edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+                ),
+                node,
+                dialect,
             )
         )
         return results
@@ -2587,11 +2757,15 @@ def _classify_and_extract(
         edges, target = _extract_edges_from_update(node, dialect, subject)
         temp = target in _collect_table_aliases_with_temp(node)[1]
         results.append(
-            ParsedStatement(
-                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
-                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
-                target_table=target or None, is_intermediate_target=temp, node=node,
-                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            _augmented_with_expression_call(
+                ParsedStatement(
+                    ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                    unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                    target_table=target or None, is_intermediate_target=temp, node=node,
+                    edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+                ),
+                node,
+                dialect,
             )
         )
         return results
@@ -2606,11 +2780,15 @@ def _classify_and_extract(
             node.args.get("where"), target or "<UNKNOWN_TARGET>", dialect, aliases, set()
         )
         results.append(
-            ParsedStatement(
-                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
-                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
-                target_table=target or None, is_intermediate_target=temp, node=node,
-                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            _augmented_with_expression_call(
+                ParsedStatement(
+                    ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                    unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                    target_table=target or None, is_intermediate_target=temp, node=node,
+                    edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+                ),
+                node,
+                dialect,
             )
         )
         return results
@@ -2619,11 +2797,15 @@ def _classify_and_extract(
         edges, target = _extract_edges_from_merge(node, dialect, subject)
         temp = target in _collect_table_aliases_with_temp(node)[1]
         results.append(
-            ParsedStatement(
-                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
-                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
-                target_table=target or None, is_intermediate_target=temp, node=node,
-                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            _augmented_with_expression_call(
+                ParsedStatement(
+                    ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                    unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                    target_table=target or None, is_intermediate_target=temp, node=node,
+                    edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+                ),
+                node,
+                dialect,
             )
         )
         return results
@@ -2634,11 +2816,15 @@ def _classify_and_extract(
         # [] for a plain CREATE TABLE, non-empty for CREATE TABLE ... AS SELECT.
         edges = _extract_from_statement(node, dialect)
         results.append(
-            ParsedStatement(
-                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
-                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
-                target_table=target or None, is_intermediate_target=temp, node=node,
-                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            _augmented_with_expression_call(
+                ParsedStatement(
+                    ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                    unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                    target_table=target or None, is_intermediate_target=temp, node=node,
+                    edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+                ),
+                node,
+                dialect,
             )
         )
         return results
@@ -3977,6 +4163,7 @@ class _Walk:
     member_attribution: str | None = None
     member_fallback_reason: str | None = None
     members: tuple[PackageMember, ...] = ()
+    pending_member_calls: tuple[PendingMemberCall, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -4425,7 +4612,10 @@ _CONFIDENCE_RANK: Final = {
 
 
 def _read_through(
-    call: ProcedureLineageEdgeRecord, edge: ProcedureLineageEdgeRecord, callee: str
+    call: ProcedureLineageEdgeRecord,
+    edge: ProcedureLineageEdgeRecord,
+    callee: str,
+    via_routine_locator: int | None = None,
 ) -> ProcedureLineageEdgeRecord:
     """`edge`, read from a member this one calls, as the caller's fact at the call.
 
@@ -4434,7 +4624,11 @@ def _read_through(
     that indexes the callee's statement comes with it. At most PARTIAL, because a
     parameter can steer the callee's branches, and a callee's result set stays in
     the callee: a PL/SQL call returns none. `aida.routine_call_descent` does the
-    same across routines."""
+    same across routines. `via_routine_locator` (R11-FP03) is a statement ordinal
+    inside the *callee* member's own span, so `routine_edge_row` can later resolve
+    the callee's actual captured routine id -- never the caller's -- the same way
+    `member_routine_id` is resolved, because only that lookup tells two overloads
+    of one member name apart."""
     target, intermediate, write = edge.target_table, edge.is_intermediate, edge.is_write
     if target == PROCEDURE_RESULT_TARGET:
         target, intermediate, write = PROCEDURE_LOCAL_TARGET, True, False
@@ -4457,6 +4651,7 @@ def _read_through(
         unparsed_reason=None,
         via_temp_table=edge.via_temp_table,
         via_routine=callee,
+        via_routine_locator=via_routine_locator,
         statement_range_status=(
             StatementRangeStatus.CALL_SITE.value
             if call.statement_range is not None
@@ -4467,7 +4662,7 @@ def _read_through(
 
 def _member_calls_read_through(
     walked: list[tuple[int | None, list[ParsedStatement]]], layout: _PackageLayout
-) -> list[tuple[int | None, list[ParsedStatement]]]:
+) -> tuple[list[tuple[int | None, list[ParsedStatement]]], list[PendingMemberCall]]:
     """Each call between members of this package, read through at the call.
 
     `walked` is each unit's statements with the member it belongs to (an index in
@@ -4491,10 +4686,14 @@ def _member_calls_read_through(
             if member is not None and isinstance(target, int):
                 calls[member].add(target)
     if not targets:
-        return walked
+        return walked, []
 
     own: dict[int, list[ProcedureLineageEdgeRecord]] = {}
     gap: dict[int, bool] = {}
+    # R11-FP03: a member's own first ordinal, so a caller's spliced edge can carry
+    # *this* member as `via_routine_locator` -- resolved to its captured routine id
+    # later, by ordinal, the same way `member_routine_id` already is.
+    first_ordinal: dict[int, int] = {}
     for position, (member, group) in enumerate(walked):
         if member is None:
             continue
@@ -4509,7 +4708,11 @@ def _member_calls_read_through(
             and not isinstance(targets.get((position, offset)), int)
             for offset, statement in enumerate(group)
         )
+        ordinals = [statement.ordinal for statement in group]
+        if ordinals:
+            first_ordinal[member] = min(ordinals)
 
+    pending: list[PendingMemberCall] = []
     result: list[tuple[int | None, list[ParsedStatement]]] = []
     for position, (member, group) in enumerate(walked):
         statements = list(group)
@@ -4538,8 +4741,9 @@ def _member_calls_read_through(
                         frontier.append(onward)
             callee = layout.members[target].name
             via = f"{layout.name}.{callee}" if layout.name else callee
+            via_ordinal = first_ordinal.get(target)
             spliced = [
-                _read_through(marker, edge, via)
+                _read_through(marker, edge, via, via_ordinal)
                 for index in sorted(reached)
                 for edge in own.get(index, [])
             ]
@@ -4562,8 +4766,21 @@ def _member_calls_read_through(
                     unparsed_reason=reason,
                     edges=(*spliced, replace(marker, unparsed_reason=reason)),
                 )
+                # R11-FP03: deferred, not decided -- a reached member's own blocking
+                # gap may still be an ordinary, undecided external call that catalog
+                # descent (running after this whole parse) can resolve; recorded so
+                # it can re-check this call once it does, rather than this call
+                # being stuck with today's pessimistic marker forever. `statement`
+                # (not `statements[offset]`) is the pre-splice ordinal, unchanged.
+                pending.append(
+                    PendingMemberCall(
+                        statement_ordinal=statement.ordinal,
+                        reached_member_indices=tuple(reached),
+                        via_routine=via,
+                    )
+                )
         result.append((member, statements))
-    return result
+    return result, pending
 
 
 def _walk_package(sql: str, layout: _PackageLayout, context: _WalkContext) -> _Walk:
@@ -4601,7 +4818,7 @@ def _walk_package(sql: str, layout: _PackageLayout, context: _WalkContext) -> _W
             statements, ordinal = _walk_span(sql, start, end, ordinal, context)
         attributed = [_attributed_to(s, None, MemberAttribution.PACKAGE_LEVEL) for s in statements]
         walked.append((None, attributed))
-    walked = _member_calls_read_through(walked, layout)
+    walked, pending_member_calls = _member_calls_read_through(walked, layout)
     members: list[PackageMember] = []
     for index, group in walked:
         if index is None:
@@ -4626,6 +4843,7 @@ def _walk_package(sql: str, layout: _PackageLayout, context: _WalkContext) -> _W
         digest=context.digest,
         member_attribution=MemberAttribution.MEMBER.value,
         members=tuple(members),
+        pending_member_calls=tuple(pending_member_calls),
     )
 
 
@@ -4745,6 +4963,7 @@ def parse_procedure_lineage(
             member_attribution=walk.member_attribution,
             member_fallback_reason=walk.member_fallback_reason,
             package_members=walk.members,
+            pending_member_calls=walk.pending_member_calls,
         )
 
     edges: list[ProcedureLineageEdgeRecord] = []
@@ -4788,6 +5007,7 @@ def parse_procedure_lineage(
         member_attribution=walk.member_attribution,
         member_fallback_reason=walk.member_fallback_reason,
         package_members=walk.members,
+        pending_member_calls=walk.pending_member_calls,
     )
 
 

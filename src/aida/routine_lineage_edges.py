@@ -423,9 +423,21 @@ def routine_edge_row(
     """One parsed edge as a row. R11-FP03: `member_routine_ids` maps a package
     parse's statement ordinals to the captured member routine each belongs to
     (`resolve_package_member_ids`); a caller that does not pass it still records
-    the member by name and grain, and leaves the id NULL rather than guessing."""
+    the member by name and grain, and leaves the id NULL rather than guessing.
+
+    The same map resolves `via_routine_id` for an edge spliced from an in-package
+    sibling call: `edge.via_routine_locator` is an ordinal inside the *callee*
+    member's own span, so looking it up in `member_routine_ids` (built over this
+    same parse) gives the callee's id, never the caller's -- which
+    `edge.package_member`'s own ordinal would give instead. A cross-routine splice
+    already carries its callee's id directly on `edge.via_routine_id`, resolved
+    by `aida.routine_call_descent` at descent time, and wins if somehow both are
+    set (they never should be)."""
     source_name = persistable_table(edge.source_table, edge.source_resolved)
     target_name = persistable_table(edge.target_table, True)
+    via_routine_id = edge.via_routine_id
+    if via_routine_id is None and edge.via_routine_locator is not None:
+        via_routine_id = (member_routine_ids or {}).get(edge.via_routine_locator)
     row = DeepProcedureLineageEdge(
         organization_id=organization_id,
         datasource_id=datasource_id,
@@ -447,6 +459,7 @@ def routine_edge_row(
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
         via_routine=edge.via_routine,
+        via_routine_id=via_routine_id,
         package_member=edge.package_member,
         member_attribution=edge.member_attribution,
         member_routine_id=(
@@ -938,6 +951,9 @@ def trigger_edge_row(
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
         via_routine=edge.via_routine,
+        # R11-FP03: a trigger's action routine has no packages of its own, so only
+        # the direct, already-resolved id (a cross-routine splice) ever applies here.
+        via_routine_id=edge.via_routine_id,
         sql_hash=sql_hash,
         review_status=review_status,
         created_by=created_by,

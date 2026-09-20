@@ -201,6 +201,15 @@ class DeepProcedureLineageEdge(StatementRangeColumns, Base, TimestampMixin):
     # R11-FP07: the called routine an edge was read from (`aida.routine_call_descent`);
     # NULL for an edge from the routine's own statements.
     via_routine: Mapped[str | None] = mapped_column(String(500))
+    # R11-FP03: the callee `via_routine` names, as its own captured routine id --
+    # never the caller's (`routine_id`, above, which is unchanged: the edge still
+    # belongs to whoever made the call). NULL for an edge that is not spliced at
+    # all, and for one spliced from a cross-package member call this datasource's
+    # catalog does not yet disambiguate to one routine (see
+    # `aida.routine_call_descent`). Set by `routine_edge_row`, never guessed.
+    via_routine_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="SET NULL"), index=True
+    )
     # R11-FP03: an Oracle package's member subprogram this edge belongs to, as the
     # package body names it; the grain it is attributed at
     # (`procedure_lineage.MemberAttribution`); and the captured member routine,
@@ -310,6 +319,12 @@ class TriggerLineageEdge(StatementRangeColumns, Base, TimestampMixin):
     unparsed_reason: Mapped[str | None] = mapped_column(String(400))
     via_temp_table: Mapped[str | None] = mapped_column(String(500))
     via_routine: Mapped[str | None] = mapped_column(String(500))
+    # R11-FP03: `via_routine`'s own captured routine id -- see `DeepProcedureLineageEdge.
+    # via_routine_id`. A trigger has no packages of its own, so this is only ever a
+    # direct, already-resolved cross-routine splice.
+    via_routine_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_routine.id", ondelete="SET NULL"), index=True
+    )
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # ADR-0026's review lifecycle, exactly as the routine table carries it: an
     # agent writes PROPOSED, only ACTIVE steers retrieval and tool generation,

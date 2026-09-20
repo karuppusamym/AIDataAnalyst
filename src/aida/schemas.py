@@ -2962,6 +2962,10 @@ class DeepProcedureLineageEdgeRead(ApiModel):
     via_temp_table: str | None = None
     #: R11-FP07: the called routine this edge was read from, if any.
     via_routine: str | None = None
+    #: R11-FP03: `via_routine`'s own captured routine id -- never the caller's.
+    #: Unresolved (null) for a cross-package member call this datasource's catalog
+    #: does not yet disambiguate to one routine.
+    via_routine_id: UUID | None = None
     #: The stored row's ADR-0026 review state, on a listed edge. A parse
     #: response reports what the parser found, and leaves it unset.
     review_status: str | None = None

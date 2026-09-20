@@ -12961,6 +12961,18 @@
             ],
             "title": "Via Routine"
           },
+          "via_routine_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Via Routine Id"
+          },
           "via_temp_table": {
             "anyOf": [
               {

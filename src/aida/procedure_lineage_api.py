@@ -126,6 +126,7 @@ def _edge_read(edge: ProcedureLineageEdgeRecord) -> DeepProcedureLineageEdgeRead
         unparsed_reason=edge.unparsed_reason,
         via_temp_table=edge.via_temp_table,
         via_routine=edge.via_routine,
+        via_routine_id=edge.via_routine_id,
         statement_range=(
             StatementRangeRead(
                 start_offset=where.start_offset,
@@ -320,6 +321,7 @@ async def list_deep_procedure_lineage(
             unparsed_reason=row.unparsed_reason,
             via_temp_table=row.via_temp_table,
             via_routine=row.via_routine,
+            via_routine_id=row.via_routine_id,
             review_status=row.review_status,
             statement_range=_row_range(row),
             statement_range_status=row.statement_range_status,

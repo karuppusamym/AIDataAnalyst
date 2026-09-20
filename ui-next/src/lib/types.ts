@@ -2127,6 +2127,7 @@ export interface DeepProcedureLineageEdgeRead {
   unparsed_reason?: string | null;
   via_temp_table?: string | null;
   via_routine?: string | null;
+  via_routine_id?: string | null;
   review_status?: string | null;
   statement_range?: StatementRangeRead | null;
   statement_range_status?: string | null;

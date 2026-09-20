@@ -35,6 +35,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Final
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,8 +43,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.envelope_models import MetadataRoutine
 from aida.models import DataSource, MetadataSchema
 from aida.procedure_lineage import (
+    MEMBER_CALL_NOT_FULLY_PARSED,
     PROCEDURE_LOCAL_TARGET,
     UNPARSED_TRANSFORMATION_TYPE,
+    PendingMemberCall,
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
     StatementRangeStatus,
@@ -79,6 +82,18 @@ class Callee:
     qualified_name: str | None
     body: str | None
     missing: str | None = None
+    # R11-FP03: the callee's own captured routine id, when the resolver already
+    # knows it (a real catalog row) -- carried onto the spliced edges' own
+    # `via_routine_id` so a reader is never left re-deriving it from `via_routine`'s
+    # display text. `None` for a resolver (tests, mainly) that has no such catalog.
+    routine_id: UUID | None = None
+    # R11-FP03: set instead of `body` when the resolver has already produced the
+    # callee's parse itself, filtered to less than the whole thing -- a cross-package
+    # member call (`_cross_package_resolver`), whose "body" is one member's own slice
+    # of another package's parse, not text this module could hand back to be parsed
+    # again without re-admitting the rest of that package. `_descend` recurses into
+    # it exactly as it would a fresh `parse_procedure_lineage` of `body`.
+    parsed: ProcedureParseResult | None = None
 
 
 Resolver = Callable[[str], Callee]
@@ -129,6 +144,9 @@ def _at_call_site(
     dialect: str,
     kind: str,
     source_name: str,
+    *,
+    via_routine_id: UUID | None = None,
+    via_routine_locator: int | None = None,
 ) -> ProcedureLineageEdgeRecord:
     confidence = (
         edge.confidence
@@ -160,6 +178,8 @@ def _at_call_site(
         is_write=write,
         control_flow_context=call.control_flow_context or edge.control_flow_context,
         via_routine=callee,
+        via_routine_id=via_routine_id,
+        via_routine_locator=via_routine_locator,
         statement_range=call.statement_range,
         statement_range_status=(
             StatementRangeStatus.CALL_SITE.value
@@ -229,6 +249,7 @@ def _summarised(
         member_attribution=result.member_attribution,
         member_fallback_reason=result.member_fallback_reason,
         package_members=result.package_members,
+        pending_member_calls=result.pending_member_calls,
     )
 
 
@@ -250,7 +271,8 @@ def _descend(
         kind, name = called
         callee = resolve(name)
         missing = callee.missing
-        if missing is None and (callee.key is None or callee.body is None):
+        has_content = callee.body is not None or callee.parsed is not None
+        if missing is None and (callee.key is None or not has_content):
             missing = CALLEE_NOT_CAPTURED
         elif missing is None and callee.key in path:
             missing = CALLEE_CYCLE
@@ -258,10 +280,15 @@ def _descend(
             missing = CALLEE_DEPTH_LIMIT
         elif missing is None and budget.remaining <= 0:
             missing = CALLEE_LIMIT
-        if missing is None and callee.key is not None and callee.body is not None:
+        if missing is None and callee.key is not None and has_content:
             budget.remaining -= 1
+            if callee.parsed is not None:
+                starting_point = callee.parsed
+            else:
+                assert callee.body is not None  # `has_content` guarantees one of the two
+                starting_point = parse_procedure_lineage(callee.body, dialect=dialect)
             child = _descend(
-                parse_procedure_lineage(callee.body, dialect=dialect),
+                starting_point,
                 dialect=dialect,
                 resolve=resolve,
                 path=path | {callee.key},
@@ -269,7 +296,15 @@ def _descend(
                 budget=budget,
             )
             edges.extend(
-                _at_call_site(child_edge, edge, callee.qualified_name or name, dialect, kind, name)
+                _at_call_site(
+                    child_edge,
+                    edge,
+                    callee.qualified_name or name,
+                    dialect,
+                    kind,
+                    name,
+                    via_routine_id=callee.routine_id,
+                )
                 for child_edge in child.edges
                 if child_edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE
             )
@@ -278,6 +313,147 @@ def _descend(
             missing = CALLEE_NOT_FULLY_PARSED
         edges.append(replace(edge, unparsed_reason=f"{_PREFIXES[kind]}{name} ({missing})"))
     return _summarised(result, _deduplicated(edges))
+
+
+def _member_edges(
+    result: ProcedureParseResult, member_index: int
+) -> list[ProcedureLineageEdgeRecord]:
+    """Every edge belonging to one package member's own `[first_ordinal,
+    last_ordinal]` span (`ProcedureParseResult.package_members`) -- its statements'
+    own facts, whatever its in-package sibling calls had already spliced in at
+    parse time, and any gap that is still unresolved. Never the rest of the
+    package. Used both to re-check a sibling call this module deferred (R11-FP03's
+    ordering fix, below) and to read one named member out of a *different*
+    package's own parse for a cross-package call (`_cross_package_resolver`)."""
+    if member_index >= len(result.package_members):
+        return []
+    member = result.package_members[member_index]
+    if member.first_ordinal is None or member.last_ordinal is None:
+        return []
+    return [
+        edge
+        for edge in result.edges
+        if member.first_ordinal <= edge.statement_ordinal <= member.last_ordinal
+    ]
+
+
+def _member_parse_result(
+    result: ProcedureParseResult, member_index: int
+) -> ProcedureParseResult:
+    """One package member's own edges, read as if that member alone had been
+    parsed -- `_descend`'s recursive step treats this exactly like a fresh
+    `parse_procedure_lineage` of some callee's body, so a cross-package call
+    (`_cross_package_resolver`) reads through the *member*, never the rest of
+    the package it lives in."""
+    edges = _member_edges(result, member_index)
+    real = [edge for edge in edges if edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE]
+    fully_parsed = len(real) == len(edges)
+    return ProcedureParseResult(
+        edges=edges,
+        statement_count=len(edges) or 1,
+        confidence=(
+            Confidence.FULL.value
+            if fully_parsed and real and all(e.confidence == Confidence.FULL.value for e in real)
+            else Confidence.PARTIAL.value if real or not fully_parsed else Confidence.LOW.value
+        ),
+        dialect=result.dialect,
+        sql_hash=result.sql_hash,
+        errors=[e.unparsed_reason for e in edges if e.unparsed_reason],
+        is_fully_parsed=fully_parsed,
+        is_read_only=fully_parsed and not any(e.is_write for e in real),
+        statement_text_digest=result.statement_text_digest,
+    )
+
+
+def _reconcile_pass(
+    result: ProcedureParseResult, pending: tuple[PendingMemberCall, ...]
+) -> tuple[ProcedureParseResult, bool]:
+    """One fixed-point step of `_reconcile_pending_member_calls`: every pending call
+    whose reached members are, as of `result`'s *current* edges, no longer blocked
+    gets its final splice; everything else, including a pending call still blocked
+    only because another pending call has not resolved yet, is left as it is for
+    the next step to re-check against this step's own progress."""
+    pending_by_ordinal = {item.statement_ordinal: item for item in pending}
+    edges: list[ProcedureLineageEdgeRecord] = []
+    changed = False
+    for edge in result.edges:
+        item = pending_by_ordinal.get(edge.statement_ordinal)
+        is_candidate = (
+            item is not None
+            and edge.transformation_type == UNPARSED_TRANSFORMATION_TYPE
+            and (edge.unparsed_reason or "").endswith(f"({MEMBER_CALL_NOT_FULLY_PARSED})")
+        )
+        if not is_candidate:
+            edges.append(edge)
+            continue
+        assert item is not None  # narrows for mypy; `is_candidate` already checked it
+        reached_edges = {
+            index: _member_edges(result, index) for index in item.reached_member_indices
+        }
+        blocked = any(
+            any(e.transformation_type == UNPARSED_TRANSFORMATION_TYPE for e in group)
+            for group in reached_edges.values()
+        )
+        if blocked:
+            edges.append(edge)
+            continue
+        changed = True
+        target_index = item.reached_member_indices[0] if item.reached_member_indices else None
+        via_ordinal = (
+            result.package_members[target_index].first_ordinal
+            if target_index is not None and target_index < len(result.package_members)
+            else None
+        )
+        edges.extend(
+            _at_call_site(
+                reached_edge,
+                edge,
+                item.via_routine,
+                result.dialect,
+                KIND_CALL,
+                item.via_routine,
+                via_routine_locator=via_ordinal,
+            )
+            for group in reached_edges.values()
+            for reached_edge in group
+            if reached_edge.transformation_type != UNPARSED_TRANSFORMATION_TYPE
+        )
+    if not changed:
+        return result, False
+    return _summarised(result, _deduplicated(edges)), True
+
+
+def _reconcile_pending_member_calls(result: ProcedureParseResult) -> ProcedureParseResult:
+    """R11-FP03: a sibling-member call's completeness that `_member_calls_read_through`
+    deferred (`PendingMemberCall`) because a member it reached still had its own
+    external call, decided now that the descent pass above has resolved every
+    ordinary gap in this same parse.
+
+    A member still blocked -- its own call stayed a gap, or resolved to a further
+    decided gap (AMBIGUOUS, NOT_CAPTURED, ...) -- keeps today's `CALLEE_NOT_FULLY_
+    PARSED` marker, unchanged. One that is now clear gets its reached members'
+    edges spliced in, exactly as an eager in-package resolution would have.
+
+    **Bounded, not unlimited**: run to a fixed point, at most `len(pending) + 1`
+    passes -- enough for a chain of *pending* calls of any depth within this one
+    package (each pass resolves at least one more link, since a chain longer than
+    the pass count would mean nothing changed and the loop already stopped) to
+    settle in the order their own blockers clear, not the order they were written
+    in. What it does **not** reach: a *callee* that is itself a package with its
+    own unresolved sibling-call ordering issue -- `_descend`'s recursive call into
+    such a callee never runs this reconciliation on the callee's own parse, so the
+    callee is conservatively read as not fully parsed, the same as today, rather
+    than potentially resolving further.
+    """
+    pending = result.pending_member_calls
+    if not pending:
+        return result
+    current = result
+    for _ in range(len(pending) + 1):
+        current, changed = _reconcile_pass(current, pending)
+        if not changed:
+            break
+    return replace(current, pending_member_calls=())
 
 
 def descend_nested_calls(
@@ -294,10 +470,11 @@ def descend_nested_calls(
         depth=0,
         budget=_Budget(MAX_CALLEES),
     )
+    reconciled = _reconcile_pending_member_calls(descended)
     # A table function's rows arrive as an intermediate, so the hops through it are the
     # caller's own end-to-end lineage.
-    spliced = [*descended.edges, *propagate_intermediate_hops(descended.edges)]
-    return _summarised(descended, _deduplicated(spliced))
+    spliced = [*reconciled.edges, *propagate_intermediate_hops(reconciled.edges)]
+    return _summarised(reconciled, _deduplicated(spliced))
 
 
 def _name_parts(name: str) -> tuple[str | None, str]:
@@ -311,7 +488,21 @@ def _name_parts(name: str) -> tuple[str | None, str]:
 async def routine_resolver(
     session: AsyncSession, datasource: DataSource, caller: MetadataRoutine
 ) -> Resolver:
-    """Resolve a called routine's name among the ACTIVE routines captured in `datasource`."""
+    """Resolve a called routine's name among the ACTIVE routines captured in `datasource`.
+
+    R11-FP03: when no routine matches the name at all, and the name has at least
+    one qualifier, the qualifier may instead be a *package* in the caller's own
+    schema and the rest one of its members -- `other_pkg.member(...)`, a call this
+    parser leaves for descent because it is not the caller's own package (an
+    in-package sibling call is already read through before descent ever runs).
+    Narrower than the in-package case on purpose: only a package in the caller's
+    own schema, found by name; a fully schema-qualified `schema.pkg.member` is not
+    read (`_name_parts` keeps only the last two dotted parts, the same limit a
+    plain two-part schema-qualified routine call already has here). An overloaded
+    member name (more than one member of that package sharing it) is AMBIGUOUS,
+    never a guess -- the same rule the in-package resolver uses, and, like it, by
+    name only: this gap marker never carried the call's arguments.
+    """
     rows = (
         await session.execute(
             select(MetadataRoutine, MetadataSchema.name)
@@ -328,10 +519,48 @@ async def routine_resolver(
     )
     by_qualified: dict[tuple[str, str], list[tuple[MetadataRoutine, str]]] = {}
     by_name: dict[str, list[tuple[MetadataRoutine, str]]] = {}
+    by_package: dict[tuple[str, str], list[tuple[MetadataRoutine, str]]] = {}
     for routine, schema_name in rows:
         entry = (routine, schema_name)
         by_qualified.setdefault((schema_name.lower(), routine.name.lower()), []).append(entry)
         by_name.setdefault(routine.name.lower(), []).append(entry)
+        if routine.routine_type.strip().upper() == "PACKAGE":
+            by_package.setdefault((schema_name.lower(), routine.name.lower()), []).append(entry)
+    #: Cache: a package resolved cross-package is parsed once even if several
+    #: calls (or several members) reach it.
+    package_parses: dict[UUID, ProcedureParseResult] = {}
+
+    def cross_package_member(package_name: str, member_name: str) -> Callee:
+        packages = by_package.get((caller_schema or "", package_name), [])
+        if not packages:
+            return Callee(None, None, None, CALLEE_NOT_CAPTURED)
+        if len(packages) > 1:
+            return Callee(None, None, None, CALLEE_AMBIGUOUS)
+        package_routine, schema_name = packages[0]
+        try:
+            package_body = require_eligible_routine_body(package_routine)
+        except RoutineNotEligibleError:
+            qualified = f"{schema_name}.{package_routine.name}"
+            return Callee(str(package_routine.id), qualified, None, CALLEE_BODY_WITHHELD)
+        pkg_result = package_parses.get(package_routine.id)
+        if pkg_result is None:
+            pkg_result = parse_procedure_lineage(package_body, dialect=datasource.dialect)
+            package_parses[package_routine.id] = pkg_result
+        matches = [
+            index
+            for index, member in enumerate(pkg_result.package_members)
+            if member.name.lower() == member_name
+        ]
+        if not matches:
+            return Callee(None, None, None, CALLEE_NOT_CAPTURED)
+        if len(matches) > 1:
+            return Callee(None, None, None, CALLEE_AMBIGUOUS)
+        member = pkg_result.package_members[matches[0]]
+        qualified = f"{schema_name}.{package_routine.name}.{member.name}"
+        key = f"{package_routine.id}:{matches[0]}"
+        return Callee(
+            key, qualified, None, parsed=_member_parse_result(pkg_result, matches[0])
+        )
 
     def resolve(name: str) -> Callee:
         schema, routine_name = _name_parts(name)
@@ -341,17 +570,19 @@ async def routine_resolver(
             candidates = (
                 by_qualified.get((caller_schema, routine_name), []) if caller_schema else []
             ) or by_name.get(routine_name, [])
-        if not candidates:
-            return Callee(None, None, None, CALLEE_NOT_CAPTURED)
-        if len(candidates) > 1:
-            return Callee(None, None, None, CALLEE_AMBIGUOUS)
-        routine, schema_name = candidates[0]
-        qualified = f"{schema_name}.{routine.name}"
-        try:
-            body = require_eligible_routine_body(routine)
-        except RoutineNotEligibleError:
-            return Callee(str(routine.id), qualified, None, CALLEE_BODY_WITHHELD)
-        return Callee(str(routine.id), qualified, body)
+        if candidates:
+            if len(candidates) > 1:
+                return Callee(None, None, None, CALLEE_AMBIGUOUS)
+            routine, schema_name = candidates[0]
+            qualified = f"{schema_name}.{routine.name}"
+            try:
+                body = require_eligible_routine_body(routine)
+            except RoutineNotEligibleError:
+                return Callee(str(routine.id), qualified, None, CALLEE_BODY_WITHHELD)
+            return Callee(str(routine.id), qualified, body, routine_id=routine.id)
+        if schema is not None:
+            return cross_package_member(schema, routine_name)
+        return Callee(None, None, None, CALLEE_NOT_CAPTURED)
 
     return resolve
 
