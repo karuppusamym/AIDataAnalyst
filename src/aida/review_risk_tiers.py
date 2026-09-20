@@ -131,6 +131,13 @@ _TIERS: Final[Mapping[str, str]] = {
     # store and apply path as a workbook import, but the text came from a file
     # anyone may have edited, so it is T2 at every size -- no agent decides it.
     "OKF_IMPORT_BATCH": TIER_T2,
+    # R11-OKF03: an edited routine purpose from the same source. It publishes through the
+    # routine description workflow (whose own draft is T0), but the text came from a file
+    # anyone may have edited -- the reason `OKF_IMPORT_BATCH` above is T2 at every size --
+    # so it is the same tier. Registered rather than left to `risk_tier_for`'s fail-closed
+    # T3: T3 sits above every agent's hard ceiling too, but an unregistered type is invisible
+    # to the oversight bounds that count by tier and misreports what the ladder covers.
+    "OKF_IMPORT_ROUTINE_DESCRIPTION": TIER_T2,
     # --- T2: published meaning and executable capability ------------------
     "SEMANTIC_MODEL_VERSION": TIER_T2,
     "SEMANTIC_METRIC": TIER_T2,

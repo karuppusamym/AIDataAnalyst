@@ -921,6 +921,27 @@ def _purpose_text(section: str) -> str:
     return text
 
 
+def _after_the_exporters_placeholder(base_text: str, upload_text: str) -> str:
+    """What an editor added *after* the exporter's own "Not established." sentence.
+
+    When Atlas holds no approved text, the exported purpose is one sentence saying so
+    (`okf_export._purpose_section`). An editor who types their description under that
+    sentence, rather than over it, would otherwise propose a description that opens with "Not
+    established. No approved description of this table exists." -- Atlas's statement about
+    itself, published as the object's meaning. Only what they added is theirs to propose; the
+    sentence is dropped, matched whitespace-insensitively (an editor may re-wrap it), and an
+    upload that does not begin with it is left exactly as written. A base that is not a
+    placeholder is never touched: approved text an editor extends is a normal edit.
+    """
+    if not _PURPOSE_PLACEHOLDER.match(base_text):
+        return upload_text
+    lead = re.compile(r"\s+".join(re.escape(word) for word in base_text.split()))
+    match = lead.match(upload_text)
+    if match is None:
+        return upload_text
+    return upload_text[match.end() :].strip()
+
+
 def _split_cells(line: str) -> list[str]:
     """One GFM table row's cells: split on `|` not escaped by a backslash."""
     cells: list[str] = []
@@ -1061,6 +1082,9 @@ def _purpose_edit(
     showed, so the routine workflow's body check has an export-time baseline to hold it to.
     """
     base_text, upload_text = _purpose_text(base), _purpose_text(upload)
+    if _collapsed(base_text) == _collapsed(upload_text):
+        return
+    upload_text = _after_the_exporters_placeholder(base_text, upload_text)
     if _collapsed(base_text) == _collapsed(upload_text):
         return
     description: OkfDescription = obj.description
