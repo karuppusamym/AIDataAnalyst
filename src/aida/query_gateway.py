@@ -124,14 +124,14 @@ def sensitive_projection_names(
     return output_names
 
 
-def redact_sql_literals(sql: str, *, dialect: str) -> str:
+def redact_sql_literals(sql: str, *, dialect: str, strip_comments: bool = False) -> str:
     """Create an evidence-safe SQL representation without user/source literal values.
 
     Re-exported from `aida.sql_redaction`, where the implementation now lives so the
     ingestion path can use it without importing runtime code (an L1-imports-L3 edge).
     Kept as a name here because existing callers and tests reference it.
     """
-    return _redact_sql_literals(sql, dialect=dialect)
+    return _redact_sql_literals(sql, dialect=dialect, strip_comments=strip_comments)
 
 
 def extract_column_lineage(sql: str, *, dialect: str) -> list[dict[str, Any]]:
@@ -453,8 +453,14 @@ class QueryExecutionGateway:
             findings.append(limit_finding)
 
         normalized_sql = guard_result.normalized_sql
+        # What is stored and returned as `normalized_sql` is this redacted shape, never the
+        # executable text above. Comments are dropped from it: the statement was typed or drafted
+        # by a caller, and a comment can hold a name, a literal or a secret that the literal
+        # replacement below cannot see. The executable text keeps them; only the record does not.
         redacted_sql = (
-            redact_sql_literals(normalized_sql, dialect=dialect) if normalized_sql else None
+            redact_sql_literals(normalized_sql, dialect=dialect, strip_comments=True)
+            if normalized_sql
+            else None
         )
         column_lineage = (
             extract_column_lineage(normalized_sql, dialect=dialect) if normalized_sql else []

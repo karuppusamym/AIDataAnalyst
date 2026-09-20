@@ -12,9 +12,10 @@ again with the receipt; the gateway then re-authorizes and re-validates it in fu
 receipt never outlives a revoked grant, a changed definition or a narrowed product.
 
 **No statement text (INV-6, ADR-0014).** Pasted SQL carries whatever literals its author typed, so
-the table keeps a digest of the exact statement and its bindings (`statement_digest`) and only the
-*redacted* shape for display (`redacted_sql`, from `aida.sql_redaction.redact_for_storage`, or
-nothing when redaction could not guarantee it). The caller holds the text and sends it back at
+the table keeps a *keyed* digest of the exact statement and its bindings (`statement_digest`) and
+only the *redacted* shape for display (`redacted_sql`, from
+`aida.sql_redaction.redact_for_storage`, or nothing when redaction could not guarantee it). The
+caller holds the text and sends it back at
 Run; an edit changes the digest, which is what makes "edited SQL requires revalidation" true by
 construction rather than by a flag someone has to remember to clear.
 
@@ -61,7 +62,9 @@ class SqlDraftReceipt(Base, TimestampMixin):
     principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
     origin: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="VALIDATED")
-    #: sha256 of the exact statement text and every binding a Run must repeat.
+    #: Keyed digest (the deployment signer's `sign_value`) of the exact statement text and every
+    #: binding a Run must repeat. Keyed because it is stored beside `redacted_sql`: an unkeyed
+    #: hash would confirm a guessed literal. Rows before that change hold a bare sha256.
     statement_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     #: The value-free shape, for display only; None when redaction could not guarantee one.
     redacted_sql: Mapped[str | None] = mapped_column(Text)

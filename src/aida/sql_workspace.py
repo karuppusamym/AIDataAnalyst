@@ -18,7 +18,11 @@ person asks it to:
    validation still stops the Run.
 
 **Value-free (INV-6).** The receipt stores a digest and the redacted shape; the statement text is
-the caller's. Audit records carry the receipt id, the digest and counts, never SQL.
+the caller's. Audit records carry the receipt id, the digest and counts, never SQL. The digest is
+*keyed* (`statement_digest`): it sits beside the redacted shape, so an unkeyed hash of a pasted
+statement would let a reader of the row confirm a guessed literal. Receipts issued before the
+digest was keyed carry an unkeyed one that no Run can match, so one still unexpired when the change
+deployed answers REVALIDATION_REQUIRED and is validated again; they live minutes, not days.
 
 **Once.** A receipt moves VALIDATED -> EXECUTING by conditional update, so a duplicate or retried
 Run executes nothing and is told which execution the receipt produced. Result rows are not
@@ -44,7 +48,6 @@ agent or a tool calls, and this is the reviewed path a person takes.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -79,7 +82,12 @@ from aida.sql_validation import (
     SqlValidationReport,
 )
 from aida.sql_workspace_models import SqlDraftReceipt
-from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
+from aida.tool_rendering import (
+    ToolParameterCode,
+    ToolParameterError,
+    render_tool_sql,
+    template_placeholders,
+)
 from atlas.platform.config import Settings
 
 ORIGIN_GENERATED: Final = "GENERATED"
@@ -110,21 +118,28 @@ PARAMETER_INVALID: Final = "PARAMETER_INVALID"
 #: The longest text value a draft binds. A filter value, not a document.
 PARAMETER_VALUE_MAX_LENGTH: Final = 4_000
 
-#: The renderer raises `ToolParameterError` with a fixed phrase and the names it concerns
-#: (`"parameter must be an integer: qty"`). It carries no code of its own, so the phrases the
-#: draft path can reach are mapped here; anything unrecognised is still refused, as
-#: PARAMETER_INVALID, and nothing of the message is echoed. The renderer never quotes a value.
-_RENDERER_PHRASES: Final[dict[str, str]] = {
-    "undeclared placeholders": PARAMETER_UNDECLARED,
-    "unused parameter definitions": PARAMETER_UNUSED,
-    "required parameter is null": PARAMETER_VALUE_MISSING,
-    "parameter must be a string": PARAMETER_TYPE_MISMATCH,
-    "parameter must be an integer": PARAMETER_TYPE_MISMATCH,
-    "parameter must be numeric": PARAMETER_TYPE_MISMATCH,
-    "parameter must be finite": PARAMETER_TYPE_MISMATCH,
-    "parameter must be boolean": PARAMETER_TYPE_MISMATCH,
-    "parameter must be an ISO date string": PARAMETER_TYPE_MISMATCH,
-    "parameter exceeds max_length": PARAMETER_TOO_LONG,
+#: The renderer refuses with a `ToolParameterError` whose issues carry a `ToolParameterCode` and
+#: the parameter names concerned. These are the codes the draft path names to a person; any other
+#: -- a code the workspace has no word for, or a refusal raised with a message and no issue -- is
+#: still refused, as PARAMETER_INVALID with no name, and nothing of the message is echoed. The
+#: renderer never quotes a value, and this never reads its wording.
+#:
+#: Not named, and so PARAMETER_INVALID: UNKNOWN_PARAMETER and REQUIRED_MISSING (the draft always
+#: sends exactly its declared names, each with a value, null included), UNSUPPORTED_TYPE (the
+#: request contract admits only the five types), and the allow-list and range codes (a draft
+#: declares none). A test holds this table to every code the renderer has, so a new one is a
+#: decision, not an accident.
+_PARAMETER_CODES: Final[dict[ToolParameterCode, str]] = {
+    ToolParameterCode.UNDECLARED_PLACEHOLDER: PARAMETER_UNDECLARED,
+    ToolParameterCode.UNUSED_DEFINITION: PARAMETER_UNUSED,
+    ToolParameterCode.REQUIRED_NULL: PARAMETER_VALUE_MISSING,
+    ToolParameterCode.NOT_A_STRING: PARAMETER_TYPE_MISMATCH,
+    ToolParameterCode.NOT_AN_INTEGER: PARAMETER_TYPE_MISMATCH,
+    ToolParameterCode.NOT_NUMERIC: PARAMETER_TYPE_MISMATCH,
+    ToolParameterCode.NOT_FINITE: PARAMETER_TYPE_MISMATCH,
+    ToolParameterCode.NOT_A_BOOLEAN: PARAMETER_TYPE_MISMATCH,
+    ToolParameterCode.NOT_AN_ISO_DATE: PARAMETER_TYPE_MISMATCH,
+    ToolParameterCode.TOO_LONG: PARAMETER_TOO_LONG,
 }
 
 _PARAMETER_HINTS: Final[dict[str, str]] = {
@@ -149,6 +164,9 @@ _PARAMETER_HINTS: Final[dict[str, str]] = {
 #: of this shape is echoed as a finding's `ref`.
 _PARAMETER_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
+#: What a statement digest is taken over, named inside the signed text (see `statement_digest`).
+_DIGEST_PURPOSE: Final = "sql_draft.statement.v2"
+
 #: What sqlglot raises for text it cannot read -- the set `aida.sql_redaction` catches.
 _UNPARSEABLE: Final = (ParseError, TokenError, ValueError, RecursionError)
 
@@ -163,7 +181,8 @@ class SqlWorkspaceRefused(Exception):
         self.execution_id = execution_id
 
 
-def statement_digest(
+async def statement_digest(
+    settings: Settings,
     *,
     sql: str,
     max_rows: int | None,
@@ -172,16 +191,28 @@ def statement_digest(
     parameter_types: Mapping[str, str] | None = None,
     parameter_fingerprint: str | None = None,
 ) -> str:
-    """The exact statement and every binding a Run must repeat, as one sha256.
+    """The exact statement and every binding a Run must repeat, as one *keyed* digest.
 
-    The text is hashed as sent, byte for byte: a changed literal, a reformatted line or a new
+    The text is digested as sent, byte for byte: a changed literal, a reformatted line or a new
     limit is a different statement, and a different statement needs its own validation. For a
     parameterized statement the text is the template; the declared types and the keyed digest of
-    the values are bound beside it, so a changed type or value is a different statement too. The
-    parameter keys are added only when there are parameters, so a raw statement's digest is the
-    one it always had.
+    the values are bound beside it, so a changed type or value is a different statement too.
+
+    Keyed (`aida.signing.sign_value`, the deployment's signer) because the receipt stores this
+    digest beside the statement's redacted shape, and a pasted statement's text includes its
+    literals: with an unkeyed hash, anyone who could read the row knew everything about the
+    statement but those literals and could confirm a short, guessable one by trying candidates.
+    Under a key they cannot. The result is the width the signer's output has -- 64 hex characters
+    for the local provider, `vault:v<n>:` and 44 base64 characters for Vault Transit -- which is
+    what `query_execution.sql_hash` already keeps in the same `String(64)`.
+
+    A digest is only ever recomputed and compared here, never trusted from the caller, so the
+    key is never needed to *verify* anything the caller sends.
     """
     payload: dict[str, Any] = {
+        # Names what is signed, so the signature cannot equal one the same key made for another
+        # kind of value: `sign_value` also keys a question, a comment and tool parameters.
+        "purpose": _DIGEST_PURPOSE,
         "sql": sql,
         "max_rows": max_rows,
         "context_product_version_id": (
@@ -192,9 +223,7 @@ def statement_digest(
     if parameter_types:
         payload["parameter_types"] = dict(sorted(parameter_types.items()))
         payload["parameter_fingerprint"] = parameter_fingerprint
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return await sign_value(settings, json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,15 +257,12 @@ class DraftBinding:
 def _parameter_findings(
     exc: ToolParameterError, declared_types: Mapping[str, str]
 ) -> tuple[SqlFinding, ...]:
-    """The renderer's refusal as findings: one per parameter it names, codes from its phrases."""
+    """The renderer's refusal as findings: one per parameter it names, by the codes it carries."""
     findings: list[SqlFinding] = []
-    for clause in str(exc).split("; "):
-        phrase, _, names = clause.partition(": ")
-        code = _RENDERER_PHRASES.get(phrase, PARAMETER_INVALID)
+    for issue in exc.issues:
+        code = _PARAMETER_CODES.get(issue.code, PARAMETER_INVALID)
         refs: list[str | None] = (
-            [name.strip() for name in names.split(",")]
-            if code != PARAMETER_INVALID and names
-            else [None]
+            list(issue.names) if code != PARAMETER_INVALID and issue.names else [None]
         )
         for ref in refs:
             name = ref if ref is not None and _PARAMETER_NAME.fullmatch(ref) else None
@@ -427,8 +453,9 @@ async def validate_draft(
     clock = now or datetime.now(UTC)
     fingerprint = await parameter_fingerprint(settings, binding)
     # The caller's text, not the bound statement: for a template that is the shape with its
-    # placeholders, and redaction removes any literal written into it directly.
-    redacted = redact_for_storage(sql, dialect=datasource.dialect)
+    # placeholders, and redaction removes any literal written into it directly. Comments go too:
+    # they are the caller's, and one can hold a name, a literal or a secret.
+    redacted = redact_for_storage(sql, dialect=datasource.dialect, strip_comments=True)
     receipt = SqlDraftReceipt(
         organization_id=datasource.organization_id,
         datasource_id=datasource.id,
@@ -436,7 +463,8 @@ async def validate_draft(
         principal_type=context.principal_type,
         origin=origin,
         status=STATUS_VALIDATED,
-        statement_digest=statement_digest(
+        statement_digest=await statement_digest(
+            settings,
             sql=sql,
             max_rows=max_rows,
             context_product_version_id=scope.version_id if scope else None,
@@ -531,7 +559,8 @@ async def run_receipt(
         # Values that do not bind cannot be the values that validated.
         await _refuse(session, context, receipt, correlation_id, REVALIDATION_REQUIRED, 409)
     fingerprint = await parameter_fingerprint(gateway.settings, binding)
-    presented = statement_digest(
+    presented = await statement_digest(
+        gateway.settings,
         sql=sql,
         max_rows=max_rows,
         context_product_version_id=scope.version_id if scope else None,

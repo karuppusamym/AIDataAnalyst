@@ -387,8 +387,12 @@ async def test_a_run_that_loses_the_claim_executes_nothing(
         principal_type=context.principal_type,
         origin="PASTED",
         status="VALIDATED",
-        statement_digest=statement_digest(
-            sql=ORDERS_SQL, max_rows=None, context_product_version_id=None, workspace_id=None
+        statement_digest=await statement_digest(
+            Settings(_env_file=None),
+            sql=ORDERS_SQL,
+            max_rows=None,
+            context_product_version_id=None,
+            workspace_id=None,
         ),
         redaction_status="REDACTED",
         referenced_tables=["retail.orders"],
@@ -535,14 +539,15 @@ async def test_the_digest_binds_every_run_input() -> None:
         "context_product_version_id": None,
         "workspace_id": None,
     }
-    digest = statement_digest(**base)
+    settings = Settings(_env_file=None)
+    digest = await statement_digest(settings, **base)
     for field, value in (
         ("sql", ORDERS_SQL + " "),
         ("max_rows", 10),
         ("context_product_version_id", uuid4()),
         ("workspace_id", uuid4()),
     ):
-        assert statement_digest(**{**base, field: value}) != digest, field
+        assert await statement_digest(settings, **{**base, field: value}) != digest, field
 
 
 async def test_the_draft_request_takes_exactly_one_input(

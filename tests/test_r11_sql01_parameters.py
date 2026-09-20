@@ -346,7 +346,7 @@ def test_a_parameter_that_cannot_bind_is_named_by_code(
 def test_an_unrecognised_renderer_refusal_is_still_refused_and_never_echoed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The renderer's messages are mapped by phrase; a new phrase fails closed, value-free."""
+    """A refusal with no code the workspace knows fails closed, value-free."""
 
     def _new_refusal(*args: Any, **kwargs: Any) -> Any:
         raise ToolParameterError("a phrase the workspace never mapped: SENTINEL-4471")
@@ -378,7 +378,7 @@ def test_no_finding_carries_the_value() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The digest: the values under the signing key, and a raw statement's digest unchanged
+# The digest: the values under the signing key, and the statement's digest under it too
 # ---------------------------------------------------------------------------
 
 
@@ -402,7 +402,8 @@ async def test_the_value_digest_is_keyed_and_is_the_tool_executions_fingerprint(
     )
 
 
-def test_the_digest_binds_the_parameter_types_and_values() -> None:
+async def test_the_digest_binds_the_parameter_types_and_values() -> None:
+    settings = Settings(_env_file=None)
     base: dict[str, Any] = {
         "sql": TEMPLATE,
         "max_rows": None,
@@ -411,30 +412,34 @@ def test_the_digest_binds_the_parameter_types_and_values() -> None:
         "parameter_types": {"order_id": "STRING"},
         "parameter_fingerprint": "fingerprint-one",
     }
-    digest = statement_digest(**base)
+    digest = await statement_digest(settings, **base)
 
     for field, value in (
         ("parameter_types", {"order_id": "INTEGER"}),
         ("parameter_types", {"order_ref": "STRING"}),
         ("parameter_fingerprint", "fingerprint-two"),
     ):
-        assert statement_digest(**{**base, field: value}) != digest, (field, value)
+        assert await statement_digest(settings, **{**base, field: value}) != digest, (field, value)
 
 
-def test_a_raw_statements_digest_is_the_one_it_always_had() -> None:
-    """Receipts issued before parameters existed still match their statements."""
-    payload = {
+async def test_a_statement_without_parameters_digests_the_same_with_or_without_empty_ones() -> None:
+    """No parameters is no parameter keys: an empty declaration adds nothing to what is signed."""
+    settings = Settings(_env_file=None)
+    payload: dict[str, Any] = {
         "sql": TEMPLATE,
         "max_rows": 5,
         "context_product_version_id": None,
         "workspace_id": None,
     }
-    before = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
 
-    assert statement_digest(**payload) == before
-    assert statement_digest(**payload, parameter_types={}, parameter_fingerprint=None) == before
+    bare = await statement_digest(settings, **payload)
+
+    assert (
+        await statement_digest(
+            settings, **payload, parameter_types={}, parameter_fingerprint=None
+        )
+        == bare
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -576,7 +576,14 @@ class SqlGuard:
                 or table.name.lower() not in _visible_cte_names(table)
             }
         )
-        columns = sorted({column.sql(dialect=dialect) for column in statement.find_all(exp.Column)})
+        # A column's own name, without any comment sqlglot hung on it: this list is stored and
+        # returned as `referenced_columns`, and a comment can hold a name, a literal or a secret.
+        columns = sorted(
+            {
+                column.sql(dialect=dialect, comments=False)
+                for column in statement.find_all(exp.Column)
+            }
+        )
 
         applied_limit: int | None = None
         if isinstance(statement, exp.Query):

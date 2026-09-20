@@ -221,7 +221,10 @@ async def test_the_control_plane_scan_would_notice_a_leak(
         lambda settings: type("_Resolver", (), {"resolve": staticmethod(lambda ref: "dsn://x")})(),
     )
     # Break the property on purpose: persist the statement verbatim.
-    monkeypatch.setattr("aida.query_gateway.redact_sql_literals", lambda sql, *, dialect: sql)
+    monkeypatch.setattr(
+        "aida.query_gateway.redact_sql_literals",
+        lambda sql, *, dialect, strip_comments=False: sql,
+    )
 
     session = CatalogSession(
         tables=[("analytics_db", "analytics", "customers")],

@@ -30,6 +30,21 @@ literals. So `PARSED` now also requires that a value-aware lexical scan of the r
 text finds nothing left to remove; otherwise the text is scrubbed lexically and labelled
 `LEXICAL`. Rows stored before the fix are repaired by `scripts/reredact_stored_sql.py`.
 
+**A boolean is a value too (2026-09-19).** sqlglot models a string or a number as
+`exp.Literal` and `TRUE`/`FALSE` as `exp.Boolean`, so the node-level pass used to leave
+`WHERE is_vip = TRUE` in the stored shape while replacing `WHERE region = 'EMEA'`. Both are
+replaced now. In T-SQL, which has no boolean literal, sqlglot renders the node as `1`, `0` or
+`(1 = 1)`; replacing the node before it is rendered keeps such a statement `PARSED` instead of
+sending it to the lexical scrub. The lexical scrub itself is not changed: it cannot tell a
+boolean value from program text, and `contains_value_shaped_text` is also the dbt gate.
+
+**Comments are kept, unless the caller says otherwise (2026-09-19).** The node-level pass keeps
+a comment and the lexical scrub keeps its text (only digits go), because ingestion screens the
+raw text of a definition for injected instructions and wants its prose stored. A comment on a
+statement someone *typed or a model wrote*, though, can hold a name, a literal or a secret, and
+`strip_comments=True` removes it from the stored shape. The reviewed-SQL path and the query
+gateway ask for that; the ingestion path does not.
+
 The fingerprint exists so that "did this definition change?" stays answerable without
 keeping the thing that changed.
 """
@@ -89,17 +104,26 @@ def sql_fingerprint(sql: str) -> str:
     return hashlib.sha256(sql.encode("utf-8")).hexdigest()
 
 
-def redact_sql_literals(sql: str, *, dialect: str) -> str:
+def redact_sql_literals(sql: str, *, dialect: str, strip_comments: bool = False) -> str:
     """Replace every literal with a placeholder. Raises if the statement will not parse.
 
     The result is value-free even when the parse hid values from the node-level pass:
-    that text is scrubbed lexically instead of being returned as it was.
+    that text is scrubbed lexically instead of being returned as it was. With `strip_comments`
+    the comments go too (see the module docstring).
     """
-    precise = _redact_precisely(sql, dialect=dialect)
-    return precise if precise is not None else scrub_literals_lexically(sql, dialect=dialect)
+    precise = _redact_precisely(sql, dialect=dialect, strip_comments=strip_comments)
+    return (
+        precise
+        if precise is not None
+        else scrub_literals_lexically(sql, dialect=dialect, strip_comments=strip_comments)
+    )
 
 
-def _redact_precisely(sql: str, *, dialect: str) -> str | None:
+#: The nodes that carry a value. sqlglot spells a boolean `exp.Boolean`, not `exp.Literal`.
+_VALUE_NODES = (exp.Literal, exp.Boolean)
+
+
+def _redact_precisely(sql: str, *, dialect: str, strip_comments: bool = False) -> str | None:
     """Node-level redaction, or None when the parse did not expose every value.
 
     Raises `ParseError`/`TokenError` when the statement does not parse at all.
@@ -130,8 +154,8 @@ def _redact_precisely(sql: str, *, dialect: str) -> str | None:
         # lexical scrub, and LEXICAL is in `VALUE_FREE_REDACTION_STATUSES`.
         return None
     redacted = statement.transform(
-        lambda node: exp.Placeholder(this="redacted") if isinstance(node, exp.Literal) else node
-    ).sql(dialect=dialect, pretty=True)
+        lambda node: exp.Placeholder(this="redacted") if isinstance(node, _VALUE_NODES) else node
+    ).sql(dialect=dialect, pretty=True, comments=not strip_comments)
     if contains_value_shaped_text(redacted, dialect=dialect):
         return None
     return redacted
@@ -188,7 +212,9 @@ _FOREIGN_LANGUAGE_QUOTING = _Quoting(
 )
 
 
-def scrub_literals_lexically(sql: str, *, dialect: str | None = None) -> str:
+def scrub_literals_lexically(
+    sql: str, *, dialect: str | None = None, strip_comments: bool = False
+) -> str:
     """Remove literals without parsing. Structure survives; values do not.
 
     Quoted text is read the way the dialect reads it: a single-quoted string is a value,
@@ -197,8 +223,13 @@ def scrub_literals_lexically(sql: str, *, dialect: str | None = None) -> str:
     with values of its own, so it is scrubbed rather than dropped -- and a value anywhere
     else. So is the single-quoted body of `CREATE FUNCTION ... AS '<body>'`. A body in a
     non-SQL language has its double-quoted and backtick strings removed as well.
+
+    Comments keep their text (digits aside) unless `strip_comments` drops them. Only the two
+    forms every dialect shares are recognised, `-- ...` and `/* ... */`; a `#` comment is text.
     """
-    return _scrub_statement(sql, dialect=dialect, comment_numbers=True)
+    return _scrub_statement(
+        sql, dialect=dialect, comment_numbers=True, strip_comments=strip_comments
+    )
 
 
 def contains_value_shaped_text(sql: str, *, dialect: str | None = None) -> bool:
@@ -207,10 +238,15 @@ def contains_value_shaped_text(sql: str, *, dialect: str | None = None) -> bool:
     Comments are not counted: the node-level pass keeps them, prompt-risk screening reads
     them, and a digit in `-- v2 of the report` is not what this check is for.
     """
-    return _scrub_statement(sql, dialect=dialect, comment_numbers=False) != sql
+    return (
+        _scrub_statement(sql, dialect=dialect, comment_numbers=False, strip_comments=False)
+        != sql
+    )
 
 
-def _scrub_statement(sql: str, *, dialect: str | None, comment_numbers: bool) -> str:
+def _scrub_statement(
+    sql: str, *, dialect: str | None, comment_numbers: bool, strip_comments: bool
+) -> str:
     quoting = _quoting_for(dialect)
     language_match = _DECLARED_LANGUAGE.search(sql)
     language = language_match.group(1).lower() if language_match else None
@@ -224,6 +260,7 @@ def _scrub_statement(sql: str, *, dialect: str | None, comment_numbers: bool) ->
         body_quoting,
         quoted_body_allowed=bool(_ROUTINE_HEADER.match(sql)) and dialect != "tsql",
         comment_numbers=comment_numbers,
+        strip_comments=strip_comments,
     )
 
 
@@ -234,6 +271,7 @@ def _scrub(
     *,
     quoted_body_allowed: bool,
     comment_numbers: bool,
+    strip_comments: bool,
 ) -> str:
     out: list[str] = []
     run_start = 0
@@ -245,7 +283,7 @@ def _scrub(
     def scrub_body(body: str) -> str:
         return _scrub(
             body, body_quoting, body_quoting, quoted_body_allowed=False,
-            comment_numbers=comment_numbers,
+            comment_numbers=comment_numbers, strip_comments=strip_comments,
         )
 
     while i < n:
@@ -253,8 +291,15 @@ def _scrub(
         if text.startswith("--", i) or text.startswith("/*", i):
             end = _comment_end(text, i)
             flush(i)
-            comment = text[i:end]
-            out.append(_NUMERIC_LITERAL.sub(_PLACEHOLDER, comment) if comment_numbers else comment)
+            if strip_comments:
+                # A line comment ends at the newline, which stays. A block comment can sit
+                # between two tokens (`SELECT/*x*/1`), so it leaves a space in its place.
+                out.append(" " if text.startswith("/*", i) else "")
+            else:
+                comment = text[i:end]
+                out.append(
+                    _NUMERIC_LITERAL.sub(_PLACEHOLDER, comment) if comment_numbers else comment
+                )
             i = run_start = end
             continue
         if ch == "$" and (tag := _DOLLAR_QUOTE_TAG.match(text, i)):
@@ -340,7 +385,9 @@ def _introduces_body(text: str, position: int) -> bool:
     return j < 2 or not (text[j - 2].isalnum() or text[j - 2] == "_")
 
 
-def redact_for_storage(sql: str | None, *, dialect: str) -> RedactedSql | None:
+def redact_for_storage(
+    sql: str | None, *, dialect: str, strip_comments: bool = False
+) -> RedactedSql | None:
     """Prepare source-supplied SQL for persistence. `None` in, `None` out.
 
     Tries a real parse first, because node-level replacement is precise. Falls back to a
@@ -355,7 +402,7 @@ def redact_for_storage(sql: str | None, *, dialect: str) -> RedactedSql | None:
     if not sql.strip():
         return RedactedSql(status="PARSED", redacted="", fingerprint=fingerprint)
     try:
-        precise = _redact_precisely(sql, dialect=dialect)
+        precise = _redact_precisely(sql, dialect=dialect, strip_comments=strip_comments)
     except (ParseError, TokenError, ValueError, RecursionError):
         precise = None
     if precise is not None:
@@ -363,7 +410,9 @@ def redact_for_storage(sql: str | None, *, dialect: str) -> RedactedSql | None:
     try:
         return RedactedSql(
             status="LEXICAL",
-            redacted=scrub_literals_lexically(sql, dialect=dialect),
+            redacted=scrub_literals_lexically(
+                sql, dialect=dialect, strip_comments=strip_comments
+            ),
             fingerprint=fingerprint,
         )
     except (re.error, RecursionError):
