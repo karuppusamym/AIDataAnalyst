@@ -367,6 +367,34 @@ describe("KnowledgeDocument", () => {
     expect(screen.queryAllByRole("button")).toHaveLength(0);
   });
 
+  it("makes a table's scroll area reachable by keyboard and names it after the heading above", async () => {
+    // The table scrolls sideways in a narrow pane rather than breaking its words, and an
+    // area that scrolls but cannot take focus is unreachable without a mouse.
+    const user = userEvent.setup();
+    render(<KnowledgeDocument content={VIEW_DOC} />);
+    const scroll = screen.getByRole("group", { name: "Schema table, scrollable" });
+    expect(scroll).toHaveAttribute("tabindex", "0");
+    expect(within(scroll).getByRole("table")).toHaveTextContent("order_id");
+    await user.tab();
+    expect(scroll).toHaveFocus();
+  });
+
+  it("names a table with no heading plainly, strips markdown from a heading, and numbers repeats", () => {
+    const table = "| A | B |\n|---|---|\n| 1 | 2 |\n";
+    render(
+      <KnowledgeDocument
+        content={`${table}\n# \`bank.sales.orders\` **columns**\n\n${table}\n${table}\n## Keys\n\n${table}`}
+      />,
+    );
+    const names = screen.getAllByRole("group").map((group) => group.getAttribute("aria-label"));
+    expect(names).toEqual([
+      "Table, scrollable",
+      "bank.sales.orders columns table, scrollable",
+      "bank.sales.orders columns table 2, scrollable",
+      "Keys table, scrollable",
+    ]);
+  });
+
   it("resolves an index's relative and directory links against the document's own path", async () => {
     const user = userEvent.setup();
     const opened: string[] = [];

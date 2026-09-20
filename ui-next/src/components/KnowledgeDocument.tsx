@@ -134,6 +134,14 @@ function tableCells(line: string): string[] {
     .map((cell) => cell.trim().replace(/\\\|/g, "|"));
 }
 
+/** A heading's words without its markdown, for naming what sits under it. */
+function plainText(markdown: string): string {
+  return markdown
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/`|\*\*/g, "")
+    .trim();
+}
+
 export function KnowledgeDocument({
   content,
   onNavigate = null,
@@ -151,6 +159,8 @@ export function KnowledgeDocument({
   const at = (n: number): string => lines[n] ?? "";
   let i = 0;
   let key = 0;
+  let section = "";
+  const tableNames = new Map<string, number>();
   while (i < lines.length) {
     const line = at(i);
     if (!line.trim()) {
@@ -161,6 +171,7 @@ export function KnowledgeDocument({
     if (heading) {
       const level = (heading[1] ?? "#").length;
       const text = heading[2] ?? "";
+      section = plainText(text);
       blocks.push(
         level === 1 ? (
           <h4 key={key++} className="kdoc__h">
@@ -182,8 +193,20 @@ export function KnowledgeDocument({
         i += 1;
       }
       const [head = "", , ...rest] = rows;
+      // A table wider than its pane scrolls sideways instead of breaking its words, so the
+      // scroll area must be reachable from the keyboard and say what it holds; two tables
+      // under one heading are told apart by number.
+      const base = section ? `${section} table` : "Table";
+      const seen = (tableNames.get(base) ?? 0) + 1;
+      tableNames.set(base, seen);
       blocks.push(
-        <div key={key++} className="kdoc__tablewrap">
+        <div
+          key={key++}
+          className="kdoc__tablewrap"
+          tabIndex={0}
+          role="group"
+          aria-label={`${seen === 1 ? base : `${base} ${seen}`}, scrollable`}
+        >
           <table className="kdoc__table">
             <thead>
               <tr>

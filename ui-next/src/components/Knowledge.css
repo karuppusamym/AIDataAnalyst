@@ -54,7 +54,11 @@
 .kdoc__link{background:none;border:0;padding:0;color:var(--accent);cursor:pointer;font:inherit;text-decoration:underline;text-underline-offset:2px}
 .kdoc__tablewrap{overflow-x:auto;margin:6px 0}
 .kdoc__table{border-collapse:collapse;font-size:11.5px;min-width:100%}
-.kdoc__table th,.kdoc__table td{border:1px solid var(--line-soft);padding:3px 6px;text-align:left;vertical-align:top}
+/* `.kdoc` lets any word break anywhere so a long path never pushes a paragraph wide. In a
+   table that turns a narrow pane into "Nulla/ble" and "customer_i/d": the browser sizes
+   columns by their breakable minimum, so nothing ever needs to scroll. Cells keep their words
+   whole instead, and `.kdoc__tablewrap` scrolls a table that is wider than its pane. */
+.kdoc__table th,.kdoc__table td{border:1px solid var(--line-soft);padding:3px 6px;text-align:left;vertical-align:top;overflow-wrap:normal}
 .kdoc__table th{background:var(--sunk);font-weight:600}
 .kview__ask{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
 .kview__ask label{font-size:12px;color:var(--ink-2)}
