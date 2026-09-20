@@ -3488,8 +3488,8 @@ export interface NegativeAssertionRead {
 export interface NotificationEventRead {
   id: string;
   organization_id: string;
-  incident_id: string;
-  rule_id: string;
+  incident_id: string | null;
+  rule_id: string | null;
   channel: string;
   recipients: string[];
   status: string;

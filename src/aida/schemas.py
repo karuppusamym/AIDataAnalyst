@@ -3512,8 +3512,12 @@ class NotificationRuleRead(ApiModel):
 class NotificationEventRead(ApiModel):
     id: UUID
     organization_id: UUID
-    incident_id: UUID
-    rule_id: UUID
+    # NT-1 (2026-09-04) made both columns nullable: a governance notification -- an approval
+    # request, a kill switch, a certification about to lapse -- has neither. This model still
+    # demanded both, so `GET /v1/notifications` and its acknowledge action answered 500 the
+    # moment one such row existed (R11-D33).
+    incident_id: UUID | None
+    rule_id: UUID | None
     channel: str
     recipients: list[str]
     status: str

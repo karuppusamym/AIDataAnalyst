@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -55,6 +56,21 @@ from aida.schemas import (
 from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["data-quality"])
+
+
+def _declared_fields(row: Any, model: type[ApiModel], **extra: Any) -> dict[str, Any]:
+    """The values `model` declares, read off `row`, plus `extra`.
+
+    The three quality reads below used to build this dict from *every table column*, and
+    `ApiModel` forbids extra fields, so a column the response never exposed -- the incident's
+    `fingerprint`, its dedup key, added with the freshness sink -- turned every list of incidents
+    into a 500, and the transition endpoint into a 500 *after* it had committed the change.
+    Reading only the declared fields makes the response independent of the table's shape, which is
+    what a response model is for (R11-D32).
+    """
+    values = {name: getattr(row, name) for name in model.model_fields if hasattr(row, name)}
+    values.update(extra)
+    return values
 
 
 async def _source(
@@ -229,13 +245,7 @@ async def list_quality_observations(
     ).all()
     items = [
         DataQualityObservationRead.model_validate(
-            {
-                **{
-                    column.name: getattr(observation, column.name)
-                    for column in DataQualityObservation.__table__.columns
-                },
-                "table_name": name,
-            }
+            _declared_fields(observation, DataQualityObservationRead, table_name=name)
         )
         for observation, name in rows
     ]
@@ -277,13 +287,7 @@ async def list_quality_incidents(
     ).all()
     items = [
         DataQualityIncidentRead.model_validate(
-            {
-                **{
-                    column.name: getattr(incident, column.name)
-                    for column in DataQualityIncident.__table__.columns
-                },
-                "table_name": name,
-            }
+            _declared_fields(incident, DataQualityIncidentRead, table_name=name)
         )
         for incident, name in rows
     ]
@@ -341,13 +345,7 @@ async def transition_quality_incident(
         )
     ).one()
     return DataQualityIncidentRead.model_validate(
-        {
-            **{
-                column.name: getattr(row[0], column.name)
-                for column in DataQualityIncident.__table__.columns
-            },
-            "table_name": row[1],
-        }
+        _declared_fields(row[0], DataQualityIncidentRead, table_name=row[1])
     )
 
 

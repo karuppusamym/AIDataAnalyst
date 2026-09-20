@@ -21087,9 +21087,16 @@
             "type": "string"
           },
           "incident_id": {
-            "format": "uuid",
-            "title": "Incident Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incident Id"
           },
           "organization_id": {
             "format": "uuid",
@@ -21104,9 +21111,16 @@
             "type": "array"
           },
           "rule_id": {
-            "format": "uuid",
-            "title": "Rule Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Id"
           },
           "sent_at": {
             "anyOf": [
