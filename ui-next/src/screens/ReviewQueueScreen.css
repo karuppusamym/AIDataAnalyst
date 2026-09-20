@@ -35,7 +35,7 @@
 .tile__n{font-size:26px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
 .tile--ok .tile__n{color:var(--ok)}
 .tile--info .tile__n{color:var(--info)}
-.tile--warn .tile__n{color:var(--warn)}
+.tile--warn .tile__n{color:var(--warn-ink)}
 .tile__l{font-size:12.5px;color:var(--ink-3);margin-top:2px}
 
 .rq__main{display:flex;flex-direction:column;flex:1;min-height:220px}

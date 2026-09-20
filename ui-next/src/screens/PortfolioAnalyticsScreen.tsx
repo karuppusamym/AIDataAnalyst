@@ -253,7 +253,7 @@ function TopProductsTable({ products }: { products: PortfolioTopProductRead[] })
     return <Empty title="No published products yet" hint="Top products appear once a version is published." />;
   }
   return (
-    <div className="pfa__tablewrap">
+    <div className="pfa__tablewrap" role="region" aria-label="Top products (scrolls sideways)" tabIndex={0}>
       <table className="pfa__table" aria-label="Top products">
         <thead>
           <tr>
@@ -309,7 +309,7 @@ function TrendsTable({ points }: { points: PortfolioTrendPointRead[] }) {
     return <Empty title="No trend buckets in this window" />;
   }
   return (
-    <div className="pfa__tablewrap">
+    <div className="pfa__tablewrap" role="region" aria-label="Trends (scrolls sideways)" tabIndex={0}>
       <table className="pfa__table" aria-label="Trends">
         <thead>
           <tr>

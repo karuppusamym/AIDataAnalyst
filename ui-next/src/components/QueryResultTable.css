@@ -2,7 +2,7 @@
 .qrt__head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .qrt__title{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
 .qrt__meta{margin:0;font-size:12px;color:var(--ink-3)}
-.qrt__warn{margin:0;font-size:12.5px;color:var(--warn);background:var(--warn-soft);border-left:3px solid var(--warn);border-radius:var(--radius-sm);padding:8px 10px}
+.qrt__warn{margin:0;font-size:12.5px;color:var(--warn-ink);background:var(--warn-soft);border-left:3px solid var(--warn);border-radius:var(--radius-sm);padding:8px 10px}
 .qrt__note{margin:0;font-size:11.5px;color:var(--ink-3);line-height:1.55}
 
 /* The table scrolls inside its own box: a wide result must never make the
@@ -18,9 +18,9 @@
 
 .qrt__colname{font-family:var(--mono);font-size:11.5px;color:var(--ink)}
 .qrt__tag{display:inline-block;margin-left:6px;font-family:var(--mono);font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);border:1px solid var(--line);border-radius:3px;padding:0 4px}
-.qrt__tag--mask{color:var(--warn);border-color:var(--warn)}
+.qrt__tag--mask{color:var(--warn-ink);border-color:var(--warn)}
 
-.qrt__masked{font-family:var(--mono);font-size:11px;color:var(--warn);background:var(--warn-soft);border-radius:3px;padding:1px 5px}
+.qrt__masked{font-family:var(--mono);font-size:11px;color:var(--warn-ink);background:var(--warn-soft);border-radius:3px;padding:1px 5px}
 .qrt__null{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .qrt__json{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
 

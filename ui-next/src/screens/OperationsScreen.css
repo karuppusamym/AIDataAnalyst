@@ -47,7 +47,7 @@
 .oprow__meta{font-size:11.5px;color:var(--ink-3);margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
 .oprow__err{margin-top:6px;font-size:11.5px;color:var(--bad);font-family:var(--mono)}
 .oprow__time{flex:none;text-align:right;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:flex;flex-direction:column;gap:3px;align-items:flex-end}
-.oprow__wf{color:var(--ink-3);opacity:.85}
+.oprow__wf{color:var(--ink-3)}
 
 .ops__bxlist{display:flex;flex-direction:column;gap:8px}
 .opbx{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:10px 13px}

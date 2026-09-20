@@ -61,7 +61,7 @@
 .aig__rtile{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow-1);padding:12px;display:flex;flex-direction:column;gap:2px}
 .aig__rtile p{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3)}
 .aig__rtile strong{font-size:14px;letter-spacing:-.005em}
-.aig__rtile-warn{color:var(--warn)}
+.aig__rtile-warn{color:var(--warn-ink)}
 .aig__rtile small{font-size:11px;color:var(--ink-2)}
 
 @media (max-width: 980px){

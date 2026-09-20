@@ -1,4 +1,10 @@
-/* Small-text colours use `--ink-3`, never a hand-picked hex.
+/* R11-C2 (2026-09-19): the sidebar is #111827 in every theme, so it owns its own `--ink-3`
+   (`.snav{--ink-3:#8f9bb0}`, 6.3 on it). It used the theme's, which is a colour for the
+   theme's own light or dark surfaces -- 3.86 on the sidebar in the light theme, and getting
+   darker for a light surface would only have made that worse. The figures in the next
+   paragraph are the 2026-09 axe run's, for the sidebar as it was then (#19202f).
+
+   Small-text colours use `--ink-3`, never a hand-picked hex.
    An axe-core run against the running app failed WCAG AA contrast on every
    screen: these labels were #718097 / #536178 / #748198 on the #19202f
    sidebar, measuring 4.06 / 2.59 / 4.13 against a 4.5 threshold for text this
@@ -20,7 +26,7 @@
    keyboard-operable renders behind the very thing it exists to skip. */
 .skiplink{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .skiplink:focus{position:fixed;top:10px;left:10px;z-index:200;width:auto;height:auto;margin:0;padding:10px 16px;overflow:visible;clip:auto;border-radius:8px;border:2px solid var(--accent);background:var(--surface);color:var(--ink);font:inherit;font-weight:600;box-shadow:0 10px 30px rgba(10,16,28,.35)}
-.snav{border-right:1px solid rgba(255,255,255,.08);background:#111827;color:#dbe4f1;overflow-y:auto;display:flex;flex-direction:column;z-index:20}
+.snav{border-right:1px solid rgba(255,255,255,.08);background:#111827;color:#dbe4f1;overflow-y:auto;display:flex;flex-direction:column;z-index:20;--ink-3:#8f9bb0}
 .snav__brand{display:flex;align-items:center;gap:10px;padding:18px 16px 16px;position:sticky;top:0;background:#111827;z-index:2}
 .snav__mark{width:31px;height:31px;border-radius:9px;background:linear-gradient(145deg,#7c6ff2,#4f46e5);color:#fff;display:grid;place-items:center;font-weight:700;font-size:13px;box-shadow:0 8px 18px rgba(79,70,229,.35);flex:none}
 .snav__name{display:block;font-weight:650;font-size:15px;line-height:1.1;color:#fff;letter-spacing:-.01em}
@@ -162,9 +168,9 @@ kbd{font-family:var(--mono);font-size:9px;border:1px solid var(--line);border-bo
 .shellstatus[data-tone="error"] .shellstatus__dot{background:#e2564a;box-shadow:0 0 0 3px rgba(226,86,74,.18)}
 .shellstatus[data-tone="demo"] .shellstatus__dot{background:#9a7de0;box-shadow:0 0 0 3px rgba(154,125,224,.18)}
 .shellstatus[data-tone="pending"] .shellstatus__dot{background:#6d7c93;box-shadow:0 0 0 3px rgba(109,124,147,.14)}
-.shellstatus[data-tone="warn"] .shellstatus__label{color:#c98a24}
-.shellstatus[data-tone="error"] .shellstatus__label{color:#d9483c}
-.shellstatus[data-tone="demo"] .shellstatus__label{color:#8b6fd6}
+.shellstatus[data-tone="warn"] .shellstatus__label{color:var(--warn-ink)}
+.shellstatus[data-tone="error"] .shellstatus__label{color:var(--bad)}
+.shellstatus[data-tone="demo"] .shellstatus__label{color:var(--accent)}
 .shellstatus__label{white-space:nowrap;font-weight:650}
 .shellstatus__hint{text-transform:none;letter-spacing:0;font-family:inherit;font-size:11px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40ch}
 .shellstatus__action{border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit;font-size:10px;text-transform:none;letter-spacing:0;padding:3px 8px;cursor:pointer;flex:none}
@@ -172,6 +178,7 @@ kbd{font-family:var(--mono);font-size:9px;border:1px solid var(--line);border-bo
 .shellstatus__action:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .shellstatus--compact{margin-top:3px;font-size:9.5px}
 .shellstatus--compact .shellstatus__label{color:var(--ink-3)}
+.shellstatus--compact[data-tone="warn"] .shellstatus__label{color:#d9a44b}
 .shellstatus--compact[data-tone="demo"] .shellstatus__label{color:#a893e6}
 .shellstatus--compact[data-tone="error"] .shellstatus__label{color:#e2867c}
 .visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}

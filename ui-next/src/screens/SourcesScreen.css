@@ -36,7 +36,7 @@
 .src__score{display:flex;align-items:center;gap:14px;padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--line-soft)}
 .src__scorenum{font-family:var(--mono);font-size:34px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
 .src__scorenum--ok{color:var(--ok)}
-.src__scorenum--warn{color:var(--warn)}
+.src__scorenum--warn{color:var(--warn-ink)}
 .src__scorenum--bad{color:var(--bad)}
 .src__scorenum--mute{color:var(--ink-3)}
 .src__scoremeta{display:flex;flex-direction:column;gap:5px}

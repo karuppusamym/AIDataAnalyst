@@ -438,7 +438,7 @@ export function AiGovernanceScreen() {
               <Pill tone="warn">DRAFT</Pill>
             </div>
 
-            <ol className="aig__chain" aria-label="Model route lifecycle">
+            <ol className="aig__chain" aria-label="Model route lifecycle" tabIndex={0}>
               {LIFECYCLE_STEPS.map((step) => (
                 <li key={step.n}>
                   <span className="aig__chain-n">{step.n}</span>

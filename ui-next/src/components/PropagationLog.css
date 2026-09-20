@@ -5,7 +5,7 @@
 .ps__g{flex:none;width:12px;text-align:center;font-size:11px;line-height:1.5;color:var(--ink-3)}
 .ps--origin .ps__g{color:var(--info)}
 .ps--blocked .ps__g{color:var(--bad)}
-.ps--hop .ps__g{color:var(--warn)}
+.ps--hop .ps__g{color:var(--warn-ink)}
 .ps__b{min-width:0}
 .ps__t{display:block;font-size:12.5px;color:var(--ink);line-height:1.45}
 .ps__m{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:2px}
@@ -14,4 +14,4 @@
 /* D02: an illustrative log must not be mistakable for traversed evidence. */
 .plog--demo{border-style:dashed}
 .plog__h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.plog__demo{margin:0 0 8px;font-size:12px;color:var(--warn);line-height:1.55}
+.plog__demo{margin:0 0 8px;font-size:12px;color:var(--warn-ink);line-height:1.55}

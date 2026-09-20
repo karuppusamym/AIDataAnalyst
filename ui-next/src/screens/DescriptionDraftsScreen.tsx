@@ -121,7 +121,10 @@ function DraftRow({
     `style ${pct(draft.style_score)} · completeness ${pct(draft.completeness_score)}`;
 
   return (
-    <div className={`draftrow${expanded ? " draftrow--exp" : ""}`}>
+    // `role="listitem"`: the container is `role="list"`, and a list none of whose children is a
+    // listitem is an axe `aria-required-children` violation -- one the jsdom sweep could not see
+    // (it renders this screen with no drafts) and the real-browser journey did.
+    <div className={`draftrow${expanded ? " draftrow--exp" : ""}`} role="listitem">
       <div className="draftrow__head">
         <div className="draftrow__name">
           <button
