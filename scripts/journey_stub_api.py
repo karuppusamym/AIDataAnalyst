@@ -301,6 +301,27 @@ ROUTE_RULES: list[Rule] = [
         ),
         "GET /v1/projects/{project_id}/context-products",
     ),
+    # R11-S13: the Stewardship work queue's backlog. Without a pinned body the generic
+    # synthesiser answered this route with `"items": [""]` -- a placeholder string where rows
+    # belong -- and the screen (which expects row objects, as the real API always sends) fell into
+    # its route error boundary. That is a stub artifact, not a defect, and the same class the
+    # grounding-receipts override below documents.
+    Rule(
+        "GET",
+        rf"^/v1/organizations/{_SEG}/stewardship/unowned-backlog/?$",
+        (
+            "Analyst",
+            "Auditor",
+            "DataAdmin",
+            "DataSteward",
+            "MetadataAdmin",
+            "PlatformAdmin",
+            "Reviewer",
+            "SemanticAdmin",
+            "Viewer",
+        ),
+        "GET /v1/organizations/{organization_id}/stewardship/unowned-backlog",
+    ),
     Rule(
         "GET",
         rf"^/v1/datasources/{_SEG}/agent-runs/?$",
@@ -834,6 +855,24 @@ def _overrides(method: str, path: str, identity: str, body: Any) -> Any | None:
         }
     if method == "GET" and re.fullmatch(rf"/v1/agent-runs/{_SEG}/?", path):
         return _agent_run()
+    # --- the Stewardship work queue (R11-S13) ------------------------------
+    if method == "GET" and re.fullmatch(
+        rf"/v1/organizations/{_SEG}/stewardship/unowned-backlog/?", path
+    ):
+        return _page(
+            [
+                _unowned_backlog_row(1, status="UNOWNED", candidate_owner=None),
+                _unowned_backlog_row(2, status="UNOWNED", candidate_owner="Finance Data"),
+                _unowned_backlog_row(
+                    3,
+                    status="ROUTED",
+                    candidate_owner=None,
+                    channel="SLACK",
+                    recipients=["data-governance-team@tenant.example"],
+                ),
+            ],
+            limit=100,
+        )
     if method == "GET" and re.fullmatch(rf"/v1/projects/{_SEG}/context-products/?", path):
         # One published product, so the picker has something to select. The real
         # route narrows this to PUBLISHED plus the caller's own consumer role
@@ -936,6 +975,37 @@ def _governance_review(status: str) -> dict[str, Any]:
         "decided_at": None,
         "created_at": NOW,
         "updated_at": NOW,
+    }
+
+
+def _unowned_backlog_row(
+    n: int,
+    *,
+    status: str,
+    candidate_owner: str | None,
+    channel: str | None = None,
+    recipients: list[str] | None = None,
+) -> dict[str, Any]:
+    """One `UnownedAssetEscalationRead`. The mix below is deliberate: a real estate has rows
+    with no candidate owner and no routing yet, and the screen must render all of them."""
+    routed = status != "UNOWNED"
+    return {
+        "id": f"00000000-0000-0000-0000-0000000d{n:04d}",
+        "organization_id": ORG_ID,
+        "table_id": f"00000000-0000-0000-0000-0000000e{n:04d}",
+        "first_detected_unowned_at": "2026-09-01T09:00:00Z",
+        "status": status,
+        "candidate_owner": candidate_owner,
+        "notification_rule_id": None,
+        "channel": channel,
+        "recipients": recipients or [],
+        "dedup_key": f"journey:{n}",
+        "routed_at": "2026-09-02T09:00:00Z" if routed else None,
+        "escalated_at": None,
+        "escalated_tier2_at": None,
+        "resolved_at": None,
+        "created_at": "2026-09-01T09:00:00Z",
+        "updated_at": "2026-09-02T09:00:00Z" if routed else "2026-09-01T09:00:00Z",
     }
 
 

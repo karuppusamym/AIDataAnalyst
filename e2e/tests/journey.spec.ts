@@ -176,7 +176,14 @@ test.describe("5. Ask -- Analyst", () => {
     // 2. ... and the answer names the product AND the published version it
     // stood on, read from the run's own RESOLVED step rather than from the
     // request that was sent.
-    await expect(page.getByLabel(/^Answer for run /)).toBeVisible();
+    const answer = page.getByLabel(/^Answer for run /);
+    await expect(answer).toBeVisible();
+    // The answer panel is tabbed (Results / Query / Evidence) and the product and version are
+    // provenance, so they live on the Evidence tab and are `hidden` on the default Results view.
+    // This spec predates the tabs and was never run against them (the harness needs the Docker
+    // stack); the requirement is unchanged -- the answer says which version stood behind it --
+    // so open the tab that says it rather than loosening what is asserted.
+    await answer.getByRole("tab", { name: "Evidence" }).click();
     await expect(page.getByText("Journey orders · version 2")).toBeVisible();
   });
 
