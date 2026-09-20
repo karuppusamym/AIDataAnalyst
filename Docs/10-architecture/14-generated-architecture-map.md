@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-417 Python modules under `src/`, 2603 intra-`src` import edges.
+418 Python modules under `src/`, 2612 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 75 |
-| aida domain modules | everything else flat in `aida.*` | 276 |
+| aida domain modules | everything else flat in `aida.*` | 277 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>75 modules"]
-  domain["aida domain modules<br/>276 modules"]
+  domain["aida domain modules<br/>277 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -60,7 +60,7 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|642| domain
+  routers -->|635| domain
   app -->|74| routers
   domain -->|68| platform
   workflows -->|56| domain
@@ -68,7 +68,7 @@ graph LR
   routers -->|20| platform
   ctx_catalog -->|19| domain
   ctx_identity_tenancy -->|18| domain
-  domain -->|16| routers
+  domain -->|15| routers
   app -->|14| domain
   ctx_connectivity -->|11| domain
   projectors -->|11| domain
@@ -112,14 +112,13 @@ Splitting the flat package into *routers* and *domain modules* is only useful if
 the dependency runs one way. It mostly does — and where it does not, the
 exceptions are named here rather than hidden by the aggregation.
 
-16 import(s) run the wrong way (a domain, platform or connector
+15 import(s) run the wrong way (a domain, platform or connector
 module importing a router):
 
 | Importer | Router imported |
 |---|---|
 | `aida.answer_provenance` | `aida.unified_lineage_api` |
 | `aida.context_rebuild` | `aida.context_product_api` |
-| `aida.governed_execution` | `aida.tool_api` |
 | `aida.lineage_evidence_export` | `aida.unified_lineage_api` |
 | `aida.marketplace_discovery` | `aida.product_marketplace_api` |
 | `aida.mcp_server` | `aida.okf_export_api` |
@@ -146,13 +145,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 387 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 388 |
 | `aida.workflows.worker` | Temporal worker | 128 |
 | `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 197 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 89 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 411 of 417 modules.
+Union of all five: 412 of 418 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -161,7 +160,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 75 | 0 | 3 | 1 | 0 | 75 |
-| aida domain modules | 256 | 80 | 145 | 44 | 6 | 276 |
+| aida domain modules | 257 | 80 | 145 | 44 | 6 | 277 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -180,13 +179,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>387 reached"])
+  aida_main(["aida.main<br/>388 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>128 reached"])
   aida_workflows_scheduler(["aida.workflows.scheduler<br/>197 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>89 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>197 modules"]
+  only_aida_main["only this process<br/>198 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
@@ -245,9 +244,9 @@ push rather than described.
 | F05 the governance decision service is never reached from a router (and never imports one) | forbidden | 3 source module(s) may not import 5 module(s) |
 | R02 extracted lineage/graph/portfolio services never import a router | forbidden | 4 source module(s) may not import 5 module(s) |
 | ADR-0029 the steward agent and the rules it shares never import a router | forbidden | 14 source module(s) may not import 16 module(s) |
-| R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router | forbidden | 7 source module(s) may not import 77 module(s) |
+| R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router | forbidden | 10 source module(s) may not import 77 module(s) |
 
-13 contracts, 812 forbidden module pairs. The
+13 contracts, 1043 forbidden module pairs. The
 forbidden edges, drawn — a dashed line is an import the build rejects:
 
 ```mermaid
@@ -362,11 +361,14 @@ graph LR
   aida_tool_plans_api["aida.tool_plans_api"]
   aida_workspace_api["aida.workspace_api"]
   aida_context_product_reads["aida.context_product_reads"]
+  aida_governed_execution["aida.governed_execution"]
   aida_graphql_limits["aida.graphql_limits"]
   aida_graphql_okf["aida.graphql_okf"]
   aida_graphql_reads["aida.graphql_reads"]
+  aida_graphql_schema["aida.graphql_schema"]
   aida_okf_read_model["aida.okf_read_model"]
   aida_okf_store["aida.okf_store"]
+  aida_tool_execution["aida.tool_execution"]
   aida_security_types -.->|forbidden| aida_api
   aida_unified_lineage -.->|forbidden| aida_query_gateway
   aida_unified_lineage_api -.->|forbidden| aida_query_gateway
@@ -794,6 +796,83 @@ graph LR
   aida_context_product_reads -.->|forbidden| aida_tool_plans_api
   aida_context_product_reads -.->|forbidden| aida_unified_lineage_api
   aida_context_product_reads -.->|forbidden| aida_workspace_api
+  aida_governed_execution -.->|forbidden| aida_api
+  aida_governed_execution -.->|forbidden| aida_main
+  aida_governed_execution -.->|forbidden| aida_mcp_server
+  aida_governed_execution -.->|forbidden| aida_access_review_api
+  aida_governed_execution -.->|forbidden| aida_agent_contract_api
+  aida_governed_execution -.->|forbidden| aida_agent_contract_request_api
+  aida_governed_execution -.->|forbidden| aida_agent_roster_api
+  aida_governed_execution -.->|forbidden| aida_ai_decision_lineage_api
+  aida_governed_execution -.->|forbidden| aida_ai_governance_api
+  aida_governed_execution -.->|forbidden| aida_ai_registry_api
+  aida_governed_execution -.->|forbidden| aida_asset_description_api
+  aida_governed_execution -.->|forbidden| aida_asset_evidence_api
+  aida_governed_execution -.->|forbidden| aida_audit_export_api
+  aida_governed_execution -.->|forbidden| aida_bi_api
+  aida_governed_execution -.->|forbidden| aida_change_signals_api
+  aida_governed_execution -.->|forbidden| aida_column_description_api
+  aida_governed_execution -.->|forbidden| aida_column_documentation_api
+  aida_governed_execution -.->|forbidden| aida_compliance_api
+  aida_governed_execution -.->|forbidden| aida_composite_key_api
+  aida_governed_execution -.->|forbidden| aida_consumption_lineage_api
+  aida_governed_execution -.->|forbidden| aida_context_compiler_api
+  aida_governed_execution -.->|forbidden| aida_context_product_api
+  aida_governed_execution -.->|forbidden| aida_dbt_api
+  aida_governed_execution -.->|forbidden| aida_definition_history_api
+  aida_governed_execution -.->|forbidden| aida_delegation_api
+  aida_governed_execution -.->|forbidden| aida_description_withdrawal_api
+  aida_governed_execution -.->|forbidden| aida_detokenization_api
+  aida_governed_execution -.->|forbidden| aida_document_ingestion_api
+  aida_governed_execution -.->|forbidden| aida_engine_capability_api
+  aida_governed_execution -.->|forbidden| aida_footprint_gaps_api
+  aida_governed_execution -.->|forbidden| aida_glossary_api
+  aida_governed_execution -.->|forbidden| aida_ingestion_api
+  aida_governed_execution -.->|forbidden| aida_intelligence_api
+  aida_governed_execution -.->|forbidden| aida_lineage_agent_api
+  aida_governed_execution -.->|forbidden| aida_lineage_evidence_export_api
+  aida_governed_execution -.->|forbidden| aida_metric_suggestion_api
+  aida_governed_execution -.->|forbidden| aida_model_export_api
+  aida_governed_execution -.->|forbidden| aida_model_import_api
+  aida_governed_execution -.->|forbidden| aida_negative_knowledge_api
+  aida_governed_execution -.->|forbidden| aida_notification_api
+  aida_governed_execution -.->|forbidden| aida_observability_api
+  aida_governed_execution -.->|forbidden| aida_okf_export_api
+  aida_governed_execution -.->|forbidden| aida_okf_import_api
+  aida_governed_execution -.->|forbidden| aida_ontology_api
+  aida_governed_execution -.->|forbidden| aida_openlineage_api
+  aida_governed_execution -.->|forbidden| aida_operational_api
+  aida_governed_execution -.->|forbidden| aida_parsed_lineage_review_api
+  aida_governed_execution -.->|forbidden| aida_persona_api
+  aida_governed_execution -.->|forbidden| aida_playbooks_api
+  aida_governed_execution -.->|forbidden| aida_policy_native_sync_api
+  aida_governed_execution -.->|forbidden| aida_procedure_lineage_api
+  aida_governed_execution -.->|forbidden| aida_procedure_tool_api
+  aida_governed_execution -.->|forbidden| aida_product_marketplace_api
+  aida_governed_execution -.->|forbidden| aida_quality_agent_api
+  aida_governed_execution -.->|forbidden| aida_quality_api
+  aida_governed_execution -.->|forbidden| aida_relationship_validation_api
+  aida_governed_execution -.->|forbidden| aida_retrieval_ops_api
+  aida_governed_execution -.->|forbidden| aida_review_batch_api
+  aida_governed_execution -.->|forbidden| aida_review_queue_api
+  aida_governed_execution -.->|forbidden| aida_routine_description_api
+  aida_governed_execution -.->|forbidden| aida_runtime_contracts_api
+  aida_governed_execution -.->|forbidden| aida_search_api
+  aida_governed_execution -.->|forbidden| aida_semantic_api
+  aida_governed_execution -.->|forbidden| aida_semantic_intelligence_api
+  aida_governed_execution -.->|forbidden| aida_sql_validation_api
+  aida_governed_execution -.->|forbidden| aida_sql_workspace_api
+  aida_governed_execution -.->|forbidden| aida_steward_agent_api
+  aida_governed_execution -.->|forbidden| aida_stewardship_api
+  aida_governed_execution -.->|forbidden| aida_studio_api
+  aida_governed_execution -.->|forbidden| aida_table_family_api
+  aida_governed_execution -.->|forbidden| aida_task_agent_api
+  aida_governed_execution -.->|forbidden| aida_token_revocation_api
+  aida_governed_execution -.->|forbidden| aida_tool_agent_api
+  aida_governed_execution -.->|forbidden| aida_tool_api
+  aida_governed_execution -.->|forbidden| aida_tool_plans_api
+  aida_governed_execution -.->|forbidden| aida_unified_lineage_api
+  aida_governed_execution -.->|forbidden| aida_workspace_api
   aida_graphql_limits -.->|forbidden| aida_api
   aida_graphql_limits -.->|forbidden| aida_main
   aida_graphql_limits -.->|forbidden| aida_mcp_server
@@ -1025,6 +1104,83 @@ graph LR
   aida_graphql_reads -.->|forbidden| aida_tool_plans_api
   aida_graphql_reads -.->|forbidden| aida_unified_lineage_api
   aida_graphql_reads -.->|forbidden| aida_workspace_api
+  aida_graphql_schema -.->|forbidden| aida_api
+  aida_graphql_schema -.->|forbidden| aida_main
+  aida_graphql_schema -.->|forbidden| aida_mcp_server
+  aida_graphql_schema -.->|forbidden| aida_access_review_api
+  aida_graphql_schema -.->|forbidden| aida_agent_contract_api
+  aida_graphql_schema -.->|forbidden| aida_agent_contract_request_api
+  aida_graphql_schema -.->|forbidden| aida_agent_roster_api
+  aida_graphql_schema -.->|forbidden| aida_ai_decision_lineage_api
+  aida_graphql_schema -.->|forbidden| aida_ai_governance_api
+  aida_graphql_schema -.->|forbidden| aida_ai_registry_api
+  aida_graphql_schema -.->|forbidden| aida_asset_description_api
+  aida_graphql_schema -.->|forbidden| aida_asset_evidence_api
+  aida_graphql_schema -.->|forbidden| aida_audit_export_api
+  aida_graphql_schema -.->|forbidden| aida_bi_api
+  aida_graphql_schema -.->|forbidden| aida_change_signals_api
+  aida_graphql_schema -.->|forbidden| aida_column_description_api
+  aida_graphql_schema -.->|forbidden| aida_column_documentation_api
+  aida_graphql_schema -.->|forbidden| aida_compliance_api
+  aida_graphql_schema -.->|forbidden| aida_composite_key_api
+  aida_graphql_schema -.->|forbidden| aida_consumption_lineage_api
+  aida_graphql_schema -.->|forbidden| aida_context_compiler_api
+  aida_graphql_schema -.->|forbidden| aida_context_product_api
+  aida_graphql_schema -.->|forbidden| aida_dbt_api
+  aida_graphql_schema -.->|forbidden| aida_definition_history_api
+  aida_graphql_schema -.->|forbidden| aida_delegation_api
+  aida_graphql_schema -.->|forbidden| aida_description_withdrawal_api
+  aida_graphql_schema -.->|forbidden| aida_detokenization_api
+  aida_graphql_schema -.->|forbidden| aida_document_ingestion_api
+  aida_graphql_schema -.->|forbidden| aida_engine_capability_api
+  aida_graphql_schema -.->|forbidden| aida_footprint_gaps_api
+  aida_graphql_schema -.->|forbidden| aida_glossary_api
+  aida_graphql_schema -.->|forbidden| aida_ingestion_api
+  aida_graphql_schema -.->|forbidden| aida_intelligence_api
+  aida_graphql_schema -.->|forbidden| aida_lineage_agent_api
+  aida_graphql_schema -.->|forbidden| aida_lineage_evidence_export_api
+  aida_graphql_schema -.->|forbidden| aida_metric_suggestion_api
+  aida_graphql_schema -.->|forbidden| aida_model_export_api
+  aida_graphql_schema -.->|forbidden| aida_model_import_api
+  aida_graphql_schema -.->|forbidden| aida_negative_knowledge_api
+  aida_graphql_schema -.->|forbidden| aida_notification_api
+  aida_graphql_schema -.->|forbidden| aida_observability_api
+  aida_graphql_schema -.->|forbidden| aida_okf_export_api
+  aida_graphql_schema -.->|forbidden| aida_okf_import_api
+  aida_graphql_schema -.->|forbidden| aida_ontology_api
+  aida_graphql_schema -.->|forbidden| aida_openlineage_api
+  aida_graphql_schema -.->|forbidden| aida_operational_api
+  aida_graphql_schema -.->|forbidden| aida_parsed_lineage_review_api
+  aida_graphql_schema -.->|forbidden| aida_persona_api
+  aida_graphql_schema -.->|forbidden| aida_playbooks_api
+  aida_graphql_schema -.->|forbidden| aida_policy_native_sync_api
+  aida_graphql_schema -.->|forbidden| aida_procedure_lineage_api
+  aida_graphql_schema -.->|forbidden| aida_procedure_tool_api
+  aida_graphql_schema -.->|forbidden| aida_product_marketplace_api
+  aida_graphql_schema -.->|forbidden| aida_quality_agent_api
+  aida_graphql_schema -.->|forbidden| aida_quality_api
+  aida_graphql_schema -.->|forbidden| aida_relationship_validation_api
+  aida_graphql_schema -.->|forbidden| aida_retrieval_ops_api
+  aida_graphql_schema -.->|forbidden| aida_review_batch_api
+  aida_graphql_schema -.->|forbidden| aida_review_queue_api
+  aida_graphql_schema -.->|forbidden| aida_routine_description_api
+  aida_graphql_schema -.->|forbidden| aida_runtime_contracts_api
+  aida_graphql_schema -.->|forbidden| aida_search_api
+  aida_graphql_schema -.->|forbidden| aida_semantic_api
+  aida_graphql_schema -.->|forbidden| aida_semantic_intelligence_api
+  aida_graphql_schema -.->|forbidden| aida_sql_validation_api
+  aida_graphql_schema -.->|forbidden| aida_sql_workspace_api
+  aida_graphql_schema -.->|forbidden| aida_steward_agent_api
+  aida_graphql_schema -.->|forbidden| aida_stewardship_api
+  aida_graphql_schema -.->|forbidden| aida_studio_api
+  aida_graphql_schema -.->|forbidden| aida_table_family_api
+  aida_graphql_schema -.->|forbidden| aida_task_agent_api
+  aida_graphql_schema -.->|forbidden| aida_token_revocation_api
+  aida_graphql_schema -.->|forbidden| aida_tool_agent_api
+  aida_graphql_schema -.->|forbidden| aida_tool_api
+  aida_graphql_schema -.->|forbidden| aida_tool_plans_api
+  aida_graphql_schema -.->|forbidden| aida_unified_lineage_api
+  aida_graphql_schema -.->|forbidden| aida_workspace_api
   aida_okf_read_model -.->|forbidden| aida_api
   aida_okf_read_model -.->|forbidden| aida_main
   aida_okf_read_model -.->|forbidden| aida_mcp_server
@@ -1179,6 +1335,83 @@ graph LR
   aida_okf_store -.->|forbidden| aida_tool_plans_api
   aida_okf_store -.->|forbidden| aida_unified_lineage_api
   aida_okf_store -.->|forbidden| aida_workspace_api
+  aida_tool_execution -.->|forbidden| aida_api
+  aida_tool_execution -.->|forbidden| aida_main
+  aida_tool_execution -.->|forbidden| aida_mcp_server
+  aida_tool_execution -.->|forbidden| aida_access_review_api
+  aida_tool_execution -.->|forbidden| aida_agent_contract_api
+  aida_tool_execution -.->|forbidden| aida_agent_contract_request_api
+  aida_tool_execution -.->|forbidden| aida_agent_roster_api
+  aida_tool_execution -.->|forbidden| aida_ai_decision_lineage_api
+  aida_tool_execution -.->|forbidden| aida_ai_governance_api
+  aida_tool_execution -.->|forbidden| aida_ai_registry_api
+  aida_tool_execution -.->|forbidden| aida_asset_description_api
+  aida_tool_execution -.->|forbidden| aida_asset_evidence_api
+  aida_tool_execution -.->|forbidden| aida_audit_export_api
+  aida_tool_execution -.->|forbidden| aida_bi_api
+  aida_tool_execution -.->|forbidden| aida_change_signals_api
+  aida_tool_execution -.->|forbidden| aida_column_description_api
+  aida_tool_execution -.->|forbidden| aida_column_documentation_api
+  aida_tool_execution -.->|forbidden| aida_compliance_api
+  aida_tool_execution -.->|forbidden| aida_composite_key_api
+  aida_tool_execution -.->|forbidden| aida_consumption_lineage_api
+  aida_tool_execution -.->|forbidden| aida_context_compiler_api
+  aida_tool_execution -.->|forbidden| aida_context_product_api
+  aida_tool_execution -.->|forbidden| aida_dbt_api
+  aida_tool_execution -.->|forbidden| aida_definition_history_api
+  aida_tool_execution -.->|forbidden| aida_delegation_api
+  aida_tool_execution -.->|forbidden| aida_description_withdrawal_api
+  aida_tool_execution -.->|forbidden| aida_detokenization_api
+  aida_tool_execution -.->|forbidden| aida_document_ingestion_api
+  aida_tool_execution -.->|forbidden| aida_engine_capability_api
+  aida_tool_execution -.->|forbidden| aida_footprint_gaps_api
+  aida_tool_execution -.->|forbidden| aida_glossary_api
+  aida_tool_execution -.->|forbidden| aida_ingestion_api
+  aida_tool_execution -.->|forbidden| aida_intelligence_api
+  aida_tool_execution -.->|forbidden| aida_lineage_agent_api
+  aida_tool_execution -.->|forbidden| aida_lineage_evidence_export_api
+  aida_tool_execution -.->|forbidden| aida_metric_suggestion_api
+  aida_tool_execution -.->|forbidden| aida_model_export_api
+  aida_tool_execution -.->|forbidden| aida_model_import_api
+  aida_tool_execution -.->|forbidden| aida_negative_knowledge_api
+  aida_tool_execution -.->|forbidden| aida_notification_api
+  aida_tool_execution -.->|forbidden| aida_observability_api
+  aida_tool_execution -.->|forbidden| aida_okf_export_api
+  aida_tool_execution -.->|forbidden| aida_okf_import_api
+  aida_tool_execution -.->|forbidden| aida_ontology_api
+  aida_tool_execution -.->|forbidden| aida_openlineage_api
+  aida_tool_execution -.->|forbidden| aida_operational_api
+  aida_tool_execution -.->|forbidden| aida_parsed_lineage_review_api
+  aida_tool_execution -.->|forbidden| aida_persona_api
+  aida_tool_execution -.->|forbidden| aida_playbooks_api
+  aida_tool_execution -.->|forbidden| aida_policy_native_sync_api
+  aida_tool_execution -.->|forbidden| aida_procedure_lineage_api
+  aida_tool_execution -.->|forbidden| aida_procedure_tool_api
+  aida_tool_execution -.->|forbidden| aida_product_marketplace_api
+  aida_tool_execution -.->|forbidden| aida_quality_agent_api
+  aida_tool_execution -.->|forbidden| aida_quality_api
+  aida_tool_execution -.->|forbidden| aida_relationship_validation_api
+  aida_tool_execution -.->|forbidden| aida_retrieval_ops_api
+  aida_tool_execution -.->|forbidden| aida_review_batch_api
+  aida_tool_execution -.->|forbidden| aida_review_queue_api
+  aida_tool_execution -.->|forbidden| aida_routine_description_api
+  aida_tool_execution -.->|forbidden| aida_runtime_contracts_api
+  aida_tool_execution -.->|forbidden| aida_search_api
+  aida_tool_execution -.->|forbidden| aida_semantic_api
+  aida_tool_execution -.->|forbidden| aida_semantic_intelligence_api
+  aida_tool_execution -.->|forbidden| aida_sql_validation_api
+  aida_tool_execution -.->|forbidden| aida_sql_workspace_api
+  aida_tool_execution -.->|forbidden| aida_steward_agent_api
+  aida_tool_execution -.->|forbidden| aida_stewardship_api
+  aida_tool_execution -.->|forbidden| aida_studio_api
+  aida_tool_execution -.->|forbidden| aida_table_family_api
+  aida_tool_execution -.->|forbidden| aida_task_agent_api
+  aida_tool_execution -.->|forbidden| aida_token_revocation_api
+  aida_tool_execution -.->|forbidden| aida_tool_agent_api
+  aida_tool_execution -.->|forbidden| aida_tool_api
+  aida_tool_execution -.->|forbidden| aida_tool_plans_api
+  aida_tool_execution -.->|forbidden| aida_unified_lineage_api
+  aida_tool_execution -.->|forbidden| aida_workspace_api
 ```
 
 ## Most-imported modules
@@ -1190,13 +1423,13 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 228 |
-| `aida.security` | aida domain modules | 131 |
-| `aida.schemas` | aida domain modules | 118 |
+| `aida.models` | aida domain modules | 229 |
+| `aida.security` | aida domain modules | 132 |
+| `aida.schemas` | aida domain modules | 119 |
 | `aida.db` | aida domain modules | 109 |
-| `aida.config` | aida domain modules | 101 |
-| `aida.events` | aida domain modules | 97 |
-| `aida.context` | aida domain modules | 72 |
+| `aida.config` | aida domain modules | 102 |
+| `aida.events` | aida domain modules | 98 |
+| `aida.context` | aida domain modules | 73 |
 | `aida.envelope_models` | aida domain modules | 43 |
 | `atlas.platform.config` | atlas.platform | 32 |
 | `aida.authorization_gate` | aida domain modules | 27 |
