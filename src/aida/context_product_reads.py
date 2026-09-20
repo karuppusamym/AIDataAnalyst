@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import Select, false, func, or_, select
+from sqlalchemy import Select, exists, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -389,21 +389,19 @@ async def context_product_listing(
     elif not consumer_roles_apply:
         visibility = (ContextProductVersion.status == "PUBLISHED",)
     else:
-        statement = statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        ).distinct()
-        count_statement = count_statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        )
-        visibility = (
-            ContextProductVersion.status == "PUBLISHED",
+        # EXISTS, not a join to the bindings with `.distinct()`. The join needed the DISTINCT to
+        # collapse a version bound to two roles the caller holds, and DISTINCT over this select
+        # covers every column of both entities -- including the version's `JSON` id lists, for
+        # which PostgreSQL has no equality operator (`could not identify an equality operator
+        # for type json`). That was a 500 for every non-lifecycle reader (an Analyst or Viewer
+        # asking for their product list, i.e. the Ask picker), and SQLite, where every test of
+        # this listing ran, accepts DISTINCT over JSON. One row per version needs neither.
+        consumer_binding = exists().where(
+            ContextProductRoleBinding.context_product_version_id == ContextProductVersion.id,
             ContextProductRoleBinding.organization_id == project.organization_id,
             ContextProductRoleBinding.role_name.in_(context.roles),
         )
+        visibility = (ContextProductVersion.status == "PUBLISHED", consumer_binding)
     return ProductListing(
         statement=statement.where(*filters, *visibility),
         count_statement=count_statement.where(*filters, *visibility),

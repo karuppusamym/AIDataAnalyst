@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -409,20 +409,18 @@ async def list_context_product_versions(
     count_statement = select(func.count()).select_from(ContextProductVersion)
     visibility: tuple[ColumnElement[bool], ...] = ()
     if not _can_read_lifecycle(context):
-        statement = statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        ).distinct()
-        count_statement = count_statement.join(
-            ContextProductRoleBinding,
-            ContextProductRoleBinding.context_product_version_id
-            == ContextProductVersion.id,
-        )
+        # EXISTS rather than a join plus `.distinct()`: DISTINCT over the whole version row
+        # includes its `JSON` id lists, which PostgreSQL cannot compare (a 500 for every
+        # non-lifecycle reader), and the count joined without DISTINCT, so a version bound to
+        # two roles the caller holds was counted twice. One row per version needs neither.
         visibility = (
             ContextProductVersion.status == "PUBLISHED",
-            ContextProductRoleBinding.organization_id == product.organization_id,
-            ContextProductRoleBinding.role_name.in_(context.roles),
+            exists().where(
+                ContextProductRoleBinding.context_product_version_id
+                == ContextProductVersion.id,
+                ContextProductRoleBinding.organization_id == product.organization_id,
+                ContextProductRoleBinding.role_name.in_(context.roles),
+            ),
         )
     versions = (
         await session.scalars(
