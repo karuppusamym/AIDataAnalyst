@@ -7,7 +7,7 @@ stack -- a query PostgreSQL rejects and SQLite accepts (Analyst and Viewer only)
 from every column of a table, and a required field a nullable column does not fill -- and no test
 saw any of them. Calling every read route as each least-privilege role, against real rows, did.
 
-    python scripts/live_role_sweep.py [OUT.json]
+    python scripts/live_role_sweep.py [OUT.json]    # default: role_sweep.json
 
 What it does and does not do:
 
@@ -32,6 +32,7 @@ Override the container or the API address with AIDA_SWEEP_POSTGRES and AIDA_SWEE
 # ruff: noqa: S608
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -40,6 +41,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from typing import Any
 
 BASE = os.environ.get("AIDA_SWEEP_BASE_URL", "http://localhost:8000")
@@ -236,8 +238,26 @@ def call(url: str, role: str, org: str) -> tuple[int, str]:
         return -1, str(error)[:80]
 
 
-def main() -> int:
-    out = sys.argv[1] if len(sys.argv) > 1 else "role_sweep.json"
+def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    """The one argument is where the report goes. Parsed before anything touches the stack, so
+    `--help` -- or a typo'd flag -- costs no request, and is never mistaken for a file name."""
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n\n")[0],
+        epilog="Override the container or the API address with AIDA_SWEEP_POSTGRES and "
+        "AIDA_SWEEP_BASE_URL.",
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default="role_sweep.json",
+        help="where to write the status of every route as every role, as JSON "
+        "(default: %(default)s in the current directory)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    out = parse_args(argv).output
     ids, org, resolved_from = resolve_ids()
     spec = json.load(
         urllib.request.urlopen(f"{BASE}/openapi.json", timeout=30)  # noqa: S310 -- scheme checked above
