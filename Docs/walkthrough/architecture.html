@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas architecture walkthrough</title>
+<style>
+:root{
+  --ground:#F4F6F7; --surface:#FFFFFF; --sunken:#EBEFF1; --ink:#13202A; --muted:#54656F; --line:#D5DDE2;
+  --accent:#0B6B6B; --accent-ink:#FFFFFF; --accent-soft:#DDEFEE;
+  --allow:#1A7048; --allow-soft:#DFF1E7; --deny:#B3372B; --deny-soft:#F8E3E0;
+  --warn:#855600; --warn-soft:#F8EBCB; --info:#2F5F9E; --info-soft:#E2EBF7;
+  --mono:ui-monospace,"Cascadia Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+    --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+    --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+    --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+  --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+  --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+  --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
+a{color:var(--accent);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+code,.mono{font-family:var(--mono);font-size:.88em}
+code{background:var(--sunken);padding:.1em .35em;border-radius:3px;overflow-wrap:anywhere}
+h1,h2,h3{line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(1.65rem,3.4vw,2.3rem);font-weight:650;letter-spacing:-.01em}
+h2{font-size:1.3rem;font-weight:650;margin-top:2.4rem;padding-top:.4rem}
+h3{font-size:1.02rem;font-weight:650;margin-top:1.4rem}
+p{margin:.6rem 0;max-width:72ch}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:16px;padding-block:20px 72px}
+/* top bar */
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.bar-in{max-width:1080px;margin:0 auto;padding:8px 16px;display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:.78rem;color:var(--accent);margin-right:6px}
+.bar nav{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+.bar nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:.9rem}
+.bar nav a:hover{background:var(--sunken);color:var(--ink)}
+.bar nav a[aria-current="page"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.theme{margin-left:auto;background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:4px 10px;font:inherit;font-size:.82rem;cursor:pointer}
+.theme:hover{color:var(--ink);border-color:var(--muted)}
+/* header */
+.eyebrow{font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+.lede{font-size:1.05rem;color:var(--muted);max-width:68ch;margin-top:.7rem}
+.stamp{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:1rem;font-size:.82rem;color:var(--muted)}
+.stamp b{color:var(--ink);font-weight:600}
+/* pills */
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.74rem;font-weight:650;letter-spacing:.02em;white-space:nowrap;border:1px solid transparent;vertical-align:baseline}
+.p-allow{background:var(--allow-soft);color:var(--allow)}
+.p-deny{background:var(--deny-soft);color:var(--deny)}
+.p-warn{background:var(--warn-soft);color:var(--warn)}
+.p-info{background:var(--info-soft);color:var(--info)}
+.p-mute{background:var(--sunken);color:var(--muted)}
+.p-accent{background:var(--accent-soft);color:var(--accent)}
+/* callouts */
+.note{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--surface);padding:10px 14px;border-radius:6px;margin:1rem 0;max-width:80ch}
+.note.warn{border-left-color:var(--warn)} .note.deny{border-left-color:var(--deny)} .note.allow{border-left-color:var(--allow)}
+.note b:first-child{display:block;margin-bottom:2px}
+/* grids and tiles */
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin:1rem 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.tile .k{font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600}
+.tile .v{font-size:1.7rem;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2;margin-top:2px}
+.tile .s{font-size:.82rem;color:var(--muted);margin-top:2px}
+/* tables */
+.tbox{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:.8rem 0}
+table{border-collapse:collapse;width:100%;font-size:.88rem;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;background:var(--sunken);font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.c,th.c{text-align:center}
+.matrix td.c{padding:5px 4px}
+td.hl,th.hl{background:var(--accent-soft)}
+.cell{display:inline-block;min-width:1.7em;padding:0 4px;border-radius:4px;font-weight:650;font-size:.8rem}
+.cell.a{background:var(--allow-soft);color:var(--allow)} .cell.d{background:var(--sunken);color:var(--muted)} .cell.p{background:var(--warn-soft);color:var(--warn)}
+/* details */
+details{background:var(--surface);border:1px solid var(--line);border-radius:8px;margin:.6rem 0}
+summary{cursor:pointer;padding:9px 14px;font-weight:600;list-style-position:inside}
+details>div{padding:2px 14px 12px}
+/* controls */
+.controls{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:.8rem 0}
+.controls label{font-size:.82rem;color:var(--muted);display:flex;gap:6px;align-items:center}
+select,input[type=search]{font:inherit;font-size:.88rem;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 11px;font:inherit;font-size:.82rem;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+/* figures */
+figure{margin:1.2rem 0}
+figure svg{max-width:100%;height:auto;display:block}
+figcaption{font-size:.84rem;color:var(--muted);margin-top:6px;max-width:80ch}
+.svgbox{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px}
+.svgbox svg{min-width:640px}
+svg text{fill:currentColor;font-family:var(--sans);font-size:12px}
+svg .t-mute{fill:var(--muted)} svg .t-b{font-weight:650} svg .t-mono{font-family:var(--mono);font-size:11px}
+svg .box{fill:var(--surface);stroke:var(--line);stroke-width:1.2}
+svg .box-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+svg .box-w{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
+svg .box-d{fill:var(--deny-soft);stroke:var(--deny);stroke-width:1.2}
+svg .box-i{fill:var(--info-soft);stroke:var(--info);stroke-width:1.2}
+svg .lane{fill:var(--sunken);stroke:none}
+svg .edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+svg .edge-a{stroke:var(--accent);stroke-width:1.8;fill:none}
+svg .edge-d{stroke:var(--deny);stroke-width:1.6;fill:none;stroke-dasharray:5 3}
+ol.steps{padding-left:1.2rem} ol.steps li{margin:.35rem 0;max-width:80ch}
+.kbd{font-family:var(--mono);font-size:.82em;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--surface)}
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+@media (max-width:560px){ .bar nav a{padding:5px 8px;font-size:.85rem} th,td{padding:6px 7px} }
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} }
+@media print{ .bar,.theme,.controls{display:none} body{background:#fff;color:#000} .wrap{padding:0} details{break-inside:avoid} details:not([open])>div{display:block} }
+</style>
+</head>
+<body>
+<header class="bar"><div class="bar-in"><span class="brand">Atlas walkthrough</span><nav aria-label="Walkthrough pages"><a href="index.html">Start</a><a href="architecture.html" aria-current="page">Architecture</a><a href="roles-and-users.html">Roles and users</a><a href="demo-script.html">Demo script</a><a href="readiness.html">Readiness</a></nav><button id="theme" class="theme" type="button">Toggle theme</button></div></header>
+<main class="wrap">
+<p class="eyebrow">Architecture</p>
+<h1>How Atlas is built, in ten minutes</h1>
+<p class="lede">Five processes, one authoritative store and a gate on every action. This page shows what runs, what each part is for, and where the design is ahead of the code.</p>
+<div class="stamp"><span>Measured at <b>787f84b</b></span><span>Date <b>2026-09-20</b></span><span>Generated architecture map: <b>current</b></span></div>
+
+<nav class="chips" aria-label="On this page" style="margin-top:1rem">
+  <a class="chip" href="#glance" style="text-decoration:none">At a glance</a>
+  <a class="chip" href="#processes" style="text-decoration:none">Five processes</a>
+  <a class="chip" href="#stores" style="text-decoration:none">Stores</a>
+  <a class="chip" href="#ask" style="text-decoration:none">One governed question</a>
+  <a class="chip" href="#invariants" style="text-decoration:none">Nine invariants</a>
+  <a class="chip" href="#code" style="text-decoration:none">Code layout</a>
+  <a class="chip" href="#gaps" style="text-decoration:none">Designed vs built</a>
+</nav>
+
+<div class="grid">
+  <div class="tile"><div class="k">Processes</div><div class="v">5 + UI</div><div class="s">api, metadata-worker, outbox-publisher, graph-projector, fleet-scheduler</div></div>
+  <div class="tile"><div class="k">Source modules</div><div class="v">418</div><div class="s">2,612 import edges, 13 import-linter contracts</div></div>
+  <div class="tile"><div class="k">API surface</div><div class="v">440 paths</div><div class="s">508 operations, 554 surfaces incl. GraphQL and MCP</div></div>
+  <div class="tile"><div class="k">Tests collected</div><div class="v">14,458</div><div class="s">collect-only on 2026-09-20; not a pass count</div></div>
+</div>
+
+<h2 id="glance">At a glance</h2>
+<p>One FastAPI application does the synchronous work. Four background processes do the rest. Everything that matters is written to PostgreSQL first; the graph, the event topic and the vector index are rebuildable copies.</p>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 1090 566" role="img" aria-label="Atlas runtime: callers reach one API process; the API writes state, outbox and audit to PostgreSQL in one transaction; four background processes read PostgreSQL and feed Temporal, Redpanda and Neo4j; source databases are reached only through the query gateway.">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+
+<text x="8" y="52" class="t-mute">Callers</text>
+<text x="8" y="176" class="t-mute">API process</text>
+<text x="8" y="306" class="t-mute">Authoritative</text>
+<text x="8" y="322" class="t-mute">state</text>
+<text x="8" y="404" class="t-mute">Background</text>
+<text x="8" y="420" class="t-mute">processes</text>
+<text x="8" y="508" class="t-mute">Derived or</text>
+<text x="8" y="524" class="t-mute">optional</text>
+
+<rect class="box" x="140" y="24" width="230" height="48" rx="6"/>
+<text x="255" y="44" text-anchor="middle" class="t-b">ui-next (browser)</text>
+<text x="255" y="60" text-anchor="middle" class="t-mute">nginx on :3001</text>
+<rect class="box" x="385" y="24" width="230" height="48" rx="6"/>
+<text x="500" y="44" text-anchor="middle" class="t-b">Agents</text>
+<text x="500" y="60" text-anchor="middle" class="t-mute">MCP at /mcp</text>
+<rect class="box" x="630" y="24" width="250" height="48" rx="6"/>
+<text x="755" y="44" text-anchor="middle" class="t-b">Applications</text>
+<text x="755" y="60" text-anchor="middle" class="t-mute">REST /v1 · GraphQL /graphql</text>
+<line class="edge" x1="255" y1="72" x2="255" y2="108" marker-end="url(#ah)"/>
+<line class="edge" x1="500" y1="72" x2="500" y2="108" marker-end="url(#ah)"/>
+<line class="edge" x1="755" y1="72" x2="755" y2="108" marker-end="url(#ah)"/>
+
+<rect class="box-a" x="140" y="110" width="740" height="126" rx="8"/>
+<text x="154" y="130" class="t-b">api · aida.main · one FastAPI app, a modular monolith</text>
+<rect class="box" x="154" y="146" width="170" height="78" rx="6"/>
+<text x="239" y="168" text-anchor="middle" class="t-b">Identity · tenancy</text>
+<text x="239" y="186" text-anchor="middle" class="t-mute">15 platform roles</text>
+<text x="239" y="202" text-anchor="middle" class="t-mute">organization boundary</text>
+<rect class="box" x="336" y="146" width="170" height="78" rx="6"/>
+<text x="421" y="168" text-anchor="middle" class="t-b">Policy · governance</text>
+<text x="421" y="186" text-anchor="middle" class="t-mute">maker is not checker</text>
+<text x="421" y="202" text-anchor="middle" class="t-mute">fail closed</text>
+<rect class="box" x="518" y="146" width="176" height="78" rx="6"/>
+<text x="606" y="168" text-anchor="middle" class="t-b">Agent runtime</text>
+<text x="606" y="186" text-anchor="middle" class="t-mute">model gateway</text>
+<text x="606" y="202" text-anchor="middle" class="t-mute">proposals, never actions</text>
+<rect class="box" x="706" y="146" width="160" height="78" rx="6"/>
+<text x="786" y="168" text-anchor="middle" class="t-b">Query gateway</text>
+<text x="786" y="186" text-anchor="middle" class="t-mute">the only path to</text>
+<text x="786" y="202" text-anchor="middle" class="t-mute">source SQL</text>
+
+<rect class="box-i" x="940" y="112" width="130" height="52" rx="6"/>
+<text x="1005" y="134" text-anchor="middle" class="t-b">Source databases</text>
+<text x="1005" y="150" text-anchor="middle" class="t-mute">read-only, bounded</text>
+<line class="edge-a" x1="880" y1="138" x2="940" y2="138" marker-end="url(#ah)"/>
+<text x="910" y="130" text-anchor="middle" class="t-mute" style="font-size:10px">SQL</text>
+<rect class="box-i" x="940" y="182" width="130" height="52" rx="6"/>
+<text x="1005" y="204" text-anchor="middle" class="t-b">Model providers</text>
+<text x="1005" y="220" text-anchor="middle" class="t-mute">approved routes only</text>
+<line class="edge" x1="880" y1="208" x2="940" y2="208" marker-end="url(#ah)"/>
+<text x="910" y="200" text-anchor="middle" class="t-mute" style="font-size:10px">prompts</text>
+
+<line class="edge-a" x1="510" y1="236" x2="510" y2="276" marker-end="url(#ah)"/>
+<text x="522" y="262" class="t-mute">one transaction: state + outbox + audit</text>
+
+<rect class="box-a" x="140" y="278" width="740" height="56" rx="8"/>
+<text x="154" y="300" class="t-b">PostgreSQL · the only authoritative store</text>
+<text x="154" y="320" class="t-mute">state · outbox · audit ledger · embeddings (bytea) · Temporal's database is the same server</text>
+
+<line class="edge" x1="228" y1="374" x2="228" y2="334" marker-end="url(#ah)"/>
+<line class="edge" x1="416" y1="374" x2="416" y2="334" marker-end="url(#ah)"/>
+<line class="edge" x1="604" y1="374" x2="604" y2="334" marker-end="url(#ah)"/>
+<line class="edge" x1="792" y1="374" x2="792" y2="334" marker-end="url(#ah)"/>
+<text x="238" y="358" class="t-mute" style="font-size:10px">each background process reads PostgreSQL</text>
+
+<rect class="box" x="140" y="376" width="176" height="68" rx="6"/>
+<text x="228" y="396" text-anchor="middle" class="t-b">metadata-worker</text>
+<text x="228" y="412" text-anchor="middle" class="t-mute">scans · profiling · drafting</text>
+<text x="228" y="428" text-anchor="middle" class="t-mute">Temporal queue aida-metadata</text>
+<rect class="box" x="328" y="376" width="176" height="68" rx="6"/>
+<text x="416" y="396" text-anchor="middle" class="t-b">outbox-publisher</text>
+<text x="416" y="412" text-anchor="middle" class="t-mute">outbox rows to the topic</text>
+<text x="416" y="428" text-anchor="middle" class="t-mute">retry, then DEAD_LETTER</text>
+<rect class="box" x="516" y="376" width="176" height="68" rx="6"/>
+<text x="604" y="396" text-anchor="middle" class="t-b">graph-projector</text>
+<text x="604" y="412" text-anchor="middle" class="t-mute">PostgreSQL into Neo4j</text>
+<text x="604" y="428" text-anchor="middle" class="t-mute">a rebuildable projection</text>
+<rect class="box-w" x="704" y="376" width="176" height="68" rx="6"/>
+<text x="792" y="396" text-anchor="middle" class="t-b">fleet-scheduler</text>
+<text x="792" y="412" text-anchor="middle" class="t-mute">23 periodic passes</text>
+<text x="792" y="428" text-anchor="middle" class="t-mute">run one replica only</text>
+
+<line class="edge" x1="228" y1="444" x2="228" y2="484" marker-end="url(#ah)"/>
+<line class="edge" x1="416" y1="444" x2="416" y2="484" marker-end="url(#ah)"/>
+<line class="edge" x1="604" y1="444" x2="604" y2="484" marker-end="url(#ah)"/>
+<rect class="box" x="140" y="486" width="176" height="56" rx="6"/>
+<text x="228" y="508" text-anchor="middle" class="t-b">Temporal</text>
+<text x="228" y="524" text-anchor="middle" class="t-mute">2 workflows defined</text>
+<rect class="box" x="328" y="486" width="176" height="56" rx="6"/>
+<text x="416" y="508" text-anchor="middle" class="t-b">Redpanda (Kafka)</text>
+<text x="416" y="524" text-anchor="middle" class="t-mute">topic aida.platform.events.v1</text>
+<rect class="box" x="516" y="486" width="176" height="56" rx="6"/>
+<text x="604" y="508" text-anchor="middle" class="t-b">Neo4j</text>
+<text x="604" y="524" text-anchor="middle" class="t-mute">graph, never read as truth</text>
+<rect class="box" x="704" y="486" width="176" height="56" rx="6" stroke-dasharray="4 3"/>
+<text x="792" y="508" text-anchor="middle" class="t-b">Redis · object store</text>
+<text x="792" y="524" text-anchor="middle" class="t-mute">compose profiles, off by default</text>
+</svg>
+</div>
+<figcaption>The default <code>docker compose up</code> starts ten services, including three of the five processes: <code>outbox-publisher</code> needs the <code>events</code> or <code>graph</code> profile and <code>graph-projector</code> needs <code>graph</code>. Redpanda, Neo4j, Redis, MinIO and Prometheus are profiles too, and <code>--profile full</code> starts 19 of the 20 services. The scheduler box is amber because nothing elects a leader: run a single replica. Source scans use the connectors' structured discovery calls, not caller-supplied SQL, which is why they sit outside the query gateway.</figcaption>
+</figure>
+
+<h2 id="processes">Five processes</h2>
+<div class="tbox"><table>
+<thead><tr><th>Process</th><th>Compose service</th><th>What it does</th><th>Worth knowing</th></tr></thead>
+<tbody>
+<tr><td><b>API</b></td><td class="mono">api :8000</td><td>REST <code>/v1</code>, GraphQL, MCP. Authenticates, applies policy, runs the model and query gateways.</td><td>Readiness gates on PostgreSQL only. <code>/docs</code>, <code>/metrics</code> and <code>/health/ready</code> are unauthenticated.</td></tr>
+<tr><td><b>metadata-worker</b></td><td class="mono">metadata-worker</td><td>Temporal worker on one queue (<code>aida-metadata</code>): scans, profiling, ingestion batches. Also runs a Kafka side-car that drafts descriptions for newly created tables.</td><td><span class="pill p-warn">Gap</span> The side-car is on by default but the default stack has no Redpanda, so it fails quietly at start.</td></tr>
+<tr><td><b>outbox-publisher</b></td><td class="mono">outbox-publisher<br><span class="pill p-mute">profile: events, graph</span></td><td>Reads the PostgreSQL outbox with <code>SKIP LOCKED</code> and publishes to one topic, with backoff and a <code>DEAD_LETTER</code> status.</td><td>Emits a 7-field envelope; the design describes a richer one.</td></tr>
+<tr><td><b>graph-projector</b></td><td class="mono">graph-projector<br><span class="pill p-mute">profile: graph</span></td><td>Projects PostgreSQL state into Neo4j. A pure function of PostgreSQL, so Neo4j can be rebuilt.</td><td>The rebuild drill has never been run.</td></tr>
+<tr><td><b>fleet-scheduler</b></td><td class="mono">fleet-scheduler</td><td>Scan-policy admission plus 23 periodic passes: owner routing, graph reconciliation, vector rebuild, freshness, reaper, task-agent runs and the delivery worker.</td><td><span class="pill p-warn">Gap</span> No leader election. A second replica would double-run the passes that use in-process cadence.</td></tr>
+</tbody></table></div>
+
+<h2 id="stores">Stores</h2>
+<div class="tbox"><table>
+<thead><tr><th>Store</th><th>Role</th><th>In the default stack?</th></tr></thead>
+<tbody>
+<tr><td><b>PostgreSQL</b></td><td>Authoritative state, outbox, audit ledger, embeddings as <code>bytea</code> (brute-force search behind a port). Temporal shares the server.</td><td><span class="pill p-allow">Yes</span></td></tr>
+<tr><td><b>Temporal</b></td><td>Workflow engine for scans and profiling. Two workflows are defined.</td><td><span class="pill p-allow">Yes</span></td></tr>
+<tr><td><b>Neo4j</b></td><td>Graph projection for lineage and relationships. Never read for an authorization or approval decision.</td><td><span class="pill p-mute">Profile: graph</span></td></tr>
+<tr><td><b>Redpanda</b></td><td>The event topic <code>aida.platform.events.v1</code>.</td><td><span class="pill p-mute">Profile: events</span></td></tr>
+<tr><td><b>Redis</b></td><td>Lineage cache, tenant concurrency and request budgets.</td><td><span class="pill p-mute">Profile: cache</span></td></tr>
+<tr><td><b>Object store</b></td><td>The audit WORM archive only (S3 Object Lock). Default backend is <code>none</code>; verified against MinIO only.</td><td><span class="pill p-mute">Profile: archive</span></td></tr>
+<tr><td><b>pgvector</b></td><td>Extension installed, adapter deliberately refuses (<code>PGVECTOR_ADAPTER_NOT_IMPLEMENTED</code>).</td><td><span class="pill p-deny">Not used</span></td></tr>
+</tbody></table></div>
+
+<h2 id="ask">One governed question, end to end</h2>
+<p>Ask a question in plain English and the platform walks a fixed ladder. Each rung names its state, so an audit record can say exactly how far a request got. Policy and prompt-risk screening happen <em>before</em> retrieval, and the query gateway sits between every model output and the source.</p>
+<div class="tbox"><table>
+<thead><tr><th>State</th><th>Who acts</th><th>What has to be true to continue</th></tr></thead>
+<tbody>
+<tr><td class="mono">AUTHORIZED</td><td>API</td><td>The caller has a verified identity and an organization.</td></tr>
+<tr><td class="mono">SCREENED</td><td>Prompt-risk screen</td><td>The question passes. A denial stops here, before any retrieval.</td></tr>
+<tr><td class="mono">RESOLVED</td><td>Policy, retrieval, graph</td><td>Concepts, metrics and join paths resolve to objects this caller may see.</td></tr>
+<tr><td class="mono">PLANNED</td><td>Retrieval</td><td>Context is ranked and policy-filtered; the model sees metadata only.</td></tr>
+<tr><td class="mono">GENERATED</td><td>Model gateway</td><td>A schema-validated SQL proposal comes back from an approved route. It is a proposal, never a command.</td></tr>
+<tr><td class="mono">VALIDATED</td><td>Query gateway</td><td>The SQL is parsed to an AST and every referenced object is checked against policy.</td></tr>
+<tr><td class="mono">COSTED</td><td>Query gateway</td><td><code>EXPLAIN</code> on the source returns a plan and an estimated cost.</td></tr>
+<tr><td class="mono">EXECUTED</td><td>Query gateway</td><td>Read-only and bounded; results are masked by classification and carry lineage.</td></tr>
+<tr><td class="mono">EXPLAINED</td><td>Model gateway, audit</td><td>The explanation, evidence, versions and decision lineage are recorded.</td></tr>
+</tbody></table></div>
+<p>When an approved tool already answers the question, the platform reuses it instead of generating SQL. That is the preferred path.</p>
+
+<h2 id="invariants">Nine invariants, and the test that holds each one</h2>
+<p>These are the rules the design refuses to trade away. Each has an enforcement point and a named test, so a change that breaks one fails a build rather than a review.</p>
+<div class="tbox"><table>
+<thead><tr><th>#</th><th>Invariant</th><th>Held by</th><th>Test</th><th>Limit, stated honestly</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><b>One authoritative store.</b> PostgreSQL is truth; Neo4j, vector and search indexes are rebuildable.</td><td>Projectors write projections; no dual writes.</td><td class="mono">test_inv1_single_authoritative_store.py</td><td>Neo4j correctness is not proven (none runs in the suite). The vector index is also written from a request route and the scheduler, so the rule is really about the graph.</td></tr>
+<tr><td>2</td><td><b>One execution choke point.</b> No source SQL except through the query gateway.</td><td>Type system, an import-linter contract, an AST scan.</td><td class="mono">test_no_connector_execution_outside_gateway</td><td>Strong: three independent layers.</td></tr>
+<tr><td>3</td><td><b>Model output is never authority.</b></td><td>Typed proposals; no conversion to a command.</td><td class="mono">test_model_output_types_are_inert</td><td>None recorded.</td></tr>
+<tr><td>4</td><td><b>Fail closed.</b></td><td>Production config refuses dev identity, <code>env://</code> secrets, weak keys, insecure JWKS.</td><td class="mono">test_production_config_fail_closed</td><td>Workspace authorization ships observing, not enforcing, and <code>staging</code> is unguarded.</td></tr>
+<tr><td>5</td><td><b>Tenant isolation is total.</b></td><td>Per-query scoping; a route-table-driven test.</td><td class="mono">test_cross_tenant_denial</td><td>Application-level only: no row-level security, and the planned scoped-repository base class does not exist.</td></tr>
+<tr><td>6</td><td><b>Value-freedom.</b> No raw source values in control-plane state.</td><td>Validators and SQL redaction.</td><td class="mono">test_inv6_value_freedom.py</td><td>Includes a meta-test that fails if the scan can no longer notice a leak.</td></tr>
+<tr><td>7</td><td><b>Attributability.</b> Every mutation writes an audit record in the same transaction.</td><td>Unit-of-work commit path.</td><td class="mono">test_inv7_attributability.py</td><td>The archive that would make it immutable is off by default.</td></tr>
+<tr><td>8</td><td><b>Maker is not checker.</b></td><td>One platform approval service.</td><td class="mono">test_self_approval_denied</td><td>Access policies and workspace members are tier T3, yet one caller can create and activate them with no second person; several other decide routes carry their own check (R11-AUD02).</td></tr>
+<tr><td>9</td><td><b>Honest capability reporting.</b></td><td>Capability flags derive from certification.</td><td class="mono">test_inv9_capability_honesty.py</td><td>Only PostgreSQL and SQL Server carry live certification evidence.</td></tr>
+</tbody></table></div>
+
+<h2 id="code">Code layout</h2>
+<p>The design describes 21 bounded contexts. Six exist as real packages under <code>src/atlas/modules</code>; the rest of the behaviour still lives in the flat <code>src/aida</code> package. The map below is generated from the source tree, so it cannot drift.</p>
+<div class="tbox"><table>
+<thead><tr><th>Group</th><th class="c">Modules</th><th>Share</th></tr></thead>
+<tbody>
+<tr><td>aida domain modules</td><td class="c">277</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:66%"></div></td></tr>
+<tr><td>aida routers (<code>*_api</code>)</td><td class="c">75</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:18%"></div></td></tr>
+<tr><td>aida.connectors</td><td class="c">14</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:3.4%"></div></td></tr>
+<tr><td>atlas.modules.catalog</td><td class="c">9</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:2.2%"></div></td></tr>
+<tr><td>aida.workflows</td><td class="c">7</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:1.7%"></div></td></tr>
+<tr><td>atlas.modules.connectivity</td><td class="c">7</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:1.7%"></div></td></tr>
+<tr><td>atlas.modules.profiling · atlas.platform</td><td class="c">5 · 5</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:2.4%"></div></td></tr>
+<tr><td>atlas.modules.identity_tenancy · ingestion · observability_audit</td><td class="c">4 · 4 · 4</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:2.9%"></div></td></tr>
+<tr><td>aida.projectors · aida.main · package roots</td><td class="c">3 · 1 · 3</td><td><div style="height:8px;border-radius:4px;background:var(--accent);width:1.7%"></div></td></tr>
+</tbody></table></div>
+<p>Thirteen import-linter contracts guard the boundaries, including the one that lets only the query gateway reach source SQL and the newest, which keeps GraphQL from reaching an execution path. The map itself flags 15 imports from domain modules into routers, so the layers are described, not yet mechanically enforced.</p>
+
+<h2 id="gaps">Designed vs built</h2>
+<p>The documents keep the design intent and mark where the code has not caught up. These are the differences a reviewer is most likely to find.</p>
+<div class="tbox"><table>
+<thead><tr><th>Design says</th><th>The code today</th><th>State</th></tr></thead>
+<tbody>
+<tr><td>Scheduler elects a leader; a standby takes over.</td><td>No leader election. A bare loop; per-pass row locks only.</td><td><span class="pill p-deny">Not built</span></td></tr>
+<tr><td>A schema per module in PostgreSQL.</td><td>No PostgreSQL schemas. Modules are Python packages.</td><td><span class="pill p-deny">Not built</span></td></tr>
+<tr><td>A task queue per worker class.</td><td>One queue, <code>aida-metadata</code>.</td><td><span class="pill p-deny">Not built</span></td></tr>
+<tr><td>Every event carries version, producer, correlation and causation ids, actor.</td><td>Seven fields: id, type, aggregate type and id, organization, time, payload.</td><td><span class="pill p-warn">Partial</span></td></tr>
+<tr><td>A repository base class that requires a tenant scope.</td><td>Scoping applied per query, guarded by a route-table test.</td><td><span class="pill p-warn">Partial</span></td></tr>
+<tr><td>Vector search on pgvector.</td><td>Brute-force over <code>bytea</code>; the pgvector adapter refuses.</td><td><span class="pill p-warn">Partial</span></td></tr>
+<tr><td>WORM audit archive.</td><td>Implemented over S3 Object Lock; off by default; verified against MinIO only.</td><td><span class="pill p-warn">Partial</span></td></tr>
+<tr><td>Layered imports mechanically enforced.</td><td>13 contracts; no layers contract; 15 domain-to-router imports remain.</td><td><span class="pill p-warn">Partial</span></td></tr>
+<tr><td>The default stack never reaches Redpanda.</td><td>The worker starts a Kafka consumer whenever <code>auto_enqueue_on_ingest</code> is on, and it defaults to on.</td><td><span class="pill p-deny">Docs were wrong</span></td></tr>
+</tbody></table></div>
+
+<h3>Re-check this page</h3>
+<pre class="tbox" style="padding:10px 14px;margin:.6rem 0;font-family:var(--mono);font-size:.84rem;overflow-x:auto">python scripts/generate_architecture_map.py --check
+env -u AIDA_ENVIRONMENT .venv/Scripts/python.exe -m pytest --collect-only
+python scripts/check_docs_links.py</pre>
+
+<footer>Atlas walkthrough pack. A dated snapshot, not a queue: status lives in the tracker (section P) and evidence in the capability register. Regenerate the numbers with the commands shown on each page.</footer>
+</main>
+<script>
+(function(){
+  var root=document.documentElement, key='atlas-walkthrough-theme';
+  try{var s=localStorage.getItem(key); if(s==='light'||s==='dark'){root.setAttribute('data-theme',s);}}catch(e){}
+  var btn=document.getElementById('theme');
+  function label(){var t=root.getAttribute('data-theme'); btn.textContent = t==='dark' ? 'Light theme' : t==='light' ? 'Dark theme' : 'Toggle theme';}
+  if(btn){label(); btn.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    var dark = cur ? cur==='dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark'; root.setAttribute('data-theme',next);
+    try{localStorage.setItem(key,next);}catch(e){} label();
+  });}
+})();
+</script>
+</body>
+</html>

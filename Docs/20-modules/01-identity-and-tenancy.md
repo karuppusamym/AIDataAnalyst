@@ -17,9 +17,9 @@ P4 (rotate a credential without an outage), and the tenancy foundation for every
 - OIDC token verification: signature, issuer, audience, expiry, algorithm, subject.
 - JWKS retrieval, caching, refresh, and pinned-key support.
 - Configurable claim paths mapping tokens to organization, roles, and groups.
-- The tenancy hierarchy: organization → legal entity → LOB → data domain → project → datasource.
-- Principal registry: human users and workload identities.
-- Secret **reference** management (never secret values).
+- The tenancy hierarchy: organization → line of business → data domain → project → datasource (five levels; `legal_entity` is not one, see §5).
+- Principal registry: human users and workload identities. *Not built: a principal exists only as the verified claims of a request (§5).*
+- Secret **reference** handling (never secret values): a reference is a column on the object that uses it, resolved by `src/aida/secrets.py`; there is no reference registry (§5).
 - Development identity provider — local only, refused in production.
 
 ## 4. Not responsibilities
@@ -63,7 +63,52 @@ identity_provider_config
 > assignments. The tenancy scope this module enforces becomes `(organization_id, workspace_id)`.
 > Until that migration lands, the four levels above are what the repository base class scopes on.
 
+> **Implementation status (2026-09-20).** The block above is the design, not the schema.
+> `src/atlas/modules/identity_tenancy/models.py` defines 17 tables (as of 2026-09-20):
+> `organization`, `line_of_business`, `data_domain`, `project`, `organization_integration_policy`,
+> `workspace`, `workspace_membership`, `workspace_access_rule`, `source_binding`,
+> `authorization_shadow_record`, `business_node`, `business_assignment`, `business_node_closure`,
+> `business_node_rollup`, `delegation`, `revoked_token` and `cross_boundary_grant`. There is no
+> `principal`, `principal_role`, `role_mapping`, `secret_reference` or `identity_provider_config`
+> table. A principal exists only as the verified claims of a request (`src/aida/oidc.py`,
+> `context_from_claims`); role mappings and the identity provider are settings
+> (`oidc_role_mappings`, `identity_provider`); a secret reference is the `credential_reference`
+> column of the datasource (`src/atlas/modules/connectivity/models.py`), resolved by
+> `src/aida/secrets.py`.
+
 `identity` is the only schema other modules may hold foreign keys into (ADR-0015).
+
+## 5a. Roles
+
+The role catalog is `PLATFORM_ROLES` in `src/aida/oidc.py`. Under OIDC these fifteen are the only roles a token can carry: `oidc_role_mappings` is a closed mapping (an external role with no entry grants nothing), and a mapped name outside the catalog is dropped. Roles are additive sets, not a hierarchy. `require_roles` checks that the caller holds one of the names listed on the route, so `Analyst` is not a superset of `Viewer` (as of 2026-09-20, 68 REST routes in the [surface-control matrix](../50-security/surface-control-matrix.md) list `Viewer` without `Analyst`).
+
+| Role | Purpose |
+|---|---|
+| `PlatformAdmin` | Cross-tenant administrator. `enforce_organization` (`src/aida/security.py`) lets it cross the organization boundary by design; that is the deliberate exception to INV-5. The break-glass role for agent-contract edits (audited) and the only role that may engage or release the model kill switch. |
+| `OrganizationAdmin` | Tenant administrator: lines of business, workspaces, members, access policies. |
+| `MetadataAdmin` | Catalog and ingestion operator. |
+| `DataAdmin` | Source owner: creates and tests datasources, quality. |
+| `SemanticAdmin` | Author of glossary, metrics and context products. |
+| `DataSteward` | Domain steward, and a reviewer of proposals. |
+| `ToolDeveloper` | Authors governed tools. |
+| `ToolConsumer` | Executes governed tools; execute-only. |
+| `AgentDeveloper` | Model routes, AI assets, agent contracts, Ask. |
+| `Reviewer` | Independent checker of governance reviews. |
+| `MetadataReviewer` | Checker of structural-metadata proposals (relationship candidates, parsed lineage). |
+| `Auditor` | Reads audit evidence and exports. Not strictly read-only and refused some evidence routes; see `00-product/02-personas-and-jobs.md` §2.6. |
+| `Operations` | Runs the platform. |
+| `Analyst` | Asks questions and consumes governed data. |
+| `Viewer` | Read baseline. |
+
+**Not grantable under OIDC.** Nine further names appear in `require_roles` guards but are not in the catalog, so no token can carry them: `ComplianceOfficer`, `DataEngineer`, `DataProductOwner`, `DataScientist`, `DataConsumer`, `MetadataIngestor`, `ModelRiskManager`, `ProjectAdmin` and `Steward`. As of 2026-09-20 they sit in the guards of 126 of the 554 surfaces in the surface-control matrix, always beside at least one grantable name. Under the development identity provider any string is accepted as a role (`src/aida/security.py`), and the UI's default development identity carries seventeen (the catalog's fifteen plus `ProjectAdmin` and `MetadataIngestor`), so a route guarded by one of these behaves differently in development than under OIDC. Example: `POST /v1/organizations/{organization_id}/business-nodes` (`src/atlas/modules/identity_tenancy/router.py`) accepts `PlatformAdmin`, `OrganizationAdmin`, `DataAdmin` or `Steward`; a `DataSteward` receives 403, and under the development provider a caller who sends the name `Steward` passes the role check.
+
+**Worker labels.** `SchedulerWorker`, `MetadataWorker` and `ReaperWorker` are labels the platform's own background jobs give themselves (`principal_type` `WORKER`) so their audit rows are attributable. No guard names them and no token can carry them.
+
+**Workspace roles.** Six lowercase roles (`viewer`, `analyst`, `steward`, `reviewer`, `auditor`, `workspace_owner`; `src/atlas/modules/identity_tenancy/schemas.py`) are a different axis: what a principal may do inside one workspace. They apply only where the workspace is in `ENFORCE` mode; a workspace in `SHADOW` records what it would have decided and allows.
+
+**Bundles and personas.** An identity-provider group maps to a bundle of roles, and the bundles are defined in the deployment's `AIDA_OIDC_ROLE_MAPPINGS` (in the compose OIDC overlay, `compose.oidc.yaml`). Because roles do not imply one another, a steward bundle carries `Analyst` and `Viewer` beside the steward roles. The persona is a separate claim: `AIDA_OIDC_PERSONA_MAPPINGS` maps a group to one of five navigation personas and authorizes nothing.
+
+> **Implementation status (2026-09-20).** A persona is only as usable as the role bundle its user signs in with, and the two are configured separately. A persona whose group is mapped, but for which no least-privilege bundle is defined, can only be signed in with some other bundle: a persona of `Auditor` with the role `Viewer` lands on a ledger it may not read. Check the bundles in `compose.oidc.yaml` for which personas are covered rather than assuming the persona mappings imply them.
 
 ## 6. Public interface
 
@@ -79,19 +124,25 @@ def list_principals(scope: TenantScope, page: Page) -> Page[PrincipalDTO]
 
 `ResolvedSecret` is a context-managed value that is never serialized, never logged, and never placed in an exception message.
 
+> **Implementation status (2026-09-20).** There is no `identity/api.py`, and none of these six functions exists under these names. The pieces that do the work are called directly: `OidcVerifier.verify` and `context_from_claims` (`src/aida/oidc.py`) behind `get_security_context`, `require_roles` and `enforce_organization` (`src/aida/security.py`); `enforce_not_revoked` (`src/aida/token_revocation.py`); and `SecretResolver.resolve` and `invalidate` (`src/aida/secrets.py`). There is no principal listing, because there is no principal table (§5); the hierarchy is read through the routes in §7.
+
 ## 7. HTTP surface
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/v1/me` | Current principal, roles, tenant scope |
+| GET | `/v1/me` | Current principal, roles, tenant scope, and server-derived persona |
 | GET | `/v1/organizations` | Tenant inventory |
-| POST | `/v1/organizations/{id}/legal-entities` | Create legal entity |
-| POST | `/v1/lobs`, `/v1/projects` | Hierarchy management |
-| GET | `/v1/identity/posture` | Runtime identity/secret readiness (operator) |
+| POST | `/v1/organizations/{organization_id}/lines-of-business` | Create a line of business |
+| POST | `/v1/lines-of-business/{lob_id}/data-domains`, `/v1/lines-of-business/{lob_id}/projects` | Hierarchy management |
+| GET | `/v1/organizations/{organization_id}/enforcement-readiness` | What would break if workspace authorization were enforced (`PlatformAdmin`, `OrganizationAdmin`, `Auditor`, `Operations`) |
+
+> **Implementation status (2026-09-20).** The rows above are the routes that exist. There is no `/v1/legal-entities`, `/v1/lobs`, `/v1/projects` or `/v1/identity/posture`, and no runtime identity/secret readiness endpoint has been built. The module's 29 routes (as of 2026-09-20) are in `src/atlas/modules/identity_tenancy/router.py` and, with their required roles, in the generated [surface-control matrix](../50-security/surface-control-matrix.md); `GET /v1/me` is in `src/aida/persona_api.py`.
 
 ## 8. Events
 
-Emits `principal.created`, `principal.role_changed`, `tenant.created`, `tenant.archived`, `secret_reference.rotated`.
+Designed to emit `principal.created`, `principal.role_changed`, `tenant.created`, `tenant.archived`, `secret_reference.rotated`.
+
+> **Implementation status (2026-09-20).** `tenant.created` is emitted under its `.v1` spellings: `organization.created.v1`, `line_of_business.created.v1`, `data_domain.created.v1` and `project.created.v1` (the event catalog records the rename). The router also emits `workspace.created.v1` and the `source_binding` request and decision events. `principal.created`, `principal.role_changed`, `tenant.archived` and `secret_reference.rotated` are never emitted: there is no principal, role-mapping or secret-reference table, and no tenant archive route.
 
 ## 9. Dependencies
 
@@ -102,10 +153,12 @@ None. This is the root module.
 | Control | Behaviour |
 |---|---|
 | INV-4 fail closed | Production refuses development identity, `env://` resolution, weak audit keys, insecure JWKS URLs |
-| INV-5 tenant isolation | Every scope resolution defaults to deny; no unscoped helper exists |
-| Token validation | Failure denies **without leaking which check failed** |
+| INV-5 tenant isolation | Every scope resolution defaults to deny; no unscoped helper exists. `PlatformAdmin` is the deliberate exception: `enforce_organization` lets it cross the organization boundary (§5a) |
+| Token validation | Failure denies with a generic 401. Expiry is the one reason named (`OidcTokenExpired`), so a client can tell "sign in again" from a token that can never work; signature, audience, issuer and revocation stay generic |
 | Secret handling | Inline DSNs rejected; exactly one configured provider; bounded cache; rotation invalidation |
 | JWKS | Cached with TTL; refresh on unknown `kid`; pinned keys supported for air-gapped operation |
+
+> **Implementation status (2026-09-20).** INV-8 (maker != checker) does not yet cover every access change this module makes. Review types `ACCESS_POLICY` and `WORKSPACE_MEMBERSHIP` are risk tier T3 (`src/aida/review_risk_tiers.py`) but have no review adapter, so nothing opens a review for them. `POST /v1/organizations/{organization_id}/access-policies` lets a `PlatformAdmin` or `OrganizationAdmin` create a policy in one call (`DRAFT` by default, `ACTIVE` if the caller asks; no route activates or retires one separately). `POST /v1/workspaces/{workspace_id}/members` lets a `PlatformAdmin`, `OrganizationAdmin` or `DataAdmin` grant any workspace role, `workspace_owner` included, in one step (both in `src/atlas/modules/identity_tenancy/router.py`). Both are audited, and neither waits for a second principal. Source bindings and cross-boundary grants do go through a maker-checker decision. The other side of the same gap, for the review queue, is in `50-security/04-compliance-and-evidence.md` §4.
 
 ## 11. Current state → target
 
@@ -113,10 +166,10 @@ None. This is the root module.
 |---|---|---|
 | OIDC verification | Implemented — signature, issuer, audience, time, algorithm; configurable claim paths; JWKS cache/refresh; pinned keys | Certify against the bank issuer and group contract |
 | Development identity | Implemented, production-refused | Unchanged |
-| Secret references | Strict parsing; one configured provider; adapter contract; production rejects `env://` | Register and certify the bank Vault/CyberArk/cloud adapter |
-| Workload identity | Not implemented | Required for connector agents and MCP consumers |
-| Token revocation / replay policy | Not implemented | Required before production |
-| Break-glass | Not implemented | Required before production |
+| Secret references | Strict parsing; one configured provider; adapter contract; production rejects `env://`. Only the env and vault providers are built in; the settings also accept cyberark, aws-sm, azure-kv and gcp-sm, and nothing resolves them until an adapter is registered | Register and certify the bank Vault/CyberArk/cloud adapter |
+| Workload identity | Partly implemented — the MCP endpoint admits only `AGENT` and `SERVICE_ACCOUNT` principal types outside development (`mcp_require_workload_identity`, default on; `src/aida/mcp_server.py`). No connector agents exist | Required for connector agents; certify the principal-type claim with the bank issuer |
+| Token revocation / replay policy | Implemented (ID-4) — a revoked token is refused on its next use, and a lookup that cannot be answered denies (`src/aida/token_revocation.py`) | Certify against the bank issuer's logout and compromise flow before production |
+| Break-glass | Not implemented as a general process; `PlatformAdmin` is the audited break-glass role for agent-contract edits only | Required before production |
 
 ## 12. Open work
 
@@ -124,8 +177,8 @@ None. This is the root module.
 |---|---|---|
 | ID-1 | Register and certify the bank secret-manager adapter | P0 |
 | ID-2 | Bank OIDC issuer, claim, and group certification | P0 |
-| ID-3 | Workload identity for agents and connector agents | P0 |
-| ID-4 | Token revocation and replay policy | P0 |
+| ID-3 | Workload identity for agents and connector agents (the MCP gate is delivered; connector agents are not built) | P0 |
+| ID-4 | Token revocation and replay policy (delivered 2026-08-30; certification remains) | P0 |
 | ID-5 | Break-glass process with audited elevation | P1 |
 | ID-6 | Rotation drill under load | P1 |
 | ID-7 | Bulk onboarding and enterprise entitlement feed integration | P1 |

@@ -112,7 +112,15 @@ Step 10 compare and explain
 
 The planner may emit one optimized query or several staged queries depending on the warehouse and complexity. **Every step passes the gateway independently**, and the whole plan is bounded by step, time, token, and cost budgets.
 
-Multi-step plans are **not yet implemented** (tracker AG-4). The current runtime handles single-step requests.
+> **Implementation status (2026-09-20).** Multi-step **tool** plans are implemented (tracker AG-4,
+> DONE): `src/aida/tool_plans.py` composes published governed tools into a dependency-ordered
+> plan with step, time, token and cost budgets, partial-failure handling and per-step evidence,
+> and `POST /v1/tool-plans/recommend` (`src/aida/tool_plans_api.py`) proposes a plan by splitting
+> a prompt on "then" or line breaks and keyword-matching each clause to a published tool. The
+> planner described above — turning a free-text question like this one into staged queries — is
+> **not built**: `GovernedPlanner` in `src/aida/agent_intelligence.py` chooses one strategy per
+> request (a single governed tool, or a single SQL statement), so the runtime still answers a
+> question like this in one step.
 
 ## 4. Promote an analysis to a governed tool
 

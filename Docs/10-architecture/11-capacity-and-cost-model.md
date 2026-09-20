@@ -22,7 +22,7 @@ Class is a required field on every `ExecutionRequest` (module 16). A request wit
 
 ## 2. Task queues
 
-Separate queues per worker class, so a profiling backlog cannot starve projection and a slow source cannot delay quality evaluation.
+The design intent is separate queues per worker class, so a profiling backlog cannot starve projection and a slow source cannot delay quality evaluation.
 
 ```text
 metadata.discovery        profile.table            profile.column
@@ -30,6 +30,15 @@ relationship.candidate    relationship.validate    lineage.extract
 semantic.enrich           embedding.generate       semantic.publish
 quality.evaluate          batch.chunk              audit.events
 ```
+
+> **Implementation status (2026-09-20).** None of the queues above exists. There is **one**
+> Temporal task queue, `aida-metadata` (the `temporal_task_queue` setting in
+> `src/atlas/platform/config.py`, set the same in `compose.yaml`), served by the single
+> `metadata-worker` process (`src/aida/workflows/worker.py`), which runs discovery, profiling
+> and batch ingestion. The relationship, lineage, quality, semantic and embedding worker
+> classes these names imply do not exist as workers, there is no `atlas-batch` unit, and
+> projection is not a Temporal queue but the `outbox-publisher` and Kafka-consuming
+> `graph-projector`. See `08-workers-and-workflows.md` §2 and §7.
 
 ## 3. Capacity model
 

@@ -2,8 +2,10 @@
 
 > **What this is not (R11-X10, 2026-09-11).** This is a reviewable *sketch* of a single
 > process. It is not a deployable topology, it has never been applied to a cluster, its
-> image digests are placeholders for an image no pipeline builds, and `migration-job.yaml`
-> is known to abort as written. `compose.yaml` runs six application processes; this
+> image digests are placeholders for an image no pipeline publishes, and `migration-job.yaml`
+> has never been run (it uses `alembic upgrade head`, which resolves today because CI
+> enforces a single head; `heads`, as `compose.yaml` runs it, is the safer form).
+> `compose.yaml` runs six application processes; this
 > directory covers two of them. `base/README.md` lists exactly what is missing and why it
 > matters — read it before treating anything here as production-ready.
 
@@ -19,9 +21,12 @@ A plain, kustomize-composable set of Kubernetes manifests for the `aida-api` ser
 `base/configmap.yaml`, not left to a deployer to remember:
 
 - `AIDA_ENVIRONMENT=production` (audit C1: this defaults to `"development"` in
-  `src/atlas/platform/config.py`, and `extra="ignore"` means a typo'd variable name is
-  silently dropped rather than failing startup — pinning the *correct* name in a reviewed
-  file is the mitigation available without an application-code change).
+  `src/atlas/platform/config.py`. The application side has since been tightened:
+  `Settings` uses `extra="forbid"`, `reject_unrecognized_aida_env_vars` refuses an
+  `AIDA_*` variable whose name is a near-miss of a real setting, and
+  `reject_implicit_environment_outside_tests` refuses to start without an explicit
+  `AIDA_ENVIRONMENT`. A name that is not a close match of any real setting is still
+  dropped, so pinning the *correct* name in a reviewed file remains worthwhile).
 - `AIDA_IDENTITY_PROVIDER=oidc` (audit C2: the default `"development"` identity provider
   trusts an unauthenticated `X-Roles` header; `oidc` plus the required issuer/audience/JWKS
   settings are the only way `Settings.reject_insecure_production_configuration` allows
@@ -92,9 +97,10 @@ which is the next real validation step once one exists (e.g. in a CI job with `k
    and commit it.
 2. **A pinned image digest.** Replace `REPLACE_ME_REGISTRY/aida-api@sha256:REPLACE_ME...`
    in both `deployment.yaml` and `migration-job.yaml` with the real digest your CI/CD
-   pipeline produced. **That pipeline does not exist yet** (audit remediation item #12: "add
-   dependency and secret scanning to CI, and build the container image in CI at all" is
-   still open). Until it lands, the intended flow is: CI builds the image from this repo's
+   pipeline produced. **That publishing step does not exist yet.** CI now builds the image
+   (`docker-build` job) and scans dependencies and secrets (audit remediation item #12 as
+   worded), but nothing pushes the image, records its digest or scans the image itself.
+   Until it lands, the intended flow is: CI builds the image from this repo's
    `Dockerfile`, pushes it, records the resulting `sha256` digest, and a deploy step (or a
    kustomize `images:` patch in a future overlay) substitutes it in — never a person typing
    a tag by hand, and never `:latest`.
@@ -125,28 +131,37 @@ which is the next real validation step once one exists (e.g. in a CI job with `k
   scan is scheduled, no outbox row is ever published and the Neo4j graph is never built —
   a silent no-op, not a visible failure. `base/README.md` has the full comparison.
 - **`migration-job.yaml` uses the fragile form.** It runs `alembic upgrade head`
-  (singular) where `compose.yaml` runs `heads` (plural). The graph is 153 revisions with a
-  single head as of 2026-09-11, so the singular form resolves today — but this repository
+  (singular) where the `migrate` service in `compose.yaml` runs `heads` (plural). The graph
+  is 192 revisions with a single head as of 2026-09-20, and the CI `migrations` job fails on
+  any second head, so the singular form resolves today — but this repository
   merges independent Alembic branches routinely (46 of those revisions are merges), and
   any moment with two live heads makes `head` abort with "Multiple head revisions are
-  present" while `heads` keeps working. This Job has never been run against this schema.
+  present" while `heads` keeps working. This Job has never been run against this schema,
+  and it stays unapplied while its image digest and Secret are placeholders.
 - ~~**No non-`env` `SecretProvider` is implemented.**~~ **Stale as of 2026-08-31; corrected
   2026-09-11 (R11-X10).** This entry said only the `Protocol` and caching existed in
   `src/aida/secrets.py`. AU-10 closed the same day this README landed:
   `VaultKvSecretProvider` reads HashiCorp Vault's KV v2 engine, and `SecretResolver` builds
-  it when `AIDA_CREDENTIAL_PROVIDER=vault` is configured. `configmap.yaml` setting that
-  value now means what it says. Still true: no CyberArk / AWS Secrets Manager / Azure Key
-  Vault / GCP Secret Manager provider exists, so a deployer whose secret store is not Vault
-  has nothing to point `vault` at.
+  it when `AIDA_CREDENTIAL_PROVIDER=vault` is configured **and** `AIDA_SECRETS_VAULT_URL`
+  and `AIDA_SECRETS_VAULT_TOKEN` are set. Nothing under `infra/` supplies those two, so
+  `configmap.yaml` setting `vault` passes startup validation but resolves nothing until a
+  deployer adds them (the token is a bootstrap credential, so not for the ConfigMap).
+  Still true: no CyberArk / AWS Secrets Manager / Azure Key Vault / GCP Secret Manager
+  provider exists (the setting accepts those names, but none is implemented), so a
+  deployer whose secret store is not Vault has nothing to point `vault` at.
 - **Resource requests/limits are defaults, not measurements.** No load test or profiling
   run exists for this codebase yet (audit §5). Treat the numbers in `deployment.yaml` as a
   reasonable starting point to watch in staging and revise, not a capacity-planning result.
-- **The Temporal-outage readiness coupling (audit remediation #11)** is unfixed in
+- ~~**The Temporal-outage readiness coupling (audit remediation #11)** is unfixed in
   application code — a Temporal outage can still take down `/health/ready` for reasons the
-  probe wiring in this manifest cannot paper over. Out of scope here (no application code
-  was touched for this item, by design).
+  probe wiring in this manifest cannot paper over.~~ **Fixed in application code;
+  corrected 2026-09-20.** `src/aida/readiness.py` treats Temporal as an optional probe: the
+  only `required` dependency of the API's `/health/ready` is PostgreSQL, and the API starts
+  and serves degraded through a Temporal outage (AU-12, with a background reconnect in
+  `src/aida/main.py`). This directory still touches no application code.
 - **No NetworkPolicy, HPA, or autoscaling** is included. Minimum reviewable bar was the
   goal; add these once there's a real cluster and traffic pattern to tune them against.
-- **No CI pipeline builds or scans this image yet** (see "pinned image digest" above and
-  audit remediation item #12). This manifest's *shape* refuses a floating tag; it cannot by
-  itself make a digest appear.
+- **No pipeline publishes or scans this image yet** (see "pinned image digest" above and
+  audit remediation item #12). CI builds it and smoke-imports it (`docker-build`), but does
+  not push it, record a digest or scan the image. This manifest's *shape* refuses a
+  floating tag; it cannot by itself make a digest appear.

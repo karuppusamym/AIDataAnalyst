@@ -52,6 +52,8 @@ Adding an enum value is safe **only if** consumers are documented and tested to 
 | Tool parameter schemas | Tool version | Tool record |
 | Semantic models, metrics, policies, model routes | Immutable object versions | Domain records |
 
+> **Implementation status (2026-09-20).** The Events row is the target, not what runs. There is no `event_version` field: `serialize_event` in `src/aida/projectors/outbox_publisher.py` sends `event_id`, `event_type`, `aggregate_type`, `aggregate_id`, a nullable `organization_id`, `occurred_at` and `payload`, so the only version marker is the `.v1` suffix in most event-type names (10 of the 129 literal event types lack it as of 2026-09-20). There is no versioned topic per family either: every event goes to the single Kafka topic `aida.platform.events.v1` with the event type in a header, and there is no schema registry. See [the event catalog](04-event-catalog.md).
+
 ## 4. Deprecation process
 
 ```mermaid
@@ -69,11 +71,13 @@ flowchart LR
 | Migration guide | Mandatory for every T1/T4 removal |
 | Emergency removal | Security only, with an incident record |
 
+> **Implementation status (2026-09-20).** The `Deprecation` and `Sunset` headers are not emitted anywhere in `src/`. Deprecation today is an OpenAPI flag only: the three `/api/v1/organizations/{organization_id}/consumption-lineage/...` aliases (`src/aida/consumption_lineage_api.py`) carry `deprecated: true` in `Docs/90-reference/openapi-baseline.json` and send no header.
+
 ## 5. Contract testing
 
 | Contract | Test |
 |---|---|
-| REST API | OpenAPI schema diff in CI; breaking change fails the build — **planned, not wired (2026-08-30)**: no OpenAPI-diff step exists in `.github/workflows/ci.yml`, and no released spec is committed to diff against |
+| REST API | OpenAPI schema diff in CI; breaking change fails the build — **wired (2026-09-20)**: the `openapi-diff` job in `.github/workflows/ci.yml` runs `scripts/openapi_diff.py` against the committed `Docs/90-reference/openapi-baseline.json`, and a breaking change (removed path or operation, newly required field, narrowed enum, ...) fails unless `info.version` is bumped |
 | Events | Schema-registry compatibility check (`BACKWARD` minimum) |
 | Module interfaces | Import-linter contracts; type checks on public signatures |
 | Envelope | Golden-payload fixtures across supported versions |
@@ -108,6 +112,8 @@ Errors are part of the contract. A consumer branching on an error code depends o
 | `details` are bounded and value-free | INV-6 |
 
 The tension in the last two rows is real: users need actionable refusals, and attackers must not get a map of the controls. The resolution is that the *reason code* is specific and the *detail* is bounded — "POLICY_DENIED with policy_version 12" is actionable without revealing which rule fired.
+
+> **Implementation status (2026-09-20).** The envelope above is the target and is not what the API returns. Handled errors use FastAPI's default body, `{"detail": "<message>"}`: `GET /v1/datasources/<unknown id>` returns 404 `{"detail":"datasource not found"}`, and a request-validation failure returns 422 with `detail` as a list of `{type, loc, msg, input}` entries. A few routes put a structured object in `detail` with its own `code` (the governed-tool Ask 409 in `src/aida/api.py`). The `error` object appears only for unhandled 500s (`src/aida/main.py`) as `{"error": {"code": "INTERNAL_SERVER_ERROR", "message", "correlation_id"}}`, with no `details` or `retryable`. Every response carries an `X-Correlation-Id` header (supplied by the client or generated), so the correlation id is available as a header on errors that have no `correlation_id` in the body.
 
 ## 7. Contract ownership
 

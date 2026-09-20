@@ -2,6 +2,12 @@
 
 **Status:** Accepted | **Date:** 2026-08-28 | **Owner:** Architecture
 
+> **Implementation status (2026-09-20).** The decision below is **not yet applied**. No PostgreSQL
+> schema per module exists: every table is in the one default schema, `src/aida/models.py` sets no
+> `schema=`, and no migration creates a schema. The decision and its reasoning are unchanged; this
+> note records the state of the tree, not a change of mind. See
+> `10-architecture/04-module-decomposition.md` §6.
+
 ## Context
 
 ADR-0011 chose a modular monolith with a planned extraction path. That plan only works if extracting a module does not require a data migration. If modules share a schema and hold foreign keys into each other's tables, extraction means untangling referential integrity across a live database — the most expensive step, and the one that usually stops the extraction.

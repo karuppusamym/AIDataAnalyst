@@ -110,11 +110,13 @@ npm run typecheck
 src/
   tokens.css              colour, type, spacing; both themes; focus; reduced-motion
   App.tsx                 shell, persona, nav, routing
-  lib/types.ts            mirrors src/aida/schemas.py — hand-written, see UX-14
+  lib/types.ts            generated from the API's OpenAPI schemas by
+                          scripts/generate_ui_types.py (UX-14) — do not edit by hand
+  lib/ui-types.ts         the hand-written types the OpenAPI document does not carry
   lib/api.ts              one fetch wrapper; typed errors; every request abortable
   lib/fixtures.ts         1M-row catalog computed per index, never materialised
   components/             primitives, CatalogTable, EvidencePane,
-                          ProposalCard, PropagationLog
+                          ReviewDetail, PropagationLog
   screens/                one component per entry in lib/routes.ts's SCREEN_IDS
 ```
 
@@ -132,11 +134,14 @@ get forgotten first:
 And the rule that matters most in this product: a model-proposed value is never
 rendered as an established one (ADR-0001).
 
-## Two primitives that carry rules, not styles
+## Two components that carry rules, not styles
 
-`ProposalCard` — the unit of governed change. `rationale` and `evidence` are **required
-fields on the type**, not optional props. A proposal that shows its outcome but not its
-reasoning is not reviewable; the reviewer is being asked to rubber-stamp. Confidence is
+`ProposalRow` (in `src/screens/ReviewQueueScreen.tsx`, styled by
+`src/components/ProposalRow.css`) — the unit of governed change. It replaced a
+fixture-era `ProposalCard` component that no longer exists. A proposal that shows its
+outcome but not its reasoning is not reviewable; the reviewer is being asked to
+rubber-stamp, so the row shows the diff and whatever evidence the review read model
+carries, and offers no Approve button on a proposal you raised yourself. Confidence is
 rendered as a number as well as a bar, because a steward tuning an auto-apply threshold
 needs the number.
 

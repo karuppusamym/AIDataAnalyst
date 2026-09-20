@@ -23,6 +23,8 @@ S1 (author and curate), A4 (build a reusable tool), and the authoring half of R1
 - Git-backed change sets for teams that manage semantics as code.
 - Impact preview before submission.
 
+> **Implementation status (2026-09-20).** Change sets, conflict detection, the test harness, the diff, the impact preview, the parameter-contract validator, context-product items and the usage-derived eval gate are built on the API (`src/aida/studio_api.py`; tracker ST-A1 to ST-A5, ST-A7 and ST-A8). The UI is narrower: `ui-next/src/screens/StudioChangeSetsScreen.tsx`, over the five calls in `ui-next/src/lib/api/studio.ts`, lists change sets, shows their items, diff and impact, and submits them. It cannot create a change set, add an item, run the tests, detect conflicts or mine eval questions, so those are API-only, and its empty state points to a Studio authoring surface that does not exist. Tracker row R11-X5 owns studio authoring with a date. Git-backed change sets are not built: there is no Git binding model, route or worker in `src/` (ST-A6, deferred with R11-C12 at P2). The sample estate holds no change sets as of 2026-09-20.
+
 ## 4. Not responsibilities
 
 | Not this module | Where it lives |
@@ -86,6 +88,8 @@ Optional; for teams treating semantics as code.
 
 The last row is the important one. A Git merge must not be able to publish a semantic version without passing maker-checker.
 
+> **Implementation status (2026-09-20).** Nothing in this section is built. There is no Git binding model, route or worker in `src/`; the row is ST-A6, deferred with R11-C12 at P2.
+
 ## 9. Public interface
 
 ```python
@@ -109,20 +113,22 @@ Emits `studio.changeset_created|submitted|abandoned`, `studio.tests_run`, `studi
 
 ## 12. Current state → target
 
-Studio is **entirely unbuilt**. Current authoring is form-based inside the Atlas portal: metric composer, tool authoring, and business-meaning review exist as individual screens with no change sets, no tests, no diffs, and no version control.
+Studio is **partly built**. It has change sets, conflict detection, the test harness, diff, impact preview and the eval gate on the API (tracker ST-A1 to ST-A5, ST-A7 and ST-A8), and a screen that reads and submits them. Git binding is deferred (P2, R11-C12) and has no code. Authoring is still form-based inside the Atlas portal: metric composer, tool authoring, and business-meaning review are individual screens, and nothing in the UI creates a change set.
 
 | Capability | Now | Target |
 |---|---|---|
 | Metric composer | Implemented (form) | Move into Studio with diff and test |
 | Tool authoring | Implemented (form) | Parameter-contract designer with test harness |
-| Change sets | Not implemented | Core Studio primitive |
-| Test harness | Not implemented | Required before submission |
-| Diff view | Not implemented | Required for reviewers |
-| Impact preview | Partial (module 09) | Integrated into submission |
-| Git binding | Not implemented | Optional, Phase C |
+| Change sets | Implemented on the API (ST-A1); the UI lists, inspects and submits them but cannot create one | Core Studio primitive, authored in the UI |
+| Test harness | Implemented on the API (ST-A2); no UI to run it | Required before submission |
+| Diff view | Implemented on the API (ST-A3); shown on the change-set screen | Required for reviewers |
+| Impact preview | Implemented on the API (ST-A5); shown on the change-set screen | Integrated into submission |
+| Git binding | Not implemented; deferred (ST-A6, P2, R11-C12) | Optional |
 | Usage-derived eval suite | Implemented (ST-A8) | Mined from consumption + BI lineage edges; gates change-set submission |
 
 ## 13. Open work
+
+*Status lives in [tracker section P](../60-delivery/03-tracker.md); this table is the original scope. ST-1 to ST-5, ST-7 and ST-8 are the tracker's ST-A1 to ST-A5, ST-A7 and ST-A8, all DONE on the API as of 2026-09-20, and ST-6 is ST-A6, deferred with R11-C12. What is still missing for the rest is the authoring UI (section 3).*
 
 | ID | Item | Priority |
 |---|---|---|

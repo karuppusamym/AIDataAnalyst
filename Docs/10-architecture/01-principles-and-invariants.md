@@ -35,7 +35,18 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Projections are written only by outbox projectors, never by request-path code. No service dual-writes PostgreSQL and a projection.
 
-**Test — Built (2026-08-30), with a named limit.** `tests/test_inv1_single_authoritative_store.py` (8 tests) asserts the structural property: projections are written only by outbox projectors, no request-path code dual-writes, and no authorization or approval decision reads a projection. What it does **not** prove is that Neo4j ingests correctly, because no Neo4j runs in the suite — the test file says so itself rather than implying coverage it does not have. `test_projection_rebuild` (delete Neo4j and the search index, replay from authoritative state, assert identical query results) remains unwritten, and **the projection-rebuild drill has never been run**. Note also that the "search index" in this statement is a target store: there is no search-index dependency in the repository, and lexical search runs as BM25-style scoring in PostgreSQL (`src/aida/retrieval.py`).
+> **Implementation status (2026-09-20).** INV-1 as tested holds for the **graph**: the test below
+> scans Cypher writes only, and every Cypher write lives in the `projectors` package
+> (`src/aida/projectors/graph_projector.py`). It does not hold as worded for the other projections.
+> The vector index (the `embedding` table, ADR-0019) is written by a request route,
+> `POST /v1/organizations/{organization_id}/retrieval/vector-index/rebuild` in
+> `src/aida/retrieval_ops_api.py`, and by a scheduler pass, `run_vector_index_rebuild_pass`
+> (`src/aida/vector_index_service.py`, called from `src/aida/workflows/scheduler.py`); neither is
+> driven by an outbox event. **No vector projector and no search projector exists** —
+> `src/aida/projectors/` holds `graph_projector.py` and `outbox_publisher.py` only — and there is
+> no search index to project into.
+
+**Test — Built (2026-08-30), with a named limit.** `tests/test_inv1_single_authoritative_store.py` (8 tests as of 2026-09-20) asserts the structural property for the graph: every Cypher write in `src/aida` lives in the projector package, so no request-path code dual-writes PostgreSQL and Neo4j; graph reads outside the projectors are confined to a closed list of modules that fall back to, or reconcile against, PostgreSQL; and projection writes are idempotent. It also carries `test_projection_rebuild` (commit `9df4429`, 2026-08-30), which runs the real `project_discovery` twice against a recording driver and asserts identical output — proof that the projector is a pure function of PostgreSQL. What the suite does **not** prove is that Neo4j ingests correctly, because no Neo4j runs in the suite — the test file says so itself rather than implying coverage it does not have — and **the projection-rebuild drill (delete the projections, replay from authoritative state, assert identical query results) has never been run**. Note also that the "search index" in this statement is a target store: there is no search-index dependency in the repository, and lexical search runs as BM25-style scoring in PostgreSQL (`src/aida/retrieval.py`).
 
 ### INV-2 — One execution choke point
 
@@ -71,7 +82,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 ### INV-5 — Tenant isolation is total
 
-**Statement.** Every governed record carries an organization boundary and, where applicable, the workspace / business-classification scope defined by the tenancy axis. Authorization defaults to deny. Cache keys, graph nodes, vector documents, artifacts, events, logs, and metrics preserve these boundaries.
+**Statement.** Every governed record carries an organization boundary and, where applicable, the workspace / business-classification scope defined by the tenancy axis. Authorization defaults to deny. Cache keys, graph nodes, vector documents, artifacts, events, logs, and metrics preserve these boundaries. The one deliberate exception is `PlatformAdmin`, which is cross-tenant by design (`enforce_organization` in `src/aida/security.py`).
 
 > **Implementation status (2026-08-30).** The earlier wording named `legal entity` as a
 > tenancy level. **`legal_entity` does not exist in `src/` or in any migration** — searched
@@ -92,7 +103,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Ingestion and profiling validators reject attribute keys associated with samples, row values, secrets, or credentials. Persisted SQL passes a redaction pass.
 
-**Test — Built (2026-08-30).** `tests/test_inv6_value_freedom.py` (13 tests) runs a sentinel fixture through the query gateway and scans control-plane state for the sentinel, and includes `test_the_control_plane_scan_would_notice_a_leak` — a meta-test that fails if the scan stops being able to find one.
+**Test — Built (2026-08-30).** `tests/test_inv6_value_freedom.py` (20 test functions as of 2026-09-20) runs a sentinel fixture through the query gateway and scans control-plane state for the sentinel, and includes `test_the_control_plane_scan_would_notice_a_leak` — a meta-test that fails if the scan stops being able to find one.
 
 **Why this constraint is affordable, evidenced (2026-08-30).** A 43-screen capture of Atlan's
 live product UI was reviewed specifically to find out whether a competitor's context quality
@@ -123,6 +134,18 @@ evidence says it costs us nothing here. Working paper:
 
 **Enforcement.** A single platform-level approval service; feature modules cannot implement their own approval.
 
+> **Implementation status (2026-09-20).** Governance reviews share one check,
+> `check_decision_permitted` in `src/aida/governance_decision_service.py`, which also refuses a
+> delegator acting through a delegate. It is not the only place the rule lives: other decide routes
+> (relationship candidates, parsed lineage, tool certification, source bindings, profiling exceptions
+> and freshness configuration) carry their own principal-equality check, and
+> `test_self_approval_denied` covers the object types the review service handles, not every such route. Two object types are classed risk tier T3 in
+> `src/aida/review_risk_tiers.py` yet have **no review adapter at all**: `ACCESS_POLICY` and
+> `WORKSPACE_MEMBERSHIP`. A `PlatformAdmin` or `OrganizationAdmin` can create an access policy in one call (`DRAFT` by default,
+> `ACTIVE` if the caller asks), and a `DataAdmin` can add a workspace member with any role,
+> `workspace_owner` included, in one step (`src/atlas/modules/identity_tenancy/router.py`), with no second
+> principal, so for those two "for any object type" is not yet true. Queued as R11-AUD02 in the tracker.
+
 **Test — Built.** `test_self_approval_denied` (`tests/test_tier0_invariants.py`): parameterized over every governed object type `decide_governance_review` handles, attempts self-approval and asserts denial.
 
 ### INV-9 — Honest capability reporting
@@ -140,7 +163,7 @@ gap in our extraction, which is the exact failure this invariant exists to preve
 review that prompted this note found the rule already broken in `sql_lineage_parser.py`
 (tracker `AT-D2`) and one connector advertising a capability nothing consumes (`AT-D3`).
 
-**Test — Built (2026-08-30).** `tests/test_inv9_capability_honesty.py` (11 tests): every advertised capability must trace to a passing certification check, and a capability declared planned must not be reachable as if it were implemented. The invariant is most visible in `src/aida/connectors/registry.py`, which distinguishes `register(...)` from `declare_planned(...)` — Databricks, Teradata and Db2 are declared planned rather than advertised.
+**Test — Built (2026-08-30).** `tests/test_inv9_capability_honesty.py` (13 test functions as of 2026-09-20): every advertised capability must trace to a passing certification check, and a capability declared planned must not be reachable as if it were implemented. The invariant is most visible in `src/aida/connectors/registry.py`, which distinguishes `register(...)` from `declare_planned(...)` — six drivers are registered (PostgreSQL, Oracle, SQL Server, BigQuery, Snowflake and Databricks, all at `BETA` maturity), and only Teradata and Db2 are declared planned rather than advertised.
 
 ## 3. Design principles
 

@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas readiness review</title>
+<style>
+:root{
+  --ground:#F4F6F7; --surface:#FFFFFF; --sunken:#EBEFF1; --ink:#13202A; --muted:#54656F; --line:#D5DDE2;
+  --accent:#0B6B6B; --accent-ink:#FFFFFF; --accent-soft:#DDEFEE;
+  --allow:#1A7048; --allow-soft:#DFF1E7; --deny:#B3372B; --deny-soft:#F8E3E0;
+  --warn:#855600; --warn-soft:#F8EBCB; --info:#2F5F9E; --info-soft:#E2EBF7;
+  --mono:ui-monospace,"Cascadia Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+    --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+    --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+    --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+  --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+  --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+  --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
+a{color:var(--accent);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+code,.mono{font-family:var(--mono);font-size:.88em}
+code{background:var(--sunken);padding:.1em .35em;border-radius:3px;overflow-wrap:anywhere}
+h1,h2,h3{line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(1.65rem,3.4vw,2.3rem);font-weight:650;letter-spacing:-.01em}
+h2{font-size:1.3rem;font-weight:650;margin-top:2.4rem;padding-top:.4rem}
+h3{font-size:1.02rem;font-weight:650;margin-top:1.4rem}
+p{margin:.6rem 0;max-width:72ch}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:16px;padding-block:20px 72px}
+/* top bar */
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.bar-in{max-width:1080px;margin:0 auto;padding:8px 16px;display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:.78rem;color:var(--accent);margin-right:6px}
+.bar nav{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+.bar nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:.9rem}
+.bar nav a:hover{background:var(--sunken);color:var(--ink)}
+.bar nav a[aria-current="page"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.theme{margin-left:auto;background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:4px 10px;font:inherit;font-size:.82rem;cursor:pointer}
+.theme:hover{color:var(--ink);border-color:var(--muted)}
+/* header */
+.eyebrow{font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+.lede{font-size:1.05rem;color:var(--muted);max-width:68ch;margin-top:.7rem}
+.stamp{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:1rem;font-size:.82rem;color:var(--muted)}
+.stamp b{color:var(--ink);font-weight:600}
+/* pills */
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.74rem;font-weight:650;letter-spacing:.02em;white-space:nowrap;border:1px solid transparent;vertical-align:baseline}
+.p-allow{background:var(--allow-soft);color:var(--allow)}
+.p-deny{background:var(--deny-soft);color:var(--deny)}
+.p-warn{background:var(--warn-soft);color:var(--warn)}
+.p-info{background:var(--info-soft);color:var(--info)}
+.p-mute{background:var(--sunken);color:var(--muted)}
+.p-accent{background:var(--accent-soft);color:var(--accent)}
+/* callouts */
+.note{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--surface);padding:10px 14px;border-radius:6px;margin:1rem 0;max-width:80ch}
+.note.warn{border-left-color:var(--warn)} .note.deny{border-left-color:var(--deny)} .note.allow{border-left-color:var(--allow)}
+.note b:first-child{display:block;margin-bottom:2px}
+/* grids and tiles */
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin:1rem 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.tile .k{font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600}
+.tile .v{font-size:1.7rem;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2;margin-top:2px}
+.tile .s{font-size:.82rem;color:var(--muted);margin-top:2px}
+/* tables */
+.tbox{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:.8rem 0}
+table{border-collapse:collapse;width:100%;font-size:.88rem;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;background:var(--sunken);font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.c,th.c{text-align:center}
+.matrix td.c{padding:5px 4px}
+td.hl,th.hl{background:var(--accent-soft)}
+.cell{display:inline-block;min-width:1.7em;padding:0 4px;border-radius:4px;font-weight:650;font-size:.8rem}
+.cell.a{background:var(--allow-soft);color:var(--allow)} .cell.d{background:var(--sunken);color:var(--muted)} .cell.p{background:var(--warn-soft);color:var(--warn)}
+/* details */
+details{background:var(--surface);border:1px solid var(--line);border-radius:8px;margin:.6rem 0}
+summary{cursor:pointer;padding:9px 14px;font-weight:600;list-style-position:inside}
+details>div{padding:2px 14px 12px}
+/* controls */
+.controls{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:.8rem 0}
+.controls label{font-size:.82rem;color:var(--muted);display:flex;gap:6px;align-items:center}
+select,input[type=search]{font:inherit;font-size:.88rem;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 11px;font:inherit;font-size:.82rem;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+/* figures */
+figure{margin:1.2rem 0}
+figure svg{max-width:100%;height:auto;display:block}
+figcaption{font-size:.84rem;color:var(--muted);margin-top:6px;max-width:80ch}
+.svgbox{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px}
+.svgbox svg{min-width:640px}
+svg text{fill:currentColor;font-family:var(--sans);font-size:12px}
+svg .t-mute{fill:var(--muted)} svg .t-b{font-weight:650} svg .t-mono{font-family:var(--mono);font-size:11px}
+svg .box{fill:var(--surface);stroke:var(--line);stroke-width:1.2}
+svg .box-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+svg .box-w{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
+svg .box-d{fill:var(--deny-soft);stroke:var(--deny);stroke-width:1.2}
+svg .box-i{fill:var(--info-soft);stroke:var(--info);stroke-width:1.2}
+svg .lane{fill:var(--sunken);stroke:none}
+svg .edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+svg .edge-a{stroke:var(--accent);stroke-width:1.8;fill:none}
+svg .edge-d{stroke:var(--deny);stroke-width:1.6;fill:none;stroke-dasharray:5 3}
+ol.steps{padding-left:1.2rem} ol.steps li{margin:.35rem 0;max-width:80ch}
+.kbd{font-family:var(--mono);font-size:.82em;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--surface)}
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+@media (max-width:560px){ .bar nav a{padding:5px 8px;font-size:.85rem} th,td{padding:6px 7px} }
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} }
+@media print{ .bar,.theme,.controls{display:none} body{background:#fff;color:#000} .wrap{padding:0} details{break-inside:avoid} details:not([open])>div{display:block} }
+</style>
+</head>
+<body>
+<header class="bar"><div class="bar-in"><span class="brand">Atlas walkthrough</span><nav aria-label="Walkthrough pages"><a href="index.html">Start</a><a href="architecture.html">Architecture</a><a href="roles-and-users.html">Roles and users</a><a href="demo-script.html">Demo script</a><a href="readiness.html" aria-current="page">Readiness</a></nav><button id="theme" class="theme" type="button">Toggle theme</button></div></header>
+<main class="wrap">
+<p class="eyebrow">Readiness</p>
+<h1>Ready to demo, not ready to deploy</h1>
+<p class="lede">An honest read of where Atlas stands: the work queue counted, production controls scored against the code, and what to say and not say in front of an audience.</p>
+<div class="stamp"><span>Tracker section P counted at <b>787f84b</b></span><span>Date <b>2026-09-20</b></span><span>Tests collected <b>14,458</b></span></div>
+
+<nav class="chips" aria-label="On this page" style="margin-top:1rem">
+  <a class="chip" href="#verdict" style="text-decoration:none">Verdict</a>
+  <a class="chip" href="#queue" style="text-decoration:none">Work queue</a>
+  <a class="chip" href="#scorecard" style="text-decoration:none">Scorecard</a>
+  <a class="chip" href="#blockers" style="text-decoration:none">Go-live blockers</a>
+  <a class="chip" href="#open" style="text-decoration:none">Open work</a>
+  <a class="chip" href="#decisions" style="text-decoration:none">Bank decisions</a>
+  <a class="chip" href="#predemo" style="text-decoration:none">Before you demo</a>
+  <a class="chip" href="#sync" style="text-decoration:none">Docs vs code</a>
+</nav>
+
+<h2 id="verdict">Verdict</h2>
+<div class="two">
+  <div class="note allow"><b>Demo: yes, on a private machine.</b>
+  The governed-metadata story works end to end on the seeded Northwind estate: catalog, lineage, stewardship with maker-checker, governed SQL, and the role behaviour on the next page. Fifteen roles were probed live and the running API matched the declared contract on every check.</div>
+  <div class="note deny"><b>Production for a bank: not yet.</b>
+  It fails closed in code and is honest about its gaps, but no real identity provider, secret manager, archive or SIEM has been exercised, there is no backup or DR, no deployable topology beyond an API sketch, and no independent security or scale evidence. A pilot needs the first five blockers below; a full go-live needs all ten.</div>
+</div>
+
+<h2 id="queue">Work queue at a glance</h2>
+<p>Tracker section P is the only status authority. Counted from the table on 2026-09-20: 138 work packages (129 before this review added nine audit rows). Of the 114 that are neither deferred nor cancelled, 67 are done and 47 still need implementation, verification or a customer prerequisite. These are work packages, not features.</p>
+<div class="grid">
+  <div class="tile"><div class="k">Done</div><div class="v" style="color:var(--allow)">67</div><div class="s">acceptance evidenced</div></div>
+  <div class="tile"><div class="k">Partial</div><div class="v" style="color:var(--warn)">32</div><div class="s">code kept, remainder named</div></div>
+  <div class="tile"><div class="k">Blocked</div><div class="v" style="color:var(--deny)">7</div><div class="s">waiting on a prerequisite</div></div>
+  <div class="tile"><div class="k">To do</div><div class="v">8</div><div class="s">found by this review</div></div>
+  <div class="tile"><div class="k">Deferred</div><div class="v">22</div><div class="s">each with a named trigger</div></div>
+  <div class="tile"><div class="k">Cancelled</div><div class="v">2</div><div class="s">obsolete</div></div>
+</div>
+<div role="img" aria-label="Stacked bar: 67 done, 32 partial, 7 blocked, 8 to do, 22 deferred, 2 cancelled out of 138" style="display:flex;height:14px;border-radius:7px;overflow:hidden;border:1px solid var(--line);max-width:720px">
+  <span style="flex:67;background:var(--allow)"></span><span style="flex:32;background:var(--warn)"></span><span style="flex:7;background:var(--deny)"></span><span style="flex:8;background:var(--info)"></span><span style="flex:22;background:var(--muted);opacity:.55"></span><span style="flex:2;background:var(--line)"></span>
+</div>
+
+<h2 id="scorecard">Production scorecard</h2>
+<p>Measured against the code, the configuration and the running stack. <span class="pill p-allow">Enforced in code</span> means a test or a startup check holds it; it does not mean a bank has exercised it.</p>
+<div class="tbox"><table>
+<thead><tr><th>Dimension</th><th>State</th><th>What exists</th><th>Missing for a bank go-live</th></tr></thead>
+<tbody>
+<tr><td><b>Authentication, OIDC</b></td><td><span class="pill p-allow">Enforced in code</span></td><td>Signature algorithm allow-list, required claims, revocation, a closed role mapping.</td><td>Only a mock issuer has ever been driven. Every unknown key id forces a fresh key-set fetch with no cooldown. <code>staging</code> accepts the development identity.</td></tr>
+<tr><td><b>Tenant isolation</b></td><td><span class="pill p-allow">Enforced in code</span></td><td>Route-table-driven cross-tenant test; 540 of 554 surfaces reach a tenant check.</td><td>Application level only: no row-level security, one database role for runtime and DDL, no live cross-tenant test.</td></tr>
+<tr><td><b>Secrets and keys</b></td><td><span class="pill p-warn">Partial</span></td><td>Production refuses <code>env://</code> credentials and the local signer and tokenizer.</td><td>No vault address in any shipped config, a static-token bootstrap, no rotation drill; four provider names are accepted but not implemented.</td></tr>
+<tr><td><b>Redaction, tokenization</b></td><td><span class="pill p-warn">Partial</span></td><td>SQL literal redaction; value-freedom tests.</td><td>Relies on the bank's disk encryption; no TLS check on the database URL; vault transform unverified.</td></tr>
+<tr><td><b>Audit immutability</b></td><td><span class="pill p-warn">Partial</span></td><td>Per-event checksum; S3 Object Lock archive provider.</td><td>Archive is off by default and production does not refuse that; no hash chain; verified against MinIO only. Live status: <code>NO_ARCHIVES</code>.</td></tr>
+<tr><td><b>SIEM, alerting</b></td><td><span class="pill p-warn">Partial</span></td><td>20 alert rules and 4 recording rules; SIEM delivery code.</td><td>3 alerts firing with no Alertmanager; SIEM endpoint is a placeholder and its worker is off; syslog is plaintext; OTLP exporter is missing from the image.</td></tr>
+<tr><td><b>CI gates</b></td><td><span class="pill p-allow">Enforced in code</span></td><td>21 jobs: ruff, strict mypy, import-linter, one migration head, OpenAPI diff, tests with a 69% floor, dependency and secret scans, SBOM, image build, Playwright journeys.</td><td>Several real-PostgreSQL race suites skip in CI; no downgrade round-trip; no container scan, SAST or DAST; no live SQL Server or Oracle tests.</td></tr>
+<tr><td><b>Build, images</b></td><td><span class="pill p-warn">Partial</span></td><td>Non-root backend image, frozen lockfile.</td><td>Base images pinned by tag, not digest; no image signing; the UI image runs as root, HTTP only, and ships source maps.</td></tr>
+<tr><td><b>Deployment artefacts</b></td><td><span class="pill p-deny">Documented only</span></td><td>An API-only Kubernetes sketch: Deployment, Service, PDB, migration Job, ConfigMap.</td><td>Never applied. No manifests for workers, scheduler, publisher, projector, UI or datastores; no Ingress, NetworkPolicy, autoscaling, Helm, Terraform or CD.</td></tr>
+<tr><td><b>HA, DR, backup</b></td><td><span class="pill p-deny">Documented only</span></td><td>Runbook prose.</td><td>No backup, restore or point-in-time tooling; no drill; the scheduler has no leader election.</td></tr>
+<tr><td><b>Performance</b></td><td><span class="pill p-warn">Partial</span></td><td>Four in-process hot-path benchmarks with a 20% regression gate.</td><td>No API p95, load or soak run; the million-table scale has never been run.</td></tr>
+<tr><td><b>Configuration safety</b></td><td><span class="pill p-allow">Enforced in code</span></td><td>Production refuses dev identity, plain-HTTP key and model URLs, the reviewer agent, GraphQL introspection.</td><td>Production still accepts the default database password, an HTTP issuer, archive <code>none</code>, workspace observing mode and an unauthenticated Redis.</td></tr>
+<tr><td><b>Model and provider risk</b></td><td><span class="pill p-warn">Partial</span></td><td>HTTPS-only providers; route maker-checker; a 39-malicious, 15-benign risk corpus.</td><td>Residency and retention are labels, never enforced; token quotas default to unlimited; no drift or spend monitoring.</td></tr>
+<tr><td><b>Supply chain</b></td><td><span class="pill p-warn">Partial</span></td><td>pip-audit with an empty baseline, npm audit with no exceptions, gitleaks, a Python SBOM.</td><td>No signing, provenance or SAST; images and actions pinned by tag; no CODEOWNERS or SECURITY.md.</td></tr>
+</tbody></table></div>
+
+<h2 id="blockers">Go-live blockers, in order</h2>
+<ol class="steps">
+<li><b>Identity and secrets on a real bank.</b> No real IdP or secret manager has been driven (R11-B6, decisions BD-1 and BD-3). Close with it: a JWKS refetch cooldown, HTTPS on issuer and vault URLs, a readiness probe of both, and a non-static vault login.</li>
+<li><b>No deployable topology.</b> Nothing beyond an API sketch; no image build, push and sign pipeline; nothing applied to a cluster.</li>
+<li><b>No backup, restore or DR</b>, and no drill (BD-7, R11-B15). Six of eight drills in the tracker have never run.</li>
+<li><b>Audit evidence is not immutable by default.</b> Archive off, tables mutable by the application role, no separate migration role; SIEM off or unverified against a real destination (BD-9, R11-B9).</li>
+<li><b>No security assurance.</b> Penetration test, break-glass and deployed revocation evidence are blocked (R11-C9); no SAST, DAST, container scan or signing.</li>
+<li><b>Transport and edge.</b> No TLS in shipped artefacts; no HSTS or CSP; <code>/metrics</code>, <code>/docs</code> and readiness open on the API port; no network policy; no REST rate limit.</li>
+<li><b>Workspace authorization is observe-only.</b> It ships non-enforcing, an operator must flip it, and no queue row tracks that.</li>
+<li><b>Capacity unmeasured at scale</b> (R11-B15). At its ceiling each process opens 30 database connections: the three default processes reach 90 of the 97 usable on a stock PostgreSQL, and all five would need 150.</li>
+<li><b>Alerts route nowhere</b>, and delivery, archive and auth-failure signals are not metrics.</li>
+<li><b>Model residency, monitoring and masking licence</b> (R11-C11, R11-C13). SOC 2 and ISO are not started.</li>
+</ol>
+
+<h2 id="open">Open work in the queue</h2>
+<p>Every row that is not done, grouped by what it blocks. <b>A</b> blocks a go-live, <b>B</b> blocks one optional capability, <b>C</b> is deferred with a named trigger.</p>
+<div class="tbox"><table>
+<thead><tr><th>Class</th><th>Rows</th><th>Status</th><th>What remains</th></tr></thead>
+<tbody>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-B6</td><td>Blocked</td><td>Corporate issuer, claims and secret manager; reload, role mapping and rotation unproven in the target topology.</td></tr>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-B15</td><td>Blocked</td><td>p95, fairness, restore, rebuild and Temporal failover unmeasured; needs size, topology, RPO and RTO.</td></tr>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-C9</td><td>Blocked</td><td>Penetration test, break-glass, deployed kill switch and revocation, policy parity.</td></tr>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-C11</td><td>Blocked</td><td>Approved model route, residency and retention, usage and drift monitoring.</td></tr>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-B5</td><td>Blocked</td><td>Customer connector certification: only PostgreSQL and SQL Server have live evidence; four others are fixture-only.</td></tr>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-B9, R11-D17</td><td>Partial</td><td>WORM archive proven only against an Object Lock double; the parity gate must run in the target environment.</td></tr>
+<tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-AUD04, AUD09</td><td>To do</td><td>Found by this review: the scheduler has no leader or single-replica guard; an unknown key id makes the API refetch the identity provider's key set with no cooldown.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-AUD01 to 03, 05 to 08</td><td>To do</td><td>Found by this review: nine guard role names no token can carry; two T3 objects with no review; the Kafka consumer that fails quietly in the default stack; a FULL-snapshot default on the synchronous ingestion endpoint; the API conventions target; OIDC persona bundles (started); API-only capabilities with no UI.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-C10, C13</td><td>Blocked</td><td>Relationship confidence needs a labelled corpus; dynamic masking needs a licensed vault transform (refusal retained).</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-B10, I1</td><td>Partial</td><td>Notification, Teams and Slack delivery verified only against loopback stubs.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-C2, C14, S13</td><td>Partial</td><td>Human screen-reader acceptance; live certification of Oracle, Snowflake, BigQuery and Databricks; scope and review-surface consolidation.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-FP01 to FP17</td><td>Partial</td><td>Database-footprint remainders: package selection and member lineage, sample-row policy, composite-key agent tier, index rebuild against a live provider, tool registration, metrics port.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-GQL01/02, OKF01-03, SQL01, REV01</td><td>Partial</td><td>GraphQL limits uncalibrated; OKF import flag off until acceptance; paid-model acceptance unauthorised; some review types sit outside the batch queue.</td></tr>
+<tr><td><span class="pill p-mute">C</span></td><td class="mono">22 deferred rows</td><td>Deferred</td><td>Each preserves a named contract before simplifying; triggers are recorded per row (for example B16 waits on B5 and a measured scan cost).</td></tr>
+</tbody></table></div>
+
+<h2 id="decisions">Decisions only the bank can make</h2>
+<p>All twelve tracker section J decisions are still open. Engineering cannot close them; several gate the blockers above.</p>
+<div class="grid">
+<div class="tile"><div class="k">BD-1 · BD-3</div><div class="s">Identity provider and claims; secret manager</div></div>
+<div class="tile"><div class="k">BD-2</div><div class="s">Policy decision point</div></div>
+<div class="tile"><div class="k">BD-4 · BD-5</div><div class="s">Source-system list; network zones and regions</div></div>
+<div class="tile"><div class="k">BD-6 · BD-8</div><div class="s">Residency and retention; approved model routes</div></div>
+<div class="tile"><div class="k">BD-7</div><div class="s">RPO and RTO</div></div>
+<div class="tile"><div class="k">BD-9</div><div class="s">SIEM and WORM destination</div></div>
+<div class="tile"><div class="k">BD-10 · BD-11 · BD-12</div><div class="s">Kubernetes standards; tier and chargeback; ITSM</div></div>
+</div>
+
+<h2 id="predemo">Before you demo</h2>
+<div class="note allow"><b>The stack matches the code.</b> Another session rebuilt it from <span class="mono">787f84b</span> on 2026-09-20 and recorded parity, the read sweep and the accessibility audit against that build (tracker R11-D17 and the capability register). The role checks on the roles page ran on that build. If HEAD has moved since, rebuild from a clean worktree and rerun the parity check first.</div>
+<ul>
+<li><b>Keep it off shared networks.</b> Every service port binds to all interfaces with default passwords, and <code>X-Roles: PlatformAdmin</code> on port 8000 grants admin. The UI bakes in an all-roles development identity.</li>
+<li><b>Ask sends prompts to real providers.</b> The deployed API holds live OpenAI and Gemini keys and the approved route is labelled residency <code>development</code>. Demo without live generation, or decide deliberately that prompts may leave the machine.</li>
+<li><b>Leave notification delivery alone.</b> Nine governance notifications have been retrying since 2026-09-12, at up to five attempts each. Enabling or changing the delivery worker would start delivering or dead-lettering them.</li>
+<li><b>Say what is not proven:</b> no WORM claim (archive status is <code>NO_ARCHIVES</code>), no alerting claim (no Alertmanager), no HA, DR, scale or p95 claim, and do not call workspace authorization enforced: it is observing.</li>
+<li><b>Authentication claim.</b> The local stack trusts identity headers by design. Say so, then show the OIDC overlay if the audience needs the production shape.</li>
+</ul>
+
+<h2 id="sync">Documentation against code</h2>
+
+<p>Six read-only audits compared the living documents with the code and the running stack, one slice each: architecture, identity and roles, delivery status, contracts and connectors, production controls, and the UI. Where the code was right, the document was corrected. Where a document described a design the code has not reached, the document keeps the intent and now carries an <em>Implementation status (2026-09-20)</em> note saying what the code does. Dated snapshots (reviews and session logs) were left alone on purpose.</p>
+<div class="grid">
+  <div class="tile"><div class="k">Documents corrected</div><div class="v">60</div><div class="s">60 files changed, 1275 insertions(+), 638 deletions(-)</div></div>
+  <div class="tile"><div class="k">Design-vs-built notes</div><div class="v">94</div><div class="s">dated Implementation status callouts</div></div>
+  <div class="tile"><div class="k">Code decisions queued</div><div class="v">9</div><div class="s">tracker rows R11-AUD01 to AUD09</div></div>
+</div>
+<h3>The corrections that matter most</h3>
+<div class="tbox"><table>
+<thead><tr><th>The document said</th><th>The code does</th><th>Fixed in</th><th>Queued as</th></tr></thead>
+<tbody><tr><td>Leader election is coded; a standby takes over</td><td>No leader election exists anywhere in <code>src/</code>. The scheduler is a bare loop; only scan admission uses row locks.</td><td>05, 08, 09, README</td><td>R11-AUD04</td></tr><tr><td>With default settings Redpanda is never reached</td><td>The worker starts a Kafka consumer by default, the default stack has no broker, and the failure is silent.</td><td>README, local runbook</td><td>R11-AUD03</td></tr><tr><td>Object storage is not wired; nothing writes or reads a vector; <code>test_projection_rebuild</code> does not exist</td><td>An S3 Object Lock archive is wired (off by default). Embeddings live in a <code>bytea</code> column with brute-force search. The test exists and proves the projector is a pure function of PostgreSQL.</td><td>03, 06, 07</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>CI runs ruff, mypy, import-linter, pytest and nothing else; there is no performance job</td><td>21 jobs, including pip-audit, npm audit, gitleaks, an SBOM, image build, Playwright journeys and a four-path performance gate.</td><td>03, 05, 07, 09, 10 and the CI guide</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>Six personas; persona decides policy and the maker-checker seat</td><td>Five personas. Persona only picks the landing page and checklist; roles decide access and maker-checker compares principal ids.</td><td>personas, experience shell, module 01</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>End-to-end guide: switch persona and approve</td><td>The dropdown changes navigation, never identity: every UI action in the default stack is one principal, <code>local-ui-admin</code>.</td><td>acceptance and setup guides</td><td>R11-AUD07</td></tr><tr><td>Portal on :3000; Redis, Neo4j, Redpanda, MinIO always on</td><td>Portal on :3001. Plain <code>docker compose up</code> starts ten services; the rest are compose profiles.</td><td>07, 09, README</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>Databricks planned, no code; Oracle governed execution done</td><td>Databricks is BETA (fixture-certified, never live). The gateway refuses every Oracle statement today.</td><td>connectivity, backlog, module index</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>Tool certification, multi-tool plans and the SDK are not implemented</td><td>TL-1 to TL-7 shipped: certification routes, seven tool-plan routes and <code>aida_tool_sdk</code>.</td><td>tool registry, tool contract</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>API conventions: cursor pagination everywhere, an <code>error</code> envelope, <code>Idempotency-Key</code>, rate-limit reset</td><td>Offset and cursor both exist (131 of 263 GETs take offset), errors are <code>detail</code> objects, no operation takes <code>Idempotency-Key</code>.</td><td>API conventions, contract strategy</td><td>R11-AUD06</td></tr><tr><td>Event catalog: about 55 events, an uncatalogued event does not fail CI</td><td>129 literal events; every one is catalogued and a gate fails an uncatalogued one.</td><td>event catalog</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>Section P: 36 of 83 done; 14 of 15 defects done; head migration <code>090b3be72b67</code></td><td>67 done of 138; 32 of 33 defects done; one head, <code>53558182d9fb</code>, across 192 revisions.</td><td>tracker, status, register</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>16 ADRs (README), seventeen accepted (Docs index); 5 of 21 modules</td><td>29 ADR files (22 accepted, 6 proposed, 1 superseded), four of them missing from the register; 6 modules.</td><td>README, Docs index, ADR register</td><td><span class="pill p-mute">docs only</span></td></tr><tr><td>Tracker: the FP03 row</td><td>Its continuation broke the table, so rows FP04 to FP18 rendered as raw text. Rejoined; the earlier remainder is marked superseded.</td><td>tracker section P</td><td><span class="pill p-mute">docs only</span></td></tr></tbody></table></div>
+<h3>Gaps that became code decisions</h3>
+<p>Wording cannot close these. Each is a row in tracker section P.</p>
+<div class="tbox"><table><thead><tr><th>Row</th><th>Gap</th></tr></thead><tbody><tr><td class="mono">R11-AUD01</td><td>Nine role names in route guards are not in the platform catalog, so no OIDC token can carry them.</td></tr><tr><td class="mono">R11-AUD02</td><td>Access policies and workspace members are tier T3 but need no second person.</td></tr><tr><td class="mono">R11-AUD03</td><td>The Kafka consumer that fails quietly in the default stack.</td></tr><tr><td class="mono">R11-AUD04</td><td>No scheduler leader or single-replica guard.</td></tr><tr><td class="mono">R11-AUD05</td><td>The synchronous ingestion endpoint defaults to a FULL snapshot with no confirmation.</td></tr><tr><td class="mono">R11-AUD06</td><td>Decide whether to build or retire the documented API conventions.</td></tr><tr><td class="mono">R11-AUD07</td><td>OIDC persona bundles added; sign-in for each not yet driven.</td></tr><tr><td class="mono">R11-AUD08</td><td>API-only capabilities with no screen: organization kill switch, global search, audit export and more.</td></tr><tr><td class="mono">R11-AUD09</td><td>An unknown key id makes the API refetch the identity provider's key set with no cooldown.</td></tr></tbody></table></div>
+<h3>Checked and already in sync</h3>
+<ul>
+<li>Generated pages match their generators: OpenAPI baseline (440 paths, 508 operations), GraphQL schema, engine and connector capability matrices, destination inventory, surface-control matrix, configuration inventory, architecture map (418 modules), UI types and the Prometheus rules.</li>
+<li>All nine invariants name a test that exists; INV-2 is held by three independent layers.</li>
+<li>The closed OIDC role mapping, the production refusals, the connector list (six BETA, two planned), the ingestion batch bounds, the MCP methods and the GraphQL limits all match their documents.</li>
+</ul>
+<h3>Where the corrections landed</h3>
+<div class="tbox" style="max-width:420px"><table><thead><tr><th>Area</th><th class="c">Files</th></tr></thead><tbody><tr><td>Product</td><td class="c mono">3</td></tr><tr><td>Architecture</td><td class="c mono">17</td></tr><tr><td>Modules</td><td class="c mono">11</td></tr><tr><td>Contracts</td><td class="c mono">8</td></tr><tr><td>Engineering</td><td class="c mono">7</td></tr><tr><td>Security</td><td class="c mono">4</td></tr><tr><td>Delivery status</td><td class="c mono">4</td></tr><tr><td>Docs index</td><td class="c mono">1</td></tr><tr><td>Root README</td><td class="c mono">1</td></tr><tr><td>Kubernetes sketch</td><td class="c mono">3</td></tr><tr><td>UI README</td><td class="c mono">1</td></tr></tbody></table></div>
+<h3>Gates run on the corrected documents</h3>
+<div class="tbox" style="max-width:720px"><table><thead><tr><th>Gate</th><th>Result</th></tr></thead><tbody><tr><td>Relative links in every Markdown file</td><td><span class="pill p-allow">OK: every relative link in 266 Markdown files</span></td></tr><tr><td>Doc claims, event catalog and competitive claims</td><td><span class="pill p-allow">5856 passed, 164 skipped, 14 warnings in 12.05s
+</span></td></tr><tr><td>Compatibility-shim register is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Architecture map is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Configuration inventory is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Destination inventory is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Engine capability matrix is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Surface-control matrix is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>GraphQL schema reference is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Prometheus rules is current</td><td><span class="pill p-allow">up to date</span></td></tr><tr><td>Lint of the new scripts (ruff)</td><td><span class="pill p-allow">All checks passed!</span></td></tr><tr><td>Walkthrough pack: anchors and links</td><td><span class="pill p-allow">0 broken anchors or links in 5 pages</span></td></tr><tr><td>Tracker section P: 5 cells per row</td><td><span class="pill p-allow">138 rows, 0 malformed</span></td></tr></tbody></table></div>
+
+<h3>Re-verify</h3>
+<pre class="tbox" style="padding:10px 14px;margin:.6rem 0;font-family:var(--mono);font-size:.84rem;overflow-x:auto">python scripts/check_docs_links.py
+env -u AIDA_ENVIRONMENT .venv/Scripts/python.exe -m pytest tests/test_doc_claims.py tests/test_event_catalog_gate.py
+python scripts/live_role_matrix.py</pre>
+
+<footer>Atlas walkthrough pack. A dated snapshot, not a queue: status lives in the tracker (section P) and evidence in the capability register. Regenerate the numbers with the commands shown on each page.</footer>
+</main>
+<script>
+(function(){
+  var root=document.documentElement, key='atlas-walkthrough-theme';
+  try{var s=localStorage.getItem(key); if(s==='light'||s==='dark'){root.setAttribute('data-theme',s);}}catch(e){}
+  var btn=document.getElementById('theme');
+  function label(){var t=root.getAttribute('data-theme'); btn.textContent = t==='dark' ? 'Light theme' : t==='light' ? 'Dark theme' : 'Toggle theme';}
+  if(btn){label(); btn.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    var dark = cur ? cur==='dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark'; root.setAttribute('data-theme',next);
+    try{localStorage.setItem(key,next);}catch(e){} label();
+  });}
+})();
+</script>
+</body>
+</html>

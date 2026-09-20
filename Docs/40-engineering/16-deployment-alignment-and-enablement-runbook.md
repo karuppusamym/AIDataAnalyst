@@ -137,7 +137,7 @@ whose profile you forgot.
 
 ### 2.2 The deploy and the migration are one action, and cannot be separated
 
-`compose.yaml` line 375 runs `alembic upgrade heads` in the `migrate` service,
+The `migrate` service in `compose.yaml` runs `alembic upgrade heads`,
 and `api`, `metadata-worker` and `fleet-scheduler` each declare
 `depends_on: migrate: condition: service_completed_successfully`. So:
 

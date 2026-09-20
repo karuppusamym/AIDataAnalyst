@@ -31,7 +31,7 @@ Every retired spelling still resolves (section 7).
 | **ORG-READ** | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | Stewardship reads |
 | **DECIDE** | DataSteward, MetadataReviewer, PlatformAdmin | Relationship and same-object decisions |
 | **DISCOVER** | DataAdmin, MetadataAdmin, PlatformAdmin | Candidate discovery |
-| **CAND-LIST** | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | Candidate list reads |
+| **CAND-LIST** | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | Candidate list reads (DataSteward and MetadataReviewer were added later on 2026-09-19 by R11-C15, commit `7560264`; see section 9) |
 
 **UI gate.** No screen in this map hides or disables an action based on the caller's role. The
 server's `require_roles` is the only role check. The UI gates below depend only on the state of
@@ -126,7 +126,7 @@ nothing.
 | Bulk decide a checked set | `POST /v1/relationship-candidates/bulk-decision` | DECIDE | per-row failures reported |
 | Decision history | `GET /v1/datasources/{datasource_id}/relationship-candidates` | CAND-LIST | none |
 | Join validation | `GET /v1/relationship-candidates/{candidate_id}/validation` | Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | none |
-| Confidence calibration tile | `GET /v1/relationship-candidates/confidence-calibration` | CAND-LIST | none, and never blocks the queue |
+| Confidence calibration tile | `GET /v1/relationship-candidates/confidence-calibration` | Auditor, DataAdmin, MetadataAdmin, PlatformAdmin, Viewer (not widened by R11-C15, so narrower than CAND-LIST) | none, and never blocks the queue |
 
 **Link added:** "Cross-source candidates in this source's domain" opens
 `#/steward/cross-source?dom=<the selected source's data_domain_id>`. A source with no domain
@@ -136,7 +136,7 @@ gets an unscoped link.
 
 | Action | API | API roles | UI gate |
 |---|---|---|---|
-| List domains | `GET /v1/organizations/{organization_id}/lines-of-business` → `GET /v1/lines-of-business/{lob_id}/data-domains` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | none |
+| List domains | `GET /v1/organizations/{organization_id}/lines-of-business` → `GET /v1/lines-of-business/{lob_id}/data-domains` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer. The org-wide `GET /v1/organizations/{organization_id}/data-domains` also admits DataSteward and MetadataReviewer since R11-C15, but the screen does not call it | none |
 | List sources | `GET /v1/organizations/{organization_id}/datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | none |
 | Discover cross-source relationships | `POST /v1/data-domains/{domain_id}/relationship-candidates/discover-cross-source` | DISCOVER | a 403 on a cross-domain scan becomes the grant request |
 | Discover same-object tables | `POST /v1/data-domains/{domain_id}/cross-source-object-resolution-candidates/discover` | DISCOVER | same |
@@ -225,14 +225,20 @@ palette still finds "playbook", "scheduled" and "automation" under Stewardship.
 
 ## 9. Noticed, not changed
 
-- **Deciders cannot list some candidates.** A principal whose only roles are DataSteward or
-  MetadataReviewer (two of the three DECIDE roles) is outside CAND-LIST. For that principal:
-  - Relationships' decision history returns 403.
-  - Cross-source's relationship list catches each per-source 403 and shows an empty page, so
-    the list looks empty rather than refused.
-  - Cross-source's same-object list and domain list are also closed to that principal.
+- **Deciders could not list some candidates (closed later on 2026-09-19).** When this map was
+  written, a principal whose only roles were DataSteward or MetadataReviewer (two of the three
+  DECIDE roles) was outside CAND-LIST. For that principal:
+  - Relationships' decision history returned 403.
+  - Cross-source's relationship list caught each per-source 403 and showed an empty page, so
+    the list looked empty rather than refused.
+  - Cross-source's same-object list and domain list were also closed.
 
-  This is a backend role-tuple question, and nothing in this slice changes it.
+  R11-C15 (commit `7560264`) widened the candidate list routes to include both roles, and the
+  org-wide data-domain list with them, so CAND-LIST in section 1 is the current set. One part
+  remains: Cross-source still builds its domain list by walking
+  `GET /v1/organizations/{organization_id}/lines-of-business`, which is closed to those two
+  roles, so their domain picker is still refused. The widened org-wide data-domain route is not
+  called by the screen. Checked against the running API on 2026-09-20.
 - **Catalog "Certify…" stub.** Catalog's disabled "Certify…" button says *"Bulk certify is not
   available yet — certification is managed per asset in stewardship."* Bulk certify by filter
   is available in Bulk actions. The explicit-id path from a Catalog selection is what 17B would

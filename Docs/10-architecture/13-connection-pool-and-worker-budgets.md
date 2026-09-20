@@ -48,15 +48,23 @@ matters for exhaustion, because a burst is exactly when every process bursts.
 ## 2. Where the connections go
 
 `compose.yaml` defines five long-lived processes that use the platform database,
-each at one instance:
+each at one instance. Only three of them start in a plain `docker compose up`;
+the other two sit behind compose profiles:
 
-| Process | Command | Instances in `compose.yaml` |
-|---|---|---|
-| api | `uvicorn aida.main:app` | 1 |
-| metadata-worker | `python -m aida.workflows.worker` | 1 |
-| fleet-scheduler | `python -m aida.workflows.scheduler` | 1 |
-| outbox-publisher | `python -m aida.projectors.outbox_publisher` | 1 |
-| graph-projector | `python -m aida.projectors.graph_projector` | 1 |
+| Process | Command | Instances in `compose.yaml` | Started by |
+|---|---|---|---|
+| api | `uvicorn aida.main:app` | 1 | default |
+| metadata-worker | `python -m aida.workflows.worker` | 1 | default |
+| fleet-scheduler | `python -m aida.workflows.scheduler` | 1 | default |
+| outbox-publisher | `python -m aida.projectors.outbox_publisher` | 1 | profiles `events`, `graph`, `full` |
+| graph-projector | `python -m aida.projectors.graph_projector` | 1 | profiles `graph`, `full` |
+
+`temporal` (`temporalio/auto-setup`, in the default stack) is a further client of
+the same PostgreSQL server: its `DB: postgres12`, `POSTGRES_SEEDS: postgres` and
+`POSTGRES_USER: aida` settings in `compose.yaml` point it at the `postgres`
+service. Its connections are not in the arithmetic below, because their number
+is set by the Temporal image rather than by anything in this repository, but
+they come out of the same server-wide `max_connections`.
 
 `migrate` also connects, through Alembic's own engine (`migrations/env.py`), but
 it is one-shot and every other service declares
@@ -94,24 +102,33 @@ PostgreSQL's own defaults — `max_connections = 100`,
 the `aida` role. Confirm rather than assume on any given host with
 `SHOW max_connections;` (see §6).
 
-| | Per process | × instances | Total |
-|---|---:|---:|---:|
-| Steady (`pool_size`) | 10 | 5 | **50** |
-| Ceiling (`pool_size + max_overflow`) | 30 | 5 | **150** |
+Which processes run depends on the compose profile (§2), so there are two
+answers. The default stack runs three processes; `--profile graph` or `full`
+runs all five (`--profile events` alone adds only the outbox-publisher: four
+processes, 40 steady and 120 at the ceiling).
 
-- Steady: 50 of 97 — **47 connections of headroom (48%)**.
-- Ceiling: 150 of 97 — **oversubscribed by 53 connections (155% of available)**.
+| | Per process | × 3 (default stack) | Total | × 5 (`graph` or `full`) | Total |
+|---|---:|---:|---:|---:|---:|
+| Steady (`pool_size`) | 10 | 3 | **30** | 5 | **50** |
+| Ceiling (`pool_size + max_overflow`) | 30 | 3 | **90** | 5 | **150** |
 
-**What that means.** The local topology is comfortable at rest and cannot
-service a simultaneous full burst of all five processes. It has not fallen over
-because the five do not normally burst together: the API is idle while a
-discovery runs, and the projectors are event-driven. The failure mode is not
-gradual — it is `asyncpg` raising "too many connections for role" (or SQLAlchemy
-`TimeoutError` waiting on checkout) on whichever process asks last.
+- Default stack, steady: 30 of 97 — **67 connections of headroom (69%)**.
+- Default stack, ceiling: 90 of 97 — **7 connections of headroom (93% of available)**, before Temporal's own connections are counted, so 7 is an upper bound.
+- Five processes, steady: 50 of 97 — **47 connections of headroom (48%)**.
+- Five processes, ceiling: 150 of 97 — **oversubscribed by 53 connections (155% of available)**.
 
-**What would exhaust it.** Any three processes at their ceiling
-(3 × 30 = 90) leaves 7 connections for the other two, which have a combined
-steady requirement of 20. The realistic trigger is a large-source discovery —
+**What that means.** The default stack fits under the server limit even with
+all three processes at their ceiling, but only just, and Temporal's connections
+come out of the same margin. The five-process topology is comfortable at rest
+and cannot service a simultaneous full burst of all five processes. It has not
+fallen over because the five do not normally burst together: the API is idle
+while a discovery runs, and the projectors are event-driven. The failure mode is
+not gradual — it is `asyncpg` raising "too many connections for role" (or
+SQLAlchemy `TimeoutError` waiting on checkout) on whichever process asks last.
+
+**What would exhaust it.** In the five-process topology, any three processes at
+their ceiling (3 × 30 = 90) leaves 7 connections for the other two, which have a
+combined steady requirement of 20. The realistic trigger is a large-source discovery —
 the Temporal worker driving toward its ceiling — concurrent with a graph
 projection rebuild of the same source and normal API traffic. That is not a
 hypothetical combination: a discovery *emits* the event the projector rebuilds

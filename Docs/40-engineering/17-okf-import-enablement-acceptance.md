@@ -33,8 +33,10 @@ the flag, so imports already pending can still be inspected, approved or rejecte
 1. Deployment parity reads a match on the commit you are enabling
    ([16 §3](16-deployment-alignment-and-enablement-runbook.md#3-verify-parity-afterwards)).
 2. Two **different human principals**: one holding `MetadataAdmin`, `DataSteward` or `PlatformAdmin`
-   (the importer), and a second holding `DataSteward`, `SemanticAdmin`, `Reviewer` or
-   `PlatformAdmin` (the checker).
+   (the importer), and a second holding `DataSteward`, `Reviewer` or `PlatformAdmin` (the
+   checker), directly or through an active delegation of one of those roles. `SemanticAdmin`
+   may read an import review's preview but cannot decide it: the review decision routes
+   exclude it.
 3. A context product with a published version whose knowledge bundle has been read at least once,
    so there is a stored publication to import against.
 4. A recorded rollback: set the flag back to `false` and restart the API.

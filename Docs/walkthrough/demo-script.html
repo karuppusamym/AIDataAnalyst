@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas demo script</title>
+<style>
+:root{
+  --ground:#F4F6F7; --surface:#FFFFFF; --sunken:#EBEFF1; --ink:#13202A; --muted:#54656F; --line:#D5DDE2;
+  --accent:#0B6B6B; --accent-ink:#FFFFFF; --accent-soft:#DDEFEE;
+  --allow:#1A7048; --allow-soft:#DFF1E7; --deny:#B3372B; --deny-soft:#F8E3E0;
+  --warn:#855600; --warn-soft:#F8EBCB; --info:#2F5F9E; --info-soft:#E2EBF7;
+  --mono:ui-monospace,"Cascadia Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+    --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+    --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+    --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+  --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+  --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+  --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
+a{color:var(--accent);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+code,.mono{font-family:var(--mono);font-size:.88em}
+code{background:var(--sunken);padding:.1em .35em;border-radius:3px;overflow-wrap:anywhere}
+h1,h2,h3{line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(1.65rem,3.4vw,2.3rem);font-weight:650;letter-spacing:-.01em}
+h2{font-size:1.3rem;font-weight:650;margin-top:2.4rem;padding-top:.4rem}
+h3{font-size:1.02rem;font-weight:650;margin-top:1.4rem}
+p{margin:.6rem 0;max-width:72ch}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:16px;padding-block:20px 72px}
+/* top bar */
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.bar-in{max-width:1080px;margin:0 auto;padding:8px 16px;display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:.78rem;color:var(--accent);margin-right:6px}
+.bar nav{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+.bar nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:.9rem}
+.bar nav a:hover{background:var(--sunken);color:var(--ink)}
+.bar nav a[aria-current="page"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.theme{margin-left:auto;background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:4px 10px;font:inherit;font-size:.82rem;cursor:pointer}
+.theme:hover{color:var(--ink);border-color:var(--muted)}
+/* header */
+.eyebrow{font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+.lede{font-size:1.05rem;color:var(--muted);max-width:68ch;margin-top:.7rem}
+.stamp{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:1rem;font-size:.82rem;color:var(--muted)}
+.stamp b{color:var(--ink);font-weight:600}
+/* pills */
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.74rem;font-weight:650;letter-spacing:.02em;white-space:nowrap;border:1px solid transparent;vertical-align:baseline}
+.p-allow{background:var(--allow-soft);color:var(--allow)}
+.p-deny{background:var(--deny-soft);color:var(--deny)}
+.p-warn{background:var(--warn-soft);color:var(--warn)}
+.p-info{background:var(--info-soft);color:var(--info)}
+.p-mute{background:var(--sunken);color:var(--muted)}
+.p-accent{background:var(--accent-soft);color:var(--accent)}
+/* callouts */
+.note{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--surface);padding:10px 14px;border-radius:6px;margin:1rem 0;max-width:80ch}
+.note.warn{border-left-color:var(--warn)} .note.deny{border-left-color:var(--deny)} .note.allow{border-left-color:var(--allow)}
+.note b:first-child{display:block;margin-bottom:2px}
+/* grids and tiles */
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin:1rem 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.tile .k{font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600}
+.tile .v{font-size:1.7rem;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2;margin-top:2px}
+.tile .s{font-size:.82rem;color:var(--muted);margin-top:2px}
+/* tables */
+.tbox{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:.8rem 0}
+table{border-collapse:collapse;width:100%;font-size:.88rem;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;background:var(--sunken);font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.c,th.c{text-align:center}
+.matrix td.c{padding:5px 4px}
+td.hl,th.hl{background:var(--accent-soft)}
+.cell{display:inline-block;min-width:1.7em;padding:0 4px;border-radius:4px;font-weight:650;font-size:.8rem}
+.cell.a{background:var(--allow-soft);color:var(--allow)} .cell.d{background:var(--sunken);color:var(--muted)} .cell.p{background:var(--warn-soft);color:var(--warn)}
+/* details */
+details{background:var(--surface);border:1px solid var(--line);border-radius:8px;margin:.6rem 0}
+summary{cursor:pointer;padding:9px 14px;font-weight:600;list-style-position:inside}
+details>div{padding:2px 14px 12px}
+/* controls */
+.controls{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:.8rem 0}
+.controls label{font-size:.82rem;color:var(--muted);display:flex;gap:6px;align-items:center}
+select,input[type=search]{font:inherit;font-size:.88rem;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 11px;font:inherit;font-size:.82rem;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+/* figures */
+figure{margin:1.2rem 0}
+figure svg{max-width:100%;height:auto;display:block}
+figcaption{font-size:.84rem;color:var(--muted);margin-top:6px;max-width:80ch}
+.svgbox{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px}
+.svgbox svg{min-width:640px}
+svg text{fill:currentColor;font-family:var(--sans);font-size:12px}
+svg .t-mute{fill:var(--muted)} svg .t-b{font-weight:650} svg .t-mono{font-family:var(--mono);font-size:11px}
+svg .box{fill:var(--surface);stroke:var(--line);stroke-width:1.2}
+svg .box-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+svg .box-w{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
+svg .box-d{fill:var(--deny-soft);stroke:var(--deny);stroke-width:1.2}
+svg .box-i{fill:var(--info-soft);stroke:var(--info);stroke-width:1.2}
+svg .lane{fill:var(--sunken);stroke:none}
+svg .edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+svg .edge-a{stroke:var(--accent);stroke-width:1.8;fill:none}
+svg .edge-d{stroke:var(--deny);stroke-width:1.6;fill:none;stroke-dasharray:5 3}
+ol.steps{padding-left:1.2rem} ol.steps li{margin:.35rem 0;max-width:80ch}
+.kbd{font-family:var(--mono);font-size:.82em;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--surface)}
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+@media (max-width:560px){ .bar nav a{padding:5px 8px;font-size:.85rem} th,td{padding:6px 7px} }
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} }
+@media print{ .bar,.theme,.controls{display:none} body{background:#fff;color:#000} .wrap{padding:0} details{break-inside:avoid} details:not([open])>div{display:block} }
+</style>
+</head>
+<body>
+<header class="bar"><div class="bar-in"><span class="brand">Atlas walkthrough</span><nav aria-label="Walkthrough pages"><a href="index.html">Start</a><a href="architecture.html">Architecture</a><a href="roles-and-users.html">Roles and users</a><a href="demo-script.html" aria-current="page">Demo script</a><a href="readiness.html">Readiness</a></nav><button id="theme" class="theme" type="button">Toggle theme</button></div></header>
+<main class="wrap">
+<p class="eyebrow">Demo script</p>
+<h1>Forty minutes, seven acts, eight users</h1>
+<p class="lede">A run of show by person. Each act names who is signed in, what to open, what to expect, and whether it changes anything.</p>
+<div class="stamp"><span>Stack: <b>Northwind (sample-bank)</b></span><span>Users: <b>scripts/demo-users.ps1</b></span><span>Date <b>2026-09-20</b></span></div>
+
+<nav class="chips" aria-label="On this page" style="margin-top:1rem">
+  <a class="chip" href="#preflight" style="text-decoration:none">Before you start</a>
+  <a class="chip" href="#acts" style="text-decoration:none">Seven acts</a>
+  <a class="chip" href="#loop" style="text-decoration:none">The maker-checker loop</a>
+  <a class="chip" href="#close" style="text-decoration:none">Close</a>
+  <a class="chip" href="#avoid" style="text-decoration:none">Do not show</a>
+  <a class="chip" href="#trouble" style="text-decoration:none">If something breaks</a>
+</nav>
+
+<div class="grid">
+  <div class="tile"><div class="k">Run time</div><div class="v">about 40 min</div><div class="s">seven acts, one close</div></div>
+  <div class="tile"><div class="k">Users</div><div class="v">8</div><div class="s">each in its own browser tab</div></div>
+  <div class="tile"><div class="k">Organization</div><div class="v" style="font-size:1.2rem">Northwind</div><div class="s">sample-bank, 3 sources, 19 assets</div></div>
+</div>
+<p>Figures such as "19 assets" and "about 20 pending" were read from the live stack on 2026-09-20. Scans and agents keep running, so yours can differ by a few.</p>
+
+<h2 id="preflight">Before you start</h2>
+<p>Tick these off. Your ticks are remembered in this browser only.</p>
+<ul style="list-style:none;padding:0;display:grid;gap:8px;max-width:80ch">
+<li><label><input type="checkbox" data-k="c1"> <b>Private machine, private network.</b> Every service port listens on all interfaces with default passwords, and the API trusts <code>X-Roles</code> headers. Do not present on a shared network.</label></li>
+<li><label><input type="checkbox" data-k="c2"> <b>Stack matches the code.</b> It was rebuilt from <code>787f84b</code> on 2026-09-20. If HEAD has moved since, build from a clean worktree of HEAD and rerun the parity check.</label></li>
+<li><label><input type="checkbox" data-k="c3"> <b>Decide about live Ask.</b> The API holds live OpenAI and Gemini keys and the approved route is labelled residency <code>development</code>: a fresh question sends its prompt to a real provider and costs money. Skipping it loses nothing above.</label></li>
+<li><label><input type="checkbox" data-k="c4"> <b>Leave notification delivery alone.</b> Nine governance notifications have been retrying since 2026-09-12; do not enable or change the delivery worker during a demo.</label></li>
+<li><label><input type="checkbox" data-k="c5"> <b>Users started:</b> <code>.\scripts\demo-users.ps1 -Action Start</code>, wait ten seconds, then <code>-Action Check</code> must print eight lines saying <em>serves its own identity</em>.</label></li>
+<li><label><input type="checkbox" data-k="c6"> <b>Northwind selected in every tab.</b> Alex and Omar can use the selector. For the rest paste the console one-liner from <code>-Action List</code>; the UI's default organization is a test bank, not Northwind.</label></li>
+<li><label><input type="checkbox" data-k="c7"> <b>Role proof ready.</b> <code>python scripts/live_role_matrix.py --roles "Reviewer+Viewer,Auditor+Viewer"</code> has been run once so the numbers are warm.</label></li>
+<li><label><input type="checkbox" data-k="c8"> <b>Loop dry-run.</b> The maker-checker loop below has been run once on this stack.</label></li>
+</ul>
+
+<h2 id="acts">Seven acts</h2>
+
+<details open id="act1"><summary>Act 1 · Ask, and see the evidence <span class="pill p-accent">ana.analyst</span> <span class="pill p-mute">7 min</span> <span class="pill p-allow">Read-only</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5185</p>
+<ol class="steps"><li>Open <code>/#/analyst/catalog</code>. Expect 19 assets from the three Northwind sources. Descriptions read <em>inferred from structural metadata and requires independent approval</em>; certification says <em>none</em>.</li><li>Open <code>/#/analyst/lineage</code>. Show the three views: Explain (narrated), Graph, Impact.</li><li>Open <code>/#/analyst/analyst</code> (Ask, source Customer Master). In the history, open the run <em>MISSING TOOL PARAMETERS: branch code</em>: a refusal that names what is missing instead of guessing.</li><li>Open a completed run and its <b>Evidence</b> tab: where every claim came from.</li><li><b>Optional, and it costs money:</b> type a fresh question. That sends the prompt to the configured model provider (see the pre-flight list). Skip it unless the audience needs to see live generation.</li></ol>
+<div class="note allow"><b>Say</b>Nothing an agent uses is trusted just because a model wrote it. The description is a proposal until a second person approves it, and a question that cannot be answered safely says why.</div>
+</div></details>
+<details open id="act2"><summary>Act 2 · A steward proposes <span class="pill p-accent">dana.steward</span> <span class="pill p-mute">5 min</span> <span class="pill p-allow">Read-only</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5182</p>
+<ol class="steps"><li>Open <code>/#/steward/stewardship</code>. Expect 19 unowned assets. Open the <b>Bulk actions</b> tab: bulk changes are routed to review, never applied directly.</li><li>Open <code>/#/steward/relationships</code>. Expect about ten relationship candidates: each is a proposal with a confidence, not a fact.</li><li>Do not press anything yet. The next act shows why.</li></ol>
+<div class="note allow"><b>Say</b>Stewards do the work, but the platform will not let the person who proposes a change be the person who approves it.</div>
+</div></details>
+<details open id="act3"><summary>Act 3 · Maker is not checker <span class="pill p-accent">dana.steward, riya.reviewer, omar.auditor</span> <span class="pill p-mute">9 min</span> <span class="pill p-warn">Read-only, optional write</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5182 · 5183 · 5184</p>
+<ol class="steps"><li><b>Read-only path.</b> As Riya open <code>http://localhost:5183/#/reviewer/governance</code>. Expect about 20 pending proposals. Open one: evidence, the proposer, and the Approve and Reject controls. Do not press them: approving publishes an AI-inferred description into the estate.</li><li>As Dana open the same queue on <code>:5182</code>. A proposal Dana raised shows <em>You proposed this change. Another reviewer must approve or reject it.</em> and no Approve button.</li><li><b>Live path.</b> Run the loop below. It creates one glossary category, one term and one review, all named <code>demo_*</code>. <b>Dry-run it once before presenting; it was not executed when this page was written.</b></li><li>As Omar open <code>http://localhost:5184/#/auditor/audit</code>: the ledger now names <code>dana.steward</code> and <code>riya.reviewer</code> against the same review.</li></ol>
+<div class="note allow"><b>Say</b>Maker is not checker is enforced on the server by principal id, for every role including PlatformAdmin. The button being hidden is a courtesy; the 409 is the control.</div>
+</div></details>
+<details open id="act4"><summary>Act 4 · The auditor reads the evidence <span class="pill p-accent">omar.auditor</span> <span class="pill p-mute">5 min</span> <span class="pill p-allow">Read-only</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5184</p>
+<ol class="steps"><li>Open <code>/#/auditor/audit</code>. The ledger holds hundreds of events; filter one and copy the link: filters are permalinked.</li><li>Open <code>/#/auditor/compliance</code>: the compliance packs. They are stored in the database, not in a WORM archive (say so).</li><li><b>Skip</b> <code>/#/auditor/refusals</code>. The list is admitted only to DataAdmin and PlatformAdmin, so it refuses an Auditor even though the screen sits in the Auditor menu (queued as R11-AUD01). To show the refusals, open it as Ravi on <code>:5187</code>.</li><li>Show that Omar cannot decide anything: the review-decision and relationship-decision routes refuse his bundle. He can write in eleven places, none of them a decision: AI assessments and remediations, evaluations, previews and marketplace requests.</li></ol>
+<div class="note allow"><b>Say</b>An auditor reads everything that happened and decides none of it.</div>
+</div></details>
+<details open id="act5"><summary>Act 5 · Least privilege is visible <span class="pill p-accent">vic.viewer</span> <span class="pill p-mute">3 min</span> <span class="pill p-allow">Read-only</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5186</p>
+<ol class="steps"><li>Open <code>http://localhost:5186/#/auditor/audit</code>. Expect <em>The audit ledger could not be loaded</em> with the server's own sentence: <em>one of these roles is required: Auditor, Operations, OrganizationAdmin, PlatformAdmin</em>.</li><li>Point at the banner: the shell could not load the organization list or the scope for a Viewer either, and says which roles it needs.</li><li>Run the API version: <code>curl -i -H "X-Principal-Id: vic.viewer" -H "X-Roles: Viewer" -H "X-Organization-Id: 9b90b35f-dcf5-49d3-8f0e-2f269987ae87" http://localhost:8000/v1/organizations/9b90b35f-dcf5-49d3-8f0e-2f269987ae87/audit-events</code> and read the 403.</li></ol>
+<div class="note allow"><b>Say</b>A refusal that names the roles it wants is a control you can audit. A screen that quietly shows less is not.</div>
+</div></details>
+<details open id="act6"><summary>Act 6 · The operator runs the estate <span class="pill p-accent">alex.operator</span> <span class="pill p-mute">4 min</span> <span class="pill p-allow">Read-only</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5181</p>
+<ol class="steps"><li>Open <code>/#/operator/sources</code>: the three Northwind sources, Customer Master (PostgreSQL), Payments and Transactions (SQL Server), Risk and Compliance (PostgreSQL).</li><li>Open <code>/#/operator/operations</code>: the outbox and fleet summary.</li><li>Mention, do not press: the organization kill switch (<code>POST /v1/organizations/{organization_id}/kill-switch/engage</code>) is PlatformAdmin only and has no button in the UI. Engaging it stops model use for the whole organization.</li></ol>
+<div class="note allow"><b>Say</b>One role can stop every model call in an organization, and only that role.</div>
+</div></details>
+<details open id="act7"><summary>Act 7 · Agents and tools <span class="pill p-accent">sam.agentdev</span> <span class="pill p-mute">4 min</span> <span class="pill p-allow">Read-only</span></summary><div>
+<p class="mono" style="color:var(--muted)">http://localhost:5188</p>
+<ol class="steps"><li>Open <code>/#/developer/developer</code>: the gateway page shows how an agent connects over MCP and which headers it carries.</li><li>Open <code>/#/inbox/inbox</code>: pending items and the per-agent kill control.</li><li>Say that model routes are risk tier T3: the developer who configures one cannot approve it.</li></ol>
+<div class="note allow"><b>Say</b>Agents get the same identity, role and audit treatment as people.</div>
+</div></details>
+
+<h2 id="loop">The maker-checker loop</h2>
+<p>Three identities, one governed change. Use it for Act 3's live path. Run in Windows PowerShell from any folder.</p>
+<div class="note warn"><b>Writes:</b> one glossary category, one glossary term and one review, all named <code>demo_*</code>, plus their audit events. They stay in the estate. <b>Not executed when this page was written:</b> the calls follow <code>scripts/verify-stewardship.ps1</code> and the declared roles were checked against the contract, but dry-run it first.</div>
+<pre class="tbox" style="padding:10px 14px;margin:.6rem 0;font-family:var(--mono);font-size:.84rem;overflow-x:auto">$api = "http://localhost:8000"; $org = "9b90b35f-dcf5-49d3-8f0e-2f269987ae87"
+function As($user, $roles) { @{ "X-Principal-Id" = $user; "X-Roles" = $roles; "X-Organization-Id" = $org } }
+function Call($method, $path, $who, $body) {
+  $p = @{ Uri = "$api$path"; Method = $method; Headers = $who; ContentType = "application/json" }
+  if ($body) { $p.Body = $body | ConvertTo-Json -Depth 8 }
+  Invoke-RestMethod @p
+}
+$dana = As "dana.steward"  "DataSteward,MetadataReviewer,Analyst,Viewer"
+$riya = As "riya.reviewer" "Reviewer,Viewer"
+$omar = As "omar.auditor"  "Auditor,Viewer"
+$stamp = Get-Date -Format "yyyyMMddHHmm"
+
+# 1. The maker proposes
+$cat  = Call POST "/v1/organizations/$org/glossary-categories" $dana @{ category_key="demo_$stamp"; display_name="Demo $stamp"; description="Walkthrough demo"; parent_id=$null }
+$term = Call POST "/v1/organizations/$org/glossary-terms" $dana @{ term_key="demo_term_$stamp"; display_name="Demo term $stamp"; definition="Created live to show maker and checker."; category_id=$cat.id; synonyms=@(); owner_principal="dana.steward" }
+$review = Call POST "/v1/glossary-term-versions/$($term.id)/submit" $dana
+
+# 2. The maker cannot approve her own change (expect 409)
+try { Call POST "/v1/governance/reviews/$($review.id)/decision" $dana @{ decision="APPROVE"; reason="my own change" } } catch { "dana: HTTP " + $_.Exception.Response.StatusCode.value__ }
+
+# 3. The auditor cannot decide at all (expect 403)
+try { Call POST "/v1/governance/reviews/$($review.id)/decision" $omar @{ decision="APPROVE"; reason="auditor" } } catch { "omar: HTTP " + $_.Exception.Response.StatusCode.value__ }
+
+# 4. The checker approves
+Call POST "/v1/governance/reviews/$($review.id)/decision" $riya @{ decision="APPROVE"; reason="Independent check" }
+
+# 5. The auditor reads what happened
+Call GET "/v1/organizations/$org/audit-events?limit=8" $omar</pre>
+<p>Expected: step 2 prints <code>dana: HTTP 409</code>, step 3 prints <code>omar: HTTP 403</code>, step 4 succeeds, and step 5 lists the events with three different principals.</p>
+
+<h2 id="close">Close</h2>
+<ol class="steps">
+<li>Run <code>python scripts/live_role_matrix.py</code> on screen. It prints a table for all fifteen roles and ends with zero unexpected answers.</li>
+<li>Open the <a href="readiness.html">readiness page</a> and read the verdict aloud: ready to demo, not ready to deploy, and why. Naming the gaps first is what makes the rest credible.</li>
+<li>Stop the extra UIs: <code>.\scripts\demo-users.ps1 -Action Stop</code>.</li>
+</ol>
+
+<h2 id="avoid">Do not show</h2>
+<ul>
+<li><b>Studio, Marketplace, Access policies, Delegations, Negative knowledge.</b> They are empty on this estate.</li>
+<li><b>Workspace access.</b> It says the BI integration is disabled.</li>
+<li><b>Any claim of WORM, alerting, HA, DR, scale or p95.</b> The archive reports <code>NO_ARCHIVES</code>, there is no alert receiver, and none of the others has been measured.</li>
+<li><b>Workspace authorization as enforced.</b> It observes and records; it does not block yet.</li>
+<li><b>The organization kill switch.</b> Mention it; do not press it.</li>
+</ul>
+
+<h2 id="trouble">If something breaks</h2>
+<div class="tbox"><table>
+<thead><tr><th>You see</th><th>It means</th><th>Do</th></tr></thead><tbody>
+<tr><td>Organizations or Scope <em>could not be loaded</em></td><td>The user lacks the roles the shell needs. Expected for Viewer, Reviewer and Analyst.</td><td>Paste the org one-liner, or use it as the Act 5 talking point.</td></tr>
+<tr><td>Every screen empty, Northwind not offered</td><td>The tab is on the default test organization.</td><td>Select Northwind, or paste the one-liner and reload.</td></tr>
+<tr><td>A tab says <em>No auth mode configured</em></td><td>That UI was not started by the launcher.</td><td>Stop and restart it with <code>-Action Start</code>.</td></tr>
+<tr><td><code>-Action Check</code> reports a different identity</td><td>A stale dev server holds the port.</td><td><code>-Action Stop</code>, then Start again.</td></tr>
+<tr><td>HTTP 409 where you expected success</td><td>The same principal made and approved the change.</td><td>Use two different users.</td></tr>
+<tr><td>A screen is slow or errors after a scan</td><td>A rescan opened a critical source-change hold.</td><td>That is the design: governed tools fail closed until the rebuild pass releases it.</td></tr>
+</tbody></table></div>
+
+<footer>Atlas walkthrough pack. A dated snapshot, not a queue: status lives in the tracker (section P) and evidence in the capability register. Regenerate the numbers with the commands shown on each page.</footer>
+</main>
+<script>
+(function(){
+  var root=document.documentElement, key='atlas-walkthrough-theme';
+  try{var s=localStorage.getItem(key); if(s==='light'||s==='dark'){root.setAttribute('data-theme',s);}}catch(e){}
+  var btn=document.getElementById('theme');
+  function label(){var t=root.getAttribute('data-theme'); btn.textContent = t==='dark' ? 'Light theme' : t==='light' ? 'Dark theme' : 'Toggle theme';}
+  if(btn){label(); btn.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    var dark = cur ? cur==='dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark'; root.setAttribute('data-theme',next);
+    try{localStorage.setItem(key,next);}catch(e){} label();
+  });}
+})();
+
+(function(){
+  var boxes=document.querySelectorAll('input[type=checkbox][data-k]');
+  boxes.forEach(function(b){
+    try{ b.checked = localStorage.getItem('atlas-demo-'+b.dataset.k)==='1'; }catch(e){}
+    b.addEventListener('change',function(){ try{ localStorage.setItem('atlas-demo-'+b.dataset.k, b.checked?'1':'0'); }catch(e){} });
+  });
+})();
+</script>
+</body>
+</html>

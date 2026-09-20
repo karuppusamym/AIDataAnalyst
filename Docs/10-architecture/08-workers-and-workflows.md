@@ -36,7 +36,7 @@ flowchart TD
 
 ## 2. Worker classes
 
-> **Implementation status (2026-08-30).** Of the nine worker classes below, **four have
+> **Implementation status (2026-09-20).** Of the nine worker classes below, **four have
 > running code** and five are target. Verified against `src/aida/workflows/`,
 > `src/aida/projectors/` and `compose.yaml`:
 >
@@ -45,12 +45,12 @@ flowchart TD
 > | Discovery | **Built** — `discover_datasource` activity, `DatasourceDiscoveryWorkflow` |
 > | Profiling | **Built** — `plan_profile_tasks` / `profile_table_task` / `finalize_profile_tasks`; the fan-out DAG in §1 is real for this class |
 > | Batch ingestion | **Built** — `MetadataBatchIngestionWorkflow`, `src/aida/batch_ingestion.py` |
-> | Projection | **Built** — `projectors/graph_projector.py` and `projectors/outbox_publisher.py`, run as their own compose services |
+> | Projection | **Built** — `projectors/graph_projector.py` and `projectors/outbox_publisher.py`, run as their own compose services behind the `events` / `graph` profiles. This class is the outbox → Neo4j path only: there is no vector or search projector (see the Semantic row) |
 > | Classification | **Not a worker.** Deterministic rules run inline (`classify_column_name` in `workflows/activities.py`) |
 > | Relationship | **Not a worker.** Candidate handling is request-path code in `src/aida/intelligence_api.py` |
-> | Lineage | **Not a worker.** Ingestion is request-path (`openlineage.py`, `dbt_artifacts.py`). Query-log, view-DDL and procedure parsing do not exist at all — see `20-modules/09-lineage.md` |
-> | Quality | **Not a worker.** Evaluation is request-path (`quality_service.py`) |
-> | Semantic | **Not a worker.** Inference is request-path (`semantic_inference.py`). "Embedding generation" does not exist — there is no embedding column |
+> | Lineage | **Not a worker.** Ingestion is request-path (`openlineage.py`, `dbt_artifacts.py`). View and procedure definition parsing exists (`sql_lineage_parser.py`, `procedure_lineage.py`) but is called from API routes, the lineage agent and the scheduler's context-rebuild pass, not from a lineage worker. Per-source status is in `20-modules/09-lineage.md` |
+> | Quality | **Not a separate worker.** Evaluation (`quality_service.py`) runs inside the `finalize_profile_tasks` activity and from `quality_api.py` |
+> | Semantic | **Not a worker.** Inference is request-path (`semantic_inference.py`). Embedding generation exists but is not a worker: it fills the `embedding` table (`bytea` vectors, no `pgvector` column — ADR-0019), written by `rebuild_vector_index` in `src/aida/vector_index_service.py`, driven by the fleet-scheduler's `run_vector_index_rebuild_pass` and by `POST /v1/organizations/{organization_id}/retrieval/vector-index/rebuild` (`src/aida/retrieval_ops_api.py`). The pass skips and the endpoint refuses while `embedding_provider` is `unset`, the shipped default |
 >
 > The bounds in §3 and the DAG in §1 are accurate for the four built classes. Read them as
 > target for the other five.
@@ -95,7 +95,7 @@ The scheduler decides *which source gets capacity next*. At thousands of sources
 
 | Concern | Mechanism |
 |---|---|
-| HA | Leader election with policy polling; a scheduler restart does not double-schedule |
+| HA | Target: leader election with policy polling, so a restart or a second replica does not double-schedule (see the status note below) |
 | Priority | Per-source priority class |
 | Fairness | Round-robin within priority class, so one huge source cannot starve the fleet |
 | Maintenance windows | Per-source allowed windows; work is deferred, not failed |
@@ -104,6 +104,19 @@ The scheduler decides *which source gets capacity next*. At thousands of sources
 | Backpressure | Downstream saturation (worker pool, DB, source) reduces admission rather than causing failures |
 | Cancellation | Cancel propagates to running activities and reconciles state |
 | Bulkhead | **One source's failure never affects unrelated sources** |
+
+> **Implementation status (2026-09-20).** No leader election exists: `grep -ri leader src` finds
+> nothing, and `run_scheduler` in `src/aida/workflows/scheduler.py` is a bare loop, so run one
+> `fleet-scheduler` replica. A restart does not double-schedule scans, because
+> `process_scan_policy` claims each due `ScanPolicy` under a row lock, advances its `next_run_at`
+> in the same transaction, and starts the workflow under a deterministic id. That is per-row
+> locking, not election. Several of the other passes rate-limit themselves with in-process cadence
+> trackers, so a second replica would run those twice, and nothing here has been failover-tested.
+> The loop is also more than fleet scheduling: `run_scheduler_iteration` runs 23 periodic passes
+> (cancellation reconciliation, priority rebalancing, owner routing, rule packs, graph
+> reconciliation, roll-up and vector-index rebuilds, quality freshness, change signals, expiry
+> sweeps, delivery workers and others) before it admits due scan policies, so treat it as the
+> platform's general maintenance loop.
 
 **The bulkhead property is the most important one.** In a bank estate, some sources are always broken — a credential expired, a firewall changed, a database is in maintenance. A design in which those failures consume the shared worker pool degrades everything. Per-source isolation plus admission control keeps a broken source a *local* problem.
 
@@ -158,10 +171,21 @@ Models are expensive, slow, and non-deterministic. The worker design minimizes c
 |---|---|---|---|
 | `atlas-worker` | Discovery, profiling, classification, relationship, lineage, quality, semantic | Temporal task-queue depth | Task retried on another worker |
 | `atlas-projector` | Projection | Kafka consumer lag | Rebalance; offsets uncommitted |
-| `atlas-scheduler` | Fleet scheduling, policy polling | Singleton with leader election | Standby takes over |
+| `atlas-scheduler` | Fleet scheduling, policy polling, periodic maintenance passes | Singleton (target: leader election) | Target: standby takes over |
 | `atlas-batch` (optional) | Batch ingestion (isolated when volume warrants) | Batch queue depth | Chunk-level resume |
 
-Task queues are separated per worker class so a profiling backlog cannot starve projection, and a slow source cannot delay quality evaluation.
+The design intent is separate task queues per worker class, so a profiling backlog cannot starve projection and a slow source cannot delay quality evaluation.
+
+> **Implementation status (2026-09-20).** The deployment-unit names above are target names, and
+> the queue separation is not built. There is **one** Temporal task queue, `aida-metadata` (the
+> `temporal_task_queue` setting in `src/atlas/platform/config.py`, set the same in
+> `compose.yaml`), served by the single `metadata-worker` process
+> (`src/aida/workflows/worker.py`). That worker registers `DatasourceDiscoveryWorkflow`,
+> `MetadataBatchIngestionWorkflow` and their activities, so discovery, profiling and batch
+> ingestion share one queue and one process. The classification, relationship, lineage, quality
+> and semantic worker classes do not exist (§2), and there is no `atlas-batch` unit. Projection
+> is not a Temporal queue: it is the `outbox-publisher` plus the Kafka-consuming
+> `graph-projector`. The scheduler has no standby: see the status note in §4.
 
 ## 8. Observability requirements
 

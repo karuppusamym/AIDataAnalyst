@@ -47,6 +47,8 @@ Reproducible bundles generated from runtime evidence for a named period, WORM-ar
 
 Each pack is reproducible: same period, same inputs, same output.
 
+> **Implementation status (2026-09-20).** Five of the six packs are generated (`MODEL_RISK`, `BCBS_239`, `ACCESS_REVIEW`, `AI_USAGE`, `CHANGE_CONTROL`; `src/aida/compliance_packs.py`, served by `src/aida/compliance_api.py`); there is no Data protection pack. A pack is stored as a checksummed database row and is not handed to the WORM archive provider, so "WORM-archived on generation" is the target, not the behaviour. Generating or downloading one needs `PlatformAdmin`, `ComplianceOfficer` or `DataSteward`; `ComplianceOfficer` cannot be granted under OIDC and `Auditor` is refused (`00-product/02-personas-and-jobs.md` §2.6).
+
 ## 4. Regulatory mapping
 
 Illustrative, not legal advice. Each control is mapped to the module that implements it.
@@ -67,6 +69,8 @@ Illustrative, not legal advice. Each control is mapped to the module that implem
 | Retention | Per-class retention policy | 20 |
 | Right to know processing | Consumption lineage | 09, 19 |
 
+> **Implementation status (2026-09-20).** The segregation-of-duties row holds for reviews, not yet for every approval. Review decisions share one maker != checker check (`check_decision_permitted` in `src/aida/governance_decision_service.py`), but the decision routes outside the review queue (candidate, parsed-lineage, tool-certification, source-binding and profiling-exception decisions among them) each carry their own principal-equality test, mostly answering 409 and, for freshness-config approval, 403. `test_self_approval_denied` (`tests/test_tier0_invariants.py`) parametrizes 10 of the 31 registered review adapters (as of 2026-09-20). Access policies and workspace memberships, both classed as the highest review risk tier, open no review at all; see `20-modules/01-identity-and-tenancy.md` §10.
+
 ## 5. Certification status — the honest position
 
 | Certification | Status | Note |
@@ -84,15 +88,15 @@ For a self-hosted deployment inside a bank, the bank's own certification perimet
 
 | Gap | Impact | Priority |
 |---|---|---|
-| WORM archive | Audit records are mutable at the storage layer | P0 |
-| SIEM routing | Security events do not reach the SOC | P0 |
+| WORM archive | Implemented (`src/aida/worm_archive.py`) but off by default (backend `none`) and verified only against a local Object Lock service, not AWS S3 or a bank store; until one is chosen and proven, audit records are mutable at the storage layer | P0 |
+| SIEM routing | Implemented (webhook and syslog) but verified only against loopback stubs; the shipped endpoint is a placeholder and the delivery worker is off by default, so security events do not reach the SOC | P0 |
 | Retention enforcement | Policy exists; enforcement does not | P0 |
-| Compliance pack generation | Evidence must be assembled by hand | P1 |
-| Access review reporting | No self-service entitlement report | P1 |
+| Compliance pack generation | Five of six packs are generated (`src/aida/compliance_packs.py`); no Data protection pack, and packs are not WORM-archived (see the status note in section 3) | P1 |
+| Access review reporting | Implemented: a self-service entitlement report (`src/aida/access_review_api.py`); a report for another principal needs `PlatformAdmin`, `DataAdmin` or `ComplianceOfficer`, and the last cannot be granted under OIDC | P1 |
 | Policy decision logging | Partial — auditors need complete inputs | P0 |
 | Privileged-access monitoring | Operators are audited but not monitored | P1 |
-| Legal hold | No mechanism to suspend retention for a matter | P1 |
-| Drill evidence retention | Drills are not run, so no evidence exists | P0 |
+| Legal hold | The archive can place and release a hold (`apply_legal_hold` and `release_legal_hold` in `src/aida/worm_archive.py`, exercised against a local Object Lock service); no API route or operator workflow calls them | P1 |
+| Drill evidence retention | One in-process kill-switch drill exists (`tests/test_kill_switch_drill.py`); no drill has been run against a deployed stack, so no drill evidence is retained | P0 |
 
 ## 7. What a buyer's due diligence will find
 
@@ -100,7 +104,7 @@ An honest self-assessment, because a surprise in due diligence is worse than a k
 
 **Strong:** architectural trust boundaries, fail-closed design, value-freedom, maker-checker as a platform primitive, attributable audit, deterministic execution control.
 
-**Weak:** no certifications, no penetration test, no WORM, no SIEM integration, no DR drill evidence, no performance benchmarks, no accessibility audit.
+**Weak:** no certifications, no penetration test, a WORM archive and SIEM delivery that are implemented but off by default and unproven against real destinations, no DR drill evidence, no performance benchmarks, no accessibility audit.
 
 **The pattern.** Atlas's *design* is ahead of the market on trust; its *operational evidence* is behind. Closing that gap is Phase D of the roadmap, and it is a product feature, not a QA afterthought.
 

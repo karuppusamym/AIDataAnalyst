@@ -32,9 +32,27 @@ Even in the "monolith," Atlas ships **four deployment units**, because their sca
 | `atlas-api` | HTTP/MCP surface, all L2–L4 modules | Latency-sensitive; scales with user concurrency |
 | `atlas-worker` | Temporal workers: ingestion, profiling, quality, lineage extraction | CPU/IO-heavy, long-running; must not compete with request latency |
 | `atlas-projector` | Outbox consumers writing Neo4j/vector/search | Throughput-oriented; independently restartable; rebuild jobs |
-| `atlas-scheduler` | Fleet scheduling, policy polling, maintenance windows | Singleton-ish with HA leader election; distinct failure mode |
+| `atlas-scheduler` | The general maintenance loop (`fleet-scheduler` in `compose.yaml`): scan-policy admission with maintenance windows, plus periodic passes — owner routing, graph reconciliation, vector index rebuild, freshness, reaper, task-agent runs — and the delivery worker, the only process that dials SIEM or chat destinations | Singleton-ish with HA leader election (the intent; not built, see the note below); distinct failure mode |
 
 All four run the **same image** with different entrypoints. Same code, same modules, different process roles. This is the highest-value split and it is available immediately.
+
+> **Implementation status (2026-09-20).** The split exists in `compose.yaml` — one image, different
+> entrypoints — but under different names and with the projector role in two processes: `api`,
+> `metadata-worker` (`aida.workflows.worker`), `fleet-scheduler` (`aida.workflows.scheduler`),
+> `outbox-publisher` (`aida.projectors.outbox_publisher`) and `graph-projector`
+> (`aida.projectors.graph_projector`). Two rows above describe more than the code does:
+>
+> * **The only projection written from the outbox is Neo4j.** There is no vector projector and no
+>   search projector, and no search index; §6's "Projection workers" row names the same targets. The
+>   vector index is written by an operator route and by a scheduler pass
+>   (`src/aida/vector_index_service.py`), not from the outbox. See INV-1 in
+>   `01-principles-and-invariants.md`.
+> * **The scheduler has no leader election, and no standby takes over.** Nothing in `src/` elects
+>   or fences a leader; `run_scheduler` in `src/aida/workflows/scheduler.py` is a bare polling loop.
+>   Scan admission is guarded by a row lock on the scan policy and by deterministic workflow ids,
+>   while the other passes rate-limit themselves with in-process cadence trackers that a second
+>   scheduler would not share. `run_scheduler_iteration` makes 23 calls ahead of scan admission as
+>   of 2026-09-20; read the function for the current set.
 
 ## 2. Extraction triggers
 
@@ -78,7 +96,13 @@ flowchart LR
     E --> F["6 · Cut over<br/>flag flip per tenant, rollback available"]
 ```
 
-Step 4 is cheap **only because** MD-1 (schema per module) and the no-cross-schema-FK rule were applied from the start. That rule is the entire insurance policy; it costs a small amount of join convenience today and saves a data migration later.
+Step 4 is cheap **only if** MD-1 (schema per module) and the no-cross-schema-FK rule are applied from the start. That rule is the entire insurance policy; it costs a small amount of join convenience today and saves a data migration later.
+
+> **Implementation status (2026-09-20).** MD-1 and ADR-0015 have **not** been applied. No PostgreSQL
+> schema per module exists: every table is in the one default schema, `src/aida/models.py` sets no
+> `schema=`, and no migration creates a schema. Step 4 is therefore not cheap today — it would begin
+> with the schema split — and the no-cross-schema-FK rule cannot be in force without schemas. See
+> `04-module-decomposition.md` §6 and ADR-0015.
 
 ### What changes at extraction
 
@@ -142,6 +166,9 @@ Detail in `10-architecture/08-workers-and-workflows.md`.
 | Split the governance core? | **No** | Only under T5/T6 |
 | Connector agents as separate deployables? | **Yes** — first extraction, product-driven | In progress at Phase B |
 | One image, multiple entrypoints? | **Yes** | If a runtime requirement (T4) diverges |
+
+> **Implementation status (2026-09-20).** The two schema rows above are decisions, not present
+> state: no PostgreSQL schema per module exists yet (see the note under §4).
 
 ## Related documents
 

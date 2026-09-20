@@ -3,34 +3,47 @@
 > Status: Authoritative **as a target naming scheme**. Owner: Architecture.
 > The named set of domain events Atlas publishes. Adding an event means adding a row here.
 
-> **Implementation status (2026-08-30). Most event names in §2 are not the names the code
-> emits.** Verified by extracting every `event_type=` argument passed to `record_outbox` across
-> `src/aida/` and comparing it to this catalog:
+> **Implementation status (2026-09-20).** **Many event names in §2 are not the names the code
+> emits.** Re-verified 2026-09-20 by extracting every `event_type=` argument passed to
+> `record_outbox` across `src/` (the scanner in `tests/event_catalog_lib.py`, which the CI gate
+> below also uses) and comparing it to this catalog:
 >
-> * The platform emits **~55 event types, all suffixed `.v1`** — e.g.
+> * The platform passes **129 distinct literal event types** to `record_outbox` as of 2026-09-20,
+>   plus 13 call sites whose type is computed (a helper, a table lookup or an f-string) and so
+>   cannot be read statically. All but ten are suffixed `.v1` — e.g.
 >   `datasource.registered.v1`, `metadata.discovery.snapshot.v1`, `query.execution.completed.v1`,
 >   `context.product_consumed.v1`, `relationship_candidate.approved.v1` /
 >   `relationship_candidate.rejected.v1` (RL-4, 2026-08-30: split from a single
 >   `relationship_candidate.decided.v1` because the graph projector already listened for
 >   these two distinct names and they never matched — decided candidates were silently
 >   never projected to Neo4j),
->   `governance.review_requested.v1`, `workspace.created.v1`.
-> * **Most rows below match nothing in the code.** Spot-checked and absent:
->   `principal.created`, `tenant.created`, `ingestion.delivered`, `catalog.object.created`,
->   `catalog.object.changed`, `profile.completed`, `classification.assigned`, `key.inferred`,
+>   `governance.review_requested.v1`, `workspace.created.v1`. The ten literals without the suffix
+>   are `classification.assigned`, `contract.violations_detected`,
+>   `data_quality.incident_opened`, `data_quality.incident_resolved`, `delegation.granted`,
+>   `delegation.revoked`, `model.kill_switch_engaged`, `model.kill_switch_released`,
+>   `studio.change_set.submitted` and `tool_plan.execution_completed`.
+> * **The catalog is a superset of what is emitted, on purpose.** Every emitted literal has a
+>   row (none is undocumented), but of the 279 event names in this file only 129 are emitted
+>   literally; 51 more appear only as strings inside helper code, and 99 appear nowhere in
+>   `src/`. Those rows are the target vocabulary and are kept. Spot-checked and absent as of
+>   2026-09-20: `principal.created`, `tenant.created`, `ingestion.delivered`,
+>   `catalog.object.created`, `catalog.object.changed`, `profile.completed`, `key.inferred`,
 >   `relationship.candidate_generated`, `relationship.approved`, `table_family.detected`,
 >   `semantic.proposal_created`, `lineage.edge_created`, `quality.observation_recorded`,
 >   `quality.sla_breached`, `agent.run_started`, `execution.requested`,
->   `model.route_version_created`, `model.kill_switch_engaged`, `policy.version_published`,
->   `audit.event_recorded`, `graph.rebuild.started`, `retrieval.index_lagging`.
+>   `model.route_version_created`, `policy.version_published`, `audit.event_recorded`,
+>   `graph.rebuild.started`, `retrieval.index_lagging`.
 > * **The Semantics-and-glossary section is the exception** and is broadly accurate: its `.v1`
 >   rows were written against the code and match it.
 > * **Topics are wrong.** All eight `atlas.*.v1` topic headings below are target. Everything
 >   goes to the single topic `aida.platform.events.v1`, with the event type in a Kafka header
 >   (`src/aida/projectors/outbox_publisher.py`).
-> * **"publishing an uncatalogued event fails CI" is false.** There is no such check;
->   `.github/workflows/ci.yml` runs `ruff`, `mypy`, `lint-imports`, an Alembic head check and
->   `pytest`. The same applies to step 3 and the closing line of §3 below.
+> * **Publishing an uncatalogued event does fail CI, for a literal `event_type=`.** This bullet
+>   said the opposite on 2026-08-30. The `pytest` run in `.github/workflows/ci.yml` includes
+>   `tests/test_event_catalog_gate.py` (ST-14 / TS-11, see below), which fails on any literal
+>   `event_type=` passed to `record_outbox` that has no row here. It cannot check the 13
+>   computed call sites, and it does not check payloads. Step 3 of §3 below (a schema registry) is
+>   still target.
 >
 > **ST-14 update (2026-09-01): reconciled.** The two directions above are now joined. The
 > "restate the catalog" resolution (U2) was chosen — consumers key on the emitted `.v1` names,
@@ -44,12 +57,14 @@
 
 Every event carries the same envelope (see `10-architecture/07-event-and-messaging-model.md` §4). Payload shapes vary; the envelope never does.
 
-**Payload rules, enforced at publish:**
+**Payload rules (the design; the note below says what runs today):**
 
 - No source business values (INV-6).
 - No credentials or secret material.
 - Bounded size.
 - Tenancy fields mandatory.
+
+> **Implementation status (2026-09-20).** No validator enforces these rules at publish. `record_outbox` (`src/aida/events.py`) only adds an `OutboxEvent` row to the caller's session: it checks no payload, sets no size bound, and `organization_id` is nullable, so an event can be published with no tenancy field. The publisher (`src/aida/projectors/outbox_publisher.py`) relays the row as-is in an envelope of `event_id`, `event_type`, `aggregate_type`, `aggregate_id`, `organization_id`, `occurred_at` and `payload`; there is no `event_version` field, and the version is the `.v1` suffix in most event-type names.
 
 ## 2. Catalog
 
@@ -453,9 +468,9 @@ error budget could only ever answer NO_DATA.
 ## 3. Adding an event
 
 1. Add the row to this catalog.
-2. Define the payload schema in the owning module's `events.py`.
-3. Register with the schema registry (`BACKWARD` compatibility) — **planned; no schema registry exists (2026-08-30)**.
-4. Confirm the payload carries no values or secrets — the publish-time validator enforces this.
+2. Define the payload shape. Today that is an inline dict at the `record_outbox` call site; no module has an `events.py`.
+3. Register with the schema registry (`BACKWARD` compatibility) — **planned; no schema registry exists (2026-09-20)**.
+4. Confirm the payload carries no values or secrets, by review — there is no publish-time validator (see §1).
 5. Document consumers, or state explicitly that there are none yet.
 
 CI asserts that every published event type appears in this catalog. **This gate now exists (ST-14 / TS-11, `tests/test_event_catalog_gate.py`):** it scans every `event_type=` passed to `record_outbox` in `src/` and fails the build if one is neither documented here nor named in the (now-empty) `KNOWN_ST14_DRIFT` baseline. Before it existed, the drift documented in the status note at the top of this file was able to accumulate unnoticed.

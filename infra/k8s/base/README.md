@@ -4,7 +4,7 @@
 
 This is a **reviewable sketch of one service**. It is *not* a deployable topology, it has
 never been applied to a cluster, and applying it as-is would fail — see "Known to be
-broken as written" below.
+unfinished as written" below.
 
 ## What it is
 
@@ -52,22 +52,25 @@ Both `deployment.yaml` and `migration-job.yaml` carry the literal string:
 REPLACE_ME_REGISTRY/aida-api@sha256:REPLACE_ME_WITH_REAL_DIGEST
 ```
 
-That is not a redaction of a real digest — no digest exists. Nothing in CI builds,
-pushes or scans this image today, so there is no pipeline output to substitute in. The
+That is not a redaction of a real digest — no digest exists. CI builds this image and
+smoke-imports it (the `docker-build` job), but nothing pushes it, records a digest or scans
+the image, so there is no pipeline output to substitute in. The
 `@sha256:` *shape* is deliberate (it makes a floating `:latest` tag impossible to write
 here by accident); it is a constraint on a future pipeline, not evidence of one.
 
-## Known to be broken as written
+## Known to be unfinished as written
 
-`migration-job.yaml` runs `alembic upgrade head` (singular) while `compose.yaml` runs
-`alembic upgrade heads` (plural), and only the plural form is safe here. The revision
-graph is 153 revisions with a single head today, so the singular form happens to resolve
-right now -- but this repository merges independent Alembic branches routinely (46 of
-those revisions are merges), and any moment with two live heads makes `head` abort with
-"Multiple head revisions are present" while `heads` keeps working. The Job has never been
-run against this schema either way. It is left uncorrected on purpose: fixing it is part
-of making these manifests real (tracker AU-9 follow-up), and this note is part of not
-claiming they already are.
+`migration-job.yaml` runs `alembic upgrade head` (singular) while the `migrate` service in
+`compose.yaml` runs `alembic upgrade heads` (plural), and only the plural form is safe
+here. The revision graph is 192 revisions with a single head as of 2026-09-20 (and the CI
+`migrations` job fails on any second head), so the singular form resolves today and the
+Job does not abort on the revision graph -- but this repository merges independent
+Alembic branches routinely (46 of those revisions are merges), and any moment with two
+live heads makes `head` abort with "Multiple head revisions are present" while `heads`
+keeps working. The Job has never been run against this schema either way, and it cannot
+be applied while its image digest and Secret are placeholders. It is left uncorrected on
+purpose: fixing it is part of making these manifests real (tracker AU-9 follow-up), and
+this note is part of not claiming they already are.
 
 ## Where the numbers are
 

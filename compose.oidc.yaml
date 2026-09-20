@@ -100,7 +100,24 @@ services:
         "SemanticAdmin","DataSteward","Reviewer","MetadataReviewer","Auditor","Operations",
         "Analyst","Viewer","ToolDeveloper","ToolConsumer","AgentDeveloper"],
         "atlas-steward":["DataSteward","MetadataReviewer","Analyst","Viewer"],
-        "atlas-viewer":["Viewer"]}
+        "atlas-viewer":["Viewer"],
+        "atlas-reviewer":["Reviewer","Viewer"],
+        "atlas-auditor":["Auditor","Viewer"],
+        "atlas-analyst":["Analyst","Viewer"],
+        "atlas-operations":["Operations","Viewer"],
+        "atlas-dataadmin":["DataAdmin","Viewer"],
+        "atlas-agentdev":["AgentDeveloper","ToolDeveloper","Analyst","Viewer"]}
+      #
+      # The last six bundles (2026-09-20) exist so every persona below can sign in
+      # as a LEAST-privilege identity. With only admin/steward/viewer defined, a
+      # Reviewer, Auditor, Operations or Analyst could not be minted at all, and a
+      # persona of Auditor with the role Viewer landed on a ledger it may not read.
+      # Each bundle is the working role plus Viewer, the same shape as
+      # `atlas-steward`: roles are additive sets, not a hierarchy. A demo signs in
+      # by typing claims into the mock issuer, for example
+      #   {"roles":["atlas-auditor"],"groups":["atlas-auditors"],
+      #    "organization_id":"<Northwind organization id>"}
+      # See Docs/walkthrough/roles-and-users.html.
 
       # UX-1: the shell's persona comes from the verified groups claim, never
       # from the browser, when the identity provider is OIDC.

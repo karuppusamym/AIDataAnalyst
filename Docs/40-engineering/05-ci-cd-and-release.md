@@ -21,27 +21,39 @@ flowchart LR
 
 ## 2. Merge gates
 
-> **Implementation status (2026-08-30).** CI exists as of 2026-08-30
-> (`.github/workflows/ci.yml`, tracker `ST-02`) and runs **five** of the fourteen gates below.
-> The pipeline diagram in §1 describes stages C, E, F, G and H that have no job.
+> **Implementation status (2026-09-20).** CI exists (`.github/workflows/ci.yml`, tracker `ST-02`,
+> first landed 2026-08-30) and has 21 jobs as of 2026-09-20. Most of the fourteen gates below have
+> a job; the table says which do not, and what each wired one does and does not cover. The jobs
+> run in parallel — there is no `needs:` ordering, no publish stage and no deploy stage — so the
+> pipeline diagram in §1 is still the target shape, not the workflow.
 >
 > | Gate | Today |
 > |---|---|
 > | `ruff check` | **Wired** — `quality` job |
-> | `mypy --strict` | **Wired** — `quality` job, but `packages = ["aida"]`, so `src/atlas/` is not type-checked |
-> | `import-linter` | **Wired** — `quality` job; 4 contracts as of 2026-08-30 and growing (see `10-architecture/04-module-decomposition.md` §5.2) |
-> | Tier 0 invariants | **Partially wired** — the `tests` job runs `tests/test_tier0_invariants.py`, which covers 4 of 9 invariants |
-> | Tier 1 module unit | **Partially wired** — all 44 test files run, but there is no tier separation and no per-module suite |
-> | Migration | **Wired** — the `migrations` job asserts exactly one Alembic head. The "irreversible migration" half is not checked |
-> | OpenAPI diff | **Not wired** — no step, and no released spec committed to diff against |
-> | Event catalog | **Not wired** — and the catalog has drifted from the emitted names as a result (`30-contracts/04-event-catalog.md`) |
-> | Audit coverage | **Not wired** — `test_every_mutation_audits` does not exist |
-> | SAST · Dependency audit · Secret scan | **Not wired** — no tool in the `dev` extras |
-> | Docs lint | **Not wired** |
-> | Performance | **Not wired** — no baseline exists to regress against |
+> | `mypy --strict` | **Wired** — `quality` job runs `mypy src sdk/aida_tool_sdk` with `strict = true`, so `src/atlas/` and the tool SDK are type-checked as well as `src/aida/` (the `packages = ["aida"]` line in `pyproject.toml` only limits a bare `mypy` run) |
+> | `import-linter` | **Wired** — `quality` job; 13 contracts in `pyproject.toml` as of 2026-09-20 (the enforced list is generated into `10-architecture/14-generated-architecture-map.md`) |
+> | Tier 0 invariants | **Partially wired** — a test module exists for each of the nine invariants (`tests/test_tier0_invariants.py`, plus one module each for INV-1, 5, 6, 7 and 9), all run by the `tests` job. There is no separate Tier 0 job or marker, so nothing makes them unskippable |
+> | Tier 1 module unit | **Partially wired** — every test file (476 as of 2026-09-20) runs in one `tests` job under a 69% combined coverage floor (`--cov-fail-under=69`), but there is no tier separation and no per-module suite |
+> | Migration | **Wired** — the `migrations` job asserts exactly one Alembic head and runs the source-side parity self-test; `migration-drift` applies every migration to an empty PostgreSQL and diffs the result against the ORM. The "irreversible migration" half is not checked: no downgrade is ever run, and 44 of the 192 `downgrade()` functions are no-ops (as of 2026-09-20) |
+> | OpenAPI diff | **Wired** — the `openapi-diff` job runs `scripts/openapi_diff.py` against the committed `Docs/90-reference/openapi-baseline.json`; `ui-types-diff` does the same for the generated `ui-next/src/lib/types.ts` |
+> | Event catalog | **Wired as a ratchet** — `tests/test_event_catalog_gate.py`, in the `tests` job, fails on a new `event_type=` in `src/` that is neither in `30-contracts/04-event-catalog.md` nor in its named `KNOWN_ST14_DRIFT` baseline. The drift already in that baseline (tracker `ST-14`) is not cleared |
+> | Audit coverage | **Wired** — `test_every_mutation_audits` in `tests/test_inv7_attributability.py` derives the mutating routes from HTTP verb and call graph and requires each to reach `record_audit`; it runs in the `tests` job |
+> | SAST · Dependency audit · Secret scan | **Partly wired** — dependency audit runs (`dependency-scan`: pip-audit on the locked non-dev set plus a CycloneDX SBOM; `frontend-dependency-scan`: `npm audit` on the `ui-next` lockfile) and so does secret scan (`secret-scan`: gitleaks over the full history). **SAST is not wired**, and there is no container-image scan |
+> | Docs lint | **Not wired** as defined (an endpoint missing OpenAPI documentation). The `docs` job is a different check: every relative Markdown link resolves, and the shim register and architecture map match the tree |
+> | Performance | **Partly wired** — `perf-baseline` times four in-process hot paths against a committed baseline and fails on a reproduced regression of more than 20%; `quality-baseline` does the same for retrieval and tool-selection quality. Neither is the bank-scale threshold set in `10-architecture/10-performance-and-scale-model.md` §9, and there is no load, soak or spike suite |
 >
-> "Every one of these blocks the merge" is therefore true of five gates today. Closing the
-> rest is tracker `E1` follow-on work.
+> Jobs with no row above: `deployment-parity` (manual only — it needs a running deployment to
+> compare against), `reachability`, `connector-version-fixtures`, `frontend-reachability`,
+> `destination-inventory`, `docker-build`, `ui-next`, `ui-proxy` and `ui-journey`.
+>
+> **Still absent:** SAST; a container-image scan; image signing and build provenance; a
+> downgrade round-trip (see the Migration row); the docs lint as defined above; live SQL Server
+> and Oracle tests; and load, soak, spike, chaos and restore suites. The real-PostgreSQL
+> concurrency suites (for example `tests/test_agent_budget_postgres_concurrency.py`) skip in the
+> `tests` job — it has no PostgreSQL service and sets none of their `AIDA_*_TEST_DATABASE_URL`
+> overrides — so only `migration-drift` and `connector-version-fixtures` run against a real
+> PostgreSQL. "Every one of these blocks the merge" is therefore not yet true of the gates listed
+> above as absent or partial.
 
 Every one of these blocks the merge.
 
@@ -147,13 +159,13 @@ Flags carry an owner and an expiry date. A flag past its expiry fails the build 
 
 | Aspect | Now | Target |
 |---|---|---|
-| Lint, type, test | Clean and passing | Retained |
-| Migration single-head | Enforced | Retained |
-| Import-linter | **Not configured** | P0 — the modular monolith depends on it |
-| OpenAPI diff gate | Not configured | P0 |
-| SBOM, signing, provenance | Not configured | P0 |
-| Performance gates | Not configured | P0 |
-| Deployment pipeline | Local compose only | Kubernetes with staged environments |
+| Lint, type, test | Gated in CI (2026-09-20): `ruff check`, `mypy` over `src` and `sdk/aida_tool_sdk`, the full suite under a 69% coverage floor | Retained |
+| Migration single-head | Enforced (`migrations` job); drift against the ORM checked on an empty PostgreSQL; no downgrade round-trip | Retained; add the round-trip |
+| Import-linter | Configured and enforced (`quality` job), 13 contracts as of 2026-09-20 | Retained — the modular monolith depends on it |
+| OpenAPI diff gate | Enforced (`openapi-diff` job) | Retained |
+| SBOM, signing, provenance | SBOM: CycloneDX from the locked set, uploaded by `dependency-scan`. Signing and provenance: not configured | P0 |
+| Performance gates | In-process regression gate only (`perf-baseline`); no load, soak or spike suite | P0 for the load suites |
+| Deployment pipeline | Local compose only; `infra/k8s/` is an unapplied sketch of one service | Kubernetes with staged environments |
 
 ## Related documents
 

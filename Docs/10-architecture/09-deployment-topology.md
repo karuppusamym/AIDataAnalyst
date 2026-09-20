@@ -5,27 +5,32 @@
 
 ## 1. Deployment units
 
-> **Implementation status (2026-08-30).** The one-image / multiple-entrypoint shape is real,
+> **Implementation status (2026-09-20).** The one-image / multiple-entrypoint shape is real,
 > but the unit names below are target names and the count is five, not four. `compose.yaml`
 > builds one image and runs it as `api`, `metadata-worker` (`python -m aida.workflows.worker`),
 > `fleet-scheduler` (`aida.workflows.scheduler`), `outbox-publisher`
 > (`aida.projectors.outbox_publisher`) and `graph-projector` (`aida.projectors.graph_projector`) —
-> so the single "projector" unit below is in fact two processes today. The `atlas-*` names and
+> so the single "projector" unit below is in fact two processes today, and both sit behind
+> compose profiles (`events` / `graph`), so a plain `docker compose up` starts three of the
+> five. The `atlas-*` names and
 > the `src/atlas/entrypoints/` package do not exist. **`atlas-connector-agent` does not exist
 > in any form**: no agent code, no registration endpoint, no mTLS path — it is a requirement,
 > not a deployed unit, and the `connector_agent.*` events in
 > `30-contracts/04-event-catalog.md` are likewise unimplemented. The HA models in the last
-> column are untested: leader election is coded in the scheduler, but no failover drill has
-> ever been run.
+> column are untested and partly not built. There is no leader election in the scheduler
+> (`grep -ri leader src` finds nothing, and `run_scheduler` in `src/aida/workflows/scheduler.py`
+> is a bare loop), so run one `fleet-scheduler` replica; see `08-workers-and-workflows.md` §4.
+> The worker unit has one task queue, `aida-metadata`, not queues partitioned by worker class.
+> No failover drill has ever been run.
 
 Four units, one image, different entrypoints (see `05-service-extraction-plan.md` §1).
 
 | Unit | Entrypoint | Scales on | Stateless? | HA model |
 |---|---|---|---|---|
 | `atlas-api` | HTTP + MCP server | Request concurrency | Yes | N replicas behind a load balancer |
-| `atlas-worker` | Temporal worker | Task-queue depth | Yes | N replicas, task queues partitioned by worker class |
+| `atlas-worker` | Temporal worker | Task-queue depth | Yes | N replicas; target: task queues partitioned by worker class (today one queue) |
 | `atlas-projector` | Kafka consumer | Consumer lag | Yes | N replicas, consumer-group rebalance |
-| `atlas-scheduler` | Fleet scheduler | — | No (leader) | Active/standby with leader election |
+| `atlas-scheduler` | Fleet scheduler and periodic maintenance loop | — | No (singleton) | Target: active/standby with leader election; none exists today |
 
 Plus one optional unit driven by product requirement rather than scale:
 
@@ -35,19 +40,23 @@ Plus one optional unit driven by product requirement rather than scale:
 
 ## 2. Local development topology
 
-Reproducible with `docker compose up --build -d`. This is the engineering baseline, not a production model.
+Reproducible with `docker compose up --build -d`, which starts the ten default services: `postgres`, `temporal`, `migrate`, `api`, `ui-next`, `metadata-worker`, `fleet-scheduler` and three sample-source containers. Everything else is an opt-in compose profile (`--profile <name>`), and `--profile full` starts all of them, 19 services in total as of 2026-09-20, excluding `seed`. The profile block at the top of `compose.yaml` is the authority for what starts when. This is the engineering baseline, not a production model.
 
 | Service | Image role | Port | Notes |
 |---|---|---|---|
-| PostgreSQL + pgvector | Authoritative store | 5432 | Single node, durable volume |
-| Redis | Cache, locks | 6379 | |
-| Neo4j | Graph projection | 7474 / 7687 | Browser at 7474 |
-| Temporal + UI | Durable workflows | 7233 / 8080 | |
-| Redpanda + Console | Kafka-compatible bus | 9092 / 8081 | |
-| MinIO | Object storage | 9000 / 9001 | |
-| `atlas-api` | FastAPI control plane | 8000 | `/docs` for OpenAPI |
-| `atlas-worker` | Temporal worker | — | |
-| Atlas portal | Product UI | 3000 | |
+| PostgreSQL + pgvector | Authoritative store | 5432 | Default stack. Single node, durable volume; Temporal uses the same server |
+| Redis | Cache, locks | 6379 | Profile `cache` |
+| Neo4j | Graph projection | 7474 / 7687 | Profile `graph`. Browser at 7474 |
+| Temporal + UI | Durable workflows | 7233 / 8080 | Temporal is in the default stack; the UI is profile `temporal-ui` |
+| Redpanda + Console | Kafka-compatible bus | 19092 (host) / 8081 | Profile `events` for both, and `graph` for Redpanda alone. 9092 is the in-network port |
+| MinIO | Object storage | 9000 / 9001 | Profile `archive` |
+| Prometheus | Metrics scrape | 9090 | Profile `monitoring` |
+| `api` | FastAPI control plane | 8000 | Default stack. `/docs` for OpenAPI |
+| `metadata-worker` | Temporal worker | — | Default stack |
+| `fleet-scheduler` | Scheduler and periodic maintenance loop | — | Default stack |
+| `outbox-publisher` | Outbox → Kafka | — | Profiles `events`, `graph` |
+| `graph-projector` | Kafka → Neo4j | — | Profile `graph` |
+| `ui-next` | Product UI | 3001 | Default stack. 5174 with `compose.dev.yaml` |
 
 Verification: `/health/live`, `/health/ready`, and `scripts/verify-local.ps1`.
 
@@ -158,7 +167,7 @@ All four converge on the **same canonical metadata envelope** and the same autho
 | `atlas-api` | N replicas, stateless, readiness-gated | Replica loss is transparent |
 | `atlas-worker` | N replicas; Temporal reassigns tasks | Task retried elsewhere; heartbeat detects loss |
 | `atlas-projector` | Consumer group rebalance | Uncommitted offsets reprocessed; consumers are idempotent |
-| `atlas-scheduler` | Leader election | Standby promotes; no double-scheduling |
+| `atlas-scheduler` | Target: leader election; none exists today (see the §1 status note) | Target: standby promotes, no double-scheduling |
 | PostgreSQL | Primary + synchronous replica, automated failover | Brief write pause; RPO 15 min worst case |
 | Neo4j | Cluster; or rebuild | Graph explorer degrades; **not authoritative** |
 | Kafka | Multi-broker, RF ≥ 3 | Projection lag |
@@ -188,10 +197,18 @@ Planning defaults:
 | Concern | Approach |
 |---|---|
 | Configuration | Environment-driven, validated at startup; production posture checks refuse unsafe settings |
-| Secrets | **References only** (`vault://`, `cyberark://`, cloud KMS schemes). Plaintext never persisted or logged. |
+| Secrets | **References only** (`vault://`, and the target schemes `cyberark://` and cloud KMS — see the status note below). Plaintext never persisted or logged. |
 | Development escape hatch | `env://` resolution is permitted locally and **rejected in production** |
 | Rotation | Bounded cache with invalidation on rotation; rotation drill required before go-live |
 | Model credentials | Referenced per model route; route approval does not activate generation (ADR-0009) |
+
+> **Implementation status (2026-09-20).** Two secret providers are implemented: `env` and
+> `vault` (HashiCorp Vault KV v2, registered once a Vault URL and token are configured), the only
+> ones `SecretResolver` registers in `src/aida/secrets.py`. The `credential_provider` setting
+> (`src/atlas/platform/config.py`) also accepts `cyberark`, `aws-sm`, `azure-kv` and `gcp-sm`,
+> but no code in `src/` implements them: a reference in one of those schemes is refused with
+> "configured enterprise secret provider is unavailable". `env` as the production provider is
+> refused at settings validation.
 
 ## 9. Image and supply chain
 
@@ -203,7 +220,7 @@ Planning defaults:
 | SBOM | Generated per build |
 | Signing | Images signed; admission policy verifies |
 | Vulnerability policy | Fail build on critical; documented patch SLA |
-| Scanning | SAST, DAST, dependency, and container scans in CI — **planned, not wired (2026-08-30)**. `.github/workflows/ci.yml` runs `ruff`, `mypy`, `lint-imports`, an Alembic single-head check and `pytest`, and nothing else; no SAST, DAST, dependency-audit, secret-scan or container-scan step exists, and no such tool is in the `dev` extras |
+| Scanning | SAST, DAST, dependency, and container scans in CI — **partly wired (2026-09-20)**. `.github/workflows/ci.yml` has 21 jobs as of 2026-09-20, including `dependency-scan` (pip-audit against the locked non-dev set, plus a CycloneDX SBOM), `frontend-dependency-scan` (`npm audit` against the `ui-next` lockfile), `secret-scan` (gitleaks over the full history) and `docker-build` (a real image build with a smoke import). Still absent: SAST, DAST, container-image scanning, image signing and an admission policy that verifies signatures |
 
 ## 10. Environment matrix
 

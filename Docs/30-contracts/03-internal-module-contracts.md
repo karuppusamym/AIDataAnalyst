@@ -20,6 +20,8 @@ Each module exposes exactly two importable modules:
 
 Everything else — `service.py`, `repository.py`, `models.py`, `schemas.py`, `router.py`, `workers/` — is private. Enforced by import-linter (`module-privacy` contract).
 
+> **Implementation status (2026-09-20).** This two-file layout is the target and is not built. Of the six bounded contexts under `src/atlas/modules/`, only `catalog` and `connectivity` have an `api.py`, and each only re-exports the module's `router` (`src/atlas/modules/catalog/api.py`, `src/atlas/modules/connectivity/api.py`); no module has a `contracts.py` (the one-time scaffold stubs were removed 2026-09-13). What the privacy contracts in `pyproject.toml` actually protect is each context's `models.py`, `schemas.py` and `router.py`, with the module's own files and the `aida.models` / `aida.schemas` shims as the allowed importers. The relocation that would have moved further code into `src/atlas/modules/` was cancelled on the same date (tracker R11-S6): completed extractions stay, and nothing further moves.
+
 ## 3. Interface design rules
 
 | Rule | Reason |
@@ -139,9 +141,9 @@ No other module gets this exemption. A proposal to add a third cross-cutting mod
 | Module unit tests | Run standalone; other modules replaced by in-memory fakes built from their `contracts.py` |
 | Contract tests | The fake and the real implementation are tested against the same interface suite |
 | Integration tests | Real modules, real database, per-module schemas |
-| Import contracts | Import-linter in CI — **partially wired (2026-08-30)**: `lint-imports` runs in the `quality` job, but the four contracts in `pyproject.toml` cover the `identity_tenancy` scaffold, INV-2 gateway exclusivity, one leaf-module ratchet, and the lineage→gateway direction (C4/ST-11). The cross-module contracts this document depends on cannot exist until the modules do — see `10-architecture/04-module-decomposition.md` §5.2 |
+| Import contracts | Import-linter in CI — **partially wired (2026-09-20)**: `lint-imports` runs in the `quality` job, and `pyproject.toml` defines 13 contracts as of 2026-09-20: a privacy contract for each of the six bounded contexts (identity_tenancy, connectivity, ingestion, catalog, observability_audit, profiling), INV-2 gateway exclusivity, one leaf-module ratchet, the lineage→gateway direction (C4/ST-11), and four that keep a class of service from importing a router (F05, R02, ADR-0029, R11-GQL01). None of them is a cross-module `api.py` / `contracts.py` contract: those cannot exist until the modules do — see `10-architecture/04-module-decomposition.md` §5.2 |
 
-**The fake-parity rule.** A fake that drifts from the real implementation produces green tests and a broken system. Both should be run against the same suite, so drift fails CI. **Planned, not built (2026-08-30):** there are no module `contracts.py` fakes to run parity against — `src/atlas/modules/identity_tenancy/contracts.py` is a 9-line stub — and no parity suite exists in `tests/`.
+**The fake-parity rule.** A fake that drifts from the real implementation produces green tests and a broken system. Both should be run against the same suite, so drift fails CI. **Planned, not built (2026-09-20):** there are no module `contracts.py` fakes to run parity against — no module has a `contracts.py` at all (the `identity_tenancy` stub the 2026-08-30 note called a 9-line stub was removed 2026-09-13) — and no parity suite exists in `tests/`.
 
 ## 9. Extraction readiness
 

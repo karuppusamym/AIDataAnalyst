@@ -221,8 +221,9 @@ tool through draft → submit → independent approval. Every decision is taken 
 a second identity from the one that requested it, because the API enforces
 that. Safe to re-run.
 
-It produces nine tables. **Nothing in this guide says anything about scale** —
-the estate is a fixture, not a benchmark.
+It produces 19 catalog objects as of 2026-09-20 — 15 base tables, 3 views and
+1 materialized view across the three datasources. **Nothing in this guide says
+anything about scale** — the estate is a fixture, not a benchmark.
 
 ---
 
@@ -240,16 +241,27 @@ verification organization.
 - [ ] Open a column. Classification, ownership and description are separate
       facts with separate lifecycles — a blank description never means
       "delete", it means nobody has published one.
-- [ ] **Lineage** shows column-level lineage within a datasource.
-      **Unified lineage** crosses datasources and needs a grant per read.
+- [ ] **Lineage** has three views: Explain (narrated, one datasource), Graph
+      (merged foreign-key, dbt, OpenLineage, view and procedure edges;
+      crossing datasources needs a grant per read) and Impact. The old
+      `#/unified-lineage` link opens Graph.
 
 ### 5.2 Governance: maker-checker
 
 The invariant worth testing by hand is that nobody approves their own work.
 
-- [ ] Propose a description change as one persona. Submit it.
-- [ ] Try to approve it as the same persona. It must refuse, naming why.
-- [ ] Switch persona and approve. The decision records both identities.
+- [ ] Propose a description change. Submit it.
+- [ ] Try to approve it as the same identity. It must refuse, naming why: the
+      review queue shows "You proposed this change. Another reviewer must
+      approve or reject it." in place of an Approve button, and the server
+      answers a self-approval with 409.
+- [ ] Watch a second identity decide. Every UI action in the default stack is
+      performed by one principal, `local-ui-admin`; the persona dropdown does
+      not change it. So approve a proposal raised by another principal (a task
+      agent's, once one is running — 5.4), or run one UI per identity
+      (`scripts/demo-users.ps1`, see "Running several users at once" at the
+      end of section 7), or use the OIDC overlay and sign in as two subjects.
+      The decision records both identities.
 - [ ] **Review queues** show pending items with their evidence.
 
 ### 5.3 Ask — the interactive agent
@@ -328,11 +340,12 @@ Then:
       scheduler iterating but **logs nothing per agent run**, so the ledger is
       the evidence, not the log.
 - [ ] **Expect `proposed: 0` on the sample estate, and that is correct.** The
-      seeded estate already carries an open description draft for all 27
-      tables, and the worklist excludes a table whose description is already
-      proposed — so the steward agent has nothing to propose, and says so. To see
-      it propose, resolve some of those drafts in the review queue first, or
-      discover a datasource with undocumented tables.
+      seeded estate already carries an open description draft for every one of
+      its 19 catalog objects (19 drafts in `DRAFT`, one per object, as of
+      2026-09-20), and the worklist excludes a table whose description is
+      already proposed — so the steward agent has nothing to propose, and says
+      so. To see it propose, resolve some of those drafts in the review queue
+      first, or discover a datasource with undocumented tables.
 - [ ] When it does propose, the proposals land in the review queue **as
       proposals**, attributed to the agent's own workload identity — not to
       you, and not applied.
@@ -528,6 +541,22 @@ checklist, including the escalation check you should not skip — an
 authorization defect was found there by running the flow rather than by any
 test, and a token whose roles claim merely contained the string
 `PlatformAdmin` was granted it.
+
+**Running several users at once.** The shipped UI on http://localhost:3001 has
+one development identity baked in at build time: `local-ui-admin`, holding all
+17 roles as of 2026-09-20 (`ui-next/src/lib/appConfig.ts`), so it cannot show
+two different users. `scripts/demo-users.ps1` starts one Vite dev server per
+demo user instead, on ports 5181 to 5188, each sending that user's
+`X-Principal-Id` and `X-Roles`, so the backend decides what each may do and
+nothing is faked in the browser. `-Action Start` starts them, `-Action Check`
+confirms each serves its own identity, `-Action Stop` ends them, and no
+`-Action` lists the roster. It needs `ui-next/node_modules` (it never installs)
+and the development-identity stack, not the OIDC overlay. A user who cannot
+list organizations, such as a Viewer or Reviewer, gets no organization picker,
+so pick Northwind with the console one-liner the script prints. The
+walkthrough pack has the roster and a demo order:
+[roles and users](../walkthrough/roles-and-users.html) and
+[demo script](../walkthrough/demo-script.html).
 
 ---
 

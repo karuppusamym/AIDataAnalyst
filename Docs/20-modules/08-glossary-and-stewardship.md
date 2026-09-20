@@ -26,6 +26,8 @@ S1, S2 (conflicts), S3 (bulk ownership), S5 (coverage), R1, R3, and B2 (is this 
 - Deterministic, evidence-scored table description drafting, reviewed through the common governance queue.
 - A responsive Stewardship Control Center integrated with the Business Meaning and asset-intelligence workbenches.
 
+> **Implementation status (2026-09-20).** The responsibilities above are API and service behaviour; the UI covers part of them. In ui-next, Business meaning creates, submits and links glossary terms (`ui-next/src/screens/BusinessMeaningScreen.tsx`), the Documentation workspace generates, lists and submits description drafts, and the Stewardship workspace (`#/steward/stewardship`) runs the catalog bulk actions (tag, classify, own, certify) and the unowned-asset backlog. These have API routes and no ui-next caller (`ui-next/src/lib/api/` names none of them): the coverage scorecard and snapshots, glossary conflicts, term-link proposals, ownership rules, the reviewed bulk operations of section 7, and leaver reassignment. No screen is named Stewardship Control Center; the Stewardship workspace is the nearest. The design intent stands; these are not yet reachable without API credentials. Tracker row R11-C12 defers the semantic conflict UX.
+
 ## 4. Not responsibilities
 
 | Not this module | Where it lives |
@@ -91,19 +93,22 @@ All bulk operations are capped at 500 subjects and require independent review. R
 
 The API computes a simple percentage for each dimension and their arithmetic mean. It supports organization-wide, data-source, domain, and line-of-business scopes, validates every scope against the tenant, can persist time-stamped snapshots, and returns up to 500 unowned table IDs for action. Field-completion percentage is deliberately excluded because it measures typing rather than trust.
 
+> **Implementation status (2026-09-20).** The coverage scorecard is API-only: `/v1/organizations/{organization_id}/stewardship/coverage` and its snapshots route have no ui-next caller. The Home screen's documented and trusted percentages are computed from a sample of catalog rows, not from this score, and the Stewardship workspace shows the unowned backlog, not the six-dimension score.
+
 ## 9. Public interface
 
 The `/v1/organizations/{organization_id}` API includes:
 
-- `/glossary/categories`, `/glossary/terms`, term versions, reviewed deprecation, and asset links.
+- `/glossary-categories`, `/glossary-terms`, term versions, reviewed deprecation, and asset links.
 - `/ownership-rules`, rule application, and `/ownership-assignments`.
 - `/stewardship/bulk-operations` for reviewed assign/link/certify/deprecate changes.
-- `/glossary/conflicts`, conflict detection, and reviewed resolution.
-- `/glossary/link-proposals` for bounded exact-label inference and review.
+- `/glossary-conflicts`, conflict detection, and reviewed resolution.
+- `/glossary-link-proposals` for bounded exact-label inference and review.
 - `/stewardship/coverage`, snapshots, and snapshot history.
-- `/asset-description-drafts/generate`, the confidence-ordered `/asset-description-drafts` list, and `/asset-description-drafts/{id}/submit` for evidence-scored description drafting.
+- `/stewardship/leaver-reassignment` for reviewed reassignment of a leaving owner's assignments.
+- `/asset-description-drafts/generate`, the confidence-ordered `/asset-description-drafts` list, and `/v1/asset-description-drafts/{draft_id}/submit` for evidence-scored description drafting.
 
-The common `/v1/governance-reviews/{review_id}/decision` endpoint applies or rejects every governed change.
+The common `/v1/governance/reviews/{review_id}/decision` endpoint applies or rejects every governed change.
 
 ## 10. Events
 
@@ -126,13 +131,13 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 |---|---|---|
 | Term lifecycle | Implemented vertical slice | Category edit/archive; scheduled lifecycle policy |
 | Term-asset linkage | Manual, reviewed bulk, and reviewed exact inferred links | Fuzzy/model-assisted ranking and bank corpus calibration |
-| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk | Inheritance and dedicated leaver/vacate workflow |
+| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk, reviewed leaver reassignment (GL-7; API only, no ui-next caller) | Inheritance; a screen for the rule, bulk and leaver workflows |
 | Conflicts | Manual and synonym detection with reviewed retained resolution | Definition-source precedence learning and richer impact preview |
 | Certification | Reviewed bulk table certification with expiry | Automatic expiry state/event worker; additional asset types |
 | Coverage | Six dimensions, four scopes, snapshots/history, unowned IDs | Scheduled trend computation, routing/escalation, bank-scale benchmarks |
 | Description drafting | Deterministic evidence-scored drafts, minimum-evidence submission gate, reviewed publish/reject with retained negative knowledge | Column/table-type-specific templates, batch scan trigger, bank corpus calibration of the scoring weights |
 | Steward agent (ADR-0029) | A contracted `agent:steward` identity works the AT-5 worklist in its priority order and proposes GL-9 table descriptions, column descriptions and GL-8 links as its own review requests; tier-gated (T0 previews), killable mid-run, bounded, ledgered, with a per-type acceptance rate; the ingest side-car drafts under the same contract where the agent is registered; scheduled runs available and off by default | Measurement on a real estate |
-| User experience | Responsive Stewardship Control Center and asset accountability actions | Interactive WCAG/usability certification and very-large-selection patterns |
+| User experience | Stewardship workspace and asset accountability actions (see the status note in section 3 for what has no screen) | Interactive WCAG/usability certification and very-large-selection patterns |
 
 ## 13. Open work
 
@@ -144,7 +149,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 | GL-4 | Scoped coverage scoring, dashboard, and history | DONE | P0 |
 | GL-5 | Reviewed bulk table certification with expiry | DONE | P1 |
 | GL-6 | Unowned-asset backlog with routing | DONE - bounded backlog, automated owner routing, and two-tier escalation | P1 |
-| GL-7 | Dedicated leaver reassignment and ownership vacate workflow | TODO | P2 |
+| GL-7 | Dedicated leaver reassignment and ownership vacate workflow | DONE on the API (2026-08-31); no ui-next caller | P2 |
 | GL-8 | Review-confirmed term-link inference from approved annotations | DONE | P1 |
 | GL-9 | Evidence-scored table description drafting, routed through review | DONE | P1 |
 | AG-12 | Steward agent: GL-8/GL-9 proposals under a contracted agent identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | DONE - on demand, or scheduled once its interval is set (off by default) | P1 |

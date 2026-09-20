@@ -59,6 +59,8 @@ context_product
 
 **`eligible_tools` is the differentiating element.** Competitors hand an external agent context and let it generate SQL in its own environment. Atlas hands it context *plus a list of approved capabilities it may invoke through the governed gateway*. The external agent gets more power and less freedom — which is exactly the trade a bank wants.
 
+> **Implementation status (2026-09-20).** There is no per-module database schema, so "Schema `context_products`" in the header names the bounded context only. A product is stored across `context_product` (the stable identity), `context_product_version` (immutable versions, with the role bindings normalized into `context_product_role_binding`), `context_product_consumer_binding`, `context_product_consumption_edge` (the product-specific consumption evidence) and `mcp_consumption_evidence` (generic evidence for any MCP read); the version carries the scope, semantic and glossary references, eligible tool versions and policy summary as columns rather than as separate tables (`src/aida/models.py`, `src/aida/context_product_api.py`).
+
 ## 7. Governance at consumption
 
 ```mermaid
@@ -79,7 +81,7 @@ sequenceDiagram
 
     C->>M: invoke eligible tool
     M->>P: authorize(principal, invoke, tool)
-    M->>Q: ExecutionRequest (typed params)
+    M->>Q: governed execution (typed params)
     Q-->>M: bounded, masked result
     M->>L: record execution + decision lineage
     M-->>C: result + evidence
@@ -100,6 +102,8 @@ Note that an external agent's tool invocation goes through the **same query gate
 
 ## 9. Public interface
 
+> **Implementation status (2026-09-20).** The signatures below are the design target. No `context_products/api.py` exists and none of these functions is defined. The behaviour is in the REST handlers in `src/aida/context_product_api.py`, the shared read path in `src/aida/context_product_read_service.py`, and the MCP server in `src/aida/mcp_server.py`.
+
 ```python
 # context_products/api.py
 def list_products(scope) -> list[ContextProductDTO]
@@ -114,15 +118,17 @@ def get_consumption(scope, product_id, page) -> Page[ConsumptionDTO]
 
 | MCP concept | Atlas mapping |
 |---|---|
-| Resource | A context product version |
+| Resource | A published context product version (`atlas://context-products/{key}/versions/{n}`), the documents of its OKF knowledge bundle (`.../okf`), and a catalog table (`atlas://catalog/{datasource_id}/{schema}/{table}`) |
 | Resource read | Policy-evaluated, lineage-recorded context fetch |
-| Tool | An eligible governed tool |
-| Tool call | `ExecutionRequest` through the query gateway |
-| Prompt | Curated analytical question templates from approved annotations |
+| Tool | Every published governed tool version (`atlas__<slug>`), plus nine native tools: `get_lineage_graph`, `get_lineage_impact`, `resolve_entity`, `get_transformation_detail`, `get_asset_context`, `get_knowledge_context`, `get_source_knowledge_context`, `validate_sql` and `request_data_product_access` (each listed as `atlas__<slug>`) |
+| Tool call | A governed tool version runs through the query gateway. The native tools read value-free metadata, except that `validate_sql` runs the gateway's validation path (a dry-run estimate against the source) and `request_data_product_access` creates an access request that a checker must approve |
+| Prompt | One prompt per published context product version (`atlas__context__{key}__v{n}`, no arguments) that returns that version's governed context |
 
 ## 11. Events
 
-Emits `context.product_published|deprecated`, `context.product_consumed`, `context.consumption_denied`, `context.budget_exceeded`.
+Emits `context.product_draft_created.v1`, `context.product_published.v1`, `context.product_deprecated.v1` (with the `.rejected` and `.deprecation_rejected` decisions), `context.product_consumed.v1`, `context.product_tool_consumed.v1`, `context.product_consumption_denied.v1` and `mcp.tool_invocation_denied.v1`.
+
+> **Implementation status (2026-09-20).** `context.budget_exceeded` is a design name that no code emits: a spent MCP budget answers HTTP 429 with rate-limit headers, and only when `mcp_budget_enabled` is switched on (it defaults to false). The event catalog maps the emitted names to the design names they replace.
 
 ## 12. Dependencies
 
@@ -134,7 +140,7 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 
 | Aspect | Now | Target |
 |---|---|---|
-| MCP server | **Implemented** — JSON-RPC 2.0 over `POST /mcp`; resources, prompts, and tools route through governed policy and evidence controls | Add workload identity, bank-scale certification, and browser-accessibility QA for the supporting portal surfaces |
+| MCP server | **Implemented** — JSON-RPC 2.0 over `POST /mcp`; resources, prompts, and tools route through governed policy and evidence controls; workload identity is enforced outside development (`mcp_require_workload_identity`, default true: the principal must be an `AGENT` or `SERVICE_ACCOUNT`) | Bank-scale certification and browser-accessibility QA for the supporting portal surfaces |
 | Context products | **Implemented** — immutable versions, maker-checker publication/deprecation, REST/MCP reads, quality policy, UI, compiler, and marketplace | Certify external entitlement and compiler providers |
 | Per-read policy | Implemented — tenancy, role, lifecycle, exact product scope, purpose allowlists, and quality gates are enforced | Extend shared ABAC vocabulary beyond Context Products |
 | Consumption lineage | Implemented for MCP — successful resources, prompts, and tools persist generic immutable evidence; Context Product reads also persist product-specific edges | Add broader retention, BI/procedure lineage projection, and enterprise-scale certification |
@@ -145,13 +151,13 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 
 | ID | Item | Priority |
 |---|---|---|
-| CX-1 | MCP server with resource and tool surfaces | P0 -- **native lineage tools delivered 2026-08-29** (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`); governed-SQL-tool and context-product surfaces already implemented |
+| CX-1 | MCP server with resource and tool surfaces | P0 -- **implemented**: the four native lineage tools were delivered 2026-08-29 (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`), and as of 2026-09-20 the server exposes nine native tools (see §10) plus every published governed tool version as `atlas__<slug>`; governed-SQL-tool and context-product surfaces already implemented |
 | CX-2 | Context product definition, versioning, maker-checker | **Implemented** -- `context_product_api.py`, `ContextProduct`/`ContextProductVersion` models, `tests/test_context_products.py` |
 | CX-3 | Per-read policy evaluation | **Implemented** -- lifecycle, roles, exact scope, purpose allowlists, quality score, and critical-incident gates enforced for REST and MCP |
 | CX-4 | Consumption recorded as lineage | **Implemented for MCP** -- successful resources, prompts, and tools create generic immutable evidence; Context Product reads and product-scoped tools retain richer product-specific edges |
 | CX-5 | Eligible-tool exposure and governed invocation | **Implemented** -- Context Product scope and native lineage tools preserve anti-enumeration behavior |
 | CX-6 | Per-consumer rate limits and budgets | **Implemented 2026-08-29** -- atomic Redis request/minute, tool/day, and context/day buckets with hashed principal keys and production fail-closed behavior |
-| CX-7 | Workload identity for MCP consumers | P0 |
+| CX-7 | Workload identity for MCP consumers | P0 -- **enforcement implemented**: outside development, `POST /mcp` refuses a principal that is not an `AGENT` or `SERVICE_ACCOUNT` (`mcp_require_workload_identity`, default true; the refusal is audited as `mcp.workload_identity.denied`) |
 | CX-8 | BI-surface context injection (Tableau, Power BI, Looker) | P1 |
 | MCP-2 | MCP write operations | **Partial 2026-08-29** -- agents can create a governed data-product access request but cannot grant it; catalog edits, classification changes, and glossary proposals remain |
 | MCP-3 | Fuzzy entity resolution for MCP tool arguments (e.g. resolve "customers" to a table id) | **Closed 2026-08-29** for lineage tools via `resolve_entity`; governed-SQL and catalog tools still require exact UUIDs |
@@ -187,7 +193,7 @@ governed context and action plane that those systems consume.
 | CP-3 | Data contract registry | **Implemented 2026-08-29** -- versioned schema/quality/freshness/SLA definitions, structural compatibility checks, product-port binding, and independently approved breaking-change exception | Compatibility and maker-checker tests; add ODCS round-trip certification fixtures |
 | CP-4 | Data marketplace | **Implemented foundation 2026-08-29** -- policy-filtered published-product discovery plus request/approve/reject/expire/revoke access lifecycle | Local verifier proves request/approve/provision-pending flow; add external provider certification and SLA escalation. *(2026-08-30 addendum, from a review of atlan.com/data-marketplace — blocked by this environment's egress proxy, read via search-result summaries, not fetched directly.)* Three UX gaps beyond what's tracked: (1) discovery is policy-filtered listing, not natural-language search over products — that's the existing "Semantic / vector search" ENTRY gap (`00-product/04-competitive-feature-matrix.md` §2), not a new one; (2) **personalized view by role/domain -- delivered 2026-08-30 (CX-9)**: `GET /v1/marketplace/products` now defaults (`sort=personalized`) to ranking the same policy-filtered catalog by the requester's GL-2 domain ownership (rolled up through module 08 business-domain tagging) and Analyst/DataScientist-vs-Viewer/DataConsumer role affinity, highest affinity first -- an analyst who owns a domain and a business user who owns a different one now get demonstrably different default orderings of the identical catalog (`score_marketplace_product` in `product_marketplace_api.py`, `domain_affinity`/`role_affinity` surfaced per item; `sort=catalog` restores the prior undifferentiated order); (3) no request-without-leaving-chat — this is whitespace item W11 (`00-product/05-differentiation-and-whitespace.md`), not a marketplace-specific gap, and shouldn't be tracked twice. |
 | CP-5 | Context compiler | **Implemented foundation 2026-08-29** -- MCP/REST/YAML/OSI/ODCS/Snowflake Semantic View/Databricks Metric View targets, stable artifact hash, structural drift report, quality gates, and REST delivery | Determinism/drift tests; add idiomatic YAML/file download and target-specific external validators |
-| CP-6 | Lineage MCP | **Implemented 2026-08-29** -- all four tools live (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`), bounded depth, org-scoped | `tests/test_mcp_server.py` now covers validation, anti-enumeration, success, and not-found behavior for the two newest tools; remaining evidence is the fuzzy-resolution corpus benchmark plus dedicated-environment lineage scale/authoritativeness certification |
+| CP-6 | Lineage MCP | **Implemented 2026-08-29** -- the four lineage tools were the first native tools (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`; the native set has since grown to nine, see §10), bounded depth, org-scoped | `tests/test_mcp_server.py` now covers validation, anti-enumeration, success, and not-found behavior for the two newest tools; remaining evidence is the fuzzy-resolution corpus benchmark plus dedicated-environment lineage scale/authoritativeness certification |
 | CP-7 | Unified AI registry | **Implemented foundation 2026-08-29** -- tenant-scoped APIs register use cases, models, agents, versions, dependencies, policies, deployments, runtime signals, independent assessments, maker-checker retirement, provider evidence sync, and portal dependency-graph visualization | Remaining local breadth is CLI manifest registration; external registry adapters and dedicated-environment browser/accessibility certification remain |
 | CP-8 | AI trust and compliance | **Implemented foundation 2026-08-29** -- deterministic 100-point trust computation exposes every documentation, accountability, lifecycle, policy, evaluation, runtime, and assessment factor plus hard blockers | Add managed assessment-template library, remediation workflow, historical score projection, and framework evidence export |
 | CP-9 | Quality and observability | Reusable rules, warehouse pushdown, anomaly monitors, scores, incident routing, ownership, SLAs, and lineage-aware blast radius | Rule execution evidence; deduplicated incidents; owner notification; quality signal shown on product and agent context |
@@ -246,7 +252,7 @@ versions before submission. Wildcard estate scope is not permitted.
 |---|---|---|---|
 | CP-S1 | Context product identity, immutable versions, validation, maker-checker, REST API, audit, outbox | A product can be created, submitted, independently approved, listed, and read with tenant isolation | **Implemented and hardened; live PostgreSQL integration proof pending** |
 | CP-S2 | Published context products as MCP resources; role eligibility and consumption evidence | External agents consume only eligible published products and every read is audited | **Implemented** |
-| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | **Implemented foundation: four native tools, Redis cache, and optional generation-stamped Neo4j projection/read path; scale certification remains** |
+| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | **Implemented foundation: the lineage tools (four of the nine native tools), Redis cache, and optional generation-stamped Neo4j projection/read path; scale certification remains** |
 | CP-S4 | Data products, ports, contracts, and lifecycle dashboard | Producers manage a portfolio and publish qualifying products | **Implemented foundation** |
 | CP-S5 | Marketplace and access requests | Consumers discover and request governed products without draft or tenant leakage | **Implemented foundation** |
 | CP-S6 | Context specification and compiler | One approved definition compiles deterministically to MCP, REST, YAML, OSI, ODCS, Snowflake, or Databricks targets | **Implemented foundation** |

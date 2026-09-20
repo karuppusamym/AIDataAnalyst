@@ -8,13 +8,14 @@
 #
 # `AIDA_ENVIRONMENT=production` and `AIDA_IDENTITY_PROVIDER=oidc` are
 # pinned here deliberately (tracker AU-9 / audit finding C1+C2): the
-# config model defaults both to insecure development values, and
-# `extra="ignore"` in Settings.model_config means a typo'd variable name
-# is silently dropped rather than failing startup. Pinning the correct
-# names in a reviewed manifest is the mitigation available today; the
-# upstream fix (fail-closed on unknown AIDA_* vars, `extra="forbid"`) is
-# tracked separately as audit remediation item #3 and is NOT this file's
-# job to implement.
+# config model defaults both to insecure development values. Settings
+# now uses `extra="forbid"`, refuses an AIDA_* variable whose name is a
+# near-miss of a real setting (`reject_unrecognized_aida_env_vars`) and
+# refuses to start without an explicit AIDA_ENVIRONMENT
+# (`reject_implicit_environment_outside_tests`), so a typo is loud rather
+# than silent. A name that is not a close match of any real setting is
+# still dropped, so pinning the correct names in a reviewed manifest
+# remains the record of intent.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -49,13 +50,18 @@ data:
   AIDA_OIDC_PERSONA_MAPPINGS: "{}"
 
   # --- Credential resolution (Settings forbids credential_provider="env"
-  # in production). `vault` is set as the placeholder that satisfies that
-  # startup check. IMPORTANT: per the 2026-08-30 audit (remediation #10),
-  # no non-"env" SecretProvider is actually implemented yet in
-  # `aida/secrets.py` -- only the Protocol and caching exist. Setting this
-  # to "vault" lets the process pass config validation; it does NOT mean
-  # connector credential resolution actually works end to end. Track that
-  # gap under the audit's #10, not here.
+  # in production). `vault` is set because it is the one non-"env"
+  # provider `aida/secrets.py` implements (VaultKvSecretProvider, KV v2;
+  # exercised only against a mocked HTTP transport, never a real Vault).
+  # IMPORTANT: it resolves nothing until AIDA_SECRETS_VAULT_URL and
+  # AIDA_SECRETS_VAULT_TOKEN are also set, and nothing under infra/
+  # supplies either (the token is a bootstrap credential, so it does not
+  # belong in this ConfigMap). Without them "vault" passes config
+  # validation and every credential reference fails closed. The other
+  # names Settings accepts (cyberark, aws-sm, azure-kv, gcp-sm) have no
+  # implementation. So this setting alone does NOT mean connector
+  # credential resolution works end to end; a deployer must supply the
+  # Vault URL and token.
   AIDA_CREDENTIAL_PROVIDER: "vault"
 
   # --- QG-5 / QG-6: production forbids an application-managed local signer

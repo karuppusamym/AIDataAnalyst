@@ -5,38 +5,40 @@
 
 > **Implementation status. This document describes a structure that does not
 > exist yet.** Everything from §3 onward — the 21 modules, the per-module schemas in §6, the
-> module anatomy in §7 — is the target. Built today (`src/atlas/` figures re-measured
-> 2026-09-11 under R11-P9; `src/aida/` figures re-measured 2026-09-12 under R11-P8 with
-> `find src/aida -maxdepth 1 -name '*.py' | wc -l` and `find src/aida -name '*.py' -exec cat {} + | wc -l`):
+> module anatomy in §7 — is the target. Built today (re-measured 2026-09-20 with
+> `find <dir> -name '*.py' | wc -l` and `find <dir> -name '*.py' -exec cat {} + | wc -l`; these sizes
+> drift within days, so `14-generated-architecture-map.md` is the current count of modules and imports):
 >
-> * **6 of 21 modules** exist under `src/atlas/modules/` as of 2026-09-11 (R11-P9 re-measure;
->   it was 1 when this note was first written): `catalog`, `connectivity`, `identity_tenancy`,
->   `ingestion`, `observability_audit` and `profiling`, 9,649 lines in all, each with the same
->   `api.py` / `contracts.py` / `service.py` / `models.py` / `repository.py` / `router.py` /
->   `schemas.py` / `events.py` file set. How much is behind those names varies: `catalog`'s
->   `service.py` is 576 lines, while `identity_tenancy`'s is still the 7-line stub labelled
->   *"Status: scaffold only"* with no business rules. `src/atlas/platform/` has four real
->   files (`config.py` 1,106 lines, `db.py`, `context.py`, `logging.py`).
-> * **Everything that works** is in the flat `src/aida/` package — ~120,000 lines across 282
->   top-level modules (304 files and ~131,000 lines counting the `connectors/`, `workflows/`
->   and `projectors/` subpackages), one declarative base, one PostgreSQL schema, one migration
->   space.
+> * **6 of 21 modules** exist under `src/atlas/modules/` (unchanged since 2026-09-11):
+>   `catalog`, `connectivity`, `identity_tenancy`, `ingestion`, `observability_audit` and
+>   `profiling`, about 9,700 lines in all as of 2026-09-20. They do **not** share one file set:
+>   all six hold `models.py`, `schemas.py` and `router.py`; `catalog` also holds `service.py`,
+>   `repository.py` and `api.py`, `connectivity` also holds `api.py`, and `profiling` also holds
+>   `src/atlas/modules/profiling/facets.py`. How much is behind those names varies: `catalog` is
+>   the only module with a `service.py` or `repository.py`, and `identity_tenancy` is just its
+>   models, schemas and router, with no `service.py` at all. `src/atlas/platform/` has four real
+>   files (`config.py`, `db.py`, `context.py`, `logging.py`).
+> * **Everything that works** is in the flat `src/aida/` package — 378 Python files and about
+>   200,000 lines as of 2026-09-20, counting the `connectors/`, `workflows/` and `projectors/`
+>   subpackages, in one declarative base, one PostgreSQL schema and one migration space.
 >
 > Read §3–§7 as "what a module will look like", never as "what you can open". §2's
 > *Enforcement* column is likewise mostly aspirational — see the status note in §5.2 for the
-> three contracts that are actually wired. The extraction sequence is
+> contracts that are actually wired. The extraction sequence is
 > `40-engineering/06-refactor-plan.md`; the tracked work is `ST-05`/`ST-06`/`ST-07`.
 
 ## 1. The problem being solved
 
-The current implementation is a **flat package monolith**: `src/aida/` with ~120,000 lines in which two files — `models.py` (5,249 lines) and `schemas.py` (3,736 lines) — hold the ORM models and DTOs for *every* domain, and `api.py` (1,786 lines) holds a large share of the HTTP surface.
+The current implementation is a **flat package monolith**: `src/aida/` with about 200,000 lines across 378 Python files (as of 2026-09-20) in which two files — `models.py` (5,463 lines) and `schemas.py` (4,681 lines) — hold the ORM models and DTOs for *every* domain, and `api.py` (1,923 lines) holds a large share of the HTTP surface.
 
-> **Implementation status (2026-09-12).** The line counts above were re-measured against this
+> **Implementation status (2026-09-20).** The line counts above were re-measured against this
 > worktree with `wc -l src/aida/models.py src/aida/schemas.py src/aida/api.py`. This is the
-> second time they have been found stale by roughly a factor of two: the 2026-08-30 pass
-> corrected ~18,000 / 1,274 / 1,298 / 1,530 to ~36,500 / 2,721 / 2,222 / 1,837, and those
-> figures had in turn drifted to the ones now shown. The shape of the problem is unchanged
-> and, on the evidence, getting worse rather than better while the extraction is deferred.
+> third time they have been found stale: the 2026-08-30 pass corrected ~18,000 / 1,274 / 1,298 /
+> 1,530 to ~36,500 / 2,721 / 2,222 / 1,837, the 2026-09-12 pass corrected those to ~120,000 /
+> 5,249 / 3,736 / 1,786, and they now read as shown. Treat every size typed in this
+> document as dated; `14-generated-architecture-map.md` is regenerated from the tree and is the
+> current count of modules. The shape of the problem is unchanged and, on the evidence, getting worse
+> rather than better while the extraction is deferred.
 
 This shape has three specific failure modes, all of which are already visible:
 
@@ -169,18 +171,26 @@ These two are the *only* upward-callable modules, and both are append-or-decide-
 | `platform-purity` | `platform.*` must not import any domain module |
 | `no-cycles` | No import cycles between modules |
 
-> **Implementation status (2026-08-30).** Of the six contracts above, **none is wired in the
-> form described**, because none of the modules they name exists. `pyproject.toml` contains
-> **four** import-linter contracts, and `lint-imports` does run in CI
-> (`.github/workflows/ci.yml`, `quality` job) as of 2026-08-30. This set is growing during the
-> current review push — re-read `pyproject.toml` rather than trusting this list:
+> **Implementation status (2026-09-20).** Of the six contracts above, **none is wired in the
+> form described**, because the flat package does not have the module layout they name.
+> `pyproject.toml` contains **13** import-linter contracts as of 2026-09-20, and `lint-imports`
+> runs in CI (`.github/workflows/ci.yml`, `quality` job). This set keeps growing — the generated
+> map, `14-generated-architecture-map.md`, parses it from `pyproject.toml` on every regeneration,
+> so read that (or `pyproject.toml`) rather than trusting this list:
 >
 > | Wired contract (`pyproject.toml`) | Relates to | Note |
 > |---|---|---|
 > | `INV-2 connector SQL execution is reachable only from the query gateway` | `gateway-exclusivity` | The real thing, at flat-package addresses: protects `aida.connectors.execution_access`, permits exactly one importer, `aida.query_gateway`. Tracker `QG-7`, landed 2026-08-30 |
-> | `identity_tenancy module privacy` | `module-privacy` | Covers the one scaffold module only |
+> | `identity_tenancy module privacy`, `connectivity module privacy`, `ingestion module privacy`, `catalog module privacy`, `observability_audit module privacy`, `profiling module privacy` | `module-privacy` | One per extracted module, six of the 21: its `models`, `schemas` and `router` (plus `service` and `repository` for `catalog`) may be imported only by the module itself and by a short named list of shims, chiefly `aida.models` and `aida.schemas` |
 > | `security_types never depends on api (leaf-module ratchet)` | — | A narrow true invariant, not in the table above |
 > | `C4 / ST-11 lineage and intelligence modules never import the query gateway` | `no-cycles` (one edge of it) | Pins the one direction §5.3 resolves: the gateway emits, intelligence consumes |
+> | `F05 the governance decision service is never reached from a router (and never imports one)` | — | Keeps `aida.governance_decision_service` and the reviewer agent from importing the router modules that once closed a cycle through them |
+> | `R02 extracted lineage/graph/portfolio services never import a router` | — | The rules extracted out of three router functions may not import a router |
+> | `ADR-0029 the steward agent and the rules it shares never import a router` | — | The steward, lineage, quality and tool agents, and the rules they share, may not import a router |
+> | `R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router` | — | GraphQL's reads, limits, schema and execution path, and the shared read services, may not import a router, indirect chains included |
+>
+> None of the 13 is a layers contract, and the generated map lists the domain-to-router
+> imports that no contract forbids.
 >
 > `layers`, `no-orm-leakage`, `platform-purity` and `no-cycles` are **not wired**. `pyproject.toml`'s
 > own comment explains why a layering contract over `aida` is deferred: the package is still
@@ -240,12 +250,13 @@ modules are extracted — see tracker ST-11.
 
 ## 6. Database schema ownership
 
-> **Implementation status (2026-08-30). Target. No module schemas exist.** Every table in the
-> platform lives in the single default PostgreSQL schema: `src/aida/models.py` sets no
-> `schema=` on any `__table_args__`, and no file under `migrations/versions/` references a
-> schema. The 20 schemas below are the extraction target, and MD-1's "schema-per-module in
-> PostgreSQL" enforcement is therefore not in force today. Boundary erosion is currently
-> prevented by review, not by the database.
+> **Implementation status (2026-09-20).** **Target. No module schemas exist.** First written
+> 2026-08-30 and re-checked on 2026-09-20: every table in the platform lives in the single
+> default PostgreSQL schema. `src/aida/models.py` sets no `schema=` on any `__table_args__`, and
+> no file under `migrations/versions/` creates a schema. The 20 schemas below are the extraction
+> target, and MD-1's "schema-per-module in PostgreSQL" enforcement is therefore not in force
+> today. ADR-0015 records the same decision and carries the same status note. Boundary erosion is
+> currently prevented by review, not by the database.
 
 One PostgreSQL database, one schema per module. This gives boundary enforcement now and a clean extraction path later.
 
@@ -280,18 +291,20 @@ One PostgreSQL database, one schema per module. This gives boundary enforcement 
 
 ## 7. Module anatomy
 
-> **Implementation status (2026-08-30; re-measured 2026-09-11 under R11-P9). Target.** Six of
-> the module directories below exist — `src/atlas/modules/catalog/`,
+> **Implementation status (2026-09-20).** **Target.** First written 2026-08-30 and re-measured
+> 2026-09-11 and 2026-09-20. Six of the module directories below exist —
+> `src/atlas/modules/catalog/`,
 > `src/atlas/modules/connectivity/`, `src/atlas/modules/identity_tenancy/`,
 > `src/atlas/modules/ingestion/`, `src/atlas/modules/observability_audit/` and
 > `src/atlas/modules/profiling/` — generated by `scripts/generate_module.py` and asserted by
 > `tests/test_module_scaffold_generator.py`. Since R11-X4 (2026-09-13) each holds only the files
 > below that have something in them — `models.py`, `schemas.py` and `router.py` in all six,
-> plus `catalog`'s `service.py`, `repository.py` and `api.py` and `connectivity`'s `api.py`;
-> the docstring-only stubs were removed once the S6 relocation was decided against. Each module's
-> `migrations/` directory exists but holds only a README: all 153 Alembic revisions are still
-> in the repository-root `migrations/versions/`. `pytest src/atlas/modules/<name>` *is* a
-> supported invocation as of R11-X4 — `pyproject.toml` now sets
+> plus `catalog`'s `service.py`, `repository.py` and `api.py`, `connectivity`'s `api.py` and
+> `profiling`'s `src/atlas/modules/profiling/facets.py`; the docstring-only stubs were removed
+> once the S6 relocation was decided against. Each module's `migrations/` directory exists but
+> holds only a README: all of the Alembic revisions (192 files as of 2026-09-20, with a single
+> head that CI enforces) are still in the repository-root `migrations/versions/`.
+> `pytest src/atlas/modules/<name>` *is* a supported invocation as of R11-X4 — `pyproject.toml` now sets
 > `testpaths = ["tests", "src/atlas"]`, so the per-module scaffold tests
 > (`src/atlas/modules/catalog/tests/test_module_scaffold.py` and `connectivity`'s) run in
 > CI. The other four modules have no public file left to check, so they have no scaffold
@@ -340,11 +353,13 @@ src/atlas/modules/<name>/
 
 ## 9. Mapping: current code → target modules
 
+Line counts in the first column are as of 2026-09-20; they drift, and `14-generated-architecture-map.md` is the current count of modules.
+
 | Current file(s) | Target module | Action |
 |---|---|---|
-| `api.py` (1,530) | split across all | Decompose into per-module `router.py` |
-| `models.py` (1,274) | split across all | Split by schema ownership; this is the highest-value refactor |
-| `schemas.py` (1,298) | split across all | Split into per-module `schemas.py` + `contracts.py` |
+| `api.py` (1,923) | split across all | Decompose into per-module `router.py` |
+| `models.py` (5,463) | split across all | Split by schema ownership; this is the highest-value refactor |
+| `schemas.py` (4,681) | split across all | Split into per-module `schemas.py` + `contracts.py` |
 | `connectors/*` | 02 connectivity | Move; extract execution into 16 |
 | `ingestion.py`, `ingestion_api.py`, `batch_ingestion.py` | 03 ingestion | Move |
 | `analysis_tasks.py`, `data_quality.py` (profiling parts) | 05 profiling | Move |
@@ -360,7 +375,7 @@ src/atlas/modules/<name>/
 | `events.py`, `projectors/outbox_publisher.py` | 20 observability-audit | Move |
 | `fleet.py`, `workflows/scheduler.py` | 03 ingestion (fleet scheduling) | Move |
 | `operational_api.py` | 20 observability-audit | Move |
-| `intelligence_api.py` (1,140) | 06 + 07 + 09 | Split by concern — largest untangling task |
+| `intelligence_api.py` (2,865) | 06 + 07 + 09 | Split by concern — largest untangling task |
 | `db.py`, `config.py`, `logging.py`, `context.py`, `main.py` | `platform/` | Move |
 | `workflows/*` | per-module `workers/` | Distribute activities to owning modules |
 

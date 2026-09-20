@@ -5,16 +5,18 @@
 
 ## 1. Why personas drive the architecture
 
-Persona is not a UX concern here. In Atlas, persona is derived from **identity claims** (OIDC groups mapped to roles), and it determines:
+Persona is not decoration here: it is derived from **identity claims**, never chosen in the browser (the OIDC groups claim, mapped by `oidc_persona_mappings`; roles come from the separate roles claim). What it does, and does not do:
 
-- which navigation shell a user receives (`20-modules/21-experience-shell.md`),
-- which policy decisions are evaluated (`20-modules/17-policy-and-governance.md`),
-- which maker-checker seat a user can occupy (a maker can never check their own proposal),
-- which evidence detail is exposed.
+- it is a navigation mode: it decides which navigation shell a user receives and which work area a fresh session lands in (`20-modules/21-experience-shell.md`);
+- it authorizes nothing. Roles decide access, route by route (`20-modules/17-policy-and-governance.md`; the role catalog is in `20-modules/01-identity-and-tenancy.md` §5a), and maker-checker compares principal ids, so a maker can never check their own proposal whatever persona either holds.
+
+`SecurityContext.persona` is read only by `GET /v1/me` (`src/aida/persona_api.py`) and the shell's landing (`ui-next/src/lib/workAreas.ts`).
 
 A persona chosen in a browser dropdown is a development convenience. In production it must come from the identity provider.
 
-## 2. The six personas
+## 2. Six roles of work, five personas
+
+This document describes six roles of work. The shell derives five of them as a persona: Analyst, Steward, Reviewer, Operator and Auditor (`src/aida/oidc.py`, `ui-next/src/lib/ui-types.ts`). Business Consumer is not a persona of its own; it is the `Consumer` work area, one click from the Analyst landing. The shell has eight work areas in all (Inbox, Analyst, Consumer, Developer, Steward, Reviewer, Operator, Auditor; `ui-next/src/lib/workAreas.ts`), and a persona only chooses which one a session lands in. The derived persona (UX-1) was delivered 2026-08-31.
 
 ```mermaid
 flowchart TB
@@ -34,7 +36,7 @@ flowchart TB
     ST -->|"submits proposal"| RV
     RV -->|"publishes"| AN
     PO -->|"keeps the estate healthy"| AN
-    AU -->|"inspects everything, changes nothing"| RV
+    AU -->|"inspects the evidence"| RV
 ```
 
 ---
@@ -139,6 +141,8 @@ flowchart TB
 | U4 | "Export an evidence pack for this control" | Compliance pack generation, WORM-archived |
 
 **Design implication.** This persona changes nothing and sees almost everything. Read-only-by-construction, with its own retention and export path.
+
+> **Implementation status (2026-09-20).** The `Auditor` role is not read-only by construction and does not see everything. It is refused the compliance-pack routes (`src/aida/compliance_api.py` names `PlatformAdmin`, `ComplianceOfficer` and `DataSteward`, and adds `Viewer` for listing and reading), on-behalf entitlement reports (`src/aida/access_review_api.py`) and cost showback (`src/atlas/modules/observability_audit/router.py`); checked against the running API on 2026-09-20, `Auditor` receives 403 and `Viewer` 200 on `GET /v1/compliance/packs`. It also holds four state-changing routes: AI-asset assessments, AI remediations (create and update) and agent evaluations. `ComplianceOfficer`, the role the pack routes name, is not grantable under OIDC (`20-modules/01-identity-and-tenancy.md` §5a). Packs are stored as checksummed rows and are not yet WORM-archived, so U4's "WORM-archived" is the target (`50-security/04-compliance-and-evidence.md` §3).
 
 ---
 

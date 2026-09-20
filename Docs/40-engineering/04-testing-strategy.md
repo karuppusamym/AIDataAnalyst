@@ -5,14 +5,22 @@
 
 ## 1. Test tiers
 
-> **Implementation status (2026-08-30).** The tier model below is target. `tests/` is a flat
-> directory of 44 files and 339 test functions, all run by one `pytest` invocation in the
-> `tests` CI job; there is no tier separation, no per-tier duration budget, and nothing
-> distinguishes a Tier 0 test from a Tier 3 test at collection time. **Tier 0 exists in
-> substance** as `tests/test_tier0_invariants.py` (6 functions, 4 of 9 invariants — see §2).
-> **Tiers 2, 4 and 5 do not exist at all**: no OpenAPI-diff, event-schema, SDK or fake-parity
-> suite; no end-to-end fixture; no load, soak, chaos or restore test. Tiers 1 and 3 exist only
-> as ordinary tests in the same flat directory.
+> **Implementation status (2026-09-20).** The tier model below is target. `tests/` is a flat
+> directory of 476 test files (`find tests -name 'test_*.py'`) holding about 14,450 collected
+> tests (`pytest --collect-only`; collected, not passed), all run by one `pytest` invocation in
+> the `tests` CI job under a 69% combined coverage floor; there is no tier separation, no
+> per-tier duration budget, and nothing distinguishes a Tier 0 test from a Tier 3 test at
+> collection time. **Tier 0 exists in substance**: `tests/test_tier0_invariants.py` plus one
+> module each for INV-1, 5, 6, 7 and 9 (the §2 table below is the 2026-08-30 tally and has not
+> been re-derived). **Tier 2 exists in part**: the OpenAPI-diff gate
+> (`tests/test_openapi_diff_gate.py`, and the `openapi-diff` CI job), the event-catalog gate
+> (`tests/test_event_catalog_gate.py`) and the migration/ORM drift gate
+> (`tests/test_migration_orm_drift.py`, in the `migration-drift` CI job) all exist; there is no
+> schema-registry compatibility or fake-parity suite. **Tier 4 exists in part**: a browser
+> journey through the production proxy (the `ui-journey` CI job) and `scripts/verify-local.ps1`.
+> **Tier 5's load, soak, chaos and restore tests do not exist**; `perf-baseline` is an
+> in-process regression gate, not those. Tiers 1 and 3 exist only as ordinary tests in the same
+> flat directory.
 
 ```mermaid
 flowchart TB
@@ -64,7 +72,7 @@ The two highest-value tests here are `test_cross_tenant_denial` (which is genera
 
 | Rule | Detail |
 |---|---|
-| Standalone | `pytest src/atlas/modules/<name>` passes with no other module — **target**; `testpaths = ["tests"]` today, and only one module directory exists |
+| Standalone | `pytest src/atlas/modules/<name>` passes with no other module — **target**; `testpaths = ["tests"]` today, and six module directories exist under `src/atlas/modules/` |
 | Fakes from `contracts.py` | Never import another module's internals |
 | Fast | No network, no real database except an in-memory or transactional fixture |
 | Coverage focus | Domain logic, boundary conditions, failure paths |
@@ -145,8 +153,8 @@ Full docker-compose stack against a **synthetic banking fixture** — never prod
 | Tier | Status |
 |---|---|
 | 0 Invariants | **Partial** — the invariant suite is not yet formalized as a distinct tier |
-| 1 Module unit | 121 tests passing; not yet per-module standalone |
-| 2 Contract | Partial — no OpenAPI diff gate; no event-catalog assertion |
+| 1 Module unit | About 14,450 tests collected on 2026-09-20 (collected, not a pass count); not yet per-module standalone |
+| 2 Contract | Partial — the OpenAPI diff gate and the event-catalog gate exist (2026-09-20); no schema-registry compatibility or fake-parity suite |
 | 3 Integration | Partial |
 | 4 End-to-end | Good — R20 fixture covers batch replay, conflicting-content denial, cross-chunk FK, exact counts, payload cleanup |
 | 5 Performance | **Not run** — no load, soak, chaos, restore, penetration, or accessibility evidence |

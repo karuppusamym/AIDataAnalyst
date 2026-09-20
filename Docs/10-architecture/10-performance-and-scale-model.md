@@ -125,11 +125,15 @@ Assertions become claims only after these produce evidence:
 
 ## 9. Regression gates
 
-> **Implementation status (2026-08-30). Target — nothing here runs.** CI does not fail on
-> performance regression, because there is no performance job in `.github/workflows/ci.yml`,
-> no `tests/performance/` directory, and no baseline to regress against. **No p95 in this
-> document has ever been measured.** Every threshold below is the gate that should exist once
-> `E10` (load/soak at 1M objects) lands. Until then, the targets published here and in
+> **Implementation status (2026-09-20). Partly built — the gates in the table below are not.**
+> A gate covers four in-process hot paths (median, +20%): the `perf-baseline` job in
+> `.github/workflows/ci.yml` runs `scripts/perf_baseline.py`, which times the SQL guard
+> pipeline, policy-engine evaluation, hybrid-retrieval fusion ranking and OpenAPI generation,
+> and fails a benchmark that reproduces more than 20% slower than its median in the committed
+> baseline (`Docs/90-reference/perf-baseline.json`). No API p95, throughput or soak gate
+> exists, and there is no `tests/performance/` directory. **No p95 in this document has ever
+> been measured.** Every threshold below is the gate that should exist once `E10` (load/soak at
+> 1M objects) lands. Until then, the targets published here and in
 > `00-product/01-vision-and-goals.md` are unvalidated design intent, and the §8 test cadences
 > above are likewise not being met — none of those tests has been run.
 
@@ -150,7 +154,7 @@ Honest position as of the baseline date. This table is the gap between the archi
 
 | Area | Status |
 |---|---|
-| Unit / contract suite | Runs in CI. 9,944 tests collected, measured 2026-09-12 with `pytest tests --collect-only`; the pass/fail result of a given run is reported by that run, not asserted here. |
+| Unit / contract suite | Runs in CI. About 14,500 tests collected as of 2026-09-20, measured with `pytest tests --collect-only`; collected, not passed — the pass/fail result of a given run is reported by that run, not asserted here. |
 | Static quality (ruff, strict mypy) | Clean |
 | Migration drift | Single head, applied |
 | Local end-to-end fixture | Passing, including batch replay and cross-chunk FK resolution |

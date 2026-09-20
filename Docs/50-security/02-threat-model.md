@@ -7,7 +7,7 @@
 
 | # | Threat | Current control | Required production reinforcement |
 |---|---|---|---|
-| T1 | **Cross-LOB / organization access** | Signed OIDC issuer/audience/JWKS verification, validated organization and role claims, organization IDs on protected entities, enforced resource ownership, role gates, live 403 isolation test; local headers prohibited in production | Bank claim/group certification, centralized ABAC, database RLS as defence in depth, revocation/replay policy, policy decision logs |
+| T1 | **Cross-LOB / organization access** | Signed OIDC issuer/audience/JWKS verification, validated organization and role claims, organization IDs on protected entities, enforced resource ownership, role gates, live 403 isolation test; local headers prohibited in production | Bank claim/group certification, ABAC enforced rather than observed, database RLS as defence in depth, revocation certified with the bank issuer (the mechanism exists), policy decision logs |
 | T2 | **SQL mutation or administrative access** | SQLGlot AST deny rules, one read-only statement per request, connector read-only transaction | Source read-only roles, database resource groups, engine-specific certification, adversarial corpus |
 | T3 | **Unauthorized table access** | Catalog-derived allowlist built from **parsed** references | Row/column/purpose entitlements synchronized from source and policy engine |
 | T4 | **Expensive or denial-of-service queries** | Forced limits, timeout, EXPLAIN cost ceiling, cross-join and unbounded-join denial | Per-LOB quotas, warehouse workload groups, concurrency controller, kill/cancel support |
@@ -21,14 +21,16 @@
 | T12 | **Event spoofing or replay** | Transactional outbox, stable event IDs, idempotent graph MERGE, committed consumer offsets | Broker ACLs and mTLS, schema registry, event signatures where required, generic consumer deduplication |
 | T13 | **Projection corruption or staleness** | PostgreSQL authoritative, replayable events, graph reconciliation status and lag | Scheduled reconciliation, replay runbook, SLO and alerting on projection lag |
 | T14 | **Workflow loss or duplicate work** | Temporal history, stable workflow IDs, activity retries and heartbeats, idempotent persistence | HA Temporal, namespace isolation, retry classification, cancellation and recovery drills |
-| T15 | **Audit tampering** | Attributable append-style audit rows with correlation IDs | Immutable/WORM export, SIEM integration, retention, cryptographic integrity, privileged-access monitoring |
-| T16 | **Dependency or image compromise** | Pinned dependencies, non-root runtime | Image digests, SBOM, signatures, provenance, vulnerability admission policy, patch SLA |
+| T15 | **Audit tampering** | Attributable append-style audit rows with correlation IDs; WORM archive and SIEM delivery implemented (the archive is off by default and verified only against a local Object Lock service, SIEM delivery only against loopback stubs) | Immutable/WORM export enabled and proven against the bank's store, SIEM integration proven against the bank's collector, retention, cryptographic integrity, privileged-access monitoring |
+| T16 | **Dependency or image compromise** | Pinned dependencies, non-root runtime; CycloneDX SBOM, pip-audit and npm audit in CI | Image digests, signatures, provenance, container-image scanning, vulnerability admission policy, patch SLA |
 | T17 | **Resource exhaustion at fleet scale** | Bounded profile rows, column batches, table counts; sequential source pressure by default | Sharded fair scheduler, per-source concurrency, maintenance windows, tested backpressure |
-| T18 | **Malicious or compromised MCP consumer** | *Not applicable yet — module 19 unbuilt* | Workload identity, per-read policy evaluation, consumption budgets, rate limits, consumption lineage |
+| T18 | **Malicious or compromised MCP consumer** | `POST /mcp` ships (`src/aida/mcp_server.py`): outside development only `AGENT` and `SERVICE_ACCOUNT` principals are admitted; per-principal and per-consumer rate budgets (`src/aida/mcp_budget.py`); agent-contract checks on tool calls; consumption lineage recorded | Bank-certified workload identity, per-read policy evaluation enforced rather than observed, budgets and rate limits sized for real consumers, consumption-lineage review |
 | T19 | **Insider misuse by a privileged operator** | Audit ledger, maker-checker on governed changes | Privileged-access monitoring, break-glass with elevated audit, access review, separation of duties |
 | T20 | **Data exfiltration via repeated bounded queries** | Row/byte caps per execution | Aggregate exfiltration detection across a session, per-principal volume budgets, anomaly alerting |
 
-T18 and T20 are new to this revision. T18 arrives with module 19; T20 is a gap that per-query bounds do not close — a thousand compliant queries can extract what one non-compliant query would not.
+T18 and T20 are new to this revision. T18 arrived with module 19; T20 is a gap that per-query bounds do not close — a thousand compliant queries can extract what one non-compliant query would not.
+
+> **Implementation status (2026-09-20).** Two facts about the role model bear on T1 and T19. First, the role catalog is fifteen names (`PLATFORM_ROLES` in `src/aida/oidc.py`). Nine further names appear in route guards (`ComplianceOfficer`, `DataEngineer`, `DataProductOwner`, `DataScientist`, `DataConsumer`, `MetadataIngestor`, `ModelRiskManager`, `ProjectAdmin`, `Steward`) and cannot arrive in an OIDC token, while the development identity accepts any string, so a role gate behaves differently in development than in production. `PlatformAdmin` is cross-tenant by design. Second, two access changes that `src/aida/review_risk_tiers.py` classes as the highest review risk tier (the trust boundary itself) have no maker-checker: creating an access policy and adding a workspace member are each a single call by an admin role, so T19's "maker-checker on governed changes" does not cover them. Both are described, with the routes, in `20-modules/01-identity-and-tenancy.md` §5a and §10.
 
 ## 2. Attack scenarios worked through
 
@@ -67,7 +69,7 @@ T18 and T20 are new to this revision. T18 arrives with module 19; T20 is a gap t
 
 | Layer | Outcome |
 |---|---|
-| Authorization | Requires `MetadataIngestor` or admin role |
+| Authorization | Requires `MetadataAdmin`, `DataAdmin` or `PlatformAdmin` under OIDC; the guards also name `MetadataIngestor`, which no token can carry (`20-modules/01-identity-and-tenancy.md` §5a) |
 | Validation | Attribute keys associated with samples, values, secrets → **rejected** |
 | Snapshot | `FULL` requires explicit confirmation; batched `FULL` reconciles **only after all chunks succeed** — a truncated delivery cannot retire metadata |
 | Evidence | Delivery recorded with fingerprint and producer |
@@ -78,7 +80,7 @@ T18 and T20 are new to this revision. T18 arrives with module 19; T20 is a gap t
 ## 3. Fail-closed invariants
 
 - Production configuration cannot use development identity, `env://` credential resolution, the development SQL override, weak audit keys, or an insecure remote JWKS URL.
-- OIDC tokens failing signature, issuer, audience, time, subject, organization, role, or algorithm validation are denied **without detailed verification leakage**.
+- OIDC tokens failing signature, issuer, audience, time, subject, organization, role, or algorithm validation are denied with a generic 401. The one reason named is expiry (`OidcTokenExpired`), which any holder can already read from the token's `exp`; signature, audience, issuer and revocation stay generic.
 - No approved and independently activated model route → natural-language generation returns an explicit denial.
 - A prompt-risk denial stops **before** metadata retrieval, model context construction, tool selection, or SQL execution.
 - An unknown, ambiguous, or cross-tenant object is denied.

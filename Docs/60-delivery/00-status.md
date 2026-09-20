@@ -1,37 +1,37 @@
 # Delivery Status
 
-## Current delivery confirmation ? 2026-09-12
+## Current delivery confirmation, 2026-09-20
 
 [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current
-work status. The [September 12 confirmation](23-review-reconciliation-2026-09-11.md#september-12-completion-confirmation)
-records the checks and remaining acceptance; the [capability register](20-capability-register.md)
-keeps implementation separate from configuration and real-environment verification.
+work status. The [capability register](20-capability-register.md) keeps implementation separate from
+configuration and real-environment verification, and each row carries the date it was measured.
+This page is a dated summary of both; where they disagree, they win.
 
-Most scheduled implementation has landed: **36 DONE, 16 PARTIAL, 7 BLOCKED, 23 DEFERRED,
-1 CANCELLED** across 83 unique packages. Of 59 non-deferred/non-cancelled packages, 36 are
-complete; 23 still need implementation, verification or prerequisites. **14 of 15 defects
-are DONE**; D6 retains OIDC-session transition verification. No TODO row is not the same as
-no pending work.
+Most scheduled implementation has landed: **67 DONE, 32 PARTIAL, 7 BLOCKED, 8 TODO, 22 DEFERRED,
+2 CANCELLED** across 138 unique work packages. Of the 114 that are neither deferred nor cancelled,
+67 are complete; 47 still need implementation, verification or prerequisites. **32 of the 33
+defects (D-series) are DONE**; D17 keeps a parity run in the target environment. A short TODO list
+is not the same as no pending work: R11-AUD01 to R11-AUD09, added on 2026-09-20, queue the gaps
+that an audit of the code against these documents found.
 
-Completed: native-policy bypass removal, signing correction, compliance-claim correction,
-withdrawal/navigation/picker defects, operator enforcement readiness, housekeeping, local
-access provisioning/revocation, governed Ask/tool reuse, source controls, browser harness,
-classification producer, scoped navigation consolidation and capability refresh. Existing
-live evidence records a real model answer and task-agent registration/runs. X7 deletion
-remains cancelled because contract and budget controls have live callers.
+Twelve PARTIAL rows closed since the September 12 confirmation: B2 (execution-match scoring), B8
+(freshness observation), C1 (live ontology publication), C3 (unsafe reviewer evidence), C6, C7
+and C8 (authority and correction remainders), D6 (OIDC-session transitions), X2, X4, X5 and S9.
 
-Remaining priorities: B2 execution-match scoring; B8 freshness observation production;
-C3 unsafe reviewer evidence; C6/C8 authority and correction remainders; D6/C2 human/session
-acceptance; C1 live ontology publication; real archive/collector/Slack/Teams evidence;
-and customer connector/IdP/secrets/security/calibration/model-governance/scale/masking
-prerequisites. Unattended reviewer approvals stay off: the latest recorded benchmark
-approves 9 of 14 false twins and distinguishes no pairs. Deferred expansion is not a
-release requirement unless its recorded trigger is met.
+Remaining priorities: C2 human accessibility acceptance; B9 real WORM-archive evidence; B10 and I1
+notification, Teams and Slack delivery beyond loopback stubs; the R11-FP01 to FP17 remainders; and
+the BLOCKED rows B5, B6, B15, C9, C10, C11 and C13, which wait on customer connector, IdP, secrets,
+security, calibration, model-governance, scale and masking prerequisites. Unattended reviewer
+approvals stay off: production configuration refuses `reviewer_agent_enabled`, and the latest
+recorded benchmark approves 9 of 14 false twins and distinguishes no pairs. Deferred expansion is
+not a release requirement unless its recorded trigger is met.
 
-Fresh checks: **195 backend + 44 UI tests passed**. Configured PostgreSQL and repository
-are both at `090b3be72b67 (head)` and ontology tables exist; the old migration blocker is
-resolved. No live model call, migration application or production configuration change
-was performed in this confirmation. Earlier full-suite/live runs retain their original dates.
+Fresh checks, 2026-09-20: **14,458 tests collected** (collection only; the full suite was not
+re-run in this pass). One Alembic head, `53558182d9fb`, across 192 revision files.
+`scripts/live_role_matrix.py` sent 5,179 probes as each platform role and 2,639 as eight demo role
+bundles to the running API, on the stack rebuilt from `787f84b`, and every answer matched the
+declared role contract. This documentation pass made no live model call, applied no migration and
+changed no production configuration.
 
 ## Historical status snapshots
 
@@ -41,7 +41,7 @@ not all been rerun against the September 11 tree. Current review findings overri
 INV-2's native-policy execution bypass (R11-D1) is closed in code as of 2026-09-11; agent safety remainders are R11-C3/C6/C7/C8; C4 now has recorded PostgreSQL concurrency/isolation proof.
 
 
-> Status: **Living document — the single answer to "where are we".** Owner: Engineering lead.
+> Status: **Historical snapshot (2026-09-12 and earlier); tracker section P is the status authority.** Owner: Engineering lead.
 > Consolidated 2026-08-30 from `04-status-matrix.md` and `05-gap-register.md`, both now in
 > `Docs/_superseded/`. Historical consolidation rule (superseded): if a status claim appeared in two places, this one won; every other
 > document previously carried a pointer here. The September 11 authority convention above supersedes this historical rule.

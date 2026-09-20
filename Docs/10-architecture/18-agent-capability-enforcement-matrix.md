@@ -21,8 +21,12 @@ A declaration is not a control. AR-06 asked which of these are checked, and wher
   - In OIDC mode, `principal_type` is one of `USER`, `SERVICE_ACCOUNT`, `AGENT` or `WORKER`.
   - In development mode, the default, it is an unvalidated `X-Principal-Type` header.
 - **Role checks ignore principal type.** `require_roles` looks only at roles, so an agent holding a role is served like a person holding it.
-- **Only two places branch on principal type:**
-  - the MCP workload-identity gate, which admits only `AGENT` and `SERVICE_ACCOUNT` and is skipped in development;
+- **Six places branch on principal type** (as of 2026-09-20):
+  - the MCP workload-identity gate in `mcp_server.mcp_endpoint`, which admits only `AGENT` and `SERVICE_ACCOUNT` and is skipped in development;
+  - `mcp_server._native_tool_contract_denial`, which refuses an `AGENT` that arrives with no tenant;
+  - `governance_decision_service._enforce_agent_oversight`, which holds an `AGENT` decider to the oversight regime and lets a human straight through;
+  - `review_batches._refuse_agents`, which refuses an `AGENT` freezing or deciding a batch;
+  - `agent_contracts.load_contract_for_principal`, which treats an `AGENT` type as needing exactly one contract;
   - policy rows that name a `principal_kind`.
 - **A contract is found in one of two ways:**
   - by asset version: `load_agent_contract`, used by the orchestrator, task agents and the drafter;

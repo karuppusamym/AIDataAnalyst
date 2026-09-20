@@ -59,7 +59,7 @@ pass began, while the test suite was green — see section 4.1 for why a green
 | Accessibility with a screen reader, contrast, zoom, multi-screen | a person; `Docs/60-delivery/24-accessibility-acceptance-2026-09-12.md` |
 | Safe unattended reviewer approvals | **do not enable.** Measured 9 of 14 false twins approved. Section 7 |
 | Any non-Postgres connector beyond the sample SQL Server | real Oracle, BigQuery, Snowflake, Databricks accounts |
-| Scale beyond the sample estate | the estate is 9 tables. Nothing here says anything about 1000+ |
+| Scale beyond the sample estate | the estate is 19 catalog objects (15 base tables, 3 views, 1 materialized view; as of 2026-09-20). Nothing here says anything about 1000+ |
 
 ### One thing to read before anything else
 
@@ -320,9 +320,22 @@ there?"**
 
 ### 5.3 Least privilege
 
-Switch the persona control to **Analyst** and repeat 5.1.
+The development persona dropdown cannot test least privilege. It changes the
+shell's presentation, not the identity, and the default stack's identity
+carries every role (17 as of 2026-09-20): with the persona set to **Analyst**
+all 37 navigation items still show and the Audit ledger still loads. Test it
+one of three ways, and repeat 5.1 as that identity:
 
-- [ ] Screens an analyst should not administer are absent or refuse.
+- **The API with a narrow `X-Roles`.** A Viewer calling
+  `/v1/organizations/{organization_id}/audit-events` gets 403, "one of these
+  roles is required: Auditor, Operations, OrganizationAdmin, PlatformAdmin".
+- **A UI with a narrow identity.** `scripts/demo-users.ps1` starts one
+  development-identity UI per demo user (see "Running several users at once"
+  in the [setup and feature guide](15-end-to-end-setup-and-feature-guide.md)).
+- **The OIDC overlay of 5.4**, signed in as `atlas-viewer`.
+
+- [ ] Screens that identity should not administer refuse, and the refusal
+      names the roles that would let it in.
 - [ ] Any refusal says *why*, with something you could act on. A blank screen,
       a spinner that never ends, or "something went wrong" is a defect worth
       reporting.
@@ -434,8 +447,9 @@ unknown:
    are recorded rather than applied. `/v1/organizations/{id}/enforcement-readiness`
    tells you what would break if you turned it on; on this estate it named
    three unbound datasources.
-5. **The estate is nine tables.** Nothing here has been tested at the scale the
-   product is aimed at.
+5. **The estate is 19 catalog objects** (15 base tables, 3 views and 1
+   materialized view, as of 2026-09-20). Nothing here has been tested at the
+   scale the product is aimed at.
 6. **Watch `model_routes.detail` in `/health/ready`.** It reads
    `approved=N;unreachable=N;never_checked=N;sweep=enabled`. A provider can
    retire a model under an approved route at any time, and until this existed

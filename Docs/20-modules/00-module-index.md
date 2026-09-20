@@ -28,13 +28,13 @@ will own when it exists. The six guides under
 [`domain-guides/`](domain-guides/) describe the six contexts that have a real
 module directory today, and describe them as they actually are:
 
-| Guide | Owns | Routes | Spec |
+| Guide | Owns | Routes (as of 2026-09-20) | Spec |
 |---|---|---|---|
 | [catalog](domain-guides/catalog.md) | The seven `metadata_*` tables, the catalog read model, bulk stewardship actions | 10 | [04](04-catalog.md) |
-| [connectivity](domain-guides/connectivity.md) | Source registration, scan policy, certification runs | 7 | [02](02-connectivity.md) |
-| [identity_tenancy](domain-guides/identity-tenancy.md) | Tenant hierarchy, workspaces, business hierarchy, delegation | 28 | [01](01-identity-and-tenancy.md) |
+| [connectivity](domain-guides/connectivity.md) | Source registration, scan policy, certification runs | 10 | [02](02-connectivity.md) |
+| [identity_tenancy](domain-guides/identity-tenancy.md) | Tenant hierarchy, workspaces, business hierarchy, delegation | 29 | [01](01-identity-and-tenancy.md) |
 | [ingestion](domain-guides/ingestion.md) | Ingestion jobs, batches and chunks, and their state machine | 15 | [03](03-ingestion.md) |
-| [observability_audit](domain-guides/observability-audit.md) | The audit ledger, outbox, archive, delivery intents, SLOs | 5 | [20](20-observability-and-audit.md) |
+| [observability_audit](domain-guides/observability-audit.md) | The audit ledger, outbox, archive, delivery intents, SLOs | 2 | [20](20-observability-and-audit.md) |
 | [profiling](domain-guides/profiling.md) | Analysis runs and tasks, scan policy, value-free profiles, the value-profiling exception gate, classification evidence | 0 | [05](05-profiling-and-classification.md) |
 
 Each guide answers four questions and stops: what the context owns, what must
@@ -42,8 +42,9 @@ stay true inside it, how you get into it, and what is deliberately somebody
 else's problem. They are orientation, not specification — read the numbered spec
 when you need the full contract.
 
-The counts above and the shape of the import graph behind them are generated, not
-typed, into
+The route counts above are typed, counted from each module's `@router.*` decorators on
+2026-09-20, and will drift; the module counts and the shape of the import graph behind
+them are generated, not typed, into
 [`../10-architecture/14-generated-architecture-map.md`](../10-architecture/14-generated-architecture-map.md).
 Where a context is still reached through a compatibility shim rather than its own
 public face, the shim and the condition for removing it are recorded in
@@ -70,8 +71,8 @@ Every module spec follows the same sections, so a reader can find the same fact 
 
 | # | Module | Layer | Purpose in one line | Module dir? | Lives today in (`src/aida/` unless noted) |
 |---|---|---|---|---|---|
-| [01](01-identity-and-tenancy.md) | identity-tenancy | L1 | Who is asking, on behalf of which part of the bank | **Yes** ([guide](domain-guides/identity-tenancy.md)) | `security.py`, `oidc.py`, `secrets.py`, `entitlements.py`, `domain_service.py`, `workspace_service.py`, `business_graph.py` · plus `src/atlas/modules/identity_tenancy/` (19 owned tables, 28 routes) |
-| [02](02-connectivity.md) | connectivity | L1 | Reaching sources safely, with honest capabilities | **Yes** ([guide](domain-guides/connectivity.md)) | `connectors/` — 5 real drivers (`postgres`, `sqlserver`, `oracle`, `snowflake`, `bigquery`); `registry.py` declares Databricks/Teradata/Db2 **planned** |
+| [01](01-identity-and-tenancy.md) | identity-tenancy | L1 | Who is asking, on behalf of which part of the bank | **Yes** ([guide](domain-guides/identity-tenancy.md)) | `security.py`, `oidc.py`, `secrets.py`, `entitlements.py`, `domain_service.py`, `workspace_service.py`, `business_graph.py` · plus `src/atlas/modules/identity_tenancy/` (17 owned tables, 29 routes, as of 2026-09-20) |
+| [02](02-connectivity.md) | connectivity | L1 | Reaching sources safely, with honest capabilities | **Yes** ([guide](domain-guides/connectivity.md)) | `connectors/` — 6 drivers registered `BETA` (`postgres`, `sqlserver`, `oracle`, `snowflake`, `bigquery`, `databricks`); `registry.py` declares only Teradata and Db2 **planned** |
 | [03](03-ingestion.md) | ingestion | L1 | Getting metadata in, idempotently, at any scale | **Yes** ([guide](domain-guides/ingestion.md)) | `ingestion.py`, `ingestion_api.py`, `batch_ingestion.py`, `workflows/ingestion.py`, `fleet.py` |
 | [04](04-catalog.md) | catalog | L2 | The authoritative inventory of the estate | **Yes** ([guide](domain-guides/catalog.md)) | `models.py` (`MetadataCatalog`/`Schema`/`Table`/`Column`/`Constraint`), `api.py`, `workflows/activities.py` |
 | [05](05-profiling-and-classification.md) | profiling | L2 | What the data looks like, without looking at it | **Yes** ([guide](domain-guides/profiling.md)) | `workflows/activities.py` (`profile_table_task`, `classify_column_name`), `analysis_tasks.py` · plus `src/atlas/modules/profiling/` (9 owned tables, 0 routes — models and DTOs only) |
@@ -81,16 +82,16 @@ Every module spec follows the same sections, so a reader can find the same fact 
 | [09](09-lineage.md) | lineage | L2 | Where data came from — and why the agent chose it | No | `unified_lineage.py`, `unified_lineage_api.py`, `lineage_cache.py`, `graph_store.py` (formerly lineage_graph_store.py), `openlineage.py`, `dbt_artifacts.py`. **No view-DDL, procedure or query-log parser exists** |
 | [10](10-knowledge-graph.md) | knowledge-graph | L2 | Bounded, value-free traversal of the estate | No | `knowledge_graph.py`, `projectors/graph_projector.py` (Neo4j) |
 | [11](11-data-quality.md) | data-quality | L2 | Whether the data can be trusted right now | No | `data_quality.py`, `quality_api.py`, `quality_service.py`, `dbt_quality_bridge.py`. `gap/02` D4 proposes folding this into profiling + policy |
-| [12](12-retrieval-and-search.md) | retrieval | L3 | Finding the right context, policy-filtered before ranking | No | `retrieval.py` — **lexical BM25 only**; no vector, no graph expansion, no fusion |
+| [12](12-retrieval-and-search.md) | retrieval | L3 | Finding the right context, policy-filtered before ranking | No | `retrieval.py` and `retrieval_stages.py` — lexical scoring, then vector (`postgres_bruteforce` by default; the channel skips itself while `embedding_provider` is `unset`, its default), graph and trust channels, fused by RRF in `hybrid_retrieve_enhanced` |
 | [13](13-agent-runtime.md) | agent-runtime | L3 | The governed analytical state machine | No | `agent_orchestrator.py`, `agent_runtime.py`, `agent_intelligence.py`, `agent_evals.py`, `prompt_risk.py` |
 | [14](14-tool-registry.md) | tool-registry | L3 | Turning analysis into reusable governed capability | No | `tool_api.py`, `tool_rendering.py` (AST literal binding — verified real) |
 | [15](15-model-gateway.md) | model-gateway | L3 | Provider-neutral, budgeted, fail-closed model access | No | `model_gateway.py` |
 | [16](16-query-gateway.md) | query-gateway | L3 | The one path to a source | No | `query_gateway.py`, `sql_guard.py`, `connectors/execution_access.py`. The strongest-built module; INV-2 enforced by import-linter since 2026-08-30 |
 | [17](17-policy-and-governance.md) | policy-governance | L1 | Policy, entitlement, and maker-checker as primitives | No | `policy_engine.py`, `context_product_policy.py`, `integration_service.py`, `ai_governance_api.py`. Maker≠checker real and tested; **ABAC and bulk decisions not implemented** |
 | [18](18-studio.md) | studio | L5 | Authoring semantics and tools with tests and version control | No | *(2026-08-30 snapshot: "Nothing. Zero matches for `studio` anywhere in `src/`.")* `studio.py`, `studio_api.py`, `studio_test_harness.py` now exist — see `60-delivery/00-status.md` §4 |
-| [19](19-context-products-and-mcp.md) | context-products-mcp | L4 | Governed context for external agents | No | `mcp_server.py` (1,776 lines, real JSON-RPC 2.0), `mcp_budget.py`, `context_product_api.py`, `context_compiler.py`, `context_compiler_api.py`, `product_marketplace_api.py` |
-| [20](20-observability-and-audit.md) | observability-audit | L1 | Evidence, telemetry, and the ledger | **Yes** ([guide](domain-guides/observability-audit.md)) | `events.py` (audit + outbox), `logging.py`, `operational_api.py`. **No OpenTelemetry export, no SIEM routing** despite the dependency being present |
-| [21](21-experience-shell.md) | experience-shell | L5 | Persona-derived navigation and the product frame | No | `ui-next/` — React 18 + TypeScript SPA, 40 screens in `SCREEN_IDS`. **No server-side module.** *(The vanilla-JS `ui/` portal this row used to name was deleted on 2026-09-05; see D05 in `../review-2026-09-05/POINTS-TRACKER.md`.)* |
+| [19](19-context-products-and-mcp.md) | context-products-mcp | L4 | Governed context for external agents | No | `mcp_server.py` (3,764 lines as of 2026-09-20, real JSON-RPC 2.0), `mcp_budget.py`, `context_product_api.py`, `context_compiler.py`, `context_compiler_api.py`, `product_marketplace_api.py` |
+| [20](20-observability-and-audit.md) | observability-audit | L1 | Evidence, telemetry, and the ledger | **Yes** ([guide](domain-guides/observability-audit.md)) | `events.py` (audit + outbox), `logging.py`, `operational_api.py`, `observability.py`, `siem_routing.py`, `siem_delivery.py`, `delivery_intents.py`. OpenTelemetry tracing and metrics are wired at startup in `main.py`, but the exporter defaults to `console`; `otlp` ships to a collector. SIEM routing exists as durable delivery intents, but the delivery worker is off by default (`delivery_worker_enabled`) and no real destination has been verified |
+| [21](21-experience-shell.md) | experience-shell | L5 | Persona-derived navigation and the product frame | No | `ui-next/` — React 18 + TypeScript SPA, 37 screens in `SCREEN_IDS` as of 2026-09-20. **No server-side module.** *(The vanilla-JS `ui/` portal this row used to name was deleted on 2026-09-05; see D05 in `../review-2026-09-05/POINTS-TRACKER.md`.)* |
 
 **How to read the last two columns (added 2026-08-30, sourced from the code; the "Module
 dir?" column re-derived 2026-09-06).** "Module dir?" answers only *"does
@@ -105,9 +106,9 @@ models and DTOs. Each guide says which. Capability status per module is in that 
 **The last column is a dated snapshot, not a living status field.** It was sourced from the code on
 2026-08-30 and has not been re-derived row by row since. Two of its claims were corrected on
 2026-09-06 because they had become false — module 18 ("no code of any kind") and module 21 ("`ui/`
-only", a portal that has since been deleted) — but the rest were not re-audited, and module 12's
-"lexical half only" and module 17's "ABAC and bulk decisions not implemented" are both known to
-have moved on. For what is true today, use
+only", a portal that has since been deleted) — and rows 01 (counts), 02, 12, 19, 20 and 21 were
+re-checked against the code on 2026-09-20. The rest were not re-audited, and module 17's "ABAC and
+bulk decisions not implemented" is known to have moved on. For what is true today, use
 [`../60-delivery/20-capability-register.md`](../60-delivery/20-capability-register.md), which keeps
 *implemented*, *reachable*, *configured* and *verified* as separate columns; this index answers
 "what does each module own", which is a different question.

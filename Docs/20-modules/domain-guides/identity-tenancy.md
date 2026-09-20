@@ -10,7 +10,7 @@
 ## What it owns
 
 Who is asking, and on behalf of which part of the bank. The largest of the five
-contexts by owned state — 19 tables, in four families:
+contexts by owned state — 17 tables (as of 2026-09-20; `models.py` is the list), in four families:
 
 - **The tenant hierarchy** — `organization`, `line_of_business`, `data_domain`,
   `project`, `organization_integration_policy`.
@@ -42,7 +42,9 @@ contexts by owned state — 19 tables, in four families:
 
 ## Entry points
 
-- **HTTP** — 28 routes, the largest surface of the five. Organizations, lines of
+- **HTTP** — 29 routes (as of 2026-09-20; the generated
+  [surface-control matrix](../../50-security/surface-control-matrix.md) lists them with their
+  required roles), the largest surface of the five. Organizations, lines of
   business, data domains, projects, cross-boundary grants, workspaces,
   memberships, source bindings and their decisions, the business tree and its
   rollup, access policies, and two read-only probes (`POST /v1/authorization-probes`
@@ -60,23 +62,28 @@ contexts by owned state — 19 tables, in four families:
 
 - **Authentication.** Establishing *who* the caller is happens in `aida.security`
   and `aida.oidc`. This context answers what that identity is entitled to inside
-  the tenant model, given an already-authenticated principal.
+  the tenant model, given an already-authenticated principal. The role catalog, what
+  each role is for, and the role names that no OIDC token can carry are in
+  [module 01, section 5a](../01-identity-and-tenancy.md#5a-roles).
 - **The policy decision itself.** `aida.policy_engine` and
   `aida.authorization_gate` evaluate and enforce; this context stores the
   memberships, rules and grants they evaluate against. Keeping the store and the
   evaluator apart is what lets the gate be the single choke point.
 - **Secrets.** `aida.secrets` owns secret material; rows here hold references.
-- **Persona and navigation.** A persona is an experience-shell concept
-  (`ui-next/`), separated from work area during the 2026-09-05 review. It is not
-  a tenancy object and must not become one.
+- **Persona and navigation.** A persona is a navigation mode. It is derived from
+  the OIDC groups claim (`aida.oidc`), reported by `GET /v1/me`, and used by the
+  shell (`ui-next/`) to choose a landing work area; it was separated from work area
+  during the 2026-09-05 review. It authorizes nothing, is not a tenancy object and
+  must not become one.
 
 ## Current shape, honestly
 
-`models.py`, `schemas.py` and `router.py` hold real content; `service.py`,
-`repository.py`, `contracts.py`, `events.py` and `workers/` are empty scaffolds.
-The router therefore holds this context's business rules as well as its
-translation layer — the largest single file of the five, and the most obvious
-candidate for the service/repository split the module layout anticipates.
+`models.py`, `schemas.py` and `router.py` are the whole context; the empty
+`service.py`, `repository.py`, `contracts.py`, `events.py` and `workers/`
+scaffolds were removed (R11-X4). The router therefore holds this context's
+business rules as well as its translation layer — the largest single file of
+the five, and the most obvious candidate for the service/repository split the
+module layout anticipates.
 
 The `identity_tenancy module privacy` import-linter contract protects the
 internals, with `aida.models`, `aida.schemas` and `aida.workspace_api` named as

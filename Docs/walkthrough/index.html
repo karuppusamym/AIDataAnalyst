@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas walkthrough pack</title>
+<style>
+:root{
+  --ground:#F4F6F7; --surface:#FFFFFF; --sunken:#EBEFF1; --ink:#13202A; --muted:#54656F; --line:#D5DDE2;
+  --accent:#0B6B6B; --accent-ink:#FFFFFF; --accent-soft:#DDEFEE;
+  --allow:#1A7048; --allow-soft:#DFF1E7; --deny:#B3372B; --deny-soft:#F8E3E0;
+  --warn:#855600; --warn-soft:#F8EBCB; --info:#2F5F9E; --info-soft:#E2EBF7;
+  --mono:ui-monospace,"Cascadia Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+    --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+    --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+    --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1418; --surface:#162026; --sunken:#1D2A31; --ink:#E3EAEE; --muted:#93A4AE; --line:#27343C;
+  --accent:#4CC2BE; --accent-ink:#06201F; --accent-soft:#12302F;
+  --allow:#5CCB95; --allow-soft:#123326; --deny:#F0897D; --deny-soft:#3A1D1A;
+  --warn:#E2B23C; --warn-soft:#3A2E10; --info:#8DB4EA; --info-soft:#17283F;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.55 var(--sans);-webkit-text-size-adjust:100%}
+a{color:var(--accent);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+code,.mono{font-family:var(--mono);font-size:.88em}
+code{background:var(--sunken);padding:.1em .35em;border-radius:3px;overflow-wrap:anywhere}
+h1,h2,h3{line-height:1.2;text-wrap:balance;margin:0}
+h1{font-size:clamp(1.65rem,3.4vw,2.3rem);font-weight:650;letter-spacing:-.01em}
+h2{font-size:1.3rem;font-weight:650;margin-top:2.4rem;padding-top:.4rem}
+h3{font-size:1.02rem;font-weight:650;margin-top:1.4rem}
+p{margin:.6rem 0;max-width:72ch}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:16px;padding-block:20px 72px}
+/* top bar */
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--surface);border-bottom:1px solid var(--line)}
+.bar-in{max-width:1080px;margin:0 auto;padding:8px 16px;display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:.04em;text-transform:uppercase;font-size:.78rem;color:var(--accent);margin-right:6px}
+.bar nav{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+.bar nav a{padding:6px 10px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:.9rem}
+.bar nav a:hover{background:var(--sunken);color:var(--ink)}
+.bar nav a[aria-current="page"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.theme{margin-left:auto;background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:4px 10px;font:inherit;font-size:.82rem;cursor:pointer}
+.theme:hover{color:var(--ink);border-color:var(--muted)}
+/* header */
+.eyebrow{font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+.lede{font-size:1.05rem;color:var(--muted);max-width:68ch;margin-top:.7rem}
+.stamp{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:1rem;font-size:.82rem;color:var(--muted)}
+.stamp b{color:var(--ink);font-weight:600}
+/* pills */
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:.74rem;font-weight:650;letter-spacing:.02em;white-space:nowrap;border:1px solid transparent;vertical-align:baseline}
+.p-allow{background:var(--allow-soft);color:var(--allow)}
+.p-deny{background:var(--deny-soft);color:var(--deny)}
+.p-warn{background:var(--warn-soft);color:var(--warn)}
+.p-info{background:var(--info-soft);color:var(--info)}
+.p-mute{background:var(--sunken);color:var(--muted)}
+.p-accent{background:var(--accent-soft);color:var(--accent)}
+/* callouts */
+.note{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--surface);padding:10px 14px;border-radius:6px;margin:1rem 0;max-width:80ch}
+.note.warn{border-left-color:var(--warn)} .note.deny{border-left-color:var(--deny)} .note.allow{border-left-color:var(--allow)}
+.note b:first-child{display:block;margin-bottom:2px}
+/* grids and tiles */
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin:1rem 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.tile .k{font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:600}
+.tile .v{font-size:1.7rem;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2;margin-top:2px}
+.tile .s{font-size:.82rem;color:var(--muted);margin-top:2px}
+/* tables */
+.tbox{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:.8rem 0}
+table{border-collapse:collapse;width:100%;font-size:.88rem;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;background:var(--sunken);font-size:.74rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.c,th.c{text-align:center}
+.matrix td.c{padding:5px 4px}
+td.hl,th.hl{background:var(--accent-soft)}
+.cell{display:inline-block;min-width:1.7em;padding:0 4px;border-radius:4px;font-weight:650;font-size:.8rem}
+.cell.a{background:var(--allow-soft);color:var(--allow)} .cell.d{background:var(--sunken);color:var(--muted)} .cell.p{background:var(--warn-soft);color:var(--warn)}
+/* details */
+details{background:var(--surface);border:1px solid var(--line);border-radius:8px;margin:.6rem 0}
+summary{cursor:pointer;padding:9px 14px;font-weight:600;list-style-position:inside}
+details>div{padding:2px 14px 12px}
+/* controls */
+.controls{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:.8rem 0}
+.controls label{font-size:.82rem;color:var(--muted);display:flex;gap:6px;align-items:center}
+select,input[type=search]{font:inherit;font-size:.88rem;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:3px 11px;font:inherit;font-size:.82rem;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+/* figures */
+figure{margin:1.2rem 0}
+figure svg{max-width:100%;height:auto;display:block}
+figcaption{font-size:.84rem;color:var(--muted);margin-top:6px;max-width:80ch}
+.svgbox{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px}
+.svgbox svg{min-width:640px}
+svg text{fill:currentColor;font-family:var(--sans);font-size:12px}
+svg .t-mute{fill:var(--muted)} svg .t-b{font-weight:650} svg .t-mono{font-family:var(--mono);font-size:11px}
+svg .box{fill:var(--surface);stroke:var(--line);stroke-width:1.2}
+svg .box-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+svg .box-w{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
+svg .box-d{fill:var(--deny-soft);stroke:var(--deny);stroke-width:1.2}
+svg .box-i{fill:var(--info-soft);stroke:var(--info);stroke-width:1.2}
+svg .lane{fill:var(--sunken);stroke:none}
+svg .edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+svg .edge-a{stroke:var(--accent);stroke-width:1.8;fill:none}
+svg .edge-d{stroke:var(--deny);stroke-width:1.6;fill:none;stroke-dasharray:5 3}
+ol.steps{padding-left:1.2rem} ol.steps li{margin:.35rem 0;max-width:80ch}
+.kbd{font-family:var(--mono);font-size:.82em;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--surface)}
+.two{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+@media (max-width:560px){ .bar nav a{padding:5px 8px;font-size:.85rem} th,td{padding:6px 7px} }
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} }
+@media print{ .bar,.theme,.controls{display:none} body{background:#fff;color:#000} .wrap{padding:0} details{break-inside:avoid} details:not([open])>div{display:block} }
+</style>
+</head>
+<body>
+<header class="bar"><div class="bar-in"><span class="brand">Atlas walkthrough</span><nav aria-label="Walkthrough pages"><a href="index.html" aria-current="page">Start</a><a href="architecture.html">Architecture</a><a href="roles-and-users.html">Roles and users</a><a href="demo-script.html">Demo script</a><a href="readiness.html">Readiness</a></nav><button id="theme" class="theme" type="button">Toggle theme</button></div></header>
+<main class="wrap">
+<p class="eyebrow">Atlas walkthrough</p>
+<h1>Go through Atlas in a quarter of an hour</h1>
+<p class="lede">Four pages built from the code as it is today: how it is built, who can do what, how to show it, and how ready it is.</p>
+<div class="stamp"><span>Measured at <b>787f84b</b></span><span>Date <b>2026-09-20</b></span><span>Branch <b>feature/agent-os-v2</b></span></div>
+
+<div class="grid">
+  <div class="tile"><div class="k">Verdict</div><div class="v" style="font-size:1.25rem">Demo yes<br>Deploy not yet</div><div class="s"><a href="readiness.html">Why, in detail</a></div></div>
+  <div class="tile"><div class="k">Roles checked live</div><div class="v">15</div><div class="s">7,818 probes, 0 unexpected answers</div></div>
+  <div class="tile"><div class="k">Work queue</div><div class="v">67 / 138</div><div class="s">packages done; 47 of the 114 active ones open</div></div>
+  <div class="tile"><div class="k">Docs corrected</div><div class="v">60</div><div class="s">files brought in line with the code</div></div>
+</div>
+
+<h2>What Atlas is</h2>
+<p>A governed AI data platform for regulated banks. It reads the estate's metadata, enforces policy <em>before</em> any action, explains every result it produces, and turns safe, repeated analysis into reusable tools. Models propose; the platform decides, and a second person approves anything that changes what an agent may trust.</p>
+
+<h2>Pick your path</h2>
+<div class="tbox"><table>
+<thead><tr><th>You are</th><th>Read, in this order</th><th>Time</th></tr></thead>
+<tbody>
+<tr><td><b>About to present</b></td><td><a href="demo-script.html">Demo script</a>, then <a href="roles-and-users.html">Roles and users</a> for the eight demo users, then the "Before you demo" list on <a href="readiness.html#predemo">Readiness</a></td><td>20 min</td></tr>
+<tr><td><b>Deciding whether to adopt</b></td><td><a href="readiness.html">Readiness</a>: verdict, scorecard, the ten go-live blockers, the twelve bank decisions</td><td>10 min</td></tr>
+<tr><td><b>Reviewing security</b></td><td><a href="roles-and-users.html">Roles and users</a> (measured against the running API), then the nine invariants on <a href="architecture.html#invariants">Architecture</a>, then the scorecard</td><td>15 min</td></tr>
+<tr><td><b>An engineer joining</b></td><td><a href="architecture.html">Architecture</a>, then <a href="../README.md">Docs/README.md</a> and the <a href="../10-architecture/14-generated-architecture-map.md">generated architecture map</a></td><td>15 min</td></tr>
+</tbody></table></div>
+
+<h2>The four pages</h2>
+<div class="grid">
+  <a class="tile" href="architecture.html" style="text-decoration:none;color:inherit"><div class="k">Architecture</div><div class="s" style="font-size:.92rem;color:var(--ink)">Five processes, one authoritative store, the ladder a question climbs, nine invariants with their tests, and where the design is ahead of the code.</div></a>
+  <a class="tile" href="roles-and-users.html" style="text-decoration:none;color:inherit"><div class="k">Roles and users</div><div class="s" style="font-size:.92rem;color:var(--ink)">Fifteen roles, eight demo users, a role-by-area heatmap and a filterable explorer of all 444 role-gated routes, each verified against the live API.</div></a>
+  <a class="tile" href="demo-script.html" style="text-decoration:none;color:inherit"><div class="k">Demo script</div><div class="s" style="font-size:.92rem;color:var(--ink)">Seven acts by person, with the exact route to open, what to expect, whether it writes, and what not to show.</div></a>
+  <a class="tile" href="readiness.html" style="text-decoration:none;color:inherit"><div class="k">Readiness</div><div class="s" style="font-size:.92rem;color:var(--ink)">The work queue counted, production controls scored against code, blockers in order, and how the docs were checked against the code.</div></a>
+</div>
+
+<h2>Where the truth lives</h2>
+<p>This pack is a dated snapshot. It is not a second queue and it does not replace these:</p>
+<ul>
+<li><a href="../60-delivery/03-tracker.md#p-current-execution-queue-reconciled-2026-09-11">Tracker, section P</a>: the only current status authority.</li>
+<li><a href="../60-delivery/20-capability-register.md">Capability register</a>: dated implementation and verification evidence.</li>
+<li><a href="../50-security/surface-control-matrix.md">Surface-control matrix</a>: generated; the role contract the roles page checks.</li>
+<li><a href="../10-architecture/14-generated-architecture-map.md">Architecture map</a>: generated from the source tree.</li>
+</ul>
+<p>Every number here was measured on 2026-09-20 at commit <span class="mono">787f84b</span>. Each page ends with the command that re-measures it.</p>
+
+<footer>Atlas walkthrough pack. A dated snapshot, not a queue: status lives in the tracker (section P) and evidence in the capability register. Regenerate the numbers with the commands shown on each page.</footer>
+</main>
+<script>
+(function(){
+  var root=document.documentElement, key='atlas-walkthrough-theme';
+  try{var s=localStorage.getItem(key); if(s==='light'||s==='dark'){root.setAttribute('data-theme',s);}}catch(e){}
+  var btn=document.getElementById('theme');
+  function label(){var t=root.getAttribute('data-theme'); btn.textContent = t==='dark' ? 'Light theme' : t==='light' ? 'Dark theme' : 'Toggle theme';}
+  if(btn){label(); btn.addEventListener('click',function(){
+    var cur=root.getAttribute('data-theme');
+    var dark = cur ? cur==='dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = dark ? 'light' : 'dark'; root.setAttribute('data-theme',next);
+    try{localStorage.setItem(key,next);}catch(e){} label();
+  });}
+})();
+</script>
+</body>
+</html>

@@ -18,16 +18,27 @@ Invoke-RestMethod http://localhost:8000/health/ready
 `docker compose up` starts ten services: `postgres`, `temporal`, `migrate`,
 `api`, `ui-next`, `metadata-worker`, `fleet-scheduler`, `sample-source`,
 `sample-mssql-source` and `sample-mssql-source-init`. The rest are behind
-Compose profiles because, with default settings, nothing reaches them.
+Compose profiles. With default settings Redis, Neo4j and MinIO are not reached,
+but **Redpanda is**: `metadata-worker` starts a Kafka consumer side-car
+(`run_newly_created_table_drafter_consumer`, from `aida/workflows/worker.py`)
+whenever `AIDA_AUTO_ENQUEUE_ON_INGEST` is true, and it defaults to true. With no
+Redpanda in the default stack its `start()` fails inside a fire-and-forget
+background task, so the auto-drafting of descriptions for newly created tables
+silently does not happen (and, with no `outbox-publisher`, the events it would
+consume stay `PENDING`). That is not fixed in code. Run with `--profile events`
+(the side-car does not retry, so restart `metadata-worker` if it started before
+Redpanda was reachable), or set `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the
+feature off explicitly.
 
 | Profile | Services | Capability that is **off** without it | Turn it on |
 |---|---|---|---|
 | `cache` | `redis` | Redis-backed lineage cache and MCP budget counters. The limits in `mcp_budget.py` are unchanged and still enforced; without Redis there is no store to enforce them in. | `$env:AIDA_LINEAGE_CACHE_ENABLED="true"; $env:AIDA_MCP_BUDGET_ENABLED="true"; docker compose --profile cache up -d` |
 | `graph` | `neo4j`, `graph-projector`, `redpanda`, `outbox-publisher` | **Neo4j graph reads.** Graph, lineage and impact screens keep working on the `postgres` graph adapter — the certified one, reading the same relational tables — so this profile is only needed to exercise Neo4j itself. | `$env:AIDA_LINEAGE_NEO4J_READ_ENABLED="true"; docker compose --profile graph up -d` |
-| `events` | `redpanda`, `redpanda-console`, `outbox-publisher` | **Kafka transport and the projection it drives.** Producers still write every event to `outbox_event`; rows stay `PENDING` until a publisher runs. | `docker compose --profile events up -d` |
+| `events` | `redpanda`, `redpanda-console`, `outbox-publisher` | **Kafka transport and the projection it drives.** Producers still write every event to `outbox_event`; rows stay `PENDING` until a publisher runs. Also off: the auto-drafting of descriptions for newly created tables (see above). | `docker compose --profile events up -d` |
 | `archive` | `minio` | **The audit archive destination.** `audit_archive_storage_backend` defaults to `none` (`NullArchiveStorage` refuses rather than reporting success). | `$env:AIDA_AUDIT_ARCHIVE_STORAGE_BACKEND="s3"; docker compose --profile archive up -d` |
 | `temporal-ui` | `temporal-ui` | The Temporal Web UI only. Temporal itself is in the default stack. | `docker compose --profile temporal-ui up -d` |
-| `full` | all of the above | — | `docker compose --profile full up -d --build` |
+| `monitoring` | `prometheus` | **Metrics scraping** on `http://localhost:9090`. It scrapes `api:8000`; the worker processes only when `AIDA_WORKER_METRICS_PORT` is set (default `0`: they do not listen; `infra/monitoring/prometheus/prometheus.yml` expects `9108`). | `docker compose --profile monitoring up -d` |
+| `full` | all of the above except `seed` — 19 of the 20 services in `compose.yaml` | — | `docker compose --profile full up -d --build` |
 
 `graph` deliberately pulls in `redpanda` and `outbox-publisher`: `graph-projector`
 is a Kafka consumer, and Compose refuses a project whose enabled service depends
@@ -65,14 +76,15 @@ stack up.
 
 | Service | Endpoint | Use | Profile |
 |---|---|---|---|
-| Atlas portal | `http://localhost:3000` | Analyst, steward, governance, operations workbenches | default |
+| Atlas portal | `http://localhost:3001` (`http://localhost:5174` with the `compose.dev.yaml` overlay) | Analyst, steward, governance, operations workbenches | default |
 | API / OpenAPI | `http://localhost:8000/docs` | API exploration | default |
 | Temporal UI | `http://localhost:8080` | Workflow history and retries | `temporal-ui` |
 | Redpanda Console | `http://localhost:8081` | Topics and consumer groups | `events` |
 | Neo4j Browser | `http://localhost:7474` | Projection inspection | `graph` |
 | MinIO Console | `http://localhost:9001` | Object storage | `archive` |
+| Prometheus | `http://localhost:9090` | Metrics scraping; `/targets` shows what is up | `monitoring` |
 
-The last four resolve only when their profile is enabled — see section 1.
+The last five resolve only when their profile is enabled — see section 1.
 
 Local credentials in `compose.yaml` are intentionally non-production values.
 
@@ -129,7 +141,7 @@ accumulates without a publisher does not turn readiness red.
 
 ## 5. Enterprise ingestion — manual operation
 
-Open **Source fleet** at `http://localhost:3000`.
+Open **Source fleet** at `http://localhost:3001` (`http://localhost:5174` with the development overlay).
 
 1. Run connection verification.
 2. Run at least one pull scan **before** certification — certification checks prior connection evidence.

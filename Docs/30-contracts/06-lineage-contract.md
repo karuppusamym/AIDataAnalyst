@@ -119,25 +119,31 @@ Conventional lineage answers *where did this data come from*. AI decision lineag
 }
 ```
 
-Each decision becomes an `AI_DECISION` edge, making the agent's reasoning **traversable in the same graph as data lineage**. **Planned, not built (2026-08-30):** no `AI_DECISION` edge is ever written, and `record_ai_decision` — the function module 09's interface names as the writer — does not exist in `src/`. Agent runs are audited (`AgentRun`, `record_audit`), but that evidence is not projected into the lineage graph, so the "same graph" property this section claims is not yet available to a traversal.
+Each decision becomes an `AI_DECISION` edge, making the agent's reasoning **traversable in the same graph as data lineage** (the traversal half is target; see the note below).
+
+> **Implementation status (2026-09-20).** The recording half is built; the same-graph half is not. `record_decision` and `record_decisions` in `src/aida/ai_decision_lineage.py` (the function module 09's interface calls `record_ai_decision` does not exist under that name) persist one row per decision in the `ai_decision_record` table, and `src/aida/agent_orchestrator.py` calls them for retrieval selections and rejections, tool selections and rejections, and refusals. The recorded shape is not the `step`/`outcome` JSON above: each row has a `decision_type` (`RETRIEVAL_SELECTED`, `RETRIEVAL_REJECTED`, `TOOL_SELECTED`, `TOOL_REJECTED` or `REFUSAL`), a `source_node` and `target_node`, a `reason`, an `evidence` object and a `control_version`. They are read at `GET /v1/ai-decisions/{run_id}`, `GET /v1/ai-decisions/asset/{asset_id}` and `GET /v1/ai-decisions/refusals`, and appear as `AI_DECISION` items in a table's evidence (`GET /v1/metadata/tables/{table_id}/evidence`). They are not edges in the graph a lineage read returns (`GET /v1/datasources/{datasource_id}/unified-lineage/graph`), so a traversal still cannot follow an agent's reasoning alongside data lineage.
 
 **Why competitors cannot record this.** The `rejected` array requires a runtime in which refusal is a first-class, deterministic event — which requires the execution choke point (ADR-0004) and prompt-risk screening (ADR-0013). A product whose agent simply runs has nothing to record, because it refuses nothing.
 
 ## 4. Exposed lineage API
 
 ```http
-GET /v1/lineage/upstream?node=tbl_123&depth=3&kinds=QUERY,DBT,ETL
-GET /v1/lineage/downstream?node=tbl_123&depth=3
-GET /v1/tables/{id}/impact
-GET /v1/agent-runs/{id}/decision-lineage
+GET /v1/datasources/{datasource_id}/unified-lineage/graph?node_limit=300&edge_limit=1500
+GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}?depth=5
+GET /v1/data-domains/{domain_id}/unified-lineage/graph
+GET /v1/metadata/tables/{table_id}/impact
+GET /v1/query-executions/{execution_id}/lineage
+GET /v1/ai-decisions/{run_id}?organization_id=<uuid>
 ```
+
+`GET /v1/lineage/upstream`, `GET /v1/lineage/downstream`, `GET /v1/tables/{id}/impact` and `GET /v1/agent-runs/{id}/decision-lineage` were the original design names and do not exist; `Docs/90-reference/openapi-baseline.json` is the route inventory.
 
 | Rule | Detail |
 |---|---|
-| Depth bounded | 1–4 hops, server-enforced |
+| Depth bounded | The impact traversal takes `depth` 1–8, default 5, server-enforced. The graph read has no depth; it is bounded by `node_limit` and `edge_limit` |
 | Node/edge caps | Per response, with **explicit truncation reasons** |
 | Policy filtering | Applied before traversal — an unauthorized node is not a hidden node, it is an absent one |
-| Kind filtering | Consumers select which edge kinds they want |
+| Kind filtering | Target: consumers select which edge kinds they want. Today the graph read filters by `suggestion_status` and `include_pending_edges`, not by edge kind |
 | Values | Never |
 
 ## 5. Impact analysis

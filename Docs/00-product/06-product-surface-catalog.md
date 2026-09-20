@@ -1,7 +1,7 @@
 # Product Surface Catalog
 
 > Status: Authoritative. Owner: Product.
-> Purpose: the inventory of user-facing surfaces Atlas's product design defines, mapped to the module that owns each. This is the "what is the product meant to contain, and who owns it" document. It is **not** a statement of what is built: several surfaces below are partial or pending — Studio (18) is `Partial` and its Git binding is an open P1 gap — so read implementation state from `60-delivery/00-status.md` and tracker section P, never from this catalog.
+> Purpose: the inventory of user-facing surfaces Atlas's product design defines, mapped to the module that owns each. This is the "what is the product meant to contain, and who owns it" document. It is **not** a statement of what is built: several surfaces below are partial or pending — Studio (18) is `Partial`: its change sets, tests, diff and impact are on the API and a screen reads and submits them, but nothing in the UI authors one, and its Git binding is deferred (P2) — so read implementation state from `60-delivery/00-status.md` and tracker section P, never from this catalog.
 > Claims: competitor statements below assessed 2026-08-28 against vendor-stated public positioning; re-verify by 2026-11-28; sources: `90-reference/03-sources.md`. What a vendor ships, below, is that assessment, not current fact.
 
 ## 1. Surface taxonomy
@@ -13,9 +13,11 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | **Workbench** | A persona's primary working environment | One per persona job cluster. Adding a workbench requires a persona job in `02-personas-and-jobs.md`. |
 | **Workspace** | A focused task environment inside a workbench | Must have a completion state — the user finishes and leaves. |
 | **Inspector** | A read-only evidence pane | Never mutates. Always reachable by permalink. |
-| **Console** | An operator/admin control surface | Privileged; never analyst-reachable. |
+| **Console** | An operator/admin control surface | Privileged. The backend refuses a caller without the role; the shell lists every screen to every persona, so a console an analyst may not use is one that refuses, not one that is hidden. |
 
 ## 2. Surface inventory
+
+> **Implementation status (2026-09-20).** Fifteen screens the shell ships had no row in this inventory and were added on this date; each names its route from `ui-next/src/lib/routes.ts` (`SCREEN_IDS`). Each is mapped to its owning module from its screen header, and its Jobs entry is the closest persona job, or a dash where none fits — a best fit, not a product decision. In the shell, Delegations sits in the Operator area although its job (R3) is the Reviewer's.
 
 ### 2.1 Analyst workbench
 
@@ -30,6 +32,11 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | Query memory / history | Workspace | 13 | A4 |
 | Global search + command palette | Workbench | 12 Retrieval | A3 |
 | Asset detail (table/column/metric) | Inspector | 04 Catalog | A3 |
+| Tool plans (`#/analyst/tool-plans`) | Workspace | 14 Tool registry | A4 |
+| Marketplace, Consumer area (`#/consumer/marketplace`) | Workspace | 19 Context products | A3 |
+| Portfolio analytics, Consumer area (`#/consumer/portfolio-analytics`) | Inspector | 19 | — |
+
+> **Implementation status (2026-09-20).** The palette is a page palette: Ctrl+K jumps between the shell's screens and does not search assets, terms or tools. Global search (`/v1/search`, `/v1/organizations/{organization_id}/global-search`) has API routes and no ui-next caller; tracker row R11-X5 gives it an owner and a date. See [module 21](../20-modules/21-experience-shell.md).
 
 ### 2.2 Steward workbench
 
@@ -46,6 +53,12 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | Knowledge graph explorer | Workbench | 10 Knowledge graph | S4 |
 | Quality policy authoring | Workspace | 11 Data quality | S5 |
 | Unowned-asset backlog | Workspace | 08 | S3 |
+| Task agents: steward, lineage, quality (`#/steward/task-agents`) | Workspace | 13 Agent runtime, 08 | S1 |
+| Negative knowledge (`#/steward/negative-knowledge`) | Workspace | 06 | S1 |
+| Cross-source relationships and object resolution (`#/steward/cross-source`) | Workspace | 06 | S1 |
+| Transformations, dbt (`#/steward/transformations`) | Workspace | 09 Lineage | S4 |
+
+> **Implementation status (2026-09-20).** The steward workspace (`#/steward/stewardship`) runs the catalog bulk actions (tag, classify, own, certify) and the unowned-asset backlog, and Business meaning creates and submits glossary terms. These module 08 surfaces have API routes and no ui-next caller: the coverage scorecard, glossary conflict resolution, term-link proposals, ownership rules, reviewed bulk operations and leaver reassignment. The coverage scorecard in the Domain overview row and the Conflict resolution row above are therefore design intent that no screen serves yet; tracker row UX-21 (conflicting-definition resolution screen) is deferred with R11-C12. See [module 08](../20-modules/08-glossary-and-stewardship.md).
 
 ### 2.3 Studio (semantic + tool authoring)
 
@@ -59,6 +72,8 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 
 > Competitive note: Snowflake ships Semantic Studio with Git integration; Atlan ships Context Engineering Studio. Studio is a parity requirement, differentiated by the fact that Atlas's semantic objects carry policy and compile to executable governed tools.
 
+> **Implementation status (2026-09-20).** The Studio screen (`#/steward/studio`) lists change sets and shows their items, diff and impact, and submits them; change sets, tests and conflict detection exist on the API only, and no screen creates a change set or runs the tests. Git-backed change sets have no code (deferred, P2). See [module 18](../20-modules/18-studio.md).
+
 ### 2.4 Reviewer workbench
 
 | Surface | Kind | Module | Jobs |
@@ -66,8 +81,10 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | Unified governance queue (all object types) | Workbench | 17 Policy & governance | R1, R3 |
 | Proposal detail: evidence, diff, blast radius | Inspector | 17 | R1 |
 | Bulk decision with per-item rationale | Workspace | 17 | R3 |
-| Delegation and assignment | Workspace | 17 | R3 |
+| Delegation and assignment (the shell files Delegations under Operator: `#/operator/delegations`) | Workspace | 17 | R3 |
 | Decision history | Inspector | 20 Observability & audit | R4 |
+| Agent inbox (`#/inbox/inbox`) | Workbench | 13 Agent runtime, 17 | R1, P5 |
+| Reviewer agent (`#/reviewer/reviewer-agent`) | Workspace | 17 | R3 |
 
 ### 2.5 Operator console
 
@@ -86,6 +103,13 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | **Kill switch** | Console | 15 | P5 |
 | Cost / showback dashboard | Console | 20 | P6 |
 | SLO dashboard | Console | 20 | P2 |
+| Agent roster (`#/operator/agent-roster`) | Inspector | 13 | U2 |
+| AI registry: trust score and remediation (`#/operator/ai`) | Console | 15 | P5 |
+| Access policies + authorization simulation (`#/operator/access-policies`) | Console | 17 | — |
+| Workspace access: members, source bindings, BI connections (`#/operator/workspace-access`) | Console | 01 | — |
+| Administration: organization, workspace, project, source setup (`#/operator/administration`) | Console | 01, 02 | P1 |
+
+> **Implementation status (2026-09-20).** The organization-wide kill switch (`POST /v1/organizations/{organization_id}/kill-switch/engage` and `POST /v1/organizations/{organization_id}/kill-switch/release`, and its state at `GET /v1/organizations/{organization_id}/kill-switch`) has no ui-next caller; `ui-next/src/screens/AiGovernanceScreen.tsx` records it as deliberately left out. The UI has only the per-agent switch: the Agent inbox can engage one agent's kill switch (`ui-next/src/screens/AgentInboxScreen.tsx`) and shows a banner while one is engaged, and releasing it has no screen. Persona job P5 (stop AI immediately) is therefore API-only at organization scope today.
 
 ### 2.6 Auditor surface
 
@@ -96,6 +120,9 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | Approval chain viewer | Inspector | 17 | U3 |
 | Compliance pack generator | Workspace | 20 | U4 |
 | Runtime posture attestation | Inspector | 17, 20 | U2 |
+| Policy refusals (`#/auditor/refusals`) | Inspector | 09 | U2 |
+
+> **Implementation status (2026-09-20).** The Audit ledger screen (`#/auditor/audit`) lists and filters events, and Compliance packs (`#/auditor/compliance`) generates evidence packs. The ledger's export (`/v1/organizations/{organization_id}/audit-events/export.jsonl`) has no ui-next caller, so the export half of the first row is API-only.
 
 ### 2.7 Developer workbench
 

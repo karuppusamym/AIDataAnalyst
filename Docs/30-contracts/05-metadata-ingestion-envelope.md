@@ -3,7 +3,7 @@
 > Status: Authoritative, T1 external contract. Owner: Data Platform. Current version: `1.1`. **`1.0` remains accepted, unchanged, permanently.**
 > One envelope for every transport: native pull, authenticated push, source-side agent, and future broker intake (ADR-0012).
 
-> **Implementation status (2026-08-30).** `1.1` is implemented for the view, routine, object-comment and grant axes (`src/aida/schemas.py`, `src/aida/envelope_models.py`, `src/aida/ingestion.py`, migrations `a1c9f4b7e230` and `d5f8b21c4a03`). Index and partition inventory, listed against 1.1 in earlier drafts of §10, are **not** delivered and remain tracker `CN-8`. Native pull for the new axes is implemented in **all five** connectors, with one honest exception: BigQuery advertises `grants: false` because BigQuery has no SQL grants (INV-9). The push transport accepts 1.1 from any producer regardless of connector. The pull path persists the new axes as of 2026-08-30 — `src/aida/workflows/activities.py` imports `persist_envelope_extensions` (line 27) and calls it (line 587), so all three transports store them. *An earlier revision of this callout said the pull path was unwired; that was true when written and is no longer.* Detail and evidence: `Docs/review-2026-08/gap/07-envelope-v11.md` (contract, storage, PostgreSQL, SQL Server) and `Docs/review-2026-08/gap/08-envelope-v11-connectors.md` (Oracle, Snowflake, BigQuery).
+> **Implementation status (2026-09-20).** `1.1` is implemented for the view, routine, object-comment and grant axes (`src/aida/schemas.py`, `src/aida/envelope_models.py`, `src/aida/ingestion.py`, migrations `a1c9f4b7e230` and `d5f8b21c4a03`). Index and partition inventory, listed against 1.1 in earlier drafts of §10, is **not** an envelope axis: the push envelope has no field for either. It is delivered on the pull path only (tracker `CN-8`): the `metadata_index` and `metadata_partition` tables are filled from what an adapter's `discover()` returns, for the adapters that advertise `indexes` and `partitions` (PostgreSQL and Oracle as of 2026-09-20; see the [engine capability matrix](../90-reference/engine-capability-matrix.md)), and are read at `GET /v1/tables/{table_id}/indexes` and `GET /v1/tables/{table_id}/partitions`. Native pull for views, routines and object comments is implemented in **all six** connectors (PostgreSQL, SQL Server, Oracle, BigQuery, Snowflake and Databricks), with two honest exceptions for grants: BigQuery advertises `grants: false` because BigQuery has no SQL grants, and Databricks advertises `grants: false` because Unity Catalog's privilege model is not the SQL grant model (INV-9). The push transport accepts 1.1 from any producer regardless of connector. The pull path persists the new axes: the `discover_datasource` activity in `src/aida/workflows/activities.py` calls `persist_envelope_extensions` (`src/aida/ingestion.py`), so all three transports store them. *An earlier revision of this callout said the pull path was unwired; that was true when written and is no longer.* Detail and evidence: `Docs/review-2026-08/gap/07-envelope-v11.md` (contract, storage, PostgreSQL, SQL Server) and `Docs/review-2026-08/gap/08-envelope-v11-connectors.md` (Oracle, Snowflake, BigQuery).
 
 ## 1. Why one envelope
 
@@ -203,11 +203,11 @@ Declaring 1.0 while sending 1.1 content is rejected rather than silently strippe
 
 | Field | Required | Semantics |
 |---|:--:|---|
-| `envelope_version` | Yes | Contract version. Backward-compatible evolution only. |
+| `envelope_version` | No | Contract version, `1.0` \| `1.1`; defaults to `1.0` when omitted (see Version discipline). Backward-compatible evolution only. |
 | `idempotency_key` | Yes | Unique per datasource. Same key + same payload → original job. Same key + different payload → **409**. |
 | `producer` | Yes | Producer identity. Signed producer identity is planned. |
-| `transport` | Yes | `PULL` \| `PUSH` \| `AGENT` \| `STREAM` |
-| `snapshot_type` | Yes | `FULL` \| `INCREMENTAL` |
+| `transport` | No (target: Yes) | Accepted today: `PUSH` (the default) \| `STREAM`. `PULL` and `AGENT` are design values that the endpoint rejects |
+| `snapshot_type` | No (target: Yes) | `FULL` \| `INCREMENTAL`. **An omitted value means `FULL`** on the synchronous endpoint (see the note in §4) |
 | `emitted_at` | Yes | Producer-side timestamp (RFC 3339 UTC) |
 | `catalogs[]` | Yes | Nested inventory |
 | `attributes` | No | Scalar, bounded, ≤ 50 per object |
@@ -216,8 +216,10 @@ Declaring 1.0 while sending 1.1 content is rejected rather than silently strippe
 
 | Type | Behaviour |
 |---|---|
-| `INCREMENTAL` | Creates and updates objects present in the envelope. **Never retires omitted objects.** Safe default. |
-| `FULL` | Authoritative for the complete datasource scope. Soft-deprecates active objects omitted from the envelope. **Requires explicit confirmation** in the UI. |
+| `INCREMENTAL` | Creates and updates objects present in the envelope. **Never retires omitted objects.** The safe choice, and the intended default. |
+| `FULL` | Authoritative for the complete datasource scope. Soft-deprecates active objects omitted from the envelope. **Target: requires explicit confirmation.** The server asks for none today (see the note below). |
+
+> **Implementation status (2026-09-20).** The defaults above are not what the synchronous endpoint does. `POST /v1/datasources/{datasource_id}/metadata-ingestions` (`MetadataIngestionCreate` in `src/atlas/modules/ingestion/schemas.py`) makes `transport` and `snapshot_type` optional and defaults them to `PUSH` and **`FULL`**. A producer that leaves `snapshot_type` out therefore sends an authoritative snapshot that soft-deprecates every active object it omitted (for the 1.1 axes, only when it also declares version `1.1`), and nothing on the server asks for confirmation: the ingestion router and schemas carry no confirmation field or check. The batch manifest (`MetadataIngestionBatchCreate`) defaults to `INCREMENTAL`, so the two entry points disagree. Until the default changes, a producer must send `snapshot_type` explicitly.
 
 **A `FULL` 1.0 envelope is authoritative for the 1.0 inventory only.** It carries no statement about views, routines, descriptions or grants, so its silence is not omission and the 1.1 axes are left alone. Reconciliation of the 1.1 axes is gated on the declared version *and* on `FULL`, so a producer that rolls back to 1.0 for a release does not wipe the estate's view definitions. The same chunk accumulation rule below applies to the 1.1 axes, through the same mechanism.
 
@@ -241,7 +243,9 @@ Without this rule, a network failure halfway through a large `FULL` delivery wou
 | Synchronous envelope | 100 catalogs / 50,000 tables / 250,000 columns / 50,000 routines | Down only |
 | Batch | 1,000 chunks / 1,000,000 tables / 5,000,000 columns | Down only |
 | Attributes per object | 50, scalar, bounded | Down only |
-| Request size (local proxy) | 40 MiB | — |
+| Request size (local proxy) | nginx's own default (1 MiB) on `/v1/`; see the note below | `ui-next/nginx.conf` |
+
+> **Implementation status (2026-09-20).** The 40 MiB figure this row used to carry is stale. `ui-next/nginx.conf` sets `client_max_body_size` only on `/mcp` (8 MiB) and `/graphql` (128 KiB); its `/v1/` location sets none, so nginx's 1 MiB default applies to a request proxied through it, unless the base image's own configuration overrides that. A request sent straight to the API has no proxy limit, and the bounds above are then the only ones.
 
 Larger estates use the durable batch contract (§8). Cumulative table and column admission is enforced **under the batch lock during every upload** and rechecked before processing — so a batch cannot exceed its bound by racing uploads.
 
@@ -311,12 +315,14 @@ sequenceDiagram
 
 Roles: `PlatformAdmin`, `MetadataAdmin`, `DataAdmin`, or the workload-oriented `MetadataIngestor`. All mutations write audit and outbox records.
 
+> **Implementation status (2026-09-20).** The push routes name `MetadataIngestor` in their role checks, but it is not in `PLATFORM_ROLES` (`src/aida/oidc.py`), and under OIDC only roles in that set can be granted through `oidc_role_mappings`. A workload identity therefore cannot carry `MetadataIngestor` in a deployment that uses OIDC; it works only under the development identity, where `X-Roles` accepts any string. A producer in a real deployment has to hold `PlatformAdmin`, `MetadataAdmin` or `DataAdmin`.
+
 ## 10. Planned evolution
 
 | Version | Adds | State |
 |---|---|---|
 | 1.1 | View definitions; routines and their parameters; source-side object descriptions; source-side grants | **Shipped 2026-08-30** |
-| 1.1+ | Index and partition inventory — deferred out of 1.1, tracked as `CN-8` | Not started |
+| 1.1+ | Index and partition inventory — deferred out of 1.1, tracked as `CN-8` | Pull path only: `metadata_index` and `metadata_partition` are populated and served (PostgreSQL and Oracle adapters). The push envelope field: not started |
 | 1.2 | BI assets (dashboards, reports); pipeline and topic assets | Not started |
 | 1.3 | File and API assets; ML model assets | Not started |
 | 2.0 | Only if a breaking change becomes unavoidable | — |

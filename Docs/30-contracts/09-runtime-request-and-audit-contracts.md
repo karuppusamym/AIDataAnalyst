@@ -19,7 +19,7 @@
 | Field | Notes |
 |---|---|
 | `purpose` | Required for purpose-bound operations; feeds ABAC |
-| `max_rows` | Bounded by the workload-class cap; the request cannot raise it |
+| `max_rows` | Bounded by the gateway's hard row limit (`hard_query_row_limit`); the request cannot raise it, and an absent value takes `default_query_row_limit` (see `ROW_LIMIT_APPLIED` in §7) |
 | `include_sql` | Returns the executed SQL **with literals redacted** |
 | `mode` | `analysis` \| `preview` (plan only, no execution) |
 
@@ -62,7 +62,11 @@
 
 Refusals name the control and give a remediation path. They do **not** detail which rule matched — that would hand an attacker the control map (`30-contracts/01-contract-strategy.md` §6).
 
+> **Implementation status (2026-09-20).** The request and response above are design shapes, not the wire contract. The REST route is `POST /v1/datasources/{datasource_id}/agent-analyses`. Its request (`AgentAnalysisRequest` in `src/aida/schemas.py`) carries `question`, an optional `candidate_sql`, `preferred_tool_version_id`, `tool_parameters`, `max_rows` and `context_product_key`; there is no `project_id`, `mode`, `purpose` or `include_sql` field (the datasource is in the path). Its response (`AgentAnalysisResponse`) carries `agent_run_id`, `status`, `generation_source`, `semantic_version`, `policy_version`, `step_trace`, `retrieval_evidence`, `plan_evidence`, `execution` and `explanation`, with no `interpretation`, `trust`, `lineage` or `versions` object. A refusal on this route is an HTTP error, `422` with the reason as a string `detail` (or a structured `409` when a governed tool needs parameters), not a `denial` object.
+
 ## 3. Audit event
+
+Target shape:
 
 ```json
 {
@@ -82,6 +86,8 @@ Refusals name the control and give a remediation path. They do **not** detail wh
 }
 ```
 
+> **Implementation status (2026-09-20).** The flat `QUERY_EXECUTED` record above is not what is stored. An audit event is a row of the `audit_event` table (`src/atlas/modules/observability_audit/models.py`) with `organization_id` (nullable), `principal_id`, `principal_type`, `action`, `resource_type`, `resource_id`, `outcome`, `correlation_id`, `source_ip`, `details` (a JSON object) and `occurred_at`. A governed execution writes two, `query.execute.requested` and then `query.execute`, the last with `outcome` `SUCCESS` or `DENIED`, `resource_type` `query_execution` and the execution id as `resource_id` (a validation call writes `query.validate.gateway` against the datasource instead). The `query.execute` `details` carry the referenced `tables`, counts (`referenced_column_count`, `lineage_output_count`, `row_count`), the names of the masked and tokenized output columns, `plan_cost`, `estimate_kind`, the estimated rows and bytes, and `finding_codes`. The fields the design puts on the event live on the `query_execution` row that `resource_id` points at: `principal_id`, `sql_hash`, `policy_version`, `semantic_version`, `warehouse_query_id` and the referenced tables, columns and column lineage. `agent_id`, `tool_id` and `lob_id` are not columns of the audit event.
+
 | Property | Guarantee |
 |---|---|
 | Written in the mutation's transaction | INV-7 — a crash cannot lose it |
@@ -90,7 +96,7 @@ Refusals name the control and give a remediation path. They do **not** detail wh
 | `warehouse_query_id` | Correlates to the source's own logs — a real backend identifier, never a synthetic UUID |
 | Append-only | Never updated, never deleted |
 
-The `warehouse_query_id` convention matters for forensics: PostgreSQL backend pid, `sqlserver-spid:<spid>`, `oracle-sid:<sid>`. An auditor can take this identifier to the DBA team and find the same query in the source's own records.
+The `warehouse_query_id` convention matters for forensics: `postgres-backend:<pid>`, `sqlserver-spid:<spid>`, `oracle-sid:<sid>`. BigQuery, Snowflake and Databricks store the bare job or query id the source returned, with no prefix. An auditor can take this identifier to the DBA team and find the same query in the source's own records.
 
 ## 4. Governance review types
 
@@ -115,11 +121,15 @@ Every one flows through the **single** review queue (module 17), never a per-fea
 
 Confidence determines the *path*, never the *authority*.
 
+Target banding:
+
 ```text
 confidence ≥ 0.95        automatic publish IF the object type is low-risk
 0.80 ≤ confidence < 0.95  publish with a review flag
 confidence < 0.80         human approval required
 ```
+
+> **Implementation status (2026-09-20).** This banding exists nowhere in `src/`: no code publishes at 0.95 or flags at 0.80. Every governance review item waits for a person, with two narrow exceptions. The reviewer agent may decide an item, but it is off by default (`reviewer_agent_enabled`), refused in production, and limited to the low tiers of a fixed object-type classification (T0 to T3 in `src/aida/review_risk_tiers.py`, capped at T1 whatever the configuration says). And when `lineage_parsed_edges_review_mode` is `require_review`, a parsed lineage edge at or above `lineage_high_confidence_auto_active_threshold` (default 0.9) lands active without review. The constraints below still hold.
 
 **Three constraints on this table.**
 
@@ -129,7 +139,7 @@ confidence < 0.80         human approval required
 
 ## 6. Query execution request (internal)
 
-The contract module 16 enforces. Every field is required; there is no partial-context path.
+The design of what module 16 enforces. Target: every field is required, and there is no partial-context path.
 
 ```text
 identity_context   purpose          datasource_id
@@ -138,7 +148,9 @@ max_rows           max_bytes        correlation_id
 sql_or_tool_binding
 ```
 
-Missing any field is a rejection, not a default (`20-modules/16-query-gateway.md` §5).
+Target: missing any field is a rejection, not a default (`20-modules/16-query-gateway.md` §5).
+
+> **Implementation status (2026-09-20).** The gateway takes a different request, and a missing row limit is defaulted rather than rejected. `workload_class` appears nowhere in `src/`, and `QueryExecutionGateway.execute` takes no `policy_version`, `timeout` or `max_bytes`: the row limit, timeout and byte or cost ceilings come from settings. The real argument list is in `20-modules/16-query-gateway.md` §5.
 
 ## 7. SQL validation finding codes
 
@@ -160,8 +172,12 @@ contract had no business living.
 | `CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN` | ERROR | — | A join with no `ON` / `USING` |
 | `SELECT_WILDCARD_FORBIDDEN` | ERROR | — | `SELECT *` (bare `COUNT(*)` is allowed) |
 | `FORBIDDEN_FUNCTION` | ERROR | function name | A function reaching outside the query engine |
+| `TABLE_VALUED_SOURCE_FORBIDDEN` | ERROR | — | A table-valued function, linked-server call or remote rowset used as a source (`OPENQUERY`, `OPENROWSET`, `TABLE(...)`): it cannot be resolved against the catalog |
+| `LOCKING_READ_FORBIDDEN` | ERROR | — | `FOR UPDATE` / `FOR SHARE`, or a T-SQL locking table hint: the gateway only runs stateless, non-locking reads |
 | `UNKNOWN_OR_UNAUTHORIZED_TABLE` | ERROR | qualified table | Not an ACTIVE table in this datasource's catalog binding for this org |
 | `UNKNOWN_COLUMN` | ERROR | `table.column` or `column` | No ACTIVE column of that name on the referenced table |
+| `CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE` | ERROR | qualified table | The request was made through a context product and the table resolves but the product does not name it (a product narrows the datasource allowlist, never widens it); `detail` carries the product version |
+| `CONTEXT_PRODUCT_TABLE_UNRESOLVED` | ERROR | qualified table | The request was made through a context product and the reference does not resolve to exactly one active table, so it cannot be shown to be inside the product |
 | `COST_CEILING_EXCEEDED` | ERROR | — | Cost-plan dry run over `max_query_estimate_cost`; `detail: {plan_cost, limit}` |
 | `BYTE_BUDGET_EXCEEDED` | ERROR | — | Byte-shaped dry run over `max_query_estimate_bytes`; `detail: {plan_cost, limit}` |
 | `ESTIMATE_UNAVAILABLE_FOR_CONNECTOR` | ERROR | — | Connector does not advertise `capabilities.explain`; fails closed (INV-4) |
