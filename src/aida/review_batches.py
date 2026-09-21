@@ -117,12 +117,14 @@ from aida.governance_decision_service import (
     registered_object_types,
 )
 from aida.models import (
+    AccessPolicy,
     AssetDescriptionDraft,
     BulkStewardshipOperation,
     ColumnDescriptionDraft,
     GlossaryTermVersion,
     GovernanceReview,
     SemanticModelVersion,
+    WorkspaceMembership,
 )
 from aida.review_batch_models import ReviewBatch, ReviewBatchItem
 from aida.review_queue_read_model import compose_review_queue
@@ -396,6 +398,8 @@ async def _queue_predicates(
 _DIFF_TARGET_TYPES: Final[Mapping[str, Any]] = {
     "SEMANTIC_MODEL_VERSION": SemanticModelVersion,
     "GLOSSARY_TERM_VERSION": GlossaryTermVersion,
+    "ACCESS_POLICY": AccessPolicy,
+    "WORKSPACE_MEMBERSHIP": WorkspaceMembership,
 }
 
 
@@ -566,7 +570,12 @@ async def compose_members(
             continue
         present = set(
             (
-                await session.scalars(select(model.id).where(model.id.in_(set(wanted.values()))))
+                await session.scalars(
+                    select(model.id).where(
+                        model.organization_id == organization_id,
+                        model.id.in_(set(wanted.values())),
+                    )
+                )
             ).all()
         )
         missing.update(rid for rid, oid in wanted.items() if oid not in present)

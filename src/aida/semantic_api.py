@@ -1430,6 +1430,14 @@ async def compose_governance_review_diff(
             if published_id is not None
             else {}
         )
+    elif review.object_type in {"ACCESS_POLICY", "WORKSPACE_MEMBERSHIP"}:
+        # R11-AUD12: the batched queue's own snapshot, so both surfaces show one content.
+        from aida.review_queue_read_model import access_change_snapshot
+
+        after = await access_change_snapshot(session, review)
+        if after is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        before = {}
     else:
         message = (
             f"structured diffs are not yet available for {review.object_type}; "

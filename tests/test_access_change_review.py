@@ -49,6 +49,7 @@ from aida.models import (
     OutboxEvent,
     WorkspaceMembership,
 )
+from aida.review_batches import load_queue_details
 from aida.review_risk_tiers import TIER_T3, agent_decidable_object_types, risk_tier_for
 from aida.schemas import (
     AccessPolicyCreate,
@@ -59,7 +60,11 @@ from aida.schemas import (
     WorkspaceMembershipProposalRead,
 )
 from aida.security_types import SecurityContext
-from aida.semantic_api import bulk_decide_governance_reviews, decide_governance_review
+from aida.semantic_api import (
+    bulk_decide_governance_reviews,
+    decide_governance_review,
+    get_governance_review_diff,
+)
 from aida.workspace_api import add_member, create_access_policy, list_access_policies, list_members
 from aida.workspace_service import authorize, create_workspace, membership_roles
 
@@ -135,15 +140,152 @@ def _policy_body(code: str = "mask-pii", **overrides: object) -> AccessPolicyCre
 
 
 async def _propose_policy(
-    session: AsyncSession, org: _Tenant, *, maker: str = "alice", code: str = "mask-pii"
+    session: AsyncSession,
+    org: _Tenant,
+    *,
+    maker: str = "alice",
+    code: str = "mask-pii",
+    **overrides: object,
 ) -> AccessPolicyProposalRead:
     return await create_access_policy(
         org.id,
-        _policy_body(code),
+        _policy_body(code, **overrides),
         context=_admin(org, maker),
         session=session,
         correlation_id="corr-policy",
     )
+
+
+async def test_batch_queue_shows_the_access_policy_and_workspace_grant_to_a_data_steward(
+    session: AsyncSession,
+) -> None:
+    """R11-AUD12: a decider does not need either role-restricted list route to know what
+    activating these T3 changes would grant. Both targets are composed into the queue's
+    structured diff, including the workspace's readable identity rather than only its UUID.
+    """
+    org = await _org(session)
+    policy = await _propose_policy(
+        session,
+        org,
+        code="deny-agent-exports",
+        name="Deny agent exports",
+        description="Agents cannot export restricted data.",
+        effect="DENY",
+        priority=900,
+        subject_match={"principal_kind": ["AGENT"]},
+        resource_match={"classification": ["RESTRICTED"]},
+        action_match=["EXPORT", "READ_DATA"],
+        condition={"environment": "PRODUCTION"},
+    )
+    workspace_id = await _workspace_id(session, org)
+    expiry = datetime.now(UTC) + timedelta(days=30)
+    membership = await _propose_member(
+        session,
+        org,
+        workspace_id,
+        member="carol@example.com",
+        role="analyst",
+        expires_at=expiry,
+    )
+
+    details = await load_queue_details(
+        session,
+        context=_ctx(org, "data-steward", "DataSteward"),
+        review_ids=[policy.governance_review_id, membership.governance_review_id],
+    )
+    by_type = {member.review.object_type: member for member in details}
+
+    policy_diff = by_type[ACCESS_POLICY_REVIEW_TYPE].proposal
+    assert policy_diff is not None and policy_diff.diff.diffable
+    assert policy_diff.diff.before == {}
+    assert policy_diff.diff.message is None
+    assert policy_diff.diff.after == {
+        "code": "deny-agent-exports",
+        "version": 1,
+        "name": "Deny agent exports",
+        "description": "Agents cannot export restricted data.",
+        "effect": "DENY",
+        "priority": 900,
+        "subject_match": {"principal_kind": ["AGENT"]},
+        "resource_match": {"classification": ["RESTRICTED"]},
+        "action_match": ["EXPORT", "READ_DATA"],
+        "transform": {},
+        "condition": {"environment": "PRODUCTION"},
+        "origin": "MANUAL",
+    }
+    assert {entry.field for entry in policy_diff.diff.entries} == set(policy_diff.diff.after)
+
+    membership_diff = by_type[WORKSPACE_MEMBERSHIP_REVIEW_TYPE].proposal
+    assert membership_diff is not None and membership_diff.diff.diffable
+    assert membership_diff.diff.before == {}
+    assert membership_diff.diff.message is None
+    assert membership_diff.diff.after is not None
+    assert membership_diff.diff.after["workspace"] == {
+        "id": str(workspace_id),
+        "name": "Risk",
+        "slug": membership_diff.diff.after["workspace"]["slug"],
+    }
+    assert membership_diff.diff.after | {"workspace": None} == {
+        "workspace": None,
+        "principal_id": "carol@example.com",
+        "principal_kind": "HUMAN",
+        "role": "analyst",
+        "expires_at": expiry.isoformat(),
+    }
+    assert {entry.field for entry in membership_diff.diff.entries} == {
+        "workspace",
+        "principal_id",
+        "principal_kind",
+        "role",
+        "expires_at",
+    }
+
+
+async def test_the_review_change_preview_shows_the_same_access_change_as_the_batch_queue(
+    session: AsyncSession,
+) -> None:
+    """R11-AUD12: the Review queue screen's change preview reads the single-review diff route,
+    not the batch queue. Both must show a decider the same proposed grant, and a target in
+    another organization is refused rather than shown.
+    """
+    org = await _org(session)
+    policy = await _propose_policy(session, org, code="deny-agent-exports", effect="DENY")
+    workspace_id = await _workspace_id(session, org)
+    membership = await _propose_member(session, org, workspace_id, member="carol@example.com")
+    steward = _ctx(org, "data-steward", "DataSteward")
+
+    details = await load_queue_details(
+        session,
+        context=steward,
+        review_ids=[policy.governance_review_id, membership.governance_review_id],
+    )
+    for member in details:
+        assert member.proposal is not None
+        batched = member.proposal.diff
+        single = await get_governance_review_diff(
+            member.review.id, context=steward, session=session
+        )
+        assert single.diffable and single.message is None
+        assert (single.before, single.after) == (batched.before, batched.after)
+        assert [(e.field, e.change) for e in single.entries] == [
+            (e.field, e.change) for e in batched.entries
+        ]
+
+    other = await _org(session)
+    foreign = GovernanceReview(
+        organization_id=other.id,
+        object_type=ACCESS_POLICY_REVIEW_TYPE,
+        object_id=str(policy.id),
+        requested_action="ACTIVATE",
+        requested_by="mallory",
+    )
+    session.add(foreign)
+    await session.flush()
+    with pytest.raises(HTTPException) as refused:
+        await get_governance_review_diff(
+            foreign.id, context=_ctx(other, "steward-2", "DataSteward"), session=session
+        )
+    assert refused.value.status_code == 409
 
 
 async def _workspace_id(session: AsyncSession, org: _Tenant) -> UUID:

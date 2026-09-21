@@ -84,6 +84,12 @@ Confidence and evidence per proposal type
     No confidence field either (human-authored content submitted for review,
     not an inference); `confidence=None`, `evidence=[]` -- the *diff* carries
     the content for these two, which is exactly what SM-7 built for them.
+``ACCESS_POLICY`` / ``WORKSPACE_MEMBERSHIP``
+    No confidence or model evidence: these are human-authored trust-boundary
+    changes. Their structured diff carries the complete proposed policy, or
+    the workspace, beneficiary, role and expiry of the proposed membership.
+    Both target families are loaded once per page, rather than through their
+    role-restricted list routes or one query per review.
 Anything else in the queue (``BULK_STEWARDSHIP_OPERATION``,
 ``GLOSSARY_CONFLICT``, ``ASSET_DOCUMENTATION_VERSION``, AI-registry/tool/
 marketplace review types, ...) still gets a row -- `confidence=None`,
@@ -96,6 +102,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -105,6 +112,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.envelope_models import RoutineDescriptionDraft
 from aida.models import (
+    AccessPolicy,
     AssetDescriptionDraft,
     ColumnDescriptionDraft,
     GlossaryLinkProposal,
@@ -116,6 +124,8 @@ from aida.models import (
     SemanticMetricVersion,
     SemanticModelVersion,
     TermSemanticBinding,
+    Workspace,
+    WorkspaceMembership,
 )
 from aida.quality_rule_proposal_model import QualityRuleProposal
 from aida.review_queue_schemas import ReviewQueueProposalRead
@@ -129,6 +139,12 @@ def _parse_object_id(review: GovernanceReview) -> UUID | None:
         return UUID(review.object_id)
     except (ValueError, AttributeError):
         return None
+
+
+def _json_datetime(value: datetime) -> str:
+    """One UTC spelling across SQLite's naive and PostgreSQL's aware datetime values."""
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).isoformat()
 
 
 async def _metadata_enrichment_proposals_by_id(
@@ -312,6 +328,8 @@ def _term_binding_evidence(binding: TermSemanticBinding) -> list[EvidenceItemRea
 
 MODEL_VERSION_TYPE = "SEMANTIC_MODEL_VERSION"
 GLOSSARY_TERM_VERSION_TYPE = "GLOSSARY_TERM_VERSION"
+ACCESS_POLICY_TYPE = "ACCESS_POLICY"
+WORKSPACE_MEMBERSHIP_TYPE = "WORKSPACE_MEMBERSHIP"
 
 # Wording reproduced verbatim from `semantic_api.compose_governance_review_diff`'s
 # non-diffable branch. `test_review_queue_read_model.py::
@@ -480,6 +498,108 @@ async def _glossary_term_snapshots(
     return snapshots, counterpart
 
 
+async def _access_policy_snapshots(
+    session: AsyncSession, policy_ids: set[UUID]
+) -> dict[UUID, tuple[UUID, dict[str, Any]]]:
+    """The proposed access rules, in one query for the whole queue page.
+
+    Workflow fields are deliberately absent. The review already says who proposed the
+    change and whether it is pending; the content a decider needs is the rule that would
+    begin enforcing on approval. An approval adds this immutable version without retiring
+    an older active version, so the truthful before-image is empty rather than a previous
+    version that the decision does not replace.
+    """
+    if not policy_ids:
+        return {}
+    rows = (
+        await session.scalars(select(AccessPolicy).where(AccessPolicy.id.in_(policy_ids)))
+    ).all()
+    return {
+        policy.id: (
+            policy.organization_id,
+            {
+                "code": policy.code,
+                "version": policy.version,
+                "name": policy.name,
+                "description": policy.description,
+                "effect": policy.effect,
+                "priority": policy.priority,
+                "subject_match": policy.subject_match,
+                "resource_match": policy.resource_match,
+                "action_match": sorted(policy.action_match),
+                "transform": policy.transform,
+                "condition": policy.condition,
+                "origin": policy.origin,
+            },
+        )
+        for policy in rows
+    }
+
+
+async def _workspace_membership_snapshots(
+    session: AsyncSession, membership_ids: set[UUID]
+) -> dict[UUID, tuple[UUID, dict[str, Any]]]:
+    """Proposed workspace grants, with the workspace's readable identity, in one query."""
+    if not membership_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(WorkspaceMembership, Workspace)
+            .join(Workspace, Workspace.id == WorkspaceMembership.workspace_id)
+            .where(WorkspaceMembership.id.in_(membership_ids))
+        )
+    ).all()
+    return {
+        membership.id: (
+            membership.organization_id,
+            {
+                "workspace": {
+                    "id": str(workspace.id),
+                    "name": workspace.name,
+                    "slug": workspace.slug,
+                },
+                "principal_id": membership.principal_id,
+                "principal_kind": membership.principal_kind,
+                "role": membership.role,
+                # SQLite returns a naive value for the same timezone-aware column PostgreSQL
+                # returns as aware. The queue must show and fingerprint one stable value on
+                # both engines, so use the canonical UTC representation already used by the
+                # batch fingerprint rather than leaking the driver's datetime shape.
+                "expires_at": (
+                    _json_datetime(membership.expires_at)
+                    if membership.expires_at is not None
+                    else None
+                ),
+            },
+        )
+        for membership, workspace in rows
+    }
+
+
+async def access_change_snapshot(
+    session: AsyncSession, review: GovernanceReview
+) -> dict[str, Any] | None:
+    """One access-change review's proposed content, for the single-review diff route.
+
+    The same snapshot the batched queue composes, so the Review queue's change preview and
+    the batch queue cannot disagree on what a decider is asked to approve. ``None`` when the
+    review is not an access change, or its target is gone or belongs to another organization.
+    """
+    object_id = _parse_object_id(review)
+    if object_id is None:
+        return None
+    if review.object_type == ACCESS_POLICY_TYPE:
+        snapshots = await _access_policy_snapshots(session, {object_id})
+    elif review.object_type == WORKSPACE_MEMBERSHIP_TYPE:
+        snapshots = await _workspace_membership_snapshots(session, {object_id})
+    else:
+        return None
+    target = snapshots.get(object_id)
+    if target is None or target[0] != review.organization_id:
+        return None
+    return target[1]
+
+
 def _diff_read(
     review: GovernanceReview,
     *,
@@ -511,7 +631,7 @@ def _diff_read(
 async def compose_review_queue_diffs(
     session: AsyncSession, reviews: Sequence[GovernanceReview]
 ) -> dict[UUID, GovernanceReviewDiffRead]:
-    """F16: every review's diff in at most five queries, whatever the page size.
+    """F16/AUD12: every review's diff in at most seven queries, whatever the page size.
 
     The composer this replaces on the list path
     (`semantic_api.compose_governance_review_diff`) is correct and stays the
@@ -528,6 +648,8 @@ async def compose_review_queue_diffs(
     """
     model_ids: dict[UUID, UUID] = {}
     term_ids: dict[UUID, UUID] = {}
+    policy_ids: dict[UUID, UUID] = {}
+    membership_ids: dict[UUID, UUID] = {}
     for review in reviews:
         object_id = _parse_object_id(review)
         if object_id is None:
@@ -536,12 +658,20 @@ async def compose_review_queue_diffs(
             model_ids[review.id] = object_id
         elif review.object_type == GLOSSARY_TERM_VERSION_TYPE:
             term_ids[review.id] = object_id
+        elif review.object_type == ACCESS_POLICY_TYPE:
+            policy_ids[review.id] = object_id
+        elif review.object_type == WORKSPACE_MEMBERSHIP_TYPE:
+            membership_ids[review.id] = object_id
 
     model_snapshots, model_counterparts = await _semantic_model_snapshots(
         session, set(model_ids.values())
     )
     term_snapshots, term_counterparts = await _glossary_term_snapshots(
         session, set(term_ids.values())
+    )
+    policy_snapshots = await _access_policy_snapshots(session, set(policy_ids.values()))
+    membership_snapshots = await _workspace_membership_snapshots(
+        session, set(membership_ids.values())
     )
 
     composed: dict[UUID, GovernanceReviewDiffRead] = {}
@@ -568,6 +698,28 @@ async def compose_review_queue_diffs(
                 review,
                 before=term_snapshots[counterpart] if counterpart is not None else {},
                 after=term_snapshots[object_id],
+                message=None,
+            )
+        elif review.id in policy_ids:
+            object_id = policy_ids[review.id]
+            target = policy_snapshots.get(object_id)
+            if target is None or target[0] != review.organization_id:
+                raise HTTPException(status_code=409, detail="review target is unavailable")
+            composed[review.id] = _diff_read(
+                review,
+                before={},
+                after=target[1],
+                message=None,
+            )
+        elif review.id in membership_ids:
+            object_id = membership_ids[review.id]
+            target = membership_snapshots.get(object_id)
+            if target is None or target[0] != review.organization_id:
+                raise HTTPException(status_code=409, detail="review target is unavailable")
+            composed[review.id] = _diff_read(
+                review,
+                before={},
+                after=target[1],
                 message=None,
             )
         else:
