@@ -1941,9 +1941,10 @@ async def _handle_get_asset_context(
             "gap": (
                 "No table-level classification field exists on this platform. AT-11's "
                 "propagation stores COLUMN-level derived classifications "
-                "(column_derived_classification, kept separate from asserted ones), but "
-                "nothing triggers propagation in a running deployment yet, so most "
-                "estates have none. This rolls up the asserted per-column "
+                "(column_derived_classification, kept separate from asserted ones), and "
+                "the scheduler's propagation pass produces them only when "
+                "classification_propagation_interval_minutes is set (0, off, by default), "
+                "so most estates have none. This rolls up the asserted per-column "
                 "metadata_column.classification values (the same ABAC input "
                 "query_gateway.py masks reads against); it is not a new classification "
                 "decision."

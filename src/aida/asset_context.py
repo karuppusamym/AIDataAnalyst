@@ -21,8 +21,10 @@ AT-11 ("classification propagation along lineage, derived kept separate from
 asserted") has since landed its storage and review path -- `propagate`,
 `store_derived_classifications` and `apply_classification_promotion` in
 `aida.classification_propagation`, writing COLUMN-level
-`ColumnDerivedClassification` rows -- but no production code path calls the
-producing half yet, so a running estate still has none of it. What *does*
+`ColumnDerivedClassification` rows -- and since R11-B17 the scheduler's
+`run_classification_propagation_pass` calls the producing half, but only when
+`classification_propagation_interval_minutes` is set (0, off, by default), so
+most running estates still have none of it. What *does*
 exist is column-level `MetadataColumn.classification` (module 05), already
 the ABAC input `query_gateway.py` masks reads against and the vocabulary
 `aida.classification.SENSITIVE_CLASSES` names. `_classification_summary`

@@ -32,7 +32,7 @@ flowchart TD
     K --> M[Outbox → projections]
 ```
 
-**Measured claims versus design intent.** Profiling fans out as bounded deterministic work; its actual cost depends on the source and profiling policy. Current semantic enrichment groups at most 25 tables per model call (`semantic_inference.py`). Enriching 100,000 selected tables therefore entails 4,000 nominal batch attempts before failures or retries, not the previously claimed roughly 50. This arithmetic is not a throughput benchmark. Confidence alone does not authorize publication; automated review has open boundary defects documented in AR-01 through AR-04.
+**Measured claims versus design intent.** Profiling fans out as bounded deterministic work; its actual cost depends on the source and profiling policy. Current semantic enrichment groups at most 25 tables per model call (`semantic_inference.py`). Enriching 100,000 selected tables therefore entails 4,000 nominal batch attempts before failures or retries, not the previously claimed roughly 50. This arithmetic is not a throughput benchmark. Confidence alone does not authorize publication, and unattended reviewer approval stays off: production configuration refuses `reviewer_agent_enabled`, and the latest recorded benchmark approved 9 of 14 false twins (R11-C3). The boundary defects AR-01 to AR-04 recorded are closed (AR-01 and AR-02 directly, AR-03 and AR-04 through R11-C3 and R11-C4).
 
 ## 2. Worker classes
 
