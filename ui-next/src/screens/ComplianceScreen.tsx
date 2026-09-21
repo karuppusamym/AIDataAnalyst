@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CompliancePackRead, GeneratePackRequest } from "../lib/types";
 import { ApiError, downloadCompliancePack, fetchCompliancePacks, generateCompliancePack } from "../lib/api";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { roleAllows } from "../lib/roles";
+import { useSession } from "../lib/session";
 import type { Tone } from "../components/primitives";
 import "./ComplianceScreen.css";
 
@@ -36,13 +38,20 @@ import "./ComplianceScreen.css";
                              and renders the raw JSON evidence body in a
                              `<pre>` block, collapsed until asked for.
 
-   `download_compliance_pack` is deliberately narrower than
-   `list_compliance_packs`/`get_compliance_pack` — it excludes `Viewer`
-   (`compliance_api.py:181` vs `:128`/`:152`) — so a Viewer's 403 on
-   "Download evidence" is the route working as designed, not a bug: it
-   renders as an inline error scoped to that one row, the same detail
-   string every other failed call in this app surfaces.
+   `download_compliance_pack` and `generate_compliance_pack` are deliberately
+   narrower than `list_compliance_packs`/`get_compliance_pack` — they exclude
+   `Viewer` (`compliance_api.py:70`/`:181` vs `:128`/`:152`), and with it the
+   Auditor persona, which reaches this screen through Viewer. Both controls
+   are therefore offered only to a session that may use them (`roleAllows`,
+   `lib/roles.ts`); a session known to hold none of the roles is told so
+   instead of being handed a button that answers 403 (found 2026-09-21 as
+   `omar.auditor`). The server's 403 stays the authority, and still renders
+   as an inline error scoped to the row if identity was not yet known.
 --------------------------------------------------------------------------- */
+
+/** `POST /v1/compliance/packs/generate` and `GET /v1/compliance/packs/{pack_id}/download`,
+ *  copied from `Docs/50-security/surface-control-matrix.md` (the two rows agree). */
+const COMPLIANCE_PACK_WRITE_ROLES = ["ComplianceOfficer", "DataSteward", "PlatformAdmin"] as const;
 
 const FRAMEWORKS: GeneratePackRequest["framework"][] = [
   "MODEL_RISK",
@@ -96,10 +105,12 @@ function PackRow({
   pack,
   evidence,
   onToggle,
+  mayDownload,
 }: {
   pack: CompliancePackRead;
   evidence: EvidenceState | undefined;
   onToggle: () => void;
+  mayDownload: boolean;
 }) {
   const buttonLabel =
     evidence === undefined ? "Download evidence" : evidence.loading ? "Loading…" : "Hide evidence";
@@ -114,9 +125,13 @@ function PackRow({
         <td><Pill tone={statusTone(pack.status)}>{humanize(pack.status)}</Pill></td>
         <td>{relTime(pack.generated_at)}</td>
         <td>
-          <Button disabled={evidence?.loading} onClick={onToggle}>
-            {buttonLabel}
-          </Button>
+          {mayDownload ? (
+            <Button disabled={evidence?.loading} onClick={onToggle}>
+              {buttonLabel}
+            </Button>
+          ) : (
+            <span className="cpk__id">Not available to your roles</span>
+          )}
         </td>
       </tr>
       {evidence !== undefined ? (
@@ -146,6 +161,8 @@ export function ComplianceScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evidenceById, setEvidenceById] = useState<Record<string, EvidenceState>>({});
+  // Offered unless identity is known and holds none of the roles (`roleAllows`).
+  const mayWrite = roleAllows(useSession().me?.roles, COMPLIANCE_PACK_WRITE_ROLES);
 
   const [form, setForm] = useState(INITIAL_FORM);
   const [generating, setGenerating] = useState(false);
@@ -243,46 +260,53 @@ export function ComplianceScreen() {
 
       <article className="cplx__panel">
         <h2 className="cplx__h2">Generate pack</h2>
-        <form onSubmit={(e) => void submitGenerate(e)}>
-          <div className="cplx__grid">
-            <Field label="Framework">
-              <select
-                value={form.framework}
-                onChange={(e) => setField("framework", e.target.value as GeneratePackRequest["framework"])}
-              >
-                {FRAMEWORKS.map((f) => (
-                  <option key={f} value={f}>{humanize(f)}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Period start">
-              <input
-                type="datetime-local"
-                required
-                value={form.periodStart}
-                onChange={(e) => setField("periodStart", e.target.value)}
-              />
-            </Field>
-            <Field label="Period end">
-              <input
-                type="datetime-local"
-                required
-                value={form.periodEnd}
-                onChange={(e) => setField("periodEnd", e.target.value)}
-              />
-            </Field>
-            <Field label="Name (optional)">
-              <input
-                placeholder="Auto-named from framework and period"
-                value={form.name}
-                onChange={(e) => setField("name", e.target.value)}
-              />
-            </Field>
-          </div>
-          <Button type="submit" variant="primary" disabled={generating}>
-            {generating ? "Generating…" : "Generate pack"}
-          </Button>
-        </form>
+        {mayWrite ? (
+          <form onSubmit={(e) => void submitGenerate(e)}>
+            <div className="cplx__grid">
+              <Field label="Framework">
+                <select
+                  value={form.framework}
+                  onChange={(e) => setField("framework", e.target.value as GeneratePackRequest["framework"])}
+                >
+                  {FRAMEWORKS.map((f) => (
+                    <option key={f} value={f}>{humanize(f)}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Period start">
+                <input
+                  type="datetime-local"
+                  required
+                  value={form.periodStart}
+                  onChange={(e) => setField("periodStart", e.target.value)}
+                />
+              </Field>
+              <Field label="Period end">
+                <input
+                  type="datetime-local"
+                  required
+                  value={form.periodEnd}
+                  onChange={(e) => setField("periodEnd", e.target.value)}
+                />
+              </Field>
+              <Field label="Name (optional)">
+                <input
+                  placeholder="Auto-named from framework and period"
+                  value={form.name}
+                  onChange={(e) => setField("name", e.target.value)}
+                />
+              </Field>
+            </div>
+            <Button type="submit" variant="primary" disabled={generating}>
+              {generating ? "Generating…" : "Generate pack"}
+            </Button>
+          </form>
+        ) : (
+          <p className="cplx__lede">
+            Generating a pack and downloading its evidence need the ComplianceOfficer, DataSteward
+            or PlatformAdmin role. Your roles can list the packs below.
+          </p>
+        )}
         {generateStatus ? (
           <div className={`cplx__status cplx__status--${generateStatus.kind}`} role="status">
             {generateStatus.text}
@@ -317,6 +341,7 @@ export function ComplianceScreen() {
                     pack={pack}
                     evidence={evidenceById[pack.id]}
                     onToggle={() => void toggleEvidence(pack)}
+                    mayDownload={mayWrite}
                   />
                 ))}
               </tbody>

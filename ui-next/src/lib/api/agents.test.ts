@@ -59,6 +59,10 @@ describe("classifyAgentAskError", () => {
     expect(
       classifyAgentAskError(new ApiError(422, "CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE")).kind,
     ).toBe("CONTEXT_PRODUCT_OUT_OF_SCOPE");
+    // A governed tool whose declared dependency the product does not name (F01).
+    expect(
+      classifyAgentAskError(new ApiError(422, "CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE")).kind,
+    ).toBe("CONTEXT_PRODUCT_OUT_OF_SCOPE");
   });
 
   it("does not guess an unrecognised 422 into a context-product refusal", () => {

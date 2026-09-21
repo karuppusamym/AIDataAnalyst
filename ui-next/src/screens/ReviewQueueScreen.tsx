@@ -721,7 +721,7 @@ function GovernanceReviewQueue() {
           <PropagationLog
             title="Quality propagation · ADR-0016 fails closed"
             illustrative
-            illustrativeNote="A hard-coded four-step story about a sample table. No lineage walk produced it: `quality_coupling.check_tool_gate` gates only on a tool's own declared dependencies, and no classification-propagation mechanism exists yet (AT-11). It is here to show the shape of the explanation a real traversal will render."
+            illustrativeNote="A hard-coded four-step story about a sample table. No lineage walk produced it: `quality_coupling.check_tool_gate` gates only on a tool's own declared dependencies. Classification propagation over column lineage does exist (AT-11, R11-B17), but it moves classifications, not quality incidents, and did not produce this story. It is here to show the shape of the explanation a quality traversal would render."
             steps={[
               {
                 kind: "origin",

@@ -226,6 +226,11 @@ const CONTEXT_PRODUCT_REFUSALS: Readonly<Record<string, AgentAskContextProductKi
   CONTEXT_PRODUCT_NOT_AVAILABLE: "CONTEXT_PRODUCT_UNAVAILABLE",
   CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED: "CONTEXT_PRODUCT_ROLE_REQUIRED",
   CONTEXT_PRODUCT_TABLE_OUT_OF_SCOPE: "CONTEXT_PRODUCT_OUT_OF_SCOPE",
+  // F01: the governed tool the planner chose depends on a table the product does not name
+  // (`agent_orchestrator.py`, `CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE`). Same remedy as a
+  // generated statement reading one; before 2026-09-21 it fell through to POLICY_REJECTED and
+  // showed the raw token.
+  CONTEXT_PRODUCT_TOOL_DEPENDENCY_OUT_OF_SCOPE: "CONTEXT_PRODUCT_OUT_OF_SCOPE",
 };
 
 export interface AgentAskErrorAlternative {

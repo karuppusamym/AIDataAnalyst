@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { describeKnowledgeError, downloadOkfBundle, fetchObjectKnowledge } from "../lib/api/knowledge";
 import type { ObjectKnowledgeRead } from "../lib/api/knowledge";
+import { roleAllows } from "../lib/roles";
+import { useSession } from "../lib/session";
 import { Button } from "./primitives";
 import { useAsyncResource } from "./screenState";
 import { KnowledgeDocument } from "./KnowledgeDocument";
@@ -26,9 +28,27 @@ import "./Knowledge.css";
    object's own datasource bundle (`source`), and this shows it: the document,
    an absence, or -- as a refusal, never as an absence -- the source's own "no".
    A product's reading wins: with any product entry, the source is not shown.
+
+   Not offered to a session known to hold none of the roles the route admits
+   (`roleAllows`, `lib/roles.ts`): for an Auditor, Reviewer, Viewer or DataAdmin
+   the section's only possible answer was "You are not permitted to read this
+   bundle" (found 2026-09-21 in the demo-pack audit). While identity is still
+   unknown it is offered, and the server's 403 stays the authority.
 --------------------------------------------------------------------------- */
 
+/** `GET /v1/metadata/tables/{table_id}/okf-knowledge`, copied from
+ *  `Docs/50-security/surface-control-matrix.md` (`okf_read_model.OKF_ROLES`). */
+const KNOWLEDGE_READ_ROLES = [
+  "AgentDeveloper",
+  "Analyst",
+  "DataProductOwner",
+  "DataSteward",
+  "MetadataAdmin",
+  "PlatformAdmin",
+] as const;
+
 export function ObjectKnowledge({ tableId }: { tableId: string }) {
+  const mayRead = roleAllows(useSession().me?.roles, KNOWLEDGE_READ_ROLES);
   const [open, setOpen] = useState(false);
   const knowledge = useAsyncResource<ObjectKnowledgeRead>(
     async (signal) => {
@@ -40,9 +60,11 @@ export function ObjectKnowledge({ tableId }: { tableId: string }) {
       }
     },
     [tableId],
-    { enabled: open },
+    { enabled: open && mayRead },
   );
   const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  if (!mayRead) return null;
 
   return (
     <section className="okn" aria-label="Knowledge">

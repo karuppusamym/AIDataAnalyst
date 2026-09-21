@@ -37,6 +37,15 @@ import "./ReliabilityScreen.css";
    `identityHeaders()` — shared, out of this screen's scope — sends
    `X-Organization-Id`).
 
+   The archive panel reports what the archive status route measures and claims
+   nothing more (2026-09-21, the R11-D3 correction applied here too): the lede
+   used to promise "the WORM archive evidence trail behind every audit event",
+   while the shipped default backend is `none` (`audit_archive_storage_backend`)
+   and the local stack answered NO_ARCHIVES with zero events archived. Whether an
+   archive is write-once depends on the backend a deployment configures (S3
+   Object Lock is; the filesystem provider's mode bit is a guard rail), and real
+   destination evidence is R11-B9.
+
    One status strip, not per-panel state, mirrors both the legacy screen's
    single `#control-message` target and `ContextProductsScreen`'s own choice
    to do the same for its multiple actions.
@@ -300,18 +309,18 @@ export function ReliabilityScreen() {
         <div>
           <h1 className="reliability__h1">Reliability</h1>
           <p className="reliability__lede">
-            The escalation routes that page someone when platform behavior slips, the
-            WORM archive evidence trail behind every audit event, and a live contract
-            inspector for the runtime data-contract enforcement path.
+            The escalation routes that page someone when platform behavior slips, whether
+            audit events are being written to the configured archive and how many have been,
+            and a live contract inspector for the runtime data-contract enforcement path.
           </p>
         </div>
       </header>
 
       {status ? <div className={`reliability__status reliability__status--${status.kind}`} role="status">{status.text}</div> : null}
 
-      <section className="relsec" aria-label="Archive and WORM evidence posture">
+      <section className="relsec" aria-label="Audit archive posture">
         <header className="relsec__head">
-          <p className="relsec__eyebrow">WORM EVIDENCE</p>
+          <p className="relsec__eyebrow">ARCHIVE EVIDENCE</p>
           <h2 className="relsec__h2">Archive posture</h2>
         </header>
         {archiveError ? (
@@ -329,7 +338,7 @@ export function ReliabilityScreen() {
             </div>
             <div className="tile">
               <div className="tile__n tnum">{nf.format(archive.total_archives)}</div>
-              <div className="tile__l">WORM archives</div>
+              <div className="tile__l">archives written</div>
             </div>
             <div className="tile">
               <div className="tile__n tnum">{nf.format(archive.total_events_archived)}</div>
