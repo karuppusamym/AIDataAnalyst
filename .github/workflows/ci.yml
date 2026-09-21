@@ -612,7 +612,10 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 until 2026-09-21: the suite outgrew it (about 15,000 tests, 39 minutes bare
+    # on a developer machine), and every run from 2026-09-19 was cancelled at the
+    # limit, so no CI run finished the backend suite in that time.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -902,6 +905,21 @@ jobs:
             sleep 1
           done
           echo "nginx did not become healthy"; docker logs atlas-ui-next; exit 1
+
+      # `/health` is answered by nginx itself, so it says nothing about the stub
+      # behind it. The first assertion used to race the stub's startup and fail
+      # with a 502 ("connect() failed (111: Connection refused) while connecting
+      # to upstream") on three of five runs up to cb69f42. Wait until a request
+      # through the proxy comes back from the stub.
+      - name: Wait for the stub upstream, through the proxy
+        run: |
+          for _ in $(seq 1 60); do
+            case "$(curl -sS http://localhost:8099/v1/health 2>/dev/null || true)" in
+              *ATLAS-STUB-UPSTREAM*) echo "the stub answers through nginx"; exit 0 ;;
+            esac
+            sleep 1
+          done
+          echo "the stub did not answer through nginx"; docker logs atlas-stub-api; exit 1
 
       # THE ASSERTION F07 IS ABOUT. Before the fix, `/mcp` returned the SPA
       # shell -- a 200, valid HTML, and completely wrong. A status-code check
