@@ -79,9 +79,10 @@ Verification: `/health/live`, `/health/ready`, and `scripts/verify-local.ps1`.
 > (`aida.projectors.graph_projector`) or the React UI, and none for any data-zone service —
 > `compose.yaml` runs all of them locally, Kubernetes runs none of them. Those manifests
 > have never been applied to a cluster: their image digests are the literal placeholder
-> `REPLACE_ME_WITH_REAL_DIGEST` because no pipeline builds or pushes the image, and the
-> migration Job runs `alembic upgrade head` (singular) where `compose.yaml` runs `heads`,
-> which is the form that survives this repository's routine branch merges.
+> `REPLACE_ME_WITH_REAL_DIGEST` because no pipeline builds or pushes the image. The
+> migration Job runs `alembic upgrade heads`, the same command as `compose.yaml` and the form
+> that survives this repository's routine branch merges (it ran `head` until 2026-09-21,
+> R11-AUD13).
 > `infra/k8s/base/README.md` is the full accounting of what is and is not there.
 > Separately, `infra/airflow/` is one DAG file run by hand as an ingestion smoke test, not
 > an Airflow deployment — this repository installs no Airflow and starts none.

@@ -3,8 +3,8 @@
 > **What this is not (R11-X10, 2026-09-11).** This is a reviewable *sketch* of a single
 > process. It is not a deployable topology, it has never been applied to a cluster, its
 > image digests are placeholders for an image no pipeline publishes, and `migration-job.yaml`
-> has never been run (it uses `alembic upgrade head`, which resolves today because CI
-> enforces a single head; `heads`, as `compose.yaml` runs it, is the safer form).
+> has never been run (since 2026-09-21 it runs `alembic upgrade heads`, the same command
+> as `compose.yaml`'s `migrate` service; R11-AUD13).
 > `compose.yaml` runs six application processes; this
 > directory covers two of them. `base/README.md` lists exactly what is missing and why it
 > matters — read it before treating anything here as production-ready.
@@ -58,7 +58,7 @@ infra/k8s/
     deployment.yaml              # 3 replicas, non-root, resource limits, digest-pinned image
     service.yaml                  # ClusterIP :80 -> :8000
     poddisruptionbudget.yaml       # minAvailable: 1
-    migration-job.yaml              # alembic upgrade head, run before/alongside rollout
+    migration-job.yaml              # alembic upgrade heads, run before/alongside rollout
     kustomization.yaml               # ties the above together (excl. the secret template)
   README.md                          # this file
 ```
@@ -130,14 +130,13 @@ which is the next real validation step once one exists (e.g. in a CI job with `k
   `ui-next`. Apply this directory and the API serves requests while no workflow runs, no
   scan is scheduled, no outbox row is ever published and the Neo4j graph is never built —
   a silent no-op, not a visible failure. `base/README.md` has the full comparison.
-- **`migration-job.yaml` uses the fragile form.** It runs `alembic upgrade head`
-  (singular) where the `migrate` service in `compose.yaml` runs `heads` (plural). The graph
-  is 192 revisions with a single head as of 2026-09-20, and the CI `migrations` job fails on
-  any second head, so the singular form resolves today — but this repository
-  merges independent Alembic branches routinely (46 of those revisions are merges), and
-  any moment with two live heads makes `head` abort with "Multiple head revisions are
-  present" while `heads` keeps working. This Job has never been run against this schema,
-  and it stays unapplied while its image digest and Secret are placeholders.
+- ~~**`migration-job.yaml` uses the fragile form.**~~ **Fixed 2026-09-21 (R11-AUD13).** It
+  ran `alembic upgrade head` (singular) where the `migrate` service in `compose.yaml` runs
+  `heads` (plural); it now runs `heads` too, and `tests/test_migration_command_parity.py`
+  pins both to the same command. The singular form would have aborted with "Multiple head
+  revisions are present" at any moment with two live heads, which this repository's routine
+  branch merges produce. This Job has still never been run against this schema, and it stays
+  unapplied while its image digest and Secret are placeholders.
 - ~~**No non-`env` `SecretProvider` is implemented.**~~ **Stale as of 2026-08-31; corrected
   2026-09-11 (R11-X10).** This entry said only the `Protocol` and caching existed in
   `src/aida/secrets.py`. AU-10 closed the same day this README landed:

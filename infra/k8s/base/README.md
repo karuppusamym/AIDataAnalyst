@@ -60,17 +60,14 @@ here by accident); it is a constraint on a future pipeline, not evidence of one.
 
 ## Known to be unfinished as written
 
-`migration-job.yaml` runs `alembic upgrade head` (singular) while the `migrate` service in
-`compose.yaml` runs `alembic upgrade heads` (plural), and only the plural form is safe
-here. The revision graph is 192 revisions with a single head as of 2026-09-20 (and the CI
-`migrations` job fails on any second head), so the singular form resolves today and the
-Job does not abort on the revision graph -- but this repository merges independent
-Alembic branches routinely (46 of those revisions are merges), and any moment with two
-live heads makes `head` abort with "Multiple head revisions are present" while `heads`
-keeps working. The Job has never been run against this schema either way, and it cannot
-be applied while its image digest and Secret are placeholders. It is left uncorrected on
-purpose: fixing it is part of making these manifests real (tracker AU-9 follow-up), and
-this note is part of not claiming they already are.
+**Corrected 2026-09-21 (R11-AUD13):** `migration-job.yaml` used to run `alembic upgrade head`
+(singular) while the `migrate` service in `compose.yaml` runs `alembic upgrade heads`
+(plural). Only the plural form survives this repository's routine Alembic branch merges
+(`head` aborts with "Multiple head revisions are present" while two heads are live), so the
+Job now runs `heads` as well, and `tests/test_migration_command_parity.py` pins both to the
+same command. The Job has still never been run against this schema, and it cannot be
+applied while its image digest and Secret are placeholders; making these manifests real
+remains the tracker AU-9 follow-up (R11-B6, R11-B15).
 
 ## Where the numbers are
 
