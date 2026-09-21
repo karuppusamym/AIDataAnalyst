@@ -530,6 +530,9 @@ _GOVERNED_OBJECT_TYPES = [
     "BULK_STEWARDSHIP_OPERATION",
     "GLOSSARY_CONFLICT",
     "GLOSSARY_LINK_PROPOSAL",
+    # R11-AUD02: the two T3 access changes that had no adapter and so no review at all.
+    "ACCESS_POLICY",
+    "WORKSPACE_MEMBERSHIP",
 ]
 
 

@@ -142,3 +142,5 @@ Log scrubbing is a middleware, not a coding convention. A convention fails the f
 | OB-6 | Cost and showback aggregation | P1 |
 | OB-7 | Access review reporting | P1 |
 | OB-8 | Log-scrubbing verification test (sentinel scan) | P0 |
+
+> **Implementation status (2026-09-21).** OB-8's scrubbing covered structlog records only: `redact_sensitive_data` (`src/atlas/platform/logging.py`) redacts by key name and value pattern. Records that libraries emit through stdlib `logging` (httpx, uvicorn, aiokafka) never reached it. httpx logs `HTTP Request: GET <full url>` at INFO, and the model-route health check sent the Gemini key as `?key=...`, so a live provider key was written to the scheduler's container log on every pass (R11-AUD14). The call now sends `x-goog-api-key`, and `RedactStdlibLogRecords`, installed by `configure_logging` on the root handlers, scrubs secret-shaped query parameters and the same value patterns from stdlib records (`tests/test_log_scrubbing.py`, `tests/test_model_route_health.py`). A logger that installs its own handler and does not propagate is not covered.

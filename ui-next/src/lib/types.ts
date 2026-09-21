@@ -32,7 +32,8 @@ export interface AccessPolicyCreate {
   status?: "DRAFT" | "ACTIVE";
 }
 
-export interface AccessPolicyRead {
+/** R11-AUD02: what `POST /v1/organizations/{id}/access-policies` answers. */
+export interface AccessPolicyProposalRead {
   id: string;
   organization_id: string;
   code: string;
@@ -51,6 +52,7 @@ export interface AccessPolicyRead {
   created_by: string;
   created_at: string;
   updated_at: string;
+  governance_review_id: string;
 }
 
 export interface AffectedRunRead {
@@ -6279,7 +6281,8 @@ export interface WorkspaceMembershipCreate {
   expires_at?: string | null;
 }
 
-export interface WorkspaceMembershipRead {
+/** R11-AUD02: what `POST /v1/workspaces/{id}/members` answers. */
+export interface WorkspaceMembershipProposalRead {
   id: string;
   organization_id: string;
   workspace_id: string;
@@ -6291,6 +6294,7 @@ export interface WorkspaceMembershipRead {
   status: string;
   created_at: string;
   updated_at: string;
+  governance_review_id: string;
 }
 
 export interface WorkspaceRead {

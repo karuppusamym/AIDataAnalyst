@@ -35,6 +35,9 @@ import type {
   AiTrustScoreRead,
   DisagreementReportRead,
   GovernanceReviewRead,
+  KillSwitchEngageRequest,
+  KillSwitchReleaseRequest,
+  KillSwitchStateRead,
   ModelRouteConfigurationCreate,
   ModelRouteConfigurationRead,
   ReviewAuditSampleRead,
@@ -442,8 +445,10 @@ export function fetchAiAssessmentTemplates(
    `/ai/runtime-status` and `/agent-evaluations` routes that view calls.
    See `AiGovernanceScreen.tsx`'s own header comment
    for the full endpoint list, file:line citations, and what was
-   deliberately left out (the kill switch; `AgentEvalGateRead`, which is
+   deliberately left out (`AgentEvalGateRead`, which is
    `AiRegistryScreen`'s per-asset-version concern, not this org-wide suite).
+   The organization kill switch is NOT left out any more: its three calls
+   follow `fetchAiRuntimeStatus` below (R11-AUD08).
 --------------------------------------------------------------------------- */
 
 export interface ModelRouteQuery {
@@ -522,6 +527,91 @@ export function fetchAiRuntimeStatus(signal?: AbortSignal): Promise<AiRuntimeSta
     async () => {
       return get<AiRuntimeStatusRead>("/v1/ai/runtime-status", signal);
     },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   The model kill switch (MG-2, `ai_governance_api.py`) -- "stop AI now".
+
+   Not the per-agent switch `engageAgentKillSwitch` below drives
+   (`agent_contract_api.py`, one agent's next run): this one halts every model
+   call for the ORGANIZATION (or, given a `route_key`, one route), checked live
+   on the very next `structured_completion`. Deliberately not the model-route
+   maker-checker either -- module 15 section 7 asks for a single-operator,
+   immediately-effective action that is audited rather than dual-controlled, and
+   reversal needs the same PlatformAdmin authorization. So there is no second
+   approver to wait for: a release is refused only when nothing is engaged
+   (409 "kill switch is not currently engaged").
+
+   The write calls refuse under fixtures rather than pretend, for the reason
+   `engageAgentKillSwitch` gives: a kill switch that silently did nothing is the
+   worst possible thing to mock. The read answers "nothing engaged" there, which
+   is the demo estate's whole truth and is what the live route itself answers
+   for an organization that never used the switch.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{organization_id}/kill-switch`
+ *  (`list_kill_switch_state`, `ai_governance_api.py`) -- every switch row this
+ *  organization has ever had: at most one `ORGANIZATION` row (`route_key` "*")
+ *  and one `ROUTE` row per route. An organization that never used the switch has
+ *  NO rows, so `[]` means "not engaged", not "unknown". Read by
+ *  AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer and Viewer. */
+export function fetchModelKillSwitchState(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<KillSwitchStateRead[]> {
+  return demoOr(
+    async () => [],
+    async () => {
+      return get<KillSwitchStateRead[]>(
+        `/v1/organizations/${encodeURIComponent(organizationId)}/kill-switch`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/kill-switch/engage`
+ *  (`engage_kill_switch`) -- stops model use. PlatformAdmin only. `reason` is
+ *  required (3-2000 characters) and is recorded with the audit event; leave
+ *  `route_key` out for the whole organization. Takes effect on the very next
+ *  model call. Engaging an already-engaged switch is accepted and replaces its
+ *  reason. */
+export function engageModelKillSwitch(
+  organizationId: string,
+  body: KillSwitchEngageRequest,
+  signal?: AbortSignal,
+): Promise<KillSwitchStateRead> {
+  if (USE_FIXTURES) {
+    return Promise.reject(
+      new Error("The kill switch is unavailable in demo data mode — run against the API."),
+    );
+  }
+  return postJson<KillSwitchStateRead>(
+    `/v1/organizations/${encodeURIComponent(organizationId)}/kill-switch/engage`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/kill-switch/release`
+ *  (`release_kill_switch`) -- lets model use resume. PlatformAdmin only, `reason`
+ *  required, audited identically to the engage. Refused with a 409 ("kill switch
+ *  is not currently engaged") when there is nothing to release. */
+export function releaseModelKillSwitch(
+  organizationId: string,
+  body: KillSwitchReleaseRequest,
+  signal?: AbortSignal,
+): Promise<KillSwitchStateRead> {
+  if (USE_FIXTURES) {
+    return Promise.reject(
+      new Error("The kill switch is unavailable in demo data mode — run against the API."),
+    );
+  }
+  return postJson<KillSwitchStateRead>(
+    `/v1/organizations/${encodeURIComponent(organizationId)}/kill-switch/release`,
+    body,
+    signal,
   );
 }
 

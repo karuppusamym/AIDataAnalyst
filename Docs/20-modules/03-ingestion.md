@@ -44,7 +44,7 @@ fleet_schedule, admission_state, maintenance_window, source_quota
 |---|---|
 | `idempotency_key` | Unique per datasource. Same key + same payload → original job. Same key + different payload → **HTTP 409**. |
 | `INCREMENTAL` | Creates/updates objects present. **Never** retires omitted objects. |
-| `FULL` | Authoritative for the whole datasource scope; soft-deprecates omitted active objects. Target: requires explicit confirmation. The server asks for none today, and the synchronous endpoint defaults an omitted `snapshot_type` to `FULL` (see [the envelope contract](../30-contracts/05-metadata-ingestion-envelope.md) §4). |
+| `FULL` | Authoritative for the whole datasource scope; soft-deprecates omitted active objects. Applied only when the producer sends it: an omitted `snapshot_type` is `INCREMENTAL` on the synchronous endpoint as on the batch manifest, and the explicit value is the whole of the confirmation; the server asks for no second step (see [the envelope contract](../30-contracts/05-metadata-ingestion-envelope.md) §4). |
 | Locking | Datasource row lock serializes competing snapshots for one source without blocking others. |
 | Atomicity | Delivery + catalog changes + graph snapshot event commit in one transaction. |
 | Fingerprints | SHA-256 over canonical JSON. Raw payloads are not retained after success. |
@@ -56,9 +56,9 @@ fleet_schedule, admission_state, maintenance_window, source_quota
 | Synchronous envelope | 100 catalogs / 50,000 tables / 250,000 columns | Down only |
 | Batch | 1,000 chunks / 1,000,000 tables / 5,000,000 columns | Down only |
 | Attributes per object | 50, scalar, bounded | Down only |
-| Request size (local proxy) | nginx's own default (1 MiB) on `/v1/` | `ui-next/nginx.conf` |
+| Request size (local proxy) | 64 MiB on the two routes that carry an envelope (`POST .../metadata-ingestions`, `POST .../chunks`); nginx's own default (1 MiB) on every other `/v1/` route | `ui-next/nginx.conf` |
 
-The 40 MiB figure this row used to carry is stale: `ui-next/nginx.conf` sets `client_max_body_size` only on `/mcp` and `/graphql`, and its `/v1/` location sets none (detail in [the envelope contract](../30-contracts/05-metadata-ingestion-envelope.md) §6).
+> **Implementation status (2026-09-20).** The 40 MiB figure this row used to carry belonged to the retired legacy `ui/` portal's `nginx.conf`; `ui-next/nginx.conf`, which replaced it, set `client_max_body_size` only on `/mcp` and `/graphql`, so a body over 1 MiB to any `/v1/` route, ingestion included, answered 413 through the UI proxy. The two envelope-carrying routes now have a location of their own at 64 MiB and the rest of `/v1/` keeps 1 MiB. The figure is derived from the synchronous caps (a chunk is validated through the same model as a push), not from a byte limit, which the ingestion code does not have; the derivation, the limit's cost, and the checks that pin it are in [the envelope contract](../30-contracts/05-metadata-ingestion-envelope.md) §6.
 
 Attribute keys associated with samples, row values, passwords, secrets, tokens, or credentials are **rejected** (INV-6).
 

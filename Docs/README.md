@@ -9,7 +9,7 @@ Atlas understands the enterprise data estate, enforces policy *before* any actio
 
 Two properties make it usable rather than decorative:
 
-- **Every claim about current state is honest.** `60-delivery/00-status.md` says `Pending` where a module does not exist, and `Not run` where a test has not been run.
+- **Every claim about current state is honest.** `60-delivery/00-status.md` is a dated snapshot, and says so: its status vocabulary is Implemented, Partial, Pending, Retest required and Bank decision, tracker section P owns current work status, and the capability register owns dated verification evidence. Where the snapshot and either of those disagree, they win.
 - **Every decision names its revisit trigger.** An ADR with no revisit trigger is dogma, not a decision.
 
 > **Documentation-truth pass, 2026-08-30.** The first property above was not holding. The
@@ -108,7 +108,7 @@ Docs/
 | [21 GraphQL, OKF and workspace design](10-architecture/21-graphql-okf-and-workspace-design.md) | Design and delivery review for items 13–17: what GraphQL queries and how data executes, OKF object documents and bundles, navigation and answer-first layouts, and stewardship merge workflows. The tracker remains the status authority |
 | [22 Context enrichment and review workspace](10-architecture/22-context-enrichment-and-review-workspace.md) | **Assessment, 2026-09-17:** all 22 requests mapped to their current foundation, proposed change and delivery owner; profiling evidence, provenance and ontology, the shared SQL workspace, and review at estate scale. Proposes acceptance criteria; claims nothing shipped |
 | [23 Stewardship action map](10-architecture/23-stewardship-action-map.md) | **Dated evidence, 2026-09-19:** every action the UI offers on the six stewardship destinations mapped to its API route, API roles, UI gate and design home, plus the deep links before and after the slice, so that consolidating screens does not silently drop one. Not a queue |
-| [ADR register](10-architecture/adr/README.md) | 29 records as of 2026-09-20: 22 accepted, 6 proposed (0023, 0025–0029), one superseded (0017 → 0018) |
+| [ADR register](10-architecture/adr/README.md) | 30 records as of 2026-09-20: 22 accepted, 7 proposed (0023, 0025–0030), one superseded (0017 → 0018) |
 
 ### 20-modules — The bounded contexts
 

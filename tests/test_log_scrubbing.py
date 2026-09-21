@@ -13,9 +13,15 @@ import json
 import logging
 from contextlib import redirect_stdout
 
+import httpx
 import structlog
 
-from atlas.platform.logging import configure_logging, redact_sensitive_data
+from atlas.platform.logging import (
+    RedactStdlibLogRecords,
+    configure_logging,
+    redact_log_text,
+    redact_sensitive_data,
+)
 
 _SENTINEL = "SENTINEL-DO-NOT-LEAK-9f18b2c4a6"
 
@@ -174,3 +180,77 @@ def test_sentinel_scan_end_to_end_log_output() -> None:
     assert record["tenant_id"] == "t-123"
 
     logging.shutdown()
+
+
+# --- R11-AUD14: a key in a URL reached the container log through httpx ----------------------------
+
+
+def test_redact_log_text_hides_secret_query_parameters_and_keeps_the_rest() -> None:
+    text = (
+        f'HTTP Request: GET https://provider.example/v1beta/models?key={_SENTINEL}&pageSize=50 '
+        '"HTTP/1.1 200 OK"'
+    )
+
+    redacted = redact_log_text(text)
+
+    assert _SENTINEL not in redacted
+    assert "?key=[REDACTED]&pageSize=50" in redacted
+    assert redacted.endswith('"HTTP/1.1 200 OK"')
+
+
+def test_redact_log_text_matches_parameter_names_case_insensitively() -> None:
+    for name in ("key", "KEY", "api_key", "api-key", "access_token", "token", "sig", "Signature"):
+        redacted = redact_log_text(f"GET https://x.example/p?a=1&{name}={_SENTINEL}")
+        assert _SENTINEL not in redacted, name
+        assert "a=1" in redacted, name
+
+
+def test_redact_log_text_leaves_an_ordinary_url_alone() -> None:
+    text = "HTTP Request: GET https://api.example/v1/models?limit=10&page=2 \"HTTP/1.1 200 OK\""
+
+    assert redact_log_text(text) == text
+
+
+class _Collect(logging.Handler):
+    """Renders records the way a real handler would: from `getMessage()`, after the filters ran."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def test_an_httpx_request_line_never_carries_the_key_to_a_handler() -> None:
+    """The real scenario: an httpx client sends `?key=...`, httpx logs the whole URL at INFO, and
+    the handler must render the line without it. No network: a mock transport answers."""
+    httpx_logger = logging.getLogger("httpx")
+    handler = _Collect()
+    handler.addFilter(RedactStdlibLogRecords())
+    previous_level = httpx_logger.level
+    httpx_logger.addHandler(handler)
+    httpx_logger.setLevel(logging.INFO)
+    try:
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        with httpx.Client(transport=transport) as client:
+            client.get("https://provider.example/v1beta/models", params={"key": _SENTINEL})
+    finally:
+        httpx_logger.removeHandler(handler)
+        httpx_logger.setLevel(previous_level)
+
+    lines = [message for message in handler.messages if "HTTP Request" in message]
+    assert lines, "httpx did not log the request; the test is not exercising what it claims to"
+    assert all(_SENTINEL not in line for line in lines)
+    assert any("key=[REDACTED]" in line for line in lines)
+
+
+def test_configure_logging_installs_the_stdlib_redaction_on_every_root_handler() -> None:
+    configure_logging("INFO")
+    configure_logging("INFO")  # every process calls it, and tests do again: it must not stack
+
+    handlers = logging.getLogger().handlers
+    assert handlers
+    for handler in handlers:
+        installed = [f for f in handler.filters if isinstance(f, RedactStdlibLogRecords)]
+        assert len(installed) == 1, handler

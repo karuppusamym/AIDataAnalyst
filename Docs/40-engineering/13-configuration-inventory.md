@@ -140,7 +140,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `secrets_vault_token` | `SecretStr | None` | `None` | 1 |
 | `secrets_vault_kv_mount` | `str` | `'secret'` | 1 |
 | `secrets_vault_timeout_seconds` | `float` | `10.0` | 1 |
-| `database_url` | `str` | `'postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida'` | 1 |
+| `database_url` | `str` | `'postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida'` | 2 |
 | `database_pool_size` | `int` | `10` | 1 |
 | `database_max_overflow` | `int` | `20` | 1 |
 | `temporal_address` | `str` | `'localhost:7233'` | 7 |
@@ -160,7 +160,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `neo4j_uri` | `str` | `'bolt://localhost:7687'` | 4 |
 | `neo4j_user` | `str` | `'neo4j'` | 4 |
 | `neo4j_password` | `str` | `''` | 4 |
-| `kafka_bootstrap_servers` | `str` | `'localhost:19092'` | 3 |
+| `kafka_bootstrap_servers` | `str` | `'localhost:19092'` | 5 |
 | `object_store_endpoint` | `str` | `'http://localhost:9000'` | 1 |
 | `object_store_access_key` | `str` | `'aida'` | 1 |
 | `object_store_secret_key` | `str` | `''` | 1 |

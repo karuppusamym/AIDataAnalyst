@@ -9,10 +9,9 @@ import type {
   SourceBindingDecision,
   SourceBindingRead,
   WorkspaceMembershipCreate,
-  WorkspaceMembershipRead,
   WorkspaceRead,
 } from "../lib/types";
-import type { PageOf } from "../lib/ui-types";
+import type { PageOf, WorkspaceMembershipRead } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
 
 /* ---------------------------------------------------------------------------
@@ -155,8 +154,9 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
 
   it("submits Add member with the exact WorkspaceMembershipCreate payload", async () => {
     mockBaseSummary();
+    // R11-AUD02: the live route answers with a pending proposal, not a grant.
     const created: WorkspaceMembershipRead = {
-      ...MEMBER, id: "member_new", principal_id: "jordan.reyes", role: "steward",
+      ...MEMBER, id: "member_new", principal_id: "jordan.reyes", role: "steward", status: "PENDING_APPROVAL",
     };
     addWorkspaceMember.mockResolvedValue(created);
     const WorkspaceAccessScreen = await loadScreen();
@@ -175,7 +175,62 @@ describe("WorkspaceAccessScreen against the real membership/binding-decision/BI 
         undefined,
       ),
     );
-    expect(await screen.findByText(/Added "jordan.reyes"/)).toBeInTheDocument();
+    // Honest about the state: proposed, on the Review queue, awaiting someone other than the proposer.
+    const proposed = await screen.findByText(/Proposed "jordan.reyes" as steward/);
+    expect(proposed).toHaveTextContent("It is on the Review queue now");
+    expect(proposed).toHaveTextContent("someone other than you has to approve it before they have any access");
+    expect(screen.queryByText(/Added "jordan.reyes"/)).not.toBeInTheDocument();
+    // The new row is listed as pending, in the same table as the member who already has access.
+    const pendingRow = screen.getByText("jordan.reyes", { selector: "td" }).closest("tr");
+    expect(pendingRow).not.toBeNull();
+    expect(within(pendingRow as HTMLElement).getByText("PENDING_APPROVAL")).toBeInTheDocument();
+    const activeRow = screen.getByText("priya.iyer", { selector: "td" }).closest("tr");
+    expect(within(activeRow as HTMLElement).getByText("ACTIVE")).toBeInTheDocument();
+  });
+
+  it("explains, before anything is submitted, that a member has no access until a second person approves", async () => {
+    mockBaseSummary();
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    expect(form).toHaveTextContent("Adding a member sends a proposal to the Review queue");
+    expect(form).toHaveTextContent("no access until someone other than you approves it there");
+  });
+
+  it("still reports a plain add when a backend answers the membership as already ACTIVE", async () => {
+    // A backend from before R11-AUD02 grants in one step; the message must not claim a review
+    // that does not exist.
+    mockBaseSummary();
+    addWorkspaceMember.mockResolvedValue({
+      ...MEMBER, id: "member_old", principal_id: "morgan.lee", role: "analyst", status: "ACTIVE",
+    });
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "morgan.lee" } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByText(/Added "morgan.lee" as analyst/)).toBeInTheDocument();
+    expect(screen.queryByText(/Review queue now/)).not.toBeInTheDocument();
+  });
+
+  it("surfaces the 409 when the principal is already a member or already proposed", async () => {
+    mockBaseSummary();
+    addWorkspaceMember.mockRejectedValue(new ApiError(409, "principal already has a membership awaiting approval"));
+    const WorkspaceAccessScreen = await loadScreen();
+    render(<WorkspaceAccessScreen />);
+    await waitFor(() => expect(fetchWorkspaceMembers).toHaveBeenCalled());
+
+    const form = await screen.findByRole("form", { name: "Add workspace member" });
+    fireEvent.change(within(form).getByPlaceholderText("jordan.reyes"), { target: { value: "jordan.reyes" } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByText("principal already has a membership awaiting approval")).toBeInTheDocument();
+    expect(screen.queryByText(/Proposed "jordan.reyes"/)).not.toBeInTheDocument();
   });
 
   it("offers the auditor role, which exports audit records without reading data (R11-B9)", async () => {

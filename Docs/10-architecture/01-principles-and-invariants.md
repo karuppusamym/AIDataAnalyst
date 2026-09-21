@@ -139,12 +139,25 @@ evidence says it costs us nothing here. Working paper:
 > delegator acting through a delegate. It is not the only place the rule lives: other decide routes
 > (relationship candidates, parsed lineage, tool certification, source bindings, profiling exceptions
 > and freshness configuration) carry their own principal-equality check, and
-> `test_self_approval_denied` covers the object types the review service handles, not every such route. Two object types are classed risk tier T3 in
-> `src/aida/review_risk_tiers.py` yet have **no review adapter at all**: `ACCESS_POLICY` and
-> `WORKSPACE_MEMBERSHIP`. A `PlatformAdmin` or `OrganizationAdmin` can create an access policy in one call (`DRAFT` by default,
-> `ACTIVE` if the caller asks), and a `DataAdmin` can add a workspace member with any role,
-> `workspace_owner` included, in one step (`src/atlas/modules/identity_tenancy/router.py`), with no second
-> principal, so for those two "for any object type" is not yet true. Queued as R11-AUD02 in the tracker.
+> `test_self_approval_denied` parametrizes 12 of the 33 review adapters (as of 2026-09-20), not every such route.
+>
+> Two object types classed risk tier T3 in `src/aida/review_risk_tiers.py`, `ACCESS_POLICY` and
+> `WORKSPACE_MEMBERSHIP`, used to have no review adapter, so a `PlatformAdmin`, `OrganizationAdmin` or
+> `DataAdmin` could create an active access policy or seat a `workspace_owner` in one call with no second
+> principal. They now go through the review service (R11-AUD02; adapters in
+> `src/aida/access_change_review.py`, routes in `src/atlas/modules/identity_tenancy/router.py`).
+> `POST /v1/organizations/{organization_id}/access-policies` always creates the policy `DRAFT` (a body that
+> asks for `ACTIVE` is a 422) and opens an `ACCESS_POLICY` review; approving it activates the policy,
+> rejecting it marks it `REJECTED`, and the policy engine loads only `ACTIVE` policies
+> (`business_graph.load_policies`). `POST /v1/workspaces/{workspace_id}/members` files every role, not only
+> `workspace_owner`, as a `PENDING_APPROVAL` membership with a `WORKSPACE_MEMBERSHIP` review, and a pending or
+> rejected member holds no role (`workspace_service.membership_roles` reads `ACTIVE` only). Both are decided on
+> `POST /v1/governance/reviews/{review_id}/decision` by a different principal holding `PlatformAdmin`,
+> `DataSteward` or `Reviewer`: the proposer is refused with 409, a non-human decider with 403 (T3 is never
+> agent-decidable), and a member may not approve their own membership. This is covered by
+> `tests/test_access_change_review.py` against a SQLite schema and has not been exercised on the deployed
+> stack. One direct path remains: `create_workspace` seats its creator as `workspace_owner` in the same call,
+> in a workspace that has no source binding, which is itself a maker-checker request.
 
 **Test — Built.** `test_self_approval_denied` (`tests/test_tier0_invariants.py`): parameterized over every governed object type `decide_governance_review` handles, attempts self-approval and asserts denial.
 

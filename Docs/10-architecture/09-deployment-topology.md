@@ -17,11 +17,16 @@
 > in any form**: no agent code, no registration endpoint, no mTLS path — it is a requirement,
 > not a deployed unit, and the `connector_agent.*` events in
 > `30-contracts/04-event-catalog.md` are likewise unimplemented. The HA models in the last
-> column are untested and partly not built. There is no leader election in the scheduler
-> (`grep -ri leader src` finds nothing, and `run_scheduler` in `src/aida/workflows/scheduler.py`
-> is a bare loop), so run one `fleet-scheduler` replica; see `08-workers-and-workflows.md` §4.
-> The worker unit has one task queue, `aida-metadata`, not queues partitioned by worker class.
-> No failover drill has ever been run.
+> column are untested, and the worker unit's partitioned task queues are not built. The scheduler
+> does elect a leader (R11-AUD04): every `fleet-scheduler` replica runs `run_scheduler` in
+> `src/aida/workflows/scheduler.py`, and only the one holding a PostgreSQL advisory lock
+> (`src/aida/scheduler_leadership.py`, on a dedicated connection outside the pool) runs the passes,
+> so more than one replica is safe. Failover is the standby's 5-second retry plus the time
+> PostgreSQL takes to drop the old session — at once if the leader's process dies, but only when TCP
+> keepalives fire (about two hours on Linux, unless the server sets `tcp_keepalives_*`) if its host
+> or network vanishes — and the passes' in-process cadence trackers restart on the new leader; the
+> full list of limits is in `08-workers-and-workflows.md` §4. The worker unit has one task queue,
+> `aida-metadata`, not queues partitioned by worker class. No failover drill has ever been run.
 
 Four units, one image, different entrypoints (see `05-service-extraction-plan.md` §1).
 
@@ -30,7 +35,7 @@ Four units, one image, different entrypoints (see `05-service-extraction-plan.md
 | `atlas-api` | HTTP + MCP server | Request concurrency | Yes | N replicas behind a load balancer |
 | `atlas-worker` | Temporal worker | Task-queue depth | Yes | N replicas; target: task queues partitioned by worker class (today one queue) |
 | `atlas-projector` | Kafka consumer | Consumer lag | Yes | N replicas, consumer-group rebalance |
-| `atlas-scheduler` | Fleet scheduler and periodic maintenance loop | — | No (singleton) | Target: active/standby with leader election; none exists today |
+| `atlas-scheduler` | Fleet scheduler and periodic maintenance loop | — | No (one active leader) | Active/standby: a PostgreSQL advisory lock elects the leader (§1 status note); not drilled |
 
 Plus one optional unit driven by product requirement rather than scale:
 
@@ -167,7 +172,7 @@ All four converge on the **same canonical metadata envelope** and the same autho
 | `atlas-api` | N replicas, stateless, readiness-gated | Replica loss is transparent |
 | `atlas-worker` | N replicas; Temporal reassigns tasks | Task retried elsewhere; heartbeat detects loss |
 | `atlas-projector` | Consumer group rebalance | Uncommitted offsets reprocessed; consumers are idempotent |
-| `atlas-scheduler` | Target: leader election; none exists today (see the §1 status note) | Target: standby promotes, no double-scheduling |
+| `atlas-scheduler` | Leader election by PostgreSQL advisory lock (see the §1 status note) | Standby promotes once the old leader's lock is released; overlap bounded to one iteration; never drilled |
 | PostgreSQL | Primary + synchronous replica, automated failover | Brief write pause; RPO 15 min worst case |
 | Neo4j | Cluster; or rebuild | Graph explorer degrades; **not authoritative** |
 | Kafka | Multi-broker, RF ≥ 3 | Projection lag |

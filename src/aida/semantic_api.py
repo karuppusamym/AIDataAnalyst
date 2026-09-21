@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.access_change_review import decide_access_policy, decide_workspace_membership
 from aida.agent_contract_request_api import definition_from_json
 from aida.agent_contracts import AgentContractValidationError, validate_contract_definition
 from aida.agent_eval_gate import (
@@ -2930,6 +2931,10 @@ _TARGET_EFFECT_ADAPTERS: dict[str, TargetEffectAdapter] = {
     "DATA_PRODUCT_VERSION": _decide_data_product_version,
     "DATA_CONTRACT_VERSION": _decide_data_contract_version,
     "DATA_PRODUCT_ACCESS_REQUEST": _decide_data_product_access_request,
+    # R11-AUD02: the two T3 access changes that had a tier and no adapter. Their adapters live
+    # in `access_change_review`, beside the proposals they decide, as the quality agent's does.
+    "ACCESS_POLICY": decide_access_policy,
+    "WORKSPACE_MEMBERSHIP": decide_workspace_membership,
     "AI_ASSET": _decide_ai_asset,
     "AI_ASSET_VERSION": _decide_ai_asset_version,
     "AGENT_CONTRACT_REQUEST": _decide_agent_contract_request,

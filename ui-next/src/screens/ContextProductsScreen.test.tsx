@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ContextCompilationRead, ContextProductCreate, ContextProductRead, GovernanceReviewRead, ProjectRead } from "../lib/types";
+import type { ContextCompilationRead, ContextProductCreate, ContextProductRead, GovernanceReviewRead, MeRead, ProjectRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import type { ContextProductChangesSincePublished } from "../lib/api";
 import { ApiError } from "../lib/api";
+import type { Session, SessionState } from "../lib/session";
 import { expectNoAxeViolations, unnamedFocusableElements } from "../test/a11y";
 
 /* ---------------------------------------------------------------------------
@@ -47,6 +48,31 @@ const postJson = vi.fn();
 vi.mock("../lib/api/ontology", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api/ontology")>();
   return { ...actual, listOntologyVersions: (...args: unknown[]) => listOntologyVersions(...args) };
+});
+
+/* R11-AUD01: which roles the session holds decides whether the ontology read is
+   made at all. `null` is "`/v1/me` has not answered" -- what every other test in
+   this file runs as (a build with no identity to consult, `state: "demo"`), and
+   the state that must keep asking. While `/v1/me` is IN FLIGHT the session is
+   "connecting": the read is held (`readDecision`, `lib/roles.ts`). */
+let sessionMe: MeRead | null = null;
+let sessionState: SessionState = "demo";
+vi.mock("../lib/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/session")>();
+  return {
+    ...actual,
+    useSession: (): Session => ({
+      state: sessionState,
+      me: sessionMe,
+      lapsed: false,
+      lastSuccessAt: null,
+      error: null,
+      dataMode: "fixtures",
+      authMode: "development",
+      authModeInferred: false,
+      reload: () => undefined,
+    }),
+  };
 });
 
 /* Staged rollout (AT-7(b) consumer bindings). */
@@ -162,6 +188,8 @@ beforeEach(() => {
   listOntologyVersions.mockResolvedValue([]);
   listOrgDatasources.mockReset();
   listOrgDatasources.mockResolvedValue({ items: [PROJECT_DATASOURCE], limit: 500, offset: 0, total: 1 });
+  sessionMe = null;
+  sessionState = "demo";
 
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
   fetchCatalogRows.mockResolvedValue({ items: CATALOG_ROWS, limit: 200, offset: 0, total: CATALOG_ROWS.length });
@@ -854,5 +882,243 @@ describe("ContextProductsScreen: changed since publication (R11-FP12)", () => {
     for (const name of ["Consumer risk analysis", "Payments context", "Settlements context"]) {
       expect(rowOf(name).querySelector('[role="status"],[role="alert"],[aria-live]')).toBeNull();
     }
+  });
+});
+
+/* ---- The ontology read, by role (R11-AUD01) ----------------------------------
+   `GET /v1/organizations/{id}/ontology-versions` is admitted to DataSteward,
+   MetadataAdmin, PlatformAdmin and Reviewer (surface-control matrix,
+   `aida.ontology_api.list_ontology_versions`). The create panel sits in this
+   screen's rail, so its ontology picker asked on every load for everyone: the
+   demo rehearsal saw the 403 for `sam.agentdev`, and the picker rendered the
+   server's "role is required" as if the steward had done something wrong.
+
+   A session that is not admitted must send NO request for it, and the picker
+   must say why it is not offered rather than sit empty (an empty list reads as
+   "nothing has been approved yet", which is a claim about the estate). */
+
+const asRoles = (...roles: string[]): MeRead => ({
+  principal_id: "someone", principal_type: "USER", organization_id: null, roles,
+  persona: null, identity_provider: "DEVELOPMENT",
+});
+const APPROVED_ONTOLOGY = {
+  id: "ov1", ontology_id: "o1", ontology_key: "commerce", version: 2, base_version: 1, published_version: 2,
+  status: "APPROVED", definition: {}, created_by: "a", approved_by: "b", governance_review_id: null,
+};
+const ONTOLOGY_REASON = /Only sessions holding DataSteward, MetadataAdmin, PlatformAdmin or Reviewer can read ontology versions/;
+
+describe("ContextProductsScreen: the ontology picker, by role (R11-AUD01)", () => {
+  it.each(["AgentDeveloper", "ToolDeveloper", "Analyst", "Viewer"])(
+    "sends no ontology request as %s, and says why the control is not offered",
+    async (role) => {
+      sessionMe = asRoles(role);
+      listOntologyVersions.mockResolvedValue([APPROVED_ONTOLOGY]);
+      await openRegistry([DRAFT_PRODUCT]);
+
+      // The other pickers are unaffected: this session still composes a draft.
+      await waitFor(() => expect(fetchCatalogRows).toHaveBeenCalled());
+      expect(await screen.findByRole("checkbox", { name: /core\.orders_raw/ })).toBeInTheDocument();
+      expect(listOntologyVersions).not.toHaveBeenCalled();
+
+      // One honest sentence, no control, and no error in the server's voice.
+      expect(screen.getByText(ONTOLOGY_REASON)).toBeInTheDocument();
+      expect(screen.getByText("Ontology versions")).toBeInTheDocument();
+      expect(screen.queryByRole("checkbox", { name: /commerce/ })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Filter Ontology versions")).not.toBeInTheDocument();
+      expect(screen.queryByText(/could not be loaded|role is required/i)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["DataSteward", "MetadataAdmin", "PlatformAdmin", "Reviewer"])(
+    "reads and offers ontology versions as %s",
+    async (role) => {
+      sessionMe = asRoles(role);
+      listOntologyVersions.mockResolvedValue([APPROVED_ONTOLOGY]);
+      await openRegistry([DRAFT_PRODUCT]);
+
+      expect(await screen.findByRole("checkbox", { name: /commerce v2/ })).toBeInTheDocument();
+      expect(listOntologyVersions).toHaveBeenCalledWith(
+        "00000000-0000-0000-0000-000000000001", 0, expect.anything(),
+      );
+      expect(screen.queryByText(ONTOLOGY_REASON)).not.toBeInTheDocument();
+    },
+  );
+
+  it("holds the ontology read while identity is in flight, then never sends it for a session that may not", async () => {
+    // `/v1/me` has not answered: "connecting", `me` null. Nothing is asked for, and the picker says
+    // neither "nothing approved" nor "not available to you" -- it does not know yet.
+    sessionState = "connecting";
+    listOntologyVersions.mockResolvedValue([APPROVED_ONTOLOGY]);
+    const { rerender } = await openRegistry([DRAFT_PRODUCT]);
+    await waitFor(() => expect(fetchCatalogRows).toHaveBeenCalled());
+    expect(listOntologyVersions).not.toHaveBeenCalled();
+    expect(screen.queryByText(ONTOLOGY_REASON)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /commerce/ })).not.toBeInTheDocument();
+
+    // Identity arrives: an AgentDeveloper. The request was never made.
+    sessionState = "connected";
+    sessionMe = asRoles("AgentDeveloper");
+    const { ContextProductsScreen } = await import("./ContextProductsScreen");
+    rerender(<ContextProductsScreen />);
+
+    expect(await screen.findByText(ONTOLOGY_REASON)).toBeInTheDocument();
+    expect(listOntologyVersions).not.toHaveBeenCalled();
+  });
+
+  it("sends the ontology read once identity says the session may", async () => {
+    sessionState = "connecting";
+    listOntologyVersions.mockResolvedValue([APPROVED_ONTOLOGY]);
+    const { rerender } = await openRegistry([DRAFT_PRODUCT]);
+    await waitFor(() => expect(fetchCatalogRows).toHaveBeenCalled());
+    expect(listOntologyVersions).not.toHaveBeenCalled();
+
+    sessionState = "connected";
+    sessionMe = asRoles("DataSteward");
+    const { ContextProductsScreen } = await import("./ContextProductsScreen");
+    rerender(<ContextProductsScreen />);
+
+    expect(await screen.findByRole("checkbox", { name: /commerce v2/ })).toBeInTheDocument();
+    expect(listOntologyVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it("still asks when identity will not answer: the server stays the authority", async () => {
+    // `/v1/me` failed: `me` is null and the state is not "connecting"; a held read would never end.
+    sessionState = "disconnected";
+    listOntologyVersions.mockResolvedValue([APPROVED_ONTOLOGY]);
+    await openRegistry([DRAFT_PRODUCT]);
+
+    expect(await screen.findByRole("checkbox", { name: /commerce v2/ })).toBeInTheDocument();
+    expect(listOntologyVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a draft as an AgentDeveloper without an ontology field", async () => {
+    sessionMe = asRoles("AgentDeveloper");
+    createContextProduct.mockResolvedValue(DRAFT_PRODUCT);
+    await openRegistry([DRAFT_PRODUCT]);
+    await screen.findByText(ONTOLOGY_REASON);
+
+    fireEvent.change(screen.getByLabelText("Stable key"), { target: { value: "consumer-risk-context" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Consumer risk analysis" } });
+    fireEvent.change(screen.getByLabelText("Owner principal"), { target: { value: "risk-data-stewards" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Bounded context for risk analysts." } });
+    fireEvent.change(screen.getByLabelText("Approved purpose"), {
+      target: { value: "Explain drivers of consumer delinquency for the monthly risk packet." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create governed draft" }));
+
+    await waitFor(() => expect(createContextProduct).toHaveBeenCalledTimes(1));
+    expect(createContextProduct.mock.calls[0]![1]).not.toHaveProperty("ontology_version_ids");
+    expect(listOntologyVersions).not.toHaveBeenCalled();
+  });
+
+  it("keeps a new version's existing ontology bindings, and says so, for a session that cannot read them", async () => {
+    // The draft is pre-filled from its base, and what the draft holds is what is sent: a session
+    // that cannot READ ontology versions must not silently DROP the ones already bound.
+    sessionMe = asRoles("AgentDeveloper");
+    const bound = {
+      ...PUBLISHED_PRODUCT,
+      latest_version: { ...PUBLISHED_PRODUCT.latest_version, ontology_version_ids: ["ov1", "ov9"] },
+    };
+    postJson.mockResolvedValue({ ...bound.latest_version, id: "cpv_3", version: 3, status: "DRAFT" });
+    await openRegistry([bound]);
+
+    fireEvent.click(screen.getByRole("button", { name: "New version" }));
+    const panel = await screen.findByRole("article", { name: "New version of consumer-risk-context" });
+    expect(within(panel).getByText(/The 2 already bound to the previous version stay bound\./)).toBeInTheDocument();
+    expect(within(panel).queryByRole("checkbox", { name: /commerce/ })).not.toBeInTheDocument();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Create version draft" }));
+    await waitFor(() => expect(postJson).toHaveBeenCalledTimes(1));
+    expect(postJson.mock.calls[0]![1].ontology_version_ids).toEqual(["ov1", "ov9"]);
+    expect(listOntologyVersions).not.toHaveBeenCalled();
+  });
+
+  it("has no WCAG A/AA violations with the ontology control withheld", async () => {
+    sessionMe = asRoles("Viewer");
+    const { container } = await openRegistry([DRAFT_PRODUCT]);
+    await screen.findByText(ONTOLOGY_REASON);
+
+    await expectNoAxeViolations(container);
+    expect(
+      unnamedFocusableElements(container).map(
+        (element) => `${element.tagName.toLowerCase()}.${(element as HTMLElement).className}`,
+      ),
+    ).toEqual([]);
+  });
+});
+
+/* ---- The routine picker, by role -----------------------------------------------
+   Found while proving the ontology fix against the live API as `sam.agentdev`
+   (AgentDeveloper, ToolDeveloper, Analyst, Viewer): `GET .../context-product-
+   routine-options` is admitted only to DataSteward, PlatformAdmin and
+   SemanticAdmin (matrix row `list_context_product_routine_options`) -- narrower
+   than the table, semantic and tool pickers, which that bundle can read. The
+   read is issued once a project is chosen, which the demo rehearsal never does,
+   so it never saw this one. Same defect, same remedy, one screen. */
+
+const ROUTINE = {
+  id: "r1", datasource_id: "ds_snowflake_prod", datasource_name: "snowflake_prod",
+  schema_name: "core", name: "rebuild_totals", routine_type: "PROCEDURE", signature: "()",
+};
+const ROUTINE_REASON = /Only sessions holding DataSteward, PlatformAdmin or SemanticAdmin can read stored procedures and functions/;
+
+describe("ContextProductsScreen: the routine picker, by role", () => {
+  it.each(["AgentDeveloper", "ToolDeveloper", "Analyst", "Viewer", "MetadataAdmin"])(
+    "sends no routine-options request as %s, and says why the control is not offered",
+    async (role) => {
+      sessionMe = asRoles(role);
+      fetchContextProductRoutineOptions.mockResolvedValue([ROUTINE]);
+      await openRegistry([DRAFT_PRODUCT]);
+
+      expect(await screen.findByText(ROUTINE_REASON)).toBeInTheDocument();
+      expect(fetchContextProductRoutineOptions).not.toHaveBeenCalled();
+      expect(screen.queryByRole("checkbox", { name: /rebuild_totals/ })).not.toBeInTheDocument();
+      expect(screen.queryByText(/could not be loaded|role is required|roles is required/i)).not.toBeInTheDocument();
+      // The pickers this bundle IS admitted to are unaffected.
+      expect(await screen.findByRole("checkbox", { name: /core\.orders_raw/ })).toBeInTheDocument();
+    },
+  );
+
+  it.each(["DataSteward", "PlatformAdmin", "SemanticAdmin"])(
+    "reads and offers routines as %s",
+    async (role) => {
+      sessionMe = asRoles(role);
+      fetchContextProductRoutineOptions.mockResolvedValue([ROUTINE]);
+      await openRegistry([DRAFT_PRODUCT]);
+
+      expect(await screen.findByRole("checkbox", { name: /core\.rebuild_totals\(\)/ })).toBeInTheDocument();
+      expect(fetchContextProductRoutineOptions).toHaveBeenCalledWith("proj_core", expect.anything());
+      expect(screen.queryByText(ROUTINE_REASON)).not.toBeInTheDocument();
+    },
+  );
+
+  it("keeps a new version's routines, and says so, for a session that cannot read them", async () => {
+    sessionMe = asRoles("AgentDeveloper");
+    const naming = {
+      ...PUBLISHED_PRODUCT,
+      latest_version: { ...PUBLISHED_PRODUCT.latest_version, routine_ids: ["r1"] },
+    };
+    postJson.mockResolvedValue({ ...naming.latest_version, id: "cpv_3", version: 3, status: "DRAFT" });
+    await openRegistry([naming]);
+
+    fireEvent.click(screen.getByRole("button", { name: "New version" }));
+    const panel = await screen.findByRole("article", { name: "New version of consumer-risk-context" });
+    expect(within(panel).getByText(/The 1 already named by the previous version stay named\./)).toBeInTheDocument();
+
+    fireEvent.click(within(panel).getByRole("button", { name: "Create version draft" }));
+    await waitFor(() => expect(postJson).toHaveBeenCalledTimes(1));
+    expect(postJson.mock.calls[0]![1].routine_ids).toEqual(["r1"]);
+    expect(fetchContextProductRoutineOptions).not.toHaveBeenCalled();
+  });
+
+  it("withholds both controls from a bundle that may read neither, and stays free of WCAG violations", async () => {
+    sessionMe = asRoles("AgentDeveloper", "ToolDeveloper", "Analyst", "Viewer");
+    const { container } = await openRegistry([DRAFT_PRODUCT]);
+
+    expect(await screen.findByText(ROUTINE_REASON)).toBeInTheDocument();
+    expect(screen.getByText(ONTOLOGY_REASON)).toBeInTheDocument();
+    expect(listOntologyVersions).not.toHaveBeenCalled();
+    expect(fetchContextProductRoutineOptions).not.toHaveBeenCalled();
+    await expectNoAxeViolations(container);
   });
 });

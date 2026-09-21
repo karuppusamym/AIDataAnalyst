@@ -15,7 +15,7 @@ from aida.logging import configure_logging
 # the drafter starts on the same process the ingest activities do, which
 # is where its input events are produced.
 from aida.newly_created_table_drafter import (
-    run_newly_created_table_drafter_consumer,
+    supervise_newly_created_table_drafter,
 )
 from aida.workflows.activities import (
     discover_datasource,
@@ -26,6 +26,26 @@ from aida.workflows.activities import (
 )
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 from aida.workflows.ingestion import MetadataBatchIngestionWorkflow
+
+
+def _report_drafter_task_exit(task: asyncio.Task[None]) -> None:
+    """Say so at once if the supervised drafter task ends with an error.
+
+    The supervisor is written never to raise, so this should not fire. It is here
+    because the failure it replaces (R11-AUD03) was silent for exactly this
+    reason: the task died, nothing awaited it until the worker shut down, and
+    nothing logged in between. A task that ends by cancellation or by returning
+    (a stop signal) is not an error.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        structlog.get_logger(__name__).error(
+            "newly_created_table_drafter_supervisor_failed",
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
 
 
 async def run_worker() -> None:
@@ -61,16 +81,31 @@ async def run_worker() -> None:
         # manually POSTs each drafter endpoint. Runs alongside the
         # Temporal worker rather than as its own deployable so the
         # module stays reachable from the same ENTRY_POINTS row.
+        #
+        # R11-AUD03: it is the *supervisor* that runs here, not the bare
+        # consumer. The default stack has no Redpanda, and the bare consumer's
+        # `start()` then raised inside this task, which nobody awaits until
+        # shutdown: automatic drafting quietly never happened and nothing
+        # logged. The supervisor logs `newly_created_table_drafter_unavailable`
+        # and retries with a capped backoff, so a broker that appears later is
+        # picked up without restarting the worker, and a broker that never
+        # appears cannot take the Temporal worker down. Set
+        # `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to not start it at all.
         drafter_task = asyncio.create_task(
-            run_newly_created_table_drafter_consumer(),
+            supervise_newly_created_table_drafter(),
             name="newly_created_table_drafter",
         )
+        drafter_task.add_done_callback(_report_drafter_task_exit)
     try:
         await worker.run()
     finally:
         if drafter_task is not None:
             drafter_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            # It ends by this cancellation, or earlier by a stop signal, or -- a
+            # bug, since the supervisor is written not to raise -- with an
+            # exception the done-callback has already logged. None of those may
+            # replace whatever `worker.run()` ended with.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await drafter_task
 
 

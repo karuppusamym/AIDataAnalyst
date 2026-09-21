@@ -4,10 +4,11 @@ import type {
   SourceBindingDecision,
   SourceBindingRead,
   WorkspaceMembershipCreate,
-  WorkspaceMembershipRead,
 } from "../lib/types";
+import type { WorkspaceMembershipRead } from "../lib/ui-types";
 import { addWorkspaceMember, decideSourceBinding } from "../lib/api";
 import { Button, Empty, Field, Pill } from "../components/primitives";
+import type { Tone } from "../components/primitives";
 import { FormError, FormSuccess, useSubmitAction } from "../components/screenState";
 
 /* ---------------------------------------------------------------------------
@@ -15,12 +16,14 @@ import { FormError, FormSuccess, useSubmitAction } from "../components/screenSta
    source-binding requests are waiting on a decision.
 
    These two are one unit because they answer the same question -- who may
-   reach what through this workspace -- from the two ends the backend
-   separates: membership is granted directly (`add_member`), while a source
-   binding is *requested* elsewhere (`AdministrationScreen`'s `BindSourceForm`)
-   and only becomes access when a different principal approves it here. A
-   reviewer reading one without the other cannot tell whether an approval
-   widens access for three people or three hundred.
+   reach what through this workspace. Both are now requests that a different
+   principal approves (R11-AUD02): a membership is *proposed* here
+   (`add_member` files it `PENDING_APPROVAL` with a `WORKSPACE_MEMBERSHIP`
+   review, and it grants nothing until someone other than the proposer
+   approves that review on the Review queue), while a source binding is
+   requested elsewhere (`AdministrationScreen`'s `BindSourceForm`) and decided
+   here. A reviewer reading one without the other cannot tell whether an
+   approval widens access for three people or three hundred.
 
      Add member       POST /v1/workspaces/{id}/members      (workspace_api.py:160, _ADMIN)
      List members     GET  /v1/workspaces/{id}/members      (workspace_api.py:207, _ANY_MEMBER)
@@ -28,7 +31,10 @@ import { FormError, FormSuccess, useSubmitAction } from "../components/screenSta
 
    No membership edit or revoke: the legacy screen has no such control either
    (`renderAccess` renders `members` as a read-only table), and `add_member`
-   is the only membership write the backend exposes at all.
+   is the only membership write the backend exposes at all. There is no approve
+   button for a proposed member on this screen for the reason
+   `CrossBoundaryGrants` gives: the decision is the Review queue's, and a second
+   decision surface would either duplicate it or quietly bypass maker-checker.
 --------------------------------------------------------------------------- */
 
 const MEMBER_ROLES: WorkspaceMembershipCreate["role"][] = [
@@ -40,6 +46,13 @@ const MEMBER_ROLES: WorkspaceMembershipCreate["role"][] = [
   "auditor",
   "workspace_owner",
 ];
+// A proposed member holds no access until approved, so it must not read like an active one;
+// a rejected proposal is a settled "no", not merely inactive.
+const MEMBER_STATUS_TONE: Record<string, Tone> = {
+  ACTIVE: "ok",
+  PENDING_APPROVAL: "warn",
+  REJECTED: "bad",
+};
 const PRINCIPAL_KINDS: NonNullable<WorkspaceMembershipCreate["principal_kind"]>[] = [
   "HUMAN",
   "AGENT",
@@ -134,9 +147,16 @@ export function AddMemberForm({
       {action.error ? <FormError detail={action.error} /> : null}
       {action.result ? (
         <FormSuccess>
-          Added "{action.result.principal_id}" as {action.result.role}.
+          {action.result.status === "ACTIVE"
+            ? `Added "${action.result.principal_id}" as ${action.result.role}.`
+            : `Proposed "${action.result.principal_id}" as ${action.result.role}. It is on the Review queue ` +
+              "now -- someone other than you has to approve it before they have any access."}
         </FormSuccess>
       ) : null}
+      <p className="wsaccess-panel__note">
+        Adding a member sends a proposal to the Review queue. The member has no access until someone other than
+        you approves it there.
+      </p>
       <Button type="submit" variant="primary" disabled={!valid || action.submitting}>
         {action.submitting ? "Adding..." : "Add member"}
       </Button>
@@ -166,7 +186,7 @@ export function MembersPanel({ members }: { members: WorkspaceMembershipRead[] }
             <td>{member.principal_kind}</td>
             <td>{member.role}</td>
             <td>
-              <Pill tone={member.status === "ACTIVE" ? "ok" : "mute"}>{member.status}</Pill>
+              <Pill tone={MEMBER_STATUS_TONE[member.status] ?? "mute"}>{member.status}</Pill>
             </td>
             <td>{member.expires_at ? new Date(member.expires_at).toLocaleDateString() : "Never"}</td>
           </tr>

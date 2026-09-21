@@ -32,7 +32,12 @@
  *  by hand until CatalogRowRead/MetadataTableRead are reachable from the
  *  OpenAPI document (see the file banner above). */
 export type { CursorPage } from "./types";
-import type { AssetDescriptionDraftRead, DataProductVersionRead } from "./types";
+import type {
+  AccessPolicyProposalRead,
+  AssetDescriptionDraftRead,
+  DataProductVersionRead,
+  WorkspaceMembershipProposalRead,
+} from "./types";
 
 export type CertificationStatus = "CERTIFIED" | "EXPIRED" | "NONE" | "REVOKED";
 export type QualityState = "PASSING" | "INCIDENT_OPEN" | "STALE" | "UNKNOWN";
@@ -343,3 +348,15 @@ export interface DocumentClaimRead {
   reviewed_at: string | null;
 }
 
+/* ---------------------------------------------------------------------------
+   Access policies and workspace members, as the LIST routes return them.
+
+   The API contract declares only what the create routes answer: `AccessPolicyProposalRead` and
+   `WorkspaceMembershipProposalRead`, each the plain row plus the `governance_review_id` of the
+   review the create opened (R11-AUD02). The list routes return an untyped `Page`, so the list-item
+   types are derived from the proposals rather than restated by hand: they cannot drift from the
+   contract, and a field added to the row lands in both.
+--------------------------------------------------------------------------- */
+
+export type AccessPolicyRead = Omit<AccessPolicyProposalRead, "governance_review_id">;
+export type WorkspaceMembershipRead = Omit<WorkspaceMembershipProposalRead, "governance_review_id">;

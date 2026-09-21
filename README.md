@@ -24,17 +24,23 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    reached: the graph backend defaults to `postgres`, the lineage cache and MCP
    budget default to off, and the audit archive destination defaults to `none`.
    **Redpanda is the exception.** `metadata-worker` starts a Kafka consumer
-   side-car (`run_newly_created_table_drafter_consumer`, started from
+   side-car (`run_newly_created_table_drafter_consumer`, supervised by
+   `supervise_newly_created_table_drafter` and started from
    `src/aida/workflows/worker.py`) whenever `AIDA_AUTO_ENQUEUE_ON_INGEST` is
    true, and it defaults to true. The default stack has no Redpanda, so the
-   consumer's `start()` fails inside a fire-and-forget background task and the
-   auto-drafting of descriptions for newly created tables silently does not
-   happen; with no `outbox-publisher` either, the events it would consume stay
-   `PENDING` in `outbox_event`. That is not fixed in code. To make it work, run
-   with the `events` profile (the side-car does not retry, so restart
-   `metadata-worker` if it started before Redpanda was reachable), or set
-   `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the feature off explicitly. Each
-   optional service is one `--profile` flag away.
+   consumer cannot connect and the auto-drafting of descriptions for newly
+   created tables does not happen; with no `outbox-publisher` either, the events
+   it would consume stay `PENDING` in `outbox_event`. That is no longer silent:
+   the supervisor logs `newly_created_table_drafter_unavailable` with the
+   attempt, the next retry delay and the bootstrap servers (an error on the first
+   failure and every tenth attempt, a warning between) and retries with a backoff
+   that doubles from 2 seconds to a cap of 60, while the Temporal worker carries
+   on. Run with the `events` profile and it starts working, with no restart of
+   `metadata-worker`, once Redpanda is reachable
+   (`newly_created_table_drafter_started`); or set
+   `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the feature off explicitly, which
+   also stops the retries and the log lines. Each optional service is one
+   `--profile` flag away.
 
    | Profile | Brings back | Off in the default stack |
    |---|---|---|

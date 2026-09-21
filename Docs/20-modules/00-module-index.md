@@ -10,8 +10,8 @@
 > `profiling`, relocated on 2026-09-06 under review point R04 with real models and schemas
 > but no routes yet — and every other module's behaviour, where it exists at all, still
 > lives in the flat `src/aida/` package. The six that exist have their own guides under
-> [`domain-guides/`](domain-guides/), which say what is real in each and what is still an
-> empty scaffold; the sentence this paragraph replaced ("one module directory exists…
+> [`domain-guides/`](domain-guides/), which say what is real in each and what is not there
+> yet; the sentence this paragraph replaced ("one module directory exists…
 > `identity_tenancy`, 69 lines") was true when written and had since become false.
 > Wherever a spec below refers to
 > `<module>/api.py`, `<module>/repository.py` and so on, it is describing the anatomy that
@@ -34,7 +34,7 @@ module directory today, and describe them as they actually are:
 | [connectivity](domain-guides/connectivity.md) | Source registration, scan policy, certification runs | 10 | [02](02-connectivity.md) |
 | [identity_tenancy](domain-guides/identity-tenancy.md) | Tenant hierarchy, workspaces, business hierarchy, delegation | 29 | [01](01-identity-and-tenancy.md) |
 | [ingestion](domain-guides/ingestion.md) | Ingestion jobs, batches and chunks, and their state machine | 15 | [03](03-ingestion.md) |
-| [observability_audit](domain-guides/observability-audit.md) | The audit ledger, outbox, archive, delivery intents, SLOs | 2 | [20](20-observability-and-audit.md) |
+| [observability_audit](domain-guides/observability-audit.md) | The audit ledger, outbox, archive, delivery intents, compliance packs and access reviews (the SLO tables were retired 2026-09-12, R11-D10) | 2 | [20](20-observability-and-audit.md) |
 | [profiling](domain-guides/profiling.md) | Analysis runs and tasks, scan policy, value-free profiles, the value-profiling exception gate, classification evidence | 0 | [05](05-profiling-and-classification.md) |
 
 Each guide answers four questions and stops: what the context owns, what must
@@ -98,9 +98,10 @@ dir?" column re-derived 2026-09-06).** "Module dir?" answers only *"does
 `src/atlas/modules/<name>/` exist?"* — six now do, and each of those six links to its guide.
 It still says nothing about whether the *capability* is built: modules 16 and 19 are among the
 strongest-implemented parts of the platform and have no module directory at all, while several
-of the six that do have one still hold their business rules in the router with `service.py`
-and `repository.py` left as empty scaffolds — and `profiling` has no router either, only
-models and DTOs. Each guide says which. Capability status per module is in that module's own
+of the six that do have one still hold their business rules in the router, with no `service.py`
+or `repository.py` (the empty scaffolds were removed, R11-X4; only `catalog` has real ones) —
+and `profiling` has an empty router, only models, DTOs and a private facets module. Each guide
+says which. Capability status per module is in that module's own
 "Current state → target" section, and the two are independent axes.
 
 **The last column is a dated snapshot, not a living status field.** It was sourced from the code on

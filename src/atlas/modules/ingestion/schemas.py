@@ -31,7 +31,7 @@ because `aida.schemas`' shim import of this module comes *after*
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import Field, model_validator
@@ -39,6 +39,24 @@ from pydantic import Field, model_validator
 from aida.schemas import ApiModel
 
 MetadataAttribute = str | int | float | bool | None
+
+# The synchronous safety boundary (contract §6). It bounds ONE request body, and that body is
+# either a synchronous push or a single chunk of a durable batch: `MetadataIngestionChunkCreate`
+# validates its catalogs through `MetadataIngestionCreate`, so a chunk cannot be larger than a
+# push. The batch's own bounds (`metadata_batch_max_*` in `atlas.platform.config`) cap the TOTAL
+# across chunks and say nothing about any one request.
+#
+# Named, rather than left as literals in `validate_envelope`, because they are the nearest thing
+# the ingestion path has to a size bound: no ingestion code limits a request in bytes, so the
+# body limit `ui-next/nginx.conf` applies to the two envelope-carrying routes is derived from
+# the table and column counts, and `tests/test_proxy_body_limits.py` fails when they grow past
+# what that limit was derived from (tracker R11-AUD05). Raising either is a change to that proxy
+# limit too. The routine count is named alongside them so the three read as one boundary, but it
+# is not in the derivation: a routine body is bounded only by its own 1,000,000 characters, so
+# there is no honest per-routine byte figure to multiply by.
+SYNC_MAX_TABLES: Final = 50_000
+SYNC_MAX_COLUMNS: Final = 250_000
+SYNC_MAX_ROUTINES: Final = 50_000
 
 
 class MetadataColumnEnvelope(ApiModel):
@@ -228,7 +246,21 @@ class MetadataIngestionCreate(ApiModel):
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
     producer: str = Field(min_length=2, max_length=200)
     transport: Literal["PUSH", "STREAM"] = "PUSH"
-    snapshot_type: Literal["FULL", "INCREMENTAL"] = "FULL"
+    # R11-AUD05: an omitted `snapshot_type` is INCREMENTAL, never FULL. A FULL snapshot is
+    # authoritative for the whole datasource scope and retires every object it does not mention
+    # (`persist_discovery_snapshot(deprecate_missing=...)`), so the only way to ask for that has
+    # to be to say so -- a producer that forgot the field, or a hand-written curl, used to send a
+    # destructive snapshot by default, with nothing on the server asking for confirmation.
+    # INCREMENTAL creates and updates what the envelope names and retires nothing (contract §4),
+    # which is also what the batch manifest below already defaulted to; the two entry points
+    # disagreed. The field stays optional and the enum is unchanged, so every request body that
+    # validated before still does -- only the meaning of a body that leaves the field out moved.
+    #
+    # One consequence to know about: `envelope_fingerprint` covers this field, so an idempotency
+    # key first used by a body that omitted it (and so ran as FULL) and then replayed answers 409
+    # instead of the original job. That is the safe direction: the replay is refused, not
+    # re-applied as a snapshot the producer never asked for.
+    snapshot_type: Literal["FULL", "INCREMENTAL"] = "INCREMENTAL"
     emitted_at: datetime
     catalogs: list[MetadataCatalogEnvelope] = Field(min_length=1, max_length=100)
 
@@ -258,7 +290,11 @@ class MetadataIngestionCreate(ApiModel):
                     for column in table.columns:
                         self._validate_attributes(column.attributes, forbidden_fragments)
                     total_columns += len(table.columns)
-        if total_tables > 50_000 or total_columns > 250_000 or total_routines > 50_000:
+        if (
+            total_tables > SYNC_MAX_TABLES
+            or total_columns > SYNC_MAX_COLUMNS
+            or total_routines > SYNC_MAX_ROUTINES
+        ):
             raise ValueError("envelope exceeds the synchronous ingestion safety boundary")
         return self
 

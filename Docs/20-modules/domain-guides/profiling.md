@@ -58,18 +58,21 @@ tables, in four groups:
 
 ## Entry points
 
-- **HTTP** — none owned yet. The analysis-run, scan-policy, profile,
-  classification-feed and profiling-exception endpoints still live in `aida.api`
-  and `atlas.modules.connectivity.router`. `router.py` here is an empty container
-  for the later ST-07 route move; `api.py` does not re-export it.
+- **HTTP** — none owned (0 routes as of 2026-09-20). The analysis-run,
+  scan-policy, profile, classification-feed and profiling-exception endpoints live
+  in `aida.api`, `aida.operational_api` and `atlas.modules.connectivity.router`.
+  `router.py` here is an empty `APIRouter` that `aida.main` does not mount, and
+  there is no `api.py` to re-export it. Its docstring still points at a later route
+  move; the tracker has since decided that nothing further moves into
+  `src/atlas/modules/` (R11-S6, cancelled 2026-09-13).
 - **In-process** — everything reaches this context's models and DTOs through the
   `aida.models` / `aida.schemas` compatibility re-exports, which is what let the
   relocation change no caller. Both are recorded, with their removal conditions,
   in
   [`../../40-engineering/09-compatibility-shim-register.md`](../../40-engineering/09-compatibility-shim-register.md).
 - **Workers** — `aida.workflows.activities` (`profile_table_task`), the fleet
-  scheduler and `aida.task_tracking` write these tables today. None of them has
-  moved into `workers/`.
+  scheduler and `aida.task_tracking` write these tables today. None of them lives
+  in this module, which has no `workers/` package.
 
 ## What it deliberately does not own
 
@@ -90,13 +93,14 @@ tables, in four groups:
 
 ## Current shape, honestly
 
-`models.py` (the nine tables) and `schemas.py` (15 DTOs) hold real content, moved
-verbatim from `aida.models` and `aida.schemas` in the R04 pass. `api.py`,
-`contracts.py`, `events.py`, `repository.py`, `service.py`, `router.py` and
-`workers/` are **all still empty scaffolds** — this context publishes no typed
-cross-module contract, owns no route and owns no worker today. That is a larger
-scaffold fraction than any of the five contexts extracted before it, and the
-guide says so rather than implying a completeness that is not there.
+`models.py` (the nine tables) and `schemas.py` (16 DTOs as of 2026-09-20) hold real
+content, moved verbatim from `aida.models` and `aida.schemas` in the R04 pass, and
+`facets.py` is a private module of value-free facet arithmetic added by R11-FP04.
+The empty `api.py`, `contracts.py`, `events.py`, `repository.py`, `service.py` and
+`workers/` scaffolds were removed (R11-X4); `router.py` is the one placeholder
+kept. This context publishes no typed cross-module contract, owns no route and
+owns no worker today. It is the only one of the six contexts with no routes, and
+the guide says so rather than implying a completeness that is not there.
 
 The classes here still declare no separate database schema; this was a
 Python-source move, not a database migration, and `Base.metadata` is unchanged by

@@ -32,7 +32,7 @@ Even in the "monolith," Atlas ships **four deployment units**, because their sca
 | `atlas-api` | HTTP/MCP surface, all L2–L4 modules | Latency-sensitive; scales with user concurrency |
 | `atlas-worker` | Temporal workers: ingestion, profiling, quality, lineage extraction | CPU/IO-heavy, long-running; must not compete with request latency |
 | `atlas-projector` | Outbox consumers writing Neo4j/vector/search | Throughput-oriented; independently restartable; rebuild jobs |
-| `atlas-scheduler` | The general maintenance loop (`fleet-scheduler` in `compose.yaml`): scan-policy admission with maintenance windows, plus periodic passes — owner routing, graph reconciliation, vector index rebuild, freshness, reaper, task-agent runs — and the delivery worker, the only process that dials SIEM or chat destinations | Singleton-ish with HA leader election (the intent; not built, see the note below); distinct failure mode |
+| `atlas-scheduler` | The general maintenance loop (`fleet-scheduler` in `compose.yaml`): scan-policy admission with maintenance windows, plus periodic passes — owner routing, graph reconciliation, vector index rebuild, freshness, reaper, task-agent runs — and the delivery worker, the only process that dials SIEM or chat destinations | Active/standby by leader election on a PostgreSQL advisory lock (see the note below); distinct failure mode |
 
 All four run the **same image** with different entrypoints. Same code, same modules, different process roles. This is the highest-value split and it is available immediately.
 
@@ -40,19 +40,29 @@ All four run the **same image** with different entrypoints. Same code, same modu
 > entrypoints — but under different names and with the projector role in two processes: `api`,
 > `metadata-worker` (`aida.workflows.worker`), `fleet-scheduler` (`aida.workflows.scheduler`),
 > `outbox-publisher` (`aida.projectors.outbox_publisher`) and `graph-projector`
-> (`aida.projectors.graph_projector`). Two rows above describe more than the code does:
+> (`aida.projectors.graph_projector`). One row above describes more than the code does, and
+> another is built but bounded:
 >
 > * **The only projection written from the outbox is Neo4j.** There is no vector projector and no
 >   search projector, and no search index; §6's "Projection workers" row names the same targets. The
 >   vector index is written by an operator route and by a scheduler pass
 >   (`src/aida/vector_index_service.py`), not from the outbox. See INV-1 in
 >   `01-principles-and-invariants.md`.
-> * **The scheduler has no leader election, and no standby takes over.** Nothing in `src/` elects
->   or fences a leader; `run_scheduler` in `src/aida/workflows/scheduler.py` is a bare polling loop.
->   Scan admission is guarded by a row lock on the scan policy and by deterministic workflow ids,
->   while the other passes rate-limit themselves with in-process cadence trackers that a second
->   scheduler would not share. `run_scheduler_iteration` makes 23 calls ahead of scan admission as
->   of 2026-09-20; read the function for the current set.
+> * **The scheduler elects a leader, and a standby takes over — with limits (R11-AUD04).** Every
+>   `fleet-scheduler` replica runs `run_scheduler` in `src/aida/workflows/scheduler.py`, but only the
+>   one holding a PostgreSQL session-level advisory lock, taken on a dedicated connection outside the
+>   pool by `src/aida/scheduler_leadership.py`, runs `run_scheduler_iteration`. A standby retries
+>   every 5 seconds, and a leader whose lock connection fails a liveness check stops starting passes,
+>   so more than one replica is safe. It is exclusion, not fencing: a pass already running is allowed
+>   to finish, so an old and a new leader can overlap by at most one iteration, and scan admission
+>   keeps its own guard (a row lock on the scan policy and deterministic workflow ids). Failover
+>   takes the retry interval plus however long PostgreSQL takes to drop the old session: at once when
+>   the leader's process dies, but only after TCP keepalives fire (about two hours on Linux unless the
+>   server sets `tcp_keepalives_*`) when its host or network vanishes. The other passes' in-process
+>   cadence trackers start empty on a standby, so a new leader runs each rate-limited pass once as it
+>   takes over. No failover drill has been run; `08-workers-and-workflows.md` §4 has the full list of
+>   limits. `run_scheduler_iteration` makes 23 calls ahead of scan admission as of 2026-09-20; read
+>   the function for the current set.
 
 ## 2. Extraction triggers
 

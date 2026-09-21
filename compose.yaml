@@ -4,7 +4,12 @@ name: aida-platform
 # PROFILES (R11-X9). `docker compose up` starts the ten services the product
 # needs: postgres, temporal, migrate, api, ui-next, metadata-worker,
 # fleet-scheduler and the three sample-source containers. Everything else is
-# opt-in, because with default settings it does nothing:
+# opt-in. cache, graph and archive are services the default settings never
+# reach. events is not quite that: a default worker starts a Kafka consumer at
+# boot (`auto_enqueue_on_ingest` defaults to true), the default stack has no
+# broker for it, and automatic description drafting on ingest quietly does not
+# happen until events is enabled (tracker R11-AUD03). temporal-ui and monitoring
+# are conveniences an estate chooses to run:
 #
 #   cache        redis                         AIDA_LINEAGE_CACHE_ENABLED,
 #                                              AIDA_MCP_BUDGET_ENABLED and
@@ -20,8 +25,15 @@ name: aida-platform
 #                                              AIDA_LINEAGE_NEO4J_READ_ENABLED
 #                                              (INV-9/E5 has not run).
 #   events       redpanda, redpanda-console,   ~118 event types are produced to
-#                outbox-publisher              the outbox table; 8 are consumed,
-#                                              by the two projectors above.
+#                outbox-publisher              the outbox table; only a few are
+#                                              consumed: by the two projectors
+#                                              above and by the worker's table
+#                                              drafter, a Kafka consumer that is
+#                                              on by default and retries with a
+#                                              backoff, logging
+#                                              newly_created_table_drafter_
+#                                              unavailable, until a broker
+#                                              exists (R11-AUD03).
 #                                              PostgreSQL stays authoritative
 #                                              (INV-1), so nothing is lost while
 #                                              the transport is down -- the
@@ -37,9 +49,11 @@ name: aida-platform
 #                                              scrape target set and an alert
 #                                              routing decision belong to the
 #                                              estate, not to a default stack.
-#   full         all of the above              One flag for the 18 services a
-#                                              plain `up` used to start
-#                                              (excludes `seed`).
+#   full         all of the above              One flag for every service but
+#                                              `seed`: the ten default services
+#                                              plus the nine above make 19 of
+#                                              the 20 in this file (counted
+#                                              2026-09-20).
 #   seed         seed                          Pre-existing; demonstration data.
 #
 # Nothing here is removed: the Kafka consumers, the Redis-backed MCP limits and

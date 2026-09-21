@@ -130,7 +130,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <p class="eyebrow">Architecture</p>
 <h1>How Atlas is built, in ten minutes</h1>
 <p class="lede">Five processes, one authoritative store and a gate on every action. This page shows what runs, what each part is for, and where the design is ahead of the code.</p>
-<div class="stamp"><span>Measured at <b>787f84b</b></span><span>Date <b>2026-09-20</b></span><span>Generated architecture map: <b>current</b></span></div>
+<div class="stamp"><span>Measured at <b>4ae9b2c plus round 11</b></span><span>Date <b>2026-09-21</b></span><span>Generated architecture map: <b>current</b></span></div>
 
 <nav class="chips" aria-label="On this page" style="margin-top:1rem">
   <a class="chip" href="#glance" style="text-decoration:none">At a glance</a>
@@ -237,7 +237,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <rect class="box-w" x="704" y="376" width="176" height="68" rx="6"/>
 <text x="792" y="396" text-anchor="middle" class="t-b">fleet-scheduler</text>
 <text x="792" y="412" text-anchor="middle" class="t-mute">23 periodic passes</text>
-<text x="792" y="428" text-anchor="middle" class="t-mute">run one replica only</text>
+<text x="792" y="428" text-anchor="middle" class="t-mute">one leader, by DB lock</text>
 
 <line class="edge" x1="228" y1="444" x2="228" y2="484" marker-end="url(#ah)"/>
 <line class="edge" x1="416" y1="444" x2="416" y2="484" marker-end="url(#ah)"/>
@@ -256,7 +256,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <text x="792" y="524" text-anchor="middle" class="t-mute">compose profiles, off by default</text>
 </svg>
 </div>
-<figcaption>The default <code>docker compose up</code> starts ten services, including three of the five processes: <code>outbox-publisher</code> needs the <code>events</code> or <code>graph</code> profile and <code>graph-projector</code> needs <code>graph</code>. Redpanda, Neo4j, Redis, MinIO and Prometheus are profiles too, and <code>--profile full</code> starts 19 of the 20 services. The scheduler box is amber because nothing elects a leader: run a single replica. Source scans use the connectors' structured discovery calls, not caller-supplied SQL, which is why they sit outside the query gateway.</figcaption>
+<figcaption>The default <code>docker compose up</code> starts ten services, including three of the five processes: <code>outbox-publisher</code> needs the <code>events</code> or <code>graph</code> profile and <code>graph-projector</code> needs <code>graph</code>. Redpanda, Neo4j, Redis, MinIO and Prometheus are profiles too, and <code>--profile full</code> starts 19 of the 20 services. The scheduler box is amber because its leader election (a PostgreSQL advisory lock, R11-AUD04) has been run against a real database but never drilled across replicas. Source scans use the connectors' structured discovery calls, not caller-supplied SQL, which is why they sit outside the query gateway.</figcaption>
 </figure>
 
 <h2 id="processes">Five processes</h2>
@@ -267,7 +267,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <tr><td><b>metadata-worker</b></td><td class="mono">metadata-worker</td><td>Temporal worker on one queue (<code>aida-metadata</code>): scans, profiling, ingestion batches. Also runs a Kafka side-car that drafts descriptions for newly created tables.</td><td><span class="pill p-warn">Gap</span> The side-car is on by default but the default stack has no Redpanda, so it fails quietly at start.</td></tr>
 <tr><td><b>outbox-publisher</b></td><td class="mono">outbox-publisher<br><span class="pill p-mute">profile: events, graph</span></td><td>Reads the PostgreSQL outbox with <code>SKIP LOCKED</code> and publishes to one topic, with backoff and a <code>DEAD_LETTER</code> status.</td><td>Emits a 7-field envelope; the design describes a richer one.</td></tr>
 <tr><td><b>graph-projector</b></td><td class="mono">graph-projector<br><span class="pill p-mute">profile: graph</span></td><td>Projects PostgreSQL state into Neo4j. A pure function of PostgreSQL, so Neo4j can be rebuilt.</td><td>The rebuild drill has never been run.</td></tr>
-<tr><td><b>fleet-scheduler</b></td><td class="mono">fleet-scheduler</td><td>Scan-policy admission plus 23 periodic passes: owner routing, graph reconciliation, vector rebuild, freshness, reaper, task-agent runs and the delivery worker.</td><td><span class="pill p-warn">Gap</span> No leader election. A second replica would double-run the passes that use in-process cadence.</td></tr>
+<tr><td><b>fleet-scheduler</b></td><td class="mono">fleet-scheduler</td><td>Scan-policy admission plus 23 periodic passes: owner routing, graph reconciliation, vector rebuild, freshness, reaper, task-agent runs and the delivery worker.</td><td><span class="pill p-warn">Partial</span> Replicas contend for a PostgreSQL advisory lock and only the holder runs the passes (R11-AUD04). Proven against a real database; no multi-replica failover drill yet.</td></tr>
 </tbody></table></div>
 
 <h2 id="stores">Stores</h2>
@@ -312,7 +312,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <tr><td>5</td><td><b>Tenant isolation is total.</b></td><td>Per-query scoping; a route-table-driven test.</td><td class="mono">test_cross_tenant_denial</td><td>Application-level only: no row-level security, and the planned scoped-repository base class does not exist.</td></tr>
 <tr><td>6</td><td><b>Value-freedom.</b> No raw source values in control-plane state.</td><td>Validators and SQL redaction.</td><td class="mono">test_inv6_value_freedom.py</td><td>Includes a meta-test that fails if the scan can no longer notice a leak.</td></tr>
 <tr><td>7</td><td><b>Attributability.</b> Every mutation writes an audit record in the same transaction.</td><td>Unit-of-work commit path.</td><td class="mono">test_inv7_attributability.py</td><td>The archive that would make it immutable is off by default.</td></tr>
-<tr><td>8</td><td><b>Maker is not checker.</b></td><td>One platform approval service.</td><td class="mono">test_self_approval_denied</td><td>Access policies and workspace members are tier T3, yet one caller can create and activate them with no second person; several other decide routes carry their own check (R11-AUD02).</td></tr>
+<tr><td>8</td><td><b>Maker is not checker.</b></td><td>One platform approval service.</td><td class="mono">test_self_approval_denied</td><td>Access policies and workspace members are tier T3 and now open a governance review: a policy is created as a draft and a member as pending, and each takes effect only when a different person approves it (R11-AUD02, deployed 2026-09-21: the refusal of an ACTIVE policy is verified live; the approve loop is covered by in-process tests only). Several other decide routes still carry their own check.</td></tr>
 <tr><td>9</td><td><b>Honest capability reporting.</b></td><td>Capability flags derive from certification.</td><td class="mono">test_inv9_capability_honesty.py</td><td>Only PostgreSQL and SQL Server carry live certification evidence.</td></tr>
 </tbody></table></div>
 
@@ -338,7 +338,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <div class="tbox"><table>
 <thead><tr><th>Design says</th><th>The code today</th><th>State</th></tr></thead>
 <tbody>
-<tr><td>Scheduler elects a leader; a standby takes over.</td><td>No leader election. A bare loop; per-pass row locks only.</td><td><span class="pill p-deny">Not built</span></td></tr>
+<tr><td>Scheduler elects a leader; a standby takes over.</td><td>Built 2026-09-20 (R11-AUD04): replicas contend for a PostgreSQL advisory lock and only the holder runs the passes. Before that it was a bare loop with per-pass row locks only.</td><td><span class="pill p-warn">Built, not drilled</span></td></tr>
 <tr><td>A schema per module in PostgreSQL.</td><td>No PostgreSQL schemas. Modules are Python packages.</td><td><span class="pill p-deny">Not built</span></td></tr>
 <tr><td>A task queue per worker class.</td><td>One queue, <code>aida-metadata</code>.</td><td><span class="pill p-deny">Not built</span></td></tr>
 <tr><td>Every event carries version, producer, correlation and causation ids, actor.</td><td>Seven fields: id, type, aggregate type and id, organization, time, payload.</td><td><span class="pill p-warn">Partial</span></td></tr>

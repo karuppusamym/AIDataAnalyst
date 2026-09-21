@@ -4678,7 +4678,8 @@ export async function makeFixtureDbtLineage(artifactImportId: string): Promise<D
    section for the real routes these fixtures stand in for.
 --------------------------------------------------------------------------- */
 
-import type { AccessPolicyCreate, AccessPolicyRead, AuthorizationSimulationRead, AuthorizationSimulationRequest } from "./types";
+import type { AccessPolicyCreate, AccessPolicyProposalRead, AuthorizationSimulationRead, AuthorizationSimulationRequest } from "./types";
+import type { AccessPolicyRead } from "./ui-types";
 import type { AccessPolicyQuery } from "./api";
 
 const FIXTURE_ACCESS_POLICIES: Record<string, AccessPolicyRead[]> = {
@@ -4727,12 +4728,20 @@ export async function makeFixtureAccessPolicies(
 /** `POST /v1/organizations/{organization_id}/access-policies` -- mirrors the
  *  real endpoint's per-`code` version increment: creating again under a
  *  `code` already present for this organization appends a new row with
- *  `version` one higher, rather than replacing the existing one. */
+ *  `version` one higher, rather than replacing the existing one. Also mirrors
+ *  R11-AUD02: a create is a proposal, so the row is always `DRAFT` (the live
+ *  endpoint files a review for it) and a body asking for `ACTIVE` is a 422. */
 export async function makeFixtureCreateAccessPolicy(
   organizationId: string,
   body: AccessPolicyCreate,
-): Promise<AccessPolicyRead> {
+): Promise<AccessPolicyProposalRead> {
   await wait(110);
+  if (body.status === "ACTIVE") {
+    throw new ApiError(
+      422,
+      "an access policy cannot be created ACTIVE: it is created as a DRAFT and becomes ACTIVE when a different principal approves its governance review",
+    );
+  }
   const items = (FIXTURE_ACCESS_POLICIES[organizationId] ??= []);
   const existing = items.filter((p) => p.code === body.code);
   const nextVersion = existing.length ? Math.max(...existing.map((p) => p.version)) + 1 : 1;
@@ -4743,11 +4752,11 @@ export async function makeFixtureCreateAccessPolicy(
     effect: body.effect, priority: body.priority ?? 100,
     subject_match: body.subject_match ?? {}, resource_match: body.resource_match ?? {},
     action_match: body.action_match ?? [], transform: body.transform ?? {}, condition: body.condition ?? {},
-    origin: "MANUAL", status: body.status ?? "DRAFT",
+    origin: "MANUAL", status: "DRAFT",
     created_by: "local-ui-admin", created_at: now, updated_at: now,
   };
   items.push(policy);
-  return policy;
+  return { ...policy, governance_review_id: `review_${policy.id}` };
 }
 
 /** `POST /v1/workspaces/{workspace_id}/authorization-simulations` -- a
@@ -4937,8 +4946,9 @@ import type {
   BiConnectionRead,
   SourceBindingDecision,
   WorkspaceMembershipCreate,
-  WorkspaceMembershipRead,
+  WorkspaceMembershipProposalRead,
 } from "./types";
+import type { WorkspaceMembershipRead } from "./ui-types";
 
 const FIXTURE_WORKSPACE_MEMBERSHIPS: WorkspaceMembershipRead[] = [
   {
@@ -4992,11 +5002,13 @@ const FIXTURE_PENDING_SOURCE_BINDING: SourceBindingRead = {
 };
 FIXTURE_SOURCE_BINDINGS.push(FIXTURE_PENDING_SOURCE_BINDING);
 
-/** `POST /v1/workspaces/{workspace_id}/members` (`workspace_api.py:160`). */
+/** `POST /v1/workspaces/{workspace_id}/members` (`workspace_api.py:160`).
+ *  Mirrors R11-AUD02: a proposal, not a grant -- the row is `PENDING_APPROVAL`
+ *  (the live endpoint files a `WORKSPACE_MEMBERSHIP` review for it). */
 export async function makeFixtureAddWorkspaceMember(
   workspaceId: string,
   body: WorkspaceMembershipCreate,
-): Promise<WorkspaceMembershipRead> {
+): Promise<WorkspaceMembershipProposalRead> {
   await wait(60);
   const workspace = FIXTURE_WORKSPACES.find((item) => item.id === workspaceId);
   if (
@@ -5016,12 +5028,12 @@ export async function makeFixtureAddWorkspaceMember(
     role: body.role,
     granted_by: "local-ui-admin",
     expires_at: body.expires_at ?? null,
-    status: "ACTIVE",
+    status: "PENDING_APPROVAL",
     created_at: now,
     updated_at: now,
   };
   FIXTURE_WORKSPACE_MEMBERSHIPS.push(membership);
-  return membership;
+  return { ...membership, governance_review_id: `review_${membership.id}` };
 }
 
 /** `GET /v1/workspaces/{workspace_id}/members` (`workspace_api.py:207`). */

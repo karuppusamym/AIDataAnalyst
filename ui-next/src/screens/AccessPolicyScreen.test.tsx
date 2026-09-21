@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { AccessPolicyCreate, AccessPolicyRead, AuthorizationSimulationRequest, WorkspaceRead } from "../lib/types";
-import type { PageOf } from "../lib/ui-types";
+import type { AccessPolicyCreate, AuthorizationSimulationRequest, WorkspaceRead } from "../lib/types";
+import type { AccessPolicyRead, PageOf } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
 
 /* ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ describe("AccessPolicyScreen against the real workspace_api.py routes", () => {
     expect(await screen.findByText("Reviewer may list access policies but not create them")).toBeInTheDocument();
   });
 
-  it("creates a policy defaulting to DRAFT unless Activate immediately is checked", async () => {
+  it("creates a policy as a DRAFT proposal and says a second person has to approve it", async () => {
     createAccessPolicy.mockResolvedValue({ ...POLICY, id: "policy_2", code: "deny-restricted-export", status: "DRAFT" });
     const AccessPolicyScreen = await loadScreen();
     render(<AccessPolicyScreen />);
@@ -133,28 +133,63 @@ describe("AccessPolicyScreen against the real workspace_api.py routes", () => {
         undefined,
       ),
     );
-    expect(await screen.findByText('Policy "deny-restricted-export" created.')).toBeInTheDocument();
+    // R11-AUD02: honest about what a create is -- a proposal on the Review queue, enforcing nothing
+    // until someone other than the proposer approves it.
+    const saved = await screen.findByText(/Policy "deny-restricted-export" saved as a draft/);
+    expect(saved).toHaveTextContent("It is on the Review queue now");
+    expect(saved).toHaveTextContent("someone other than you has to approve it before it is enforced");
     // Reloads the list after a successful create.
     await waitFor(() => expect(fetchAccessPolicies).toHaveBeenCalledTimes(2));
   });
 
-  it("sends status ACTIVE when Activate immediately is checked", async () => {
-    createAccessPolicy.mockResolvedValue(POLICY);
+  it("offers no way to activate a policy at creation, and never sends status ACTIVE", async () => {
+    // The server refuses `status: "ACTIVE"` with a 422 (R11-AUD02), so the old "Activate immediately"
+    // toggle is gone: a control that can only fail is worse than no control.
+    createAccessPolicy.mockResolvedValue({ ...POLICY, status: "DRAFT" });
     const AccessPolicyScreen = await loadScreen();
     render(<AccessPolicyScreen />);
 
+    expect(screen.queryByLabelText(/Activate immediately/)).not.toBeInTheDocument();
+    expect(screen.getByText(/enforces nothing\. It goes to the Review queue/)).toBeInTheDocument();
+
     fireEvent.change(screen.getByLabelText("Code"), { target: { value: "mask-pii-columns" } });
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Mask PII columns" } });
-    fireEvent.click(screen.getByLabelText(/Activate immediately/));
     fireEvent.click(screen.getByRole("button", { name: "Create policy" }));
 
     await waitFor(() =>
       expect(createAccessPolicy).toHaveBeenCalledWith(
         ORG_ID,
-        expect.objectContaining({ status: "ACTIVE" }),
+        expect.objectContaining({ status: "DRAFT" }),
         undefined,
       ),
     );
+    expect(createAccessPolicy.mock.calls[0]?.[1].status).not.toBe("ACTIVE");
+  });
+
+  it("shows a rejected proposal as REJECTED, not as a policy that is merely inactive", async () => {
+    fetchAccessPolicies.mockResolvedValue({
+      items: [{ ...POLICY, id: "policy_3", code: "deny-all", status: "REJECTED" }],
+      limit: 200,
+      offset: 0,
+      total: 1,
+    });
+    const AccessPolicyScreen = await loadScreen();
+    render(<AccessPolicyScreen />);
+
+    expect(await screen.findByText("REJECTED", { selector: "span" })).toBeInTheDocument();
+  });
+
+  it("surfaces the server's refusal when a create is rejected", async () => {
+    createAccessPolicy.mockRejectedValue(new ApiError(403, "role not permitted"));
+    const AccessPolicyScreen = await loadScreen();
+    render(<AccessPolicyScreen />);
+
+    fireEvent.change(screen.getByLabelText("Code"), { target: { value: "mask-pii-columns" } });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Mask PII columns" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create policy" }));
+
+    expect(await screen.findByText("role not permitted")).toBeInTheDocument();
+    expect(screen.queryByText(/saved as a draft/)).not.toBeInTheDocument();
   });
 
   it("rejects invalid JSON in a match field client-side without calling the API", async () => {

@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditEventRead } from "../lib/ui-types";
-import { ApiError, describeLoadMoreFailure, fetchAuditEvents } from "../lib/api";
+import { ApiError, describeLoadMoreFailure, downloadAuditEventsExport, fetchAuditEvents } from "../lib/api";
+import { roleHolds } from "../lib/roles";
+import { useSession } from "../lib/session";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
+import { failureText, StatusStrip, useStatusChannel } from "../components/screenState";
 import "../components/EvidencePane.css";
 import "./AuditLedgerScreen.css";
 
@@ -44,10 +47,40 @@ import "./AuditLedgerScreen.css";
    `offset: items.length`, the same idiom `MarketplaceScreen`/
    `LineageRefusalScreen` already use against their own offset-paginated
    routes.
+
+   EXPORT (R11-AUD08). Paging this browse until it runs out is not an export:
+   nothing identifies the bytes and nothing records that the extraction
+   happened. `GET .../audit-events/export.jsonl` (`audit_export_api.py`) is the
+   surface for that -- one file, hashed, capped, and itself an audited event --
+   so the header carries an Export action that sends the ledger's own filters to
+   it. It is a deliberate click and never a load-time read, because each call
+   writes `AUDIT_EVENTS_EXPORTED` to the ledger it exports.
 --------------------------------------------------------------------------- */
 
 import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
+
+/**
+ * The roles `GET .../audit-events/export.jsonl` admits.
+ *
+ * Copied from the surface-control matrix row for
+ * `aida.audit_export_api.export_audit_events` (action EXPORT,
+ * `Docs/50-security/surface-control-matrix.md`): Auditor, Operations,
+ * OrganizationAdmin, PlatformAdmin -- the same four the browse admits. Roles are
+ * necessary, not sufficient: the server also runs the policy gate for EXPORT, so
+ * a listed role can still be refused, and that refusal is shown as it arrives.
+ */
+const AUDIT_EXPORT_ROLES = ["Auditor", "Operations", "OrganizationAdmin", "PlatformAdmin"];
+
+/** The refusal in the server's own words, with the one thing worth adding to a
+ *  bare reason code: that being able to read the ledger is not the same
+ *  permission as extracting it. */
+function exportFailureText(reason: unknown): string {
+  if (reason instanceof ApiError && reason.status === 403) {
+    return `The audit export was refused: ${reason.detail}. Reading the ledger and exporting it are separate permissions.`;
+  }
+  return `The audit export failed: ${failureText(reason)}`;
+}
 
 const outcomeTone = (outcome: string): Tone =>
   outcome === "SUCCESS" ? "ok" : outcome === "DENIED" || outcome === "FAILURE" ? "bad" : "mute";
@@ -214,6 +247,13 @@ export function AuditLedgerScreen() {
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Known-only, unlike a read: bulk extraction of the ledger is never offered on
+  // a guess, and `/v1/me` answers within a moment of the page opening.
+  const mayExport = roleHolds(useSession().me?.roles, AUDIT_EXPORT_ROLES);
+  const exportStatus = useStatusChannel();
+  const [exporting, setExporting] = useState(false);
+  const exportInflight = useRef<AbortController | null>(null);
+
   // One in-flight request at a time -- aborting the previous one is what
   // stops a slow first page from overwriting the results of a newer,
   // narrower filter (the same reason `CatalogScreen.loadFirstPage` does it).
@@ -286,6 +326,63 @@ export function AuditLedgerScreen() {
     }
   }, [loadingMore, loading, items.length, total, action, resourceType, correlationId, since, until]);
 
+  /* The export sends the filters the LIST is showing -- the ones in the URL --
+     and not the half-typed text in the boxes, which the debounce below has not
+     yet committed: what is downloaded must be what is on screen. */
+  const exportEvents = useCallback(async () => {
+    if (exportInflight.current) return;
+    const controller = new AbortController();
+    exportInflight.current = controller;
+    setExporting(true);
+    exportStatus.info("Preparing the export. The server builds the whole file before it downloads.");
+    try {
+      const result = await downloadAuditEventsExport(
+        {
+          organizationId: ORG,
+          action: action || undefined,
+          resourceType: resourceType || undefined,
+          correlationId: correlationId || undefined,
+          since: since || undefined,
+          until: until || undefined,
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      const events =
+        result.rowCount === null
+          ? "the audit events"
+          : `${nf.format(result.rowCount)} event${result.rowCount === 1 ? "" : "s"}`;
+      if (result.truncated === true) {
+        // Visible or it is a lie (`audit_export_api.py`): a file cut at the cap
+        // reads as a quiet period unless it says otherwise.
+        exportStatus.failure(
+          `Downloaded ${result.filename}, but it is INCOMPLETE: the export stopped at the server's limit` +
+            `${result.rowLimit === null ? "" : ` of ${nf.format(result.rowLimit)} events`}. ` +
+            "Narrow the time range with Since and Until and export again.",
+        );
+      } else if (result.truncated === null) {
+        exportStatus.failure(
+          `Downloaded ${events} as ${result.filename}, but the server's completeness flag could not be read, ` +
+            "so it is not confirmed that nothing was cut off.",
+        );
+      } else {
+        exportStatus.success(
+          `Exported ${events} as ${result.filename}.` +
+            `${result.sha256 ? ` SHA-256 ${result.sha256}.` : ""} The export was recorded in the ledger.`,
+        );
+      }
+    } catch (reason) {
+      if ((reason as Error)?.name === "AbortError") return;
+      exportStatus.failure(exportFailureText(reason));
+    } finally {
+      if (exportInflight.current === controller) exportInflight.current = null;
+      if (!controller.signal.aborted) setExporting(false);
+    }
+  }, [ORG, action, resourceType, correlationId, since, until, exportStatus]);
+
+  // Leaving the screen drops an export that has not arrived.
+  useEffect(() => () => exportInflight.current?.abort(), []);
+
   // Debounce the three free-text filters so each keystroke doesn't become a
   // request -- the same reason `CatalogScreen` debounces its search box.
   useEffect(() => {
@@ -317,8 +414,19 @@ export function AuditLedgerScreen() {
         </div>
         <div className="aud__stats">
           <span><b className="tnum">{total !== null ? nf.format(total) : "—"}</b> events</span>
+          {mayExport ? (
+            <Button
+              disabled={exporting}
+              onClick={() => void exportEvents()}
+              title="Download every event matching the filters below as JSON Lines. The export is itself recorded in the ledger."
+            >
+              {exporting ? "Exporting…" : "Export JSONL"}
+            </Button>
+          ) : null}
         </div>
       </header>
+
+      <StatusStrip status={exportStatus.status} />
 
       <div className="aud__filters">
         <Field label="Action">

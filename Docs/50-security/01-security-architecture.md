@@ -61,7 +61,7 @@ flowchart TB
 | Control | Implementation |
 |---|---|
 | Token verification | Signature, issuer, audience, expiry, algorithm, subject |
-| JWKS | Cached with TTL, refreshed on unknown `kid`, pinned keys supported |
+| JWKS | Cached with TTL, refreshed on unknown `kid` at most once per 30-second cooldown (`src/aida/oidc.py`), so a rotated signing key is picked up by the first unknown-`kid` token after the cooldown; pinned keys supported |
 | Claim mapping | Configurable paths → organization, roles, groups |
 | Failure | Denies with a generic 401. Expiry is the one reason named (`OidcTokenExpired`); signature, audience, issuer and revocation stay generic |
 | Development provider | Explicit headers, **refused in production** |

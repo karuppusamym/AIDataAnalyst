@@ -18,6 +18,9 @@
 .homekpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}
 .homekpi{display:flex;align-items:center;gap:11px;min-width:0;text-align:left;border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:13px 14px;color:var(--ink);font:inherit;cursor:pointer;box-shadow:var(--shadow-1);transition:transform .12s,border-color .12s,box-shadow .12s}
 .homekpi:hover{transform:translateY(-1px);border-color:#c9c5f3;box-shadow:var(--shadow-2)}
+/* A signal this session's roles do not carry (not a failure, and not a zero): plain, not clickable. */
+.homekpi--na,.homekpi--na:hover{cursor:default;transform:none;border-color:var(--line);box-shadow:none;background:var(--sunk)}
+.homekpi--na b{font-size:13px;color:var(--ink-2);font-weight:600}
 .homekpi__icon{width:35px;height:35px;border-radius:9px;display:grid;place-items:center;font-family:var(--mono);font-size:12px;flex:none}
 .homekpi__icon--violet{color:#6658d4;background:#efedff}.homekpi__icon--green{color:#16724a;background:#e3f4eb}.homekpi__icon--blue{color:#315bb8;background:#e9effc}.homekpi__icon--amber{color:#9b6813;background:#fbf0da}
 .homekpi>span:nth-child(2){display:flex;min-width:0;flex-direction:column}.homekpi b{font-size:19px;line-height:1.15;letter-spacing:-.02em;font-variant-numeric:tabular-nums}.homekpi small{font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}.homekpi>i{font-style:normal;margin-left:auto;color:var(--ink-3);font-size:12px}

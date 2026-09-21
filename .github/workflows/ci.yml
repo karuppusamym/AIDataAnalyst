@@ -935,6 +935,75 @@ jobs:
             *) echo "FAIL: /v1/ did not reach the upstream"; exit 1 ;;
           esac
 
+      # R11-AUD05. `location /v1/` sets no client_max_body_size, so a metadata
+      # envelope over nginx's 1 MiB default answered 413 through this proxy while
+      # the same request reached authentication on the API's own port, and the
+      # contract's promise of a larger limit was not true of the only proxy in
+      # front of the API. ui-next/nginx.conf now gives the two routes that carry an
+      # envelope (the synchronous push and one batch chunk) a 64 MiB limit and
+      # leaves the rest of /v1/ at the default. Each case posts a body of a stated
+      # size and asserts on the STATUS and, where the body should get through, on
+      # the stub's own count of the bytes it received: a proxy that cut a large body
+      # short would still be answered 200. A 413 must be nginx's own -- a refusal
+      # the stub made would have its marker in the body. `curl` sends
+      # `Expect: 100-continue` for a large body and nginx answers 413 instead of
+      # 100 when Content-Length is over the limit, so a refused case does not push
+      # the whole body first. `scripts/check_proxy_contract.py` (job `quality`) is
+      # the static half of this; that one cannot see a directive it does not model.
+      - name: 'an envelope-sized body reaches the API on the ingestion routes, and only there'
+        run: |
+          set -euo pipefail
+          id=00000000-0000-0000-0000-000000000000
+          mib=$((1024 * 1024))
+
+          post() {  # post <path> <bytes> -> the HTTP status; the reply body is left in /tmp/reply
+            head -c "$2" /dev/zero > /tmp/payload
+            rm -f /tmp/reply
+            curl -sS --max-time 180 -o /tmp/reply -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/json' --data-binary @/tmp/payload \
+              "http://localhost:8099$1" || true
+          }
+
+          reaches() {  # reaches <path> <bytes>: 200, from the stub, having counted every byte
+            status=$(post "$1" "$2")
+            reply=$(cat /tmp/reply)
+            case "$status:$reply" in
+              200:*ATLAS-STUB-UPSTREAM*"path=$1"*"body_bytes=$2") ;;
+              *) echo "FAIL: POST $2 bytes to $1 -> $status: $reply"; exit 1 ;;
+            esac
+            echo "ok: POST $2 bytes to $1 reached the upstream in full"
+          }
+
+          refused() {  # refused <path> <bytes>: 413 from nginx itself, never from the stub
+            status=$(post "$1" "$2")
+            reply=$(cat /tmp/reply)
+            case "$reply" in
+              *ATLAS-STUB-UPSTREAM*) echo "FAIL: POST $2 bytes to $1 reached the upstream"; exit 1 ;;
+            esac
+            if [ "$status" != 413 ]; then
+              echo "FAIL: POST $2 bytes to $1 -> $status, expected nginx's 413"; exit 1
+            fi
+            echo "ok: POST $2 bytes to $1 was refused with 413"
+          }
+
+          # The request that answered 413 before the fix, on both envelope routes.
+          reaches "/v1/datasources/$id/metadata-ingestions" $((2 * mib))
+          reaches "/v1/metadata-ingestion-batches/$id/chunks" $((2 * mib))
+          # The 40 MiB the contract used to promise, and the configured limit to the byte.
+          reaches "/v1/datasources/$id/metadata-ingestions" $((40 * mib))
+          reaches "/v1/datasources/$id/metadata-ingestions" $((64 * mib))
+          reaches "/v1/metadata-ingestion-batches/$id/chunks" $((64 * mib))
+          refused "/v1/datasources/$id/metadata-ingestions" $((64 * mib + 1))
+          refused "/v1/metadata-ingestion-batches/$id/chunks" $((64 * mib + 1))
+          # And only there: ordinary routes (a create, and the query gateway, where a
+          # large body is least welcome) and the ingestion routes that carry no envelope
+          # (the manifest and finalize) keep nginx's 1 MiB default.
+          reaches "/v1/projects/$id/datasources" $((1 * mib))
+          refused "/v1/projects/$id/datasources" $((2 * mib))
+          refused "/v1/datasources/$id/query-executions" $((2 * mib))
+          refused "/v1/datasources/$id/metadata-ingestion-batches" $((2 * mib))
+          refused "/v1/metadata-ingestion-batches/$id/finalize" $((2 * mib))
+
       # The other direction: over-proxying would break client-side routing, so a
       # deep link must still get the SPA shell.
       - name: 'an SPA route still gets index.html'

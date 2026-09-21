@@ -130,7 +130,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <p class="eyebrow">Demo script</p>
 <h1>Forty minutes, seven acts, eight users</h1>
 <p class="lede">A run of show by person. Each act names who is signed in, what to open, what to expect, and whether it changes anything.</p>
-<div class="stamp"><span>Stack: <b>Northwind (sample-bank)</b></span><span>Users: <b>scripts/demo-users.ps1</b></span><span>Date <b>2026-09-20</b></span></div>
+<div class="stamp"><span>Stack: <b>Northwind (sample-bank)</b></span><span>Users: <b>scripts/demo-users.ps1</b></span><span>Date <b>2026-09-21</b></span></div>
 
 <nav class="chips" aria-label="On this page" style="margin-top:1rem">
   <a class="chip" href="#preflight" style="text-decoration:none">Before you start</a>
@@ -152,7 +152,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <p>Tick these off. Your ticks are remembered in this browser only.</p>
 <ul style="list-style:none;padding:0;display:grid;gap:8px;max-width:80ch">
 <li><label><input type="checkbox" data-k="c1"> <b>Private machine, private network.</b> Every service port listens on all interfaces with default passwords, and the API trusts <code>X-Roles</code> headers. Do not present on a shared network.</label></li>
-<li><label><input type="checkbox" data-k="c2"> <b>Stack matches the code.</b> It was rebuilt from <code>787f84b</code> on 2026-09-20. If HEAD has moved since, build from a clean worktree of HEAD and rerun the parity check.</label></li>
+<li><label><input type="checkbox" data-k="c2"> <b>Stack matches the code.</b> It was rebuilt on 2026-09-21 from <code>4ae9b2c</code> plus the round-11 changes. If HEAD has moved since, build from a clean worktree of HEAD and rerun the parity check.</label></li>
 <li><label><input type="checkbox" data-k="c3"> <b>Decide about live Ask.</b> The API holds live OpenAI and Gemini keys and the approved route is labelled residency <code>development</code>: a fresh question sends its prompt to a real provider and costs money. Skipping it loses nothing above.</label></li>
 <li><label><input type="checkbox" data-k="c4"> <b>Leave notification delivery alone.</b> Nine governance notifications have been retrying since 2026-09-12; do not enable or change the delivery worker during a demo.</label></li>
 <li><label><input type="checkbox" data-k="c5"> <b>Users started:</b> <code>.\scripts\demo-users.ps1 -Action Start</code>, wait ten seconds, then <code>-Action Check</code> must print eight lines saying <em>serves its own identity</em>.</label></li>
@@ -190,7 +190,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 </div></details>
 <details open id="act6"><summary>Act 6 · The operator runs the estate <span class="pill p-accent">alex.operator</span> <span class="pill p-mute">4 min</span> <span class="pill p-allow">Read-only</span></summary><div>
 <p class="mono" style="color:var(--muted)">http://localhost:5181</p>
-<ol class="steps"><li>Open <code>/#/operator/sources</code>: the three Northwind sources, Customer Master (PostgreSQL), Payments and Transactions (SQL Server), Risk and Compliance (PostgreSQL).</li><li>Open <code>/#/operator/operations</code>: the outbox and fleet summary.</li><li>Mention, do not press: the organization kill switch (<code>POST /v1/organizations/{organization_id}/kill-switch/engage</code>) is PlatformAdmin only and has no button in the UI. Engaging it stops model use for the whole organization.</li></ol>
+<ol class="steps"><li>Open <code>/#/operator/sources</code>: the three Northwind sources, Customer Master (PostgreSQL), Payments and Transactions (SQL Server), Risk and Compliance (PostgreSQL).</li><li>Open <code>/#/operator/operations</code>: the outbox and fleet summary.</li><li>Open <code>/#/operator/agents</code> and show the organization kill switch's state. Only PlatformAdmin gets the Engage and Release buttons, each behind a confirmation and a reason, and release needs no second person by design. Read the state out; do not press Engage: it stops model use for the whole organization from the very next request.</li></ol>
 <div class="note allow"><b>Say</b>One role can stop every model call in an organization, and only that role.</div>
 </div></details>
 <details open id="act7"><summary>Act 7 · Agents and tools <span class="pill p-accent">sam.agentdev</span> <span class="pill p-mute">4 min</span> <span class="pill p-allow">Read-only</span></summary><div>
@@ -201,7 +201,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 
 <h2 id="loop">The maker-checker loop</h2>
 <p>Three identities, one governed change. Use it for Act 3's live path. Run in Windows PowerShell from any folder.</p>
-<div class="note warn"><b>Writes:</b> one glossary category, one glossary term and one review, all named <code>demo_*</code>, plus their audit events. They stay in the estate. <b>Not executed when this page was written:</b> the calls follow <code>scripts/verify-stewardship.ps1</code> and the declared roles were checked against the contract, but dry-run it first.</div>
+<div class="note warn"><b>Writes:</b> one glossary category, one glossary term and one review, all named <code>demo_*</code>, plus their audit events. They stay in the estate. <b>Checked in-process, not on the live stack:</b> <code>tests/test_demo_maker_checker_loop.py</code> sends these five steps to the real application with the same identities and asserts the statuses below, and fails if this script drifts from what it sends. It has not been run through PowerShell against the running estate, so dry-run it once first.</div>
 <pre class="tbox" style="padding:10px 14px;margin:.6rem 0;font-family:var(--mono);font-size:.84rem;overflow-x:auto">$api = "http://localhost:8000"; $org = "9b90b35f-dcf5-49d3-8f0e-2f269987ae87"
 function As($user, $roles) { @{ "X-Principal-Id" = $user; "X-Roles" = $roles; "X-Organization-Id" = $org } }
 function Call($method, $path, $who, $body) {
@@ -212,7 +212,7 @@ function Call($method, $path, $who, $body) {
 $dana = As "dana.steward"  "DataSteward,MetadataReviewer,Analyst,Viewer"
 $riya = As "riya.reviewer" "Reviewer,Viewer"
 $omar = As "omar.auditor"  "Auditor,Viewer"
-$stamp = Get-Date -Format "yyyyMMddHHmm"
+$stamp = Get-Date -Format "yyyyMMddHHmmss"
 
 # 1. The maker proposes
 $cat  = Call POST "/v1/organizations/$org/glossary-categories" $dana @{ category_key="demo_$stamp"; display_name="Demo $stamp"; description="Walkthrough demo"; parent_id=$null }
@@ -230,7 +230,7 @@ Call POST "/v1/governance/reviews/$($review.id)/decision" $riya @{ decision="APP
 
 # 5. The auditor reads what happened
 Call GET "/v1/organizations/$org/audit-events?limit=8" $omar</pre>
-<p>Expected: step 2 prints <code>dana: HTTP 409</code>, step 3 prints <code>omar: HTTP 403</code>, step 4 succeeds, and step 5 lists the events with three different principals.</p>
+<p>Expected: step 2 prints <code>dana: HTTP 409</code>, step 3 prints <code>omar: HTTP 403</code>, step 4 succeeds, and step 5 lists the newest eight events. Four are this run's, by <b>two</b> principals: <code>dana.steward</code> (the category, the term and the submission) and <code>riya.reviewer</code> (the decision). Background workers write to the same ledger (checked live: <code>fleet-scheduler</code>, <code>metadata-worker</code> and <code>auto-enqueue-drafter</code> sit among the newest rows), so a few of the eight may be theirs; find your four by the term you just created. Omar never appears, and neither do the refused 409 and 403: a refusal and a read write no audit row, so the ledger records who <em>changed</em> something. Say that aloud; it is the honest reading of the ledger.</p>
 
 <h2 id="close">Close</h2>
 <ol class="steps">
@@ -245,7 +245,7 @@ Call GET "/v1/organizations/$org/audit-events?limit=8" $omar</pre>
 <li><b>Workspace access.</b> It says the BI integration is disabled.</li>
 <li><b>Any claim of WORM, alerting, HA, DR, scale or p95.</b> The archive reports <code>NO_ARCHIVES</code>, there is no alert receiver, and none of the others has been measured.</li>
 <li><b>Workspace authorization as enforced.</b> It observes and records; it does not block yet.</li>
-<li><b>The organization kill switch.</b> Mention it; do not press it.</li>
+<li><b>The Engage button on the organization kill switch.</b> Show the state; do not press it.</li>
 </ul>
 
 <h2 id="trouble">If something breaks</h2>
@@ -255,7 +255,7 @@ Call GET "/v1/organizations/$org/audit-events?limit=8" $omar</pre>
 <tr><td>Every screen empty, or the wrong organization</td><td>This browser remembered another organization from earlier use of the same port.</td><td>Clear the site data for that port (or run <code>localStorage.removeItem('atlas.org.id')</code> in the console) and reload.</td></tr>
 <tr><td>A tab says <em>No auth mode configured</em></td><td>That UI was not started by the launcher.</td><td>Stop and restart it with <code>-Action Start</code>.</td></tr>
 <tr><td><code>-Action Check</code> reports a different identity</td><td>A stale dev server holds the port.</td><td><code>-Action Stop</code>, then Start again.</td></tr>
-<tr><td>HTTP 409 where you expected success</td><td>The same principal made and approved the change.</td><td>Use two different users.</td></tr>
+<tr><td>HTTP 409 where you expected success</td><td>Either the same principal made and approved the change, or a step already ran: a category key already exists (a re-run in the same second), or the review is already decided (step 4 run twice).</td><td>Use two different users; after a re-run start the script again so <code>$stamp</code> is new.</td></tr>
 <tr><td>A screen is slow or errors after a scan</td><td>A rescan opened a critical source-change hold.</td><td>That is the design: governed tools fail closed until the rebuild pass releases it.</td></tr>
 </tbody></table></div>
 

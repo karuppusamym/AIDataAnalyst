@@ -189,6 +189,19 @@ class WorkspaceMembershipRead(ApiModel):
     updated_at: datetime
 
 
+class WorkspaceMembershipProposalRead(WorkspaceMembershipRead):
+    """R11-AUD02: what `POST /v1/workspaces/{id}/members` answers.
+
+    A `WorkspaceMembershipRead` plus the review the add opened. Adding a member is a
+    proposal: the membership is `PENDING_APPROVAL` and grants nothing until a second
+    principal approves the `WORKSPACE_MEMBERSHIP` review named here. Its own type for the
+    reason `AccessPolicyProposalRead` is: the list route returns `WorkspaceMembershipRead`,
+    and a member read back from a list has no review to name.
+    """
+
+    governance_review_id: UUID
+
+
 class SourceBindingCreate(ApiModel):
     datasource_id: UUID
     purpose: str = Field(min_length=3, max_length=500)

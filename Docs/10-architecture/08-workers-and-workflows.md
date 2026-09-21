@@ -95,7 +95,7 @@ The scheduler decides *which source gets capacity next*. At thousands of sources
 
 | Concern | Mechanism |
 |---|---|
-| HA | Target: leader election with policy polling, so a restart or a second replica does not double-schedule (see the status note below) |
+| HA | Leader election by a PostgreSQL advisory lock: only the leader runs the loop, so a restart or a second replica does not double-schedule (see the status note below) |
 | Priority | Per-source priority class |
 | Fairness | Round-robin within priority class, so one huge source cannot starve the fleet |
 | Maintenance windows | Per-source allowed windows; work is deferred, not failed |
@@ -105,13 +105,46 @@ The scheduler decides *which source gets capacity next*. At thousands of sources
 | Cancellation | Cancel propagates to running activities and reconciles state |
 | Bulkhead | **One source's failure never affects unrelated sources** |
 
-> **Implementation status (2026-09-20).** No leader election exists: `grep -ri leader src` finds
-> nothing, and `run_scheduler` in `src/aida/workflows/scheduler.py` is a bare loop, so run one
-> `fleet-scheduler` replica. A restart does not double-schedule scans, because
-> `process_scan_policy` claims each due `ScanPolicy` under a row lock, advances its `next_run_at`
-> in the same transaction, and starts the workflow under a deterministic id. That is per-row
-> locking, not election. Several of the other passes rate-limit themselves with in-process cadence
-> trackers, so a second replica would run those twice, and nothing here has been failover-tested.
+> **Implementation status (2026-09-20).** Leader election exists (R11-AUD04). Every
+> `fleet-scheduler` replica runs `run_scheduler` in `src/aida/workflows/scheduler.py`, but only the
+> one holding a PostgreSQL session-level advisory lock calls `run_scheduler_iteration`; the mechanism
+> is `src/aida/scheduler_leadership.py`. The lock is `pg_try_advisory_lock(0x61746C6173667363)` on
+> one dedicated, long-lived connection kept outside the pool, so it is never handed to an unrelated
+> request. A standby logs `scheduler_standby` once and retries every 5 seconds; a replica that
+> acquires it logs `scheduler_became_leader`. The leader re-verifies the connection with a round trip
+> before every iteration and fails closed: a dropped, timed-out or erroring connection means no
+> leader, no new pass, `scheduler_lost_leadership`, and a return to retrying. The lock is released
+> when the loop ends by cancellation or by an exception out of a pass. More than one replica is now
+> safe to run. On a non-PostgreSQL dialect (the SQLite tests) a replica is the sole leader and logs
+> `scheduler_leadership_not_enforced`.
+>
+> What this does not give you:
+>
+> * **Failover time** is the 5-second retry plus however long PostgreSQL takes to drop the old
+>   session. When the leader's process dies the operating system closes its socket and PostgreSQL
+>   drops the session at once. When its host or network disappears without closing anything,
+>   PostgreSQL learns of it only through TCP keepalives, whose default is the operating system's
+>   (about two hours on Linux); set `tcp_keepalives_idle`, `tcp_keepalives_interval` and
+>   `tcp_keepalives_count` on the server to shorten it. The isolated leader stops itself on its next
+>   check, so this is a scheduling gap, not a double run.
+> * **It is exclusion, not fencing.** A pass already running when leadership is lost is allowed to
+>   finish, so a new leader can overlap the old one by at most one iteration. Scan admission has its
+>   own guard for that overlap: `process_scan_policy` claims each due `ScanPolicy` under a row lock,
+>   advances its `next_run_at` in the same transaction, and starts the workflow under a deterministic
+>   id.
+> * **Cadence trackers restart on failover.** Several passes rate-limit themselves with in-process
+>   trackers, which a standby never had, so a new leader runs each rate-limited pass once as soon as
+>   it takes over. The footprint gauges are published only by the leader's process.
+> * **The lock needs a stable session.** Point `AIDA_DATABASE_URL` at PostgreSQL directly or through
+>   a session-mode pooler; behind a transaction-mode pooler the lock means nothing. It costs the
+>   leader one connection on top of the pooled budget in `13-connection-pool-and-worker-budgets.md`
+>   (a standby holds one only for the moment each retry takes), which that page's per-process
+>   ceiling of 30 does not count.
+> * **Test coverage is partial.** The loop is tested against a fake lock that replicas share
+>   (`tests/test_scheduler_leadership.py`), and the provider against a fake engine. The advisory-lock
+>   SQL runs against a real PostgreSQL only in a test that skips unless
+>   `AIDA_SCHEDULER_LEADER_TEST_DATABASE_URL` is set, and **no failover drill has been run**.
+>
 > The loop is also more than fleet scheduling: `run_scheduler_iteration` runs 23 periodic passes
 > (cancellation reconciliation, priority rebalancing, owner routing, rule packs, graph
 > reconciliation, roll-up and vector-index rebuilds, quality freshness, change signals, expiry
@@ -171,7 +204,7 @@ Models are expensive, slow, and non-deterministic. The worker design minimizes c
 |---|---|---|---|
 | `atlas-worker` | Discovery, profiling, classification, relationship, lineage, quality, semantic | Temporal task-queue depth | Task retried on another worker |
 | `atlas-projector` | Projection | Kafka consumer lag | Rebalance; offsets uncommitted |
-| `atlas-scheduler` | Fleet scheduling, policy polling, periodic maintenance passes | Singleton (target: leader election) | Target: standby takes over |
+| `atlas-scheduler` | Fleet scheduling, policy polling, periodic maintenance passes | Singleton by leader election; extra replicas stand by rather than scale | Standby takes over once PostgreSQL releases the old leader's lock; never drilled |
 | `atlas-batch` (optional) | Batch ingestion (isolated when volume warrants) | Batch queue depth | Chunk-level resume |
 
 The design intent is separate task queues per worker class, so a profiling backlog cannot starve projection and a slow source cannot delay quality evaluation.

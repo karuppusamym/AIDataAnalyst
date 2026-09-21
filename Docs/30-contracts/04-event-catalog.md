@@ -379,6 +379,8 @@ error budget could only ever answer NO_DATA.
 |---|---|---|
 | `workspace.created.v1` | Workspace created under an organization | workspace_id, slug |
 | `source_binding.requested.v1` | Datasource binding requested for a workspace, pending approval | binding_id, workspace_id, datasource_id |
+| `access_policy.activated.v1` / `.rejected.v1` | Governed decision on one proposed access policy (R11-AUD02): approval activates the draft, rejection marks it `REJECTED`. Proposing it emits `governance.review_requested.v1` | access_policy_id, code, version, effect, review_id |
+| `workspace_membership.approved.v1` / `.rejected.v1` | Governed decision on one proposed workspace member (R11-AUD02): approval makes the membership `ACTIVE`, rejection marks it `REJECTED`. Proposing it emits `governance.review_requested.v1` | membership_id, workspace_id, role, principal_kind, review_id |
 
 ### Studio — topic `atlas.governance.v1`
 

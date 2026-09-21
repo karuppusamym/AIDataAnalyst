@@ -4,9 +4,9 @@ import type {
   DataSourceRead,
   ProjectRead,
   SourceBindingRead,
-  WorkspaceMembershipRead,
   WorkspaceRead,
 } from "../lib/types";
+import type { WorkspaceMembershipRead } from "../lib/ui-types";
 import {
   listOrgDatasources,
   fetchOrgProjects,
@@ -138,8 +138,9 @@ export function WorkspaceAccessScreen() {
         <div>
           <h1 className="wsaccess__h1">Workspace access</h1>
           <p className="wsaccess__lede">
-            Manage who belongs to a workspace, decide pending source-binding requests, and connect BI
-            tools so Tableau/Power BI/Looker lineage joins the catalog.
+            Propose who belongs to a workspace (a second person approves each proposal on the Review
+            queue), decide pending source-binding requests, and connect BI tools so
+            Tableau/Power BI/Looker lineage joins the catalog.
           </p>
         </div>
       </header>

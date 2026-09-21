@@ -13,7 +13,7 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get, postJson } from "./transport";
+import { demoOr, get, postJson, requestBlob, USE_FIXTURES } from "./transport";
 import type {
   CompliancePackRead,
   GeneratePackRequest,
@@ -306,6 +306,101 @@ export async function fetchAuditEvents(
       );
     },
   );
+}
+
+/** What one audit export delivered, read from the response headers the server
+ *  documents in `audit_export_api.py`. Every field the server may not have been
+ *  heard on is nullable rather than defaulted: an absent header is "unknown",
+ *  and a default of `false` for `truncated` would be exactly the lie the
+ *  server's header exists to prevent. */
+export interface AuditExportResult {
+  /** The name the server gave the file (`Content-Disposition`). */
+  filename: string;
+  /** Events in the file (`X-Export-Row-Count`). */
+  rowCount: number | null;
+  /** True when the server stopped at its row cap, so the file is INCOMPLETE
+   *  (`X-Export-Truncated`). `null` when the header could not be read. */
+  truncated: boolean | null;
+  /** The cap that applies (`X-Export-Row-Limit`). */
+  rowLimit: number | null;
+  /** SHA-256 of the file's bytes as the server computed it
+   *  (`X-Artifact-SHA256`) -- what a recipient checks the file against. */
+  sha256: string | null;
+}
+
+/** The export takes the ledger's own five filters and nothing else: it has no
+ *  `limit`/`offset`, because it is one file and not a page. */
+export type AuditExportQuery = Omit<AuditEventQuery, "limit" | "offset">;
+
+const headerNumber = (value: string | null): number | null => {
+  if (value === null || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/** `GET /v1/organizations/{organization_id}/audit-events/export.jsonl`
+ *  (`export_audit_events`, `audit_export_api.py`) -- every event matching the
+ *  filters, as JSON Lines, saved to disk.
+ *
+ *  Fetched rather than linked: a bare `<a download href>` cannot carry this
+ *  app's identity headers or bearer token, so the bytes come through
+ *  `requestBlob` (the shared transport) and are saved through an object URL,
+ *  the idiom the other downloads here use. A refusal is thrown as the
+ *  `ApiError` it arrived as and NOTHING is saved -- including the 403 the
+ *  server's EXPORT policy gate answers with a bare reason code, because a
+ *  deployment may let a role browse the ledger and not extract it.
+ *
+ *  The export is itself an audited act server-side (`AUDIT_EVENTS_EXPORTED`,
+ *  recorded before the bytes leave), so calling this leaves a trace in the
+ *  ledger it exports; it is a user's deliberate action and is never issued on
+ *  load. Under fixtures there is no server to compose it, so this says so
+ *  instead of saving a file that would look like a real export. */
+export async function downloadAuditEventsExport(
+  query: AuditExportQuery,
+  signal?: AbortSignal,
+): Promise<AuditExportResult> {
+  if (USE_FIXTURES) {
+    throw new Error(
+      "The audit export is composed by the server. Run against a live API (VITE_USE_FIXTURES=0) to export.",
+    );
+  }
+  if (query.since) assertTimezoneAware("since", query.since);
+  if (query.until) assertTimezoneAware("until", query.until);
+
+  const params = new URLSearchParams();
+  if (query.action) params.set("action", query.action);
+  if (query.resourceType) params.set("resource_type", query.resourceType);
+  if (query.correlationId) params.set("correlation_id", query.correlationId);
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  const suffix = params.toString();
+
+  const { blob, response } = await requestBlob(
+    `/v1/organizations/${encodeURIComponent(query.organizationId)}/audit-events/export.jsonl${suffix ? `?${suffix}` : ""}`,
+    { signal },
+  );
+
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename =
+    /filename="?([^";]+)"?/i.exec(disposition)?.[1] || `audit-events-${query.organizationId}.jsonl`;
+  const truncatedHeader = response.headers.get("X-Export-Truncated");
+  const result: AuditExportResult = {
+    filename,
+    rowCount: headerNumber(response.headers.get("X-Export-Row-Count")),
+    truncated: truncatedHeader === null ? null : truncatedHeader.trim().toLowerCase() === "true",
+    rowLimit: headerNumber(response.headers.get("X-Export-Row-Limit")),
+    sha256: response.headers.get("X-Artifact-SHA256"),
+  };
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return result;
 }
 
 /* ---------------------------------------------------------------------------

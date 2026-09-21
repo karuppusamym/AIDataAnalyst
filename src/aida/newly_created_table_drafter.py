@@ -34,12 +34,47 @@ required, only a DB session and the worker principal.
   HTTP path); this is a defer, not a failure, and a later completion
   event picks the table back up.
 
-**Reachability.** `run_newly_created_table_drafter_consumer()` is
+**Reachability.** `supervise_newly_created_table_drafter()` is
 imported and started as a background asyncio task from
 `aida.workflows.worker.run_worker` (the `aida.workflows.worker`
 process, already an `ENTRY_POINTS` row in
 `tests/test_reachability_gate.py`) so this module is reachable through
 the existing worker entry point rather than becoming a new deployable.
+It runs `run_newly_created_table_drafter_consumer()` -- one
+connection's worth of work -- and runs it again when it fails.
+
+**Failure handling (R11-AUD03).** The consumer needs a broker and the
+default ten-service stack has none. Started bare, `consumer.start()`
+raised inside a task nobody awaited until the worker shut down: the
+task ended, nothing was logged, and automatic drafting for newly
+created tables quietly never happened -- and when Redpanda came up
+later, nothing noticed. The supervisor is the fix. It re-runs the
+consumer whenever the consumer ends without having been asked to stop,
+waiting 2 s and doubling to a 60 s cap between attempts, and it logs
+every failed attempt as `newly_created_table_drafter_unavailable`
+(`attempt`, `next_retry_seconds`, `bootstrap_servers`, `error_type`):
+at ERROR for the first failure of an incident and every tenth attempt
+after it, at WARNING in between, so a broker that stays away is loud
+without becoming an error line per retry. A consumer that had been up
+for a minute before it failed starts a new incident rather than
+continuing a crash loop, and the backoff starts over. Nothing the
+consumer raises can end the supervisor, so nothing it raises can take
+the Temporal worker down with it; cancellation and the consumer's own
+stopping state (the SIGINT / SIGTERM flag) are the only ways out.
+
+**Per-message semantics are unchanged, on purpose.** An exception
+while handling a message leaves the `async for` before
+`consumer.commit()`, so the offset stays where it was and the group
+redelivers the message once the consumer is started again:
+at-least-once, which `handle_newly_created_table` is written for
+(idempotent; `enqueue_semantics_in_batches` resumes). What the
+supervisor adds is that the restart now happens -- before it, the
+exception ended the task and nothing ever redelivered. A message that
+fails every time therefore holds its partition in a loud restart loop
+at the capped backoff, where it used to stop the consumer silently for
+good. Skipping or dead-lettering such a message means deciding which
+failures are terminal and where the message goes, and it changes the
+delivery guarantee, so it is a change of its own and not made here.
 
 **Never do.** Never call `record_outbox()` from inside the handler
 itself for the same event id -- that would put a downstream projector
@@ -54,6 +89,8 @@ import asyncio
 import contextlib
 import json
 import signal
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -120,7 +157,19 @@ REASON_STEWARD_OBSERVES_ONLY = "steward_agent_observes_only"
 
 @dataclass(slots=True)
 class DrafterConsumerState:
+    """What the consumer and whoever supervises it share.
+
+    `stopping` is flipped by the SIGINT / SIGTERM handler and read by both: the
+    consumer stops after the message in hand, and the supervisor does not start
+    another attempt. `started_at` is `time.monotonic()` at the moment the
+    consumer's `start()` last succeeded; the supervisor clears it before each
+    attempt and reads it afterwards, so "was it up for a while before it failed"
+    is measured from a live connection and not from the attempt beginning (a
+    `start()` that hangs for its own timeout must not count as uptime).
+    """
+
     stopping: bool = False
+    started_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,14 +740,35 @@ def _decode_event(raw: bytes) -> dict[str, Any]:
     return decoded
 
 
-async def run_newly_created_table_drafter_consumer() -> None:
+def _stop_on_signals(state: DrafterConsumerState) -> None:
+    """SIGINT / SIGTERM set `state.stopping` and nothing else.
+
+    Whoever creates the state owns this, exactly once: the supervisor, or a
+    caller that runs the consumer bare. A supervised consumer is handed the
+    supervisor's state and must not register the handlers again on every retry.
+    """
+    loop = asyncio.get_running_loop()
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(signal_name, setattr, state, "stopping", True)
+
+
+async def run_newly_created_table_drafter_consumer(
+    state: DrafterConsumerState | None = None,
+) -> None:
     """Consume `catalog.table.newly_created.v1` from the shared
     `aida.platform.events.v1` Kafka topic and dispatch each event to
-    `handle_newly_created_table`. Import path is what
-    `aida.workflows.worker.run_worker` starts as a background task
+    `handle_newly_created_table`.
+
+    One connection's worth of work, and it never retries: it returns when
+    `state.stopping` is set and raises when the connection or the handling of a
+    message fails. Retrying is `supervise_newly_created_table_drafter`'s job --
+    that is what `aida.workflows.worker.run_worker` starts as a background task
     when `settings.auto_enqueue_on_ingest` is True, keeping this file
     reachable through the existing worker entry point rather than
-    becoming a new deployable.
+    becoming a new deployable -- and it passes the `state` it shares with this
+    coroutine. Called with no state, this creates one and installs the signal
+    handlers, as it always did.
 
     Deliberately imports `aiokafka` locally (rather than at module
     top) so tests that only exercise `handle_newly_created_table`
@@ -708,11 +778,9 @@ async def run_newly_created_table_drafter_consumer() -> None:
     from aiokafka import AIOKafkaConsumer  # noqa: PLC0415 -- see docstring
 
     settings = get_settings()
-    state = DrafterConsumerState()
-    loop = asyncio.get_running_loop()
-    for signal_name in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(signal_name, setattr, state, "stopping", True)
+    if state is None:
+        state = DrafterConsumerState()
+        _stop_on_signals(state)
     consumer = AIOKafkaConsumer(
         "aida.platform.events.v1",
         bootstrap_servers=settings.kafka_bootstrap_servers,
@@ -721,9 +789,20 @@ async def run_newly_created_table_drafter_consumer() -> None:
         enable_auto_commit=False,
         auto_offset_reset="earliest",
     )
-    await consumer.start()
-    logger.info("newly_created_table_drafter_started")
+    started = False
     try:
+        # Inside the `try` so that a `start()` that fails still reaches the
+        # `finally`: it can die after the client has opened connections and its
+        # metadata-refresh task, and a supervised retry every minute must not
+        # leave those behind for each attempt (aiokafka's `__del__` warns
+        # "Unclosed AIOKafkaConsumer" about exactly that).
+        await consumer.start()
+        started = True
+        state.started_at = time.monotonic()
+        logger.info(
+            "newly_created_table_drafter_started",
+            bootstrap_servers=settings.kafka_bootstrap_servers,
+        )
         async for message in consumer:
             envelope = _decode_event(message.value)
             if envelope.get("event_type") not in (
@@ -748,9 +827,118 @@ async def run_newly_created_table_drafter_consumer() -> None:
             if state.stopping:
                 break
     finally:
-        await consumer.stop()
-        logger.info("newly_created_table_drafter_stopped")
+        try:
+            await consumer.stop()
+        except Exception as exc:
+            # Cleanup must not replace the error that brought us here: the
+            # supervisor reports that one, and a `stop()` that cannot reach a
+            # broker that is already gone is the expected companion of it.
+            logger.warning("newly_created_table_drafter_stop_failed", error_type=type(exc).__name__)
+        if started:
+            logger.info("newly_created_table_drafter_stopped")
+
+
+#: Wait after the first failed attempt; doubles per consecutive failure up to
+#: the cap. Two seconds is long enough not to hammer a broker that is starting
+#: and short enough that a Redpanda which comes up a moment after the worker is
+#: picked up almost at once; a minute is the longest a healthy stack is left
+#: without drafting after the broker returns.
+DRAFTER_RETRY_INITIAL_SECONDS = 2.0
+DRAFTER_RETRY_MAX_SECONDS = 60.0
+#: A consumer that stayed up this long before it failed is a new incident, not
+#: a continuing crash loop: the backoff starts over and the failure is logged
+#: as a first one. It equals the cap on purpose -- staying up as long as the
+#: longest wait the supervisor would ever impose is what "healthy" has to mean.
+DRAFTER_HEALTHY_AFTER_SECONDS = 60.0
+#: `newly_created_table_drafter_unavailable` is an ERROR for the first failed
+#: attempt of an incident and for every Nth after it, a WARNING otherwise: with
+#: the cap above, a broker that stays away is an error about every ten minutes
+#: and a warning each minute in between.
+DRAFTER_ERROR_EVERY_N_ATTEMPTS = 10
+
+DrafterRunner = Callable[[DrafterConsumerState], Awaitable[None]]
+DrafterSleep = Callable[[float], Awaitable[None]]
+
+
+def drafter_retry_delay_seconds(attempt: int) -> float:
+    """Seconds to wait after the `attempt`-th consecutive failure (1 is the first)."""
+    # The exponent is clamped so a very long outage cannot overflow the float
+    # long after the delay has stopped growing.
+    exponent = min(max(attempt, 1) - 1, 16)
+    return min(DRAFTER_RETRY_INITIAL_SECONDS * 2.0**exponent, DRAFTER_RETRY_MAX_SECONDS)
+
+
+async def supervise_newly_created_table_drafter(
+    run_consumer: DrafterRunner = run_newly_created_table_drafter_consumer,
+    *,
+    sleep: DrafterSleep = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    state: DrafterConsumerState | None = None,
+) -> None:
+    """Keep the newly-created-table consumer running, and say so when it is not.
+
+    The worker starts this as a background task and nobody awaits that task until
+    shutdown, so it is written not to end: a failure of the consumer -- the broker
+    is absent or drops, a message cannot be handled -- is logged as
+    `newly_created_table_drafter_unavailable` and the consumer is started again
+    after a capped exponential backoff, for as long as the process lives. The
+    consumer's success is logged by the consumer itself
+    (`newly_created_table_drafter_started`).
+
+    It ends only by cancellation (the worker's shutdown) or when the shared
+    `state.stopping` is set. A consumer that returns without being asked to stop
+    is treated as a failure, and waited out like one, so that it cannot spin.
+
+    `run_consumer`, `sleep` and `monotonic` are parameters so the loop can be
+    driven by a fake consumer and a fake clock; the defaults are the real ones.
+    When it creates the state it also installs the SIGINT / SIGTERM handlers that
+    set it, as the bare consumer used to.
+    """
+    bootstrap_servers = get_settings().kafka_bootstrap_servers
+    if state is None:
+        state = DrafterConsumerState()
+        _stop_on_signals(state)
+    failed_attempts = 0
+    while not state.stopping:
+        state.started_at = None
+        failure: Exception | None = None
+        try:
+            await run_consumer(state)
+        except Exception as exc:
+            # `Exception` and not `BaseException`: cancellation and interpreter
+            # exit must pass through. Everything else is what this loop exists
+            # to survive -- the consumer runs in a task no one is awaiting.
+            failure = exc
+        error_type = type(failure).__name__ if failure is not None else None
+        if state.stopping:
+            if failure is not None:
+                logger.warning(
+                    "newly_created_table_drafter_failed_while_stopping", error_type=error_type
+                )
+            return
+        if (
+            state.started_at is not None
+            and monotonic() - state.started_at >= DRAFTER_HEALTHY_AFTER_SECONDS
+        ):
+            failed_attempts = 0
+        failed_attempts += 1
+        delay = drafter_retry_delay_seconds(failed_attempts)
+        fields: dict[str, Any] = {
+            "attempt": failed_attempts,
+            "next_retry_seconds": delay,
+            "bootstrap_servers": bootstrap_servers,
+            # None: the consumer returned without an error and without being told to stop.
+            "error_type": error_type,
+        }
+        if failed_attempts == 1 or failed_attempts % DRAFTER_ERROR_EVERY_N_ATTEMPTS == 0:
+            # `exc_info` carries the traceback where the log pipeline keeps it
+            # (the platform's redaction processor drops the `exception` field, so
+            # `error_type` above is what is always readable).
+            logger.error("newly_created_table_drafter_unavailable", exc_info=failure, **fields)
+        else:
+            logger.warning("newly_created_table_drafter_unavailable", **fields)
+        await sleep(delay)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_newly_created_table_drafter_consumer())
+    asyncio.run(supervise_newly_created_table_drafter())

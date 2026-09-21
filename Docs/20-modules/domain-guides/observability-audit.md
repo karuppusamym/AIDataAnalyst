@@ -9,8 +9,8 @@
 
 ## What it owns
 
-Evidence, and the machinery that proves the evidence left the building. Eleven
-tables in four families:
+Evidence, and the machinery that proves the evidence left the building. Nine
+tables in four families (as of 2026-09-20; `models.py` is the list):
 
 - **The ledger** — `audit_event`, and `outbox_event`, the transactional outbox
   every domain event is written into alongside the state change that caused it.
@@ -46,14 +46,16 @@ tables in four families:
 
 ## Entry points
 
-- **HTTP** — 2 routes, the smallest surface of the five contexts, and
+- **HTTP** — 2 routes (as of 2026-09-20; count the `@router.` decorators in
+  `router.py`), the smallest surface of the five contexts that own routes, and
   deliberately so: the archive status and cost showback. Reading the ledger
   itself is not an HTTP route here. The three SLO routes
   (`POST`/`GET /v1/observability/slo` and the budget read) were retired on
   2026-09-12 — see R11-D10 above.
 - **Mounted through a shim.** `aida.main` imports this router as
-  `aida.observability_api`; two tests import handler functions from that path
-  directly. Recorded in
+  `aida.observability_api`; three tests (`tests/test_cost_showback.py`,
+  `tests/test_worm_archive_lifecycle.py` and `tests/test_worm_archive_wiring.py`,
+  as of 2026-09-20) import handler functions from that path directly. Recorded in
   [`../../40-engineering/09-compatibility-shim-register.md`](../../40-engineering/09-compatibility-shim-register.md).
 - **In-process, and this is the main one.** `aida.events` writes audit and outbox
   rows; nearly every mutating route in the system reaches this context that way
@@ -79,10 +81,10 @@ tables in four families:
 
 `models.py` is substantial and real; `schemas.py` and `router.py` are small
 because most of this context is written to in-process rather than called over
-HTTP. `service.py`, `repository.py`, `contracts.py`, `events.py` and `workers/`
-are empty scaffolds — note the irony that the module's own `events.py` is a
-scaffold while the platform's real event-writing helper lives at `aida.events`
-outside it. That is the seam to close first if this context is extracted further.
+HTTP. The empty `service.py`, `repository.py`, `contracts.py`, `events.py` and
+`workers/` scaffolds were removed (R11-X4) — note that the platform's real
+event-writing helper lives at `aida.events`, outside the module, and that nothing
+further moves into `src/atlas/modules/` (tracker R11-S6, cancelled 2026-09-13).
 
 The `observability_audit module privacy` import-linter contract protects the
 internals and names `aida.observability_api` as a permitted importer.

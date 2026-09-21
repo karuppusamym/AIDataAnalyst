@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AccessPolicyCreate,
-  AccessPolicyRead,
   AuthorizationSimulationRequest,
   SimulatedDecision,
   SimulatedSubject,
   WorkspaceRead,
 } from "../lib/types";
+import type { AccessPolicyRead } from "../lib/ui-types";
 import { ApiError, createAccessPolicy, fetchAccessPolicies, fetchOrgWorkspaces, simulateAuthorization } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
@@ -32,10 +32,14 @@ import "./AccessPolicyScreen.css";
                      `condition` stay raw JSON textareas, same as legacy --
                      this is free-form policy data, not something worth a
                      structured builder for. Parsed client-side with a clear
-                     per-field error on invalid JSON. `status` defaults to
-                     `DRAFT` unless the operator explicitly checks "Activate
-                     immediately", so nobody activates a policy without
-                     meaning to.
+                     per-field error on invalid JSON. A create is a *proposal*
+                     (R11-AUD02): the policy is always saved `DRAFT`, which
+                     enforces nothing, and goes to the Review queue -- it
+                     becomes `ACTIVE` only when someone other than the
+                     proposer approves it there. The old "Activate
+                     immediately" toggle is gone because the server now
+                     refuses `status: "ACTIVE"` with a 422; offering it would
+                     have been a control that can only fail.
      3. simulation   "who could see this?" against a picked workspace +
                      hypothetical `subjects` (also raw JSON, same reasoning);
                      renders the returned `decisions` as a small table.
@@ -63,7 +67,8 @@ const ACTIONS: AuthorizationSimulationRequest["action"][] = [
 const effectTone = (effect: string): Tone =>
   effect === "ALLOW" ? "ok" : effect === "DENY" ? "bad" : effect === "MASK" ? "warn" : "info";
 
-const statusTone = (status: string): Tone => (status === "ACTIVE" ? "ok" : "mute");
+const statusTone = (status: string): Tone =>
+  status === "ACTIVE" ? "ok" : status === "REJECTED" ? "bad" : "mute";
 
 const splitList = (value: string): string[] =>
   value.split(",").map((v) => v.trim()).filter(Boolean);
@@ -120,7 +125,6 @@ interface PolicyFormState {
   resourceMatch: string;
   transform: string;
   condition: string;
-  activateNow: boolean;
 }
 
 const INITIAL_POLICY_FORM: PolicyFormState = {
@@ -134,7 +138,6 @@ const INITIAL_POLICY_FORM: PolicyFormState = {
   resourceMatch: "{}",
   transform: "{}",
   condition: "{}",
-  activateNow: false,
 };
 
 function CreatePolicyPanel({
@@ -160,7 +163,7 @@ function CreatePolicyPanel({
             <h2 className="apform__h2">New policy</h2>
             <p className="apform__lede">Free-form subject/resource matches and transforms -- raw JSON, parsed here.</p>
           </div>
-          <Pill tone={form.activateNow ? "ok" : "mute"}>{form.activateNow ? "ACTIVE" : "DRAFT"}</Pill>
+          <Pill tone="mute">DRAFT</Pill>
         </header>
 
         <div className="apform__grid">
@@ -210,10 +213,10 @@ function CreatePolicyPanel({
           </Field>
         </div>
 
-        <label className="apform__toggle">
-          <input type="checkbox" checked={form.activateNow} onChange={(e) => setField("activateNow", e.target.checked)} />
-          Activate immediately (otherwise saved as DRAFT and has no effect until activated)
-        </label>
+        <p className="apform__lede">
+          A new policy is saved as DRAFT and enforces nothing. It goes to the Review queue, and someone other than
+          you has to approve it before it takes effect.
+        </p>
 
         <Button type="submit" variant="primary" disabled={creating}>
           {creating ? "Creating…" : "Create policy"}
@@ -537,12 +540,17 @@ export function AccessPolicyScreen() {
         action_match: splitList(form.actionMatch),
         transform,
         condition,
-        status: form.activateNow ? "ACTIVE" : "DRAFT",
+        status: "DRAFT",
       };
       setCreating(true);
       try {
         await createAccessPolicy(ORG, body);
-        setStatusMsg({ text: `Policy "${form.code}" created.`, kind: "success" });
+        setStatusMsg({
+          text:
+            `Policy "${form.code}" saved as a draft. It is on the Review queue now -- someone other than you ` +
+            "has to approve it before it is enforced.",
+          kind: "success",
+        });
         setForm(INITIAL_POLICY_FORM);
         await load();
       } catch (err) {

@@ -795,8 +795,11 @@ def test_every_object_type_the_queue_classifies_has_a_registered_adapter() -> No
     """
     # Classified for ranking/tiering but decided by their own endpoints, not
     # by the unified governance queue.
+    #
+    # `ACCESS_POLICY` and `WORKSPACE_MEMBERSHIP` were on this list until R11-AUD02: they were
+    # classified T3 and decided nowhere, which is what "decided elsewhere" hid. Both are
+    # registered now (`access_change_review`), so they are checked like every other type.
     decided_elsewhere = {
-        "ACCESS_POLICY",
         "AGENT_CONTRACT",
         "BUSINESS_ANNOTATION",
         "GLOSSARY_TERM",
@@ -804,7 +807,6 @@ def test_every_object_type_the_queue_classifies_has_a_registered_adapter() -> No
         "SEMANTIC_METRIC",
         "SOURCE_BINDING",
         "TOOL_CERTIFICATION_RUN",
-        "WORKSPACE_MEMBERSHIP",
     }
     missing = governance_decision_service.unregistered_object_types(
         known_object_types() - decided_elsewhere

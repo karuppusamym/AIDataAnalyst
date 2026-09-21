@@ -106,10 +106,14 @@ async def _served_models(provider_type: str, settings: Settings) -> set[str] | N
             key = settings.gemini_api_key
             if key is None:
                 return None
+            # The key goes in a header, never in the URL: httpx logs "HTTP Request: GET <url>"
+            # at INFO, so `?key=...` was written to the scheduler's log on every pass (found
+            # 2026-09-21, R11-AUD14). The gateway and the embedding provider already send
+            # `x-goog-api-key`.
             async with httpx.AsyncClient(timeout=settings.model_timeout_seconds) as client:
                 response = await client.get(
                     f"{settings.gemini_base_url}/models",
-                    params={"key": key.get_secret_value()},
+                    headers={"x-goog-api-key": key.get_secret_value()},
                 )
             if response.status_code != 200:
                 return None

@@ -1,13 +1,23 @@
+import asyncio
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from aida.config import Settings
-from aida.oidc import OidcTokenExpired, OidcVerificationError, OidcVerifier, context_from_claims
+from aida.oidc import (
+    JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS,
+    OidcTokenExpired,
+    OidcVerificationError,
+    OidcVerifier,
+    context_from_claims,
+)
 
 
 def oidc_fixture() -> tuple[Settings, rsa.RSAPrivateKey]:
@@ -260,3 +270,349 @@ async def test_a_rejected_token_is_not_reported_as_expired() -> None:
         await OidcVerifier(settings).verify(token)
 
     assert not isinstance(excinfo.value, OidcTokenExpired)
+
+
+# --------------------------------------------------------------------------- #
+# R11-AUD09: an unknown key id must not turn into a fetch from the identity provider
+# --------------------------------------------------------------------------- #
+#
+# `verify` reloaded the issuer's key set for every token whose `kid` the cached set did not
+# hold, and nothing limited how often. A `kid` is read from the header before the signature is
+# checked, so anyone who could send a request -- no key, no account -- could make the API call
+# the identity provider once per request. While the provider was down, each of those requests
+# retried the fetch as well.
+#
+# The provider here is a counting fake behind `httpx.MockTransport`, so the tests count real
+# fetches through the real `httpx` call, and time is `aida.oidc.monotonic` replaced by a clock
+# the test moves. Nothing sleeps.
+
+_ISSUER = "https://identity.bank.example"
+_JWKS_URL = "https://identity.bank.example/.well-known/jwks.json"
+COOLDOWN = JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS
+
+
+def _public_jwk(private_key: rsa.RSAPrivateKey, kid: str) -> dict[str, Any]:
+    jwk: dict[str, Any] = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
+    jwk.update({"kid": kid, "use": "sig", "alg": "RS256"})
+    return jwk
+
+
+class _Clock:
+    """Stands in for `aida.oidc.monotonic`: a test moves time instead of waiting for it."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _IdentityProvider:
+    """The JWKS endpoint. Counts how often it is asked; can be down, slow, or publish new keys."""
+
+    def __init__(self, keys: list[dict[str, Any]], clock: _Clock) -> None:
+        self.keys = keys
+        self.clock = clock
+        self.fetches = 0
+        self.down = False
+        self.fetch_takes = 0.0
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.fetches += 1
+        self.clock.advance(self.fetch_takes)
+        # A real network read yields to the event loop. Yielding here lets a caller that arrives
+        # while this fetch is still in flight run now, and meet the lock.
+        await asyncio.sleep(0)
+        if self.down:
+            raise httpx.ConnectError("identity provider is down", request=request)
+        return httpx.Response(200, json={"keys": self.keys})
+
+
+@dataclass
+class _Rig:
+    settings: Settings
+    verifier: OidcVerifier
+    idp: _IdentityProvider
+    clock: _Clock
+    current_key: rsa.RSAPrivateKey
+    rotated_key: rsa.RSAPrivateKey
+
+    def token(self, kid: str, key: rsa.RSAPrivateKey | None = None) -> str:
+        """A well-formed token. Unless `key` is given it is signed with the provider's current
+        key -- which an unknown `kid` never gets far enough to check."""
+        now = datetime.now(UTC)
+        return jwt.encode(
+            {
+                "sub": "bank-user-123",
+                "iss": _ISSUER,
+                "aud": "atlas",
+                "iat": now,
+                "exp": now + timedelta(minutes=5),
+            },
+            key or self.current_key,
+            algorithm="RS256",
+            headers={"kid": kid},
+        )
+
+    def rotate(self) -> None:
+        """The provider starts signing with a second key and publishes it beside the first."""
+        self.idp.keys = [
+            _public_jwk(self.current_key, "bank-key-1"),
+            _public_jwk(self.rotated_key, "bank-key-2"),
+        ]
+
+    async def refused_as_unknown(self, token: str) -> None:
+        with pytest.raises(OidcVerificationError, match="signing key is unknown"):
+            await self.verifier.verify(token)
+
+
+@pytest.fixture(scope="module")
+def signing_keys() -> tuple[rsa.RSAPrivateKey, rsa.RSAPrivateKey]:
+    """Two issuer keys, made once: RSA key generation dominates these tests' run time."""
+    return (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048),
+        rsa.generate_private_key(public_exponent=65537, key_size=2048),
+    )
+
+
+@pytest.fixture
+def rig(
+    monkeypatch: pytest.MonkeyPatch,
+    signing_keys: tuple[rsa.RSAPrivateKey, rsa.RSAPrivateKey],
+) -> _Rig:
+    current_key, rotated_key = signing_keys
+    clock = _Clock()
+    idp = _IdentityProvider([_public_jwk(current_key, "bank-key-1")], clock)
+    real_client = httpx.AsyncClient
+
+    def client_with_fake_provider(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(idp.handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("aida.oidc.httpx.AsyncClient", client_with_fake_provider)
+    monkeypatch.setattr("aida.oidc.monotonic", clock)
+    settings = Settings(
+        identity_provider="oidc",
+        oidc_issuer=_ISSUER,
+        oidc_audience="atlas",
+        oidc_jwks_url=_JWKS_URL,
+        oidc_role_mappings={"BANK_ANALYST": ["Analyst"]},
+    )
+    return _Rig(settings, OidcVerifier(settings), idp, clock, current_key, rotated_key)
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_unknown_key_ids_makes_one_fetch(rig: _Rig) -> None:
+    """The finding itself. Twenty tokens, each naming a key id the provider never issued: before
+    the limit, every one of them was a fetch from the identity provider."""
+    for index in range(20):
+        await rig.refused_as_unknown(rig.token(f"attacker-{index}"))
+
+    # One fetch: the cold load the first token needed anyway. None of the twenty forced a
+    # second, because the key set had been fetched a moment earlier and is as fresh as another
+    # fetch could make it.
+    assert rig.idp.fetches == 1
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_burst_makes_one_fetch_not_one_each(rig: _Rig) -> None:
+    """Sequential callers are the easy case. Here every caller is inside `verify` at once, the
+    window has elapsed so the burst IS entitled to a refetch, and the first fetch is still in
+    flight when the rest arrive. The lock lines them up; each must then find the finished
+    fetch's result waiting rather than start its own."""
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.clock.advance(COOLDOWN + 1)
+
+    results = await asyncio.gather(
+        *(rig.verifier.verify(rig.token(f"attacker-{index}")) for index in range(20)),
+        return_exceptions=True,
+    )
+
+    assert len(results) == 20
+    assert all(
+        isinstance(result, OidcVerificationError) and "signing key is unknown" in str(result)
+        for result in results
+    )
+    # The warm-up, plus one for the whole burst.
+    assert rig.idp.fetches == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_queued_behind_a_slow_fetch_does_not_start_another(rig: _Rig) -> None:
+    """The case that fixes WHEN the window is measured from. The second caller passed the
+    "has the cooldown elapsed?" check long before the first fetch finished -- that fetch took
+    twice the cooldown -- so only the fetch that just ended says another would be pointless. A
+    window measured from the START of the last fetch would let it fetch again immediately."""
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.clock.advance(COOLDOWN + 1)
+    rig.idp.fetch_takes = 2 * COOLDOWN
+
+    results = await asyncio.gather(
+        rig.verifier.verify(rig.token("attacker-0")),
+        rig.verifier.verify(rig.token("attacker-1")),
+        return_exceptions=True,
+    )
+
+    assert all(
+        isinstance(result, OidcVerificationError) and "signing key is unknown" in str(result)
+        for result in results
+    )
+    assert rig.idp.fetches == 2
+
+
+@pytest.mark.asyncio
+async def test_the_next_refetch_is_allowed_only_once_the_cooldown_has_elapsed(rig: _Rig) -> None:
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    assert rig.idp.fetches == 1
+
+    # One second short of the window: answered from the key set already held.
+    rig.clock.advance(COOLDOWN - 1)
+    await rig.refused_as_unknown(rig.token("attacker-a"))
+    assert rig.idp.fetches == 1
+
+    # The window has elapsed: exactly one refetch. (The key is still unknown afterwards -- the
+    # provider never issued it -- so the token is refused as before.)
+    rig.clock.advance(1)
+    await rig.refused_as_unknown(rig.token("attacker-b"))
+    assert rig.idp.fetches == 2
+
+    # That fetch restarted the window, so what follows is limited again ...
+    rig.clock.advance(1)
+    await rig.refused_as_unknown(rig.token("attacker-c"))
+    assert rig.idp.fetches == 2
+
+    # ... until it elapses in turn.
+    rig.clock.advance(COOLDOWN)
+    await rig.refused_as_unknown(rig.token("attacker-d"))
+    assert rig.idp.fetches == 3
+
+
+@pytest.mark.asyncio
+async def test_a_legitimate_rotation_is_refused_inside_the_cooldown_and_accepted_after_it(
+    rig: _Rig,
+) -> None:
+    """The price of the limit, pinned so it cannot grow unnoticed: a token signed with a key
+    the provider has just published is refused until the window since the last fetch has
+    elapsed, and the first token after that pays for the fetch and is accepted."""
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.rotate()
+    new_key_token = rig.token("bank-key-2", rig.rotated_key)
+
+    rig.clock.advance(5)
+    await rig.refused_as_unknown(new_key_token)
+    assert rig.idp.fetches == 1
+
+    rig.clock.advance(COOLDOWN - 5)
+    claims = await rig.verifier.verify(new_key_token)
+    assert claims["sub"] == "bank-user-123"
+    assert rig.idp.fetches == 2
+
+    # Picked up for good: both keys verify now, and neither costs another fetch.
+    await rig.verifier.verify(rig.token("bank-key-2", rig.rotated_key))
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    assert rig.idp.fetches == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refetch_counts_as_an_attempt_and_keeps_the_cached_keys(
+    rig: _Rig,
+) -> None:
+    """A provider outage must not become a request-rate amplifier: the failed attempt starts the
+    window like a successful one, and it must not cost the cache the good key set it holds."""
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.idp.down = True
+    rig.clock.advance(COOLDOWN + 1)
+
+    # The one request entitled to a refetch makes it, and learns the provider is down.
+    with pytest.raises(OidcVerificationError, match="endpoint is unavailable"):
+        await rig.verifier.verify(rig.token("attacker-0"))
+    assert rig.idp.fetches == 2
+
+    # Everything after it, inside the window, is answered from the cached set rather than with
+    # another attempt on a provider that is not answering.
+    for index in range(1, 11):
+        await rig.refused_as_unknown(rig.token(f"attacker-{index}"))
+    assert rig.idp.fetches == 2
+
+    # The failure did not poison the cache: the key already held still verifies, with no fetch.
+    claims = await rig.verifier.verify(rig.token("bank-key-1"))
+    assert claims["sub"] == "bank-user-123"
+    assert rig.idp.fetches == 2
+
+    # Once the window has passed and the provider is back, a rotation is picked up.
+    rig.idp.down = False
+    rig.rotate()
+    rig.clock.advance(COOLDOWN)
+    await rig.verifier.verify(rig.token("bank-key-2", rig.rotated_key))
+    assert rig.idp.fetches == 3
+
+
+@pytest.mark.asyncio
+async def test_cache_expiry_still_refreshes_the_key_set(rig: _Rig) -> None:
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    assert rig.idp.fetches == 1
+
+    rig.clock.advance(rig.settings.oidc_jwks_cache_seconds + 1)
+    await rig.verifier.verify(rig.token("bank-key-1"))
+
+    assert rig.idp.fetches == 2
+
+
+@pytest.mark.asyncio
+async def test_the_cache_expiry_refresh_is_not_held_back_by_the_cooldown(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cooldown belongs to the unknown-key path alone. The shipped numbers hide that -- 30
+    seconds against a 30 second floor on the cache lifetime -- so this makes the cooldown four
+    times the cache lifetime to show the ordinary refresh never consults it. Otherwise a later
+    edit to either number could leave an expired key set (say, one holding a withdrawn key)
+    being served past its expiry."""
+    monkeypatch.setattr("aida.oidc.JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS", 120.0)
+    verifier = OidcVerifier(rig.settings.model_copy(update={"oidc_jwks_cache_seconds": 30}))
+    await verifier.verify(rig.token("bank-key-1"))
+    assert rig.idp.fetches == 1
+
+    rig.clock.advance(31)
+    await verifier.verify(rig.token("bank-key-1"))
+
+    assert rig.idp.fetches == 2
+
+
+@pytest.mark.asyncio
+async def test_a_known_key_id_never_causes_a_fetch_while_the_cache_is_current(rig: _Rig) -> None:
+    """The cooldown is about unknown key ids. A token whose `kid` is held is answered from the
+    cache however much time has passed since the last fetch, until the cache itself expires."""
+    await rig.verifier.verify(rig.token("bank-key-1"))
+
+    for _ in range(5):
+        rig.clock.advance(COOLDOWN + 1)
+        await rig.verifier.verify(rig.token("bank-key-1"))
+
+    assert rig.clock.now - 1_000.0 < rig.settings.oidc_jwks_cache_seconds
+    assert rig.idp.fetches == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_key_id_against_pinned_keys_is_still_refused_as_unknown() -> None:
+    """Pinned keys go through the same load path with no network behind it: the outcome for an
+    unknown `kid` is unchanged."""
+    settings, private_key = oidc_fixture()
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": "bank-user-123",
+            "iss": settings.oidc_issuer,
+            "aud": settings.oidc_audience,
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "not-pinned"},
+    )
+
+    with pytest.raises(OidcVerificationError, match="signing key is unknown"):
+        await OidcVerifier(settings).verify(token)

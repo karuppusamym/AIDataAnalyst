@@ -20,15 +20,21 @@ Invoke-RestMethod http://localhost:8000/health/ready
 `sample-mssql-source` and `sample-mssql-source-init`. The rest are behind
 Compose profiles. With default settings Redis, Neo4j and MinIO are not reached,
 but **Redpanda is**: `metadata-worker` starts a Kafka consumer side-car
-(`run_newly_created_table_drafter_consumer`, from `aida/workflows/worker.py`)
+(`run_newly_created_table_drafter_consumer`, supervised by
+`supervise_newly_created_table_drafter`, from `aida/workflows/worker.py`)
 whenever `AIDA_AUTO_ENQUEUE_ON_INGEST` is true, and it defaults to true. With no
-Redpanda in the default stack its `start()` fails inside a fire-and-forget
-background task, so the auto-drafting of descriptions for newly created tables
-silently does not happen (and, with no `outbox-publisher`, the events it would
-consume stay `PENDING`). That is not fixed in code. Run with `--profile events`
-(the side-car does not retry, so restart `metadata-worker` if it started before
-Redpanda was reachable), or set `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the
-feature off explicitly.
+Redpanda in the default stack the consumer cannot connect, so the auto-drafting
+of descriptions for newly created tables does not happen (and, with no
+`outbox-publisher`, the events it would consume stay `PENDING`). That is no
+longer silent: the supervisor logs `newly_created_table_drafter_unavailable`
+(with `attempt`, `next_retry_seconds` and `bootstrap_servers`; an error on the
+first failure and every tenth attempt, a warning between) and retries with a
+backoff that doubles from 2 s to a cap of 60 s, while the Temporal worker
+carries on. Run with `--profile events` and it starts working, with no restart
+of `metadata-worker`, once Redpanda is reachable
+(`newly_created_table_drafter_started`), or set
+`AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the feature off explicitly, which
+also stops the retries and the log lines.
 
 | Profile | Services | Capability that is **off** without it | Turn it on |
 |---|---|---|---|

@@ -16,6 +16,8 @@ import {
 } from "../lib/api";
 import { listGlossaryTerms } from "../lib/_api_append";
 import { listOntologyVersions } from "../lib/api/ontology";
+import { readDecision } from "../lib/roles";
+import { useSession } from "../lib/session";
 import { ReferencePicker, usePickerOptions } from "../components/ReferencePicker";
 import { Button, Field, Pill } from "../components/primitives";
 import { splitList } from "../components/screenState";
@@ -100,10 +102,74 @@ const INITIAL_DRAFT: DraftState = {
 /** The six governed-reference groups, as the draft state holds them. */
 type ReferenceKey = "tableIds" | "semanticIds" | "glossaryIds" | "toolIds" | "routineIds" | "ontologyVersionIds";
 
+/**
+ * The roles `GET /v1/organizations/{organization_id}/ontology-versions` admits.
+ *
+ * Copied from the surface-control matrix row for
+ * `aida.ontology_api.list_ontology_versions`
+ * (`Docs/50-security/surface-control-matrix.md`): DataSteward, MetadataAdmin,
+ * PlatformAdmin, Reviewer. An AgentDeveloper, ToolDeveloper, Analyst or Viewer
+ * bundle is refused it -- and this panel sits in the screen's rail, so the
+ * picker below asked on EVERY load of Context products, whether or not anyone
+ * ever opened the ontology list (R11-AUD01, found for `sam.agentdev`).
+ */
+const ONTOLOGY_READ_ROLES = ["DataSteward", "MetadataAdmin", "PlatformAdmin", "Reviewer"];
+
+/**
+ * The roles `GET /v1/projects/{project_id}/context-product-routine-options` admits.
+ *
+ * Copied from the matrix row for
+ * `aida.context_product_api.list_context_product_routine_options`:
+ * DataSteward, PlatformAdmin, SemanticAdmin -- narrower than the table, semantic
+ * and tool pickers beside it, which the same AgentDeveloper / ToolDeveloper /
+ * Analyst / Viewer bundle IS admitted to. Found while proving the ontology fix
+ * above against the live API as `sam.agentdev` (GET, 403): the demo rehearsal
+ * never selects a project, so it never reaches this one, but the first presenter
+ * who does gets the server's "one of these roles is required" in the picker.
+ */
+const ROUTINE_OPTIONS_ROLES = ["DataSteward", "PlatformAdmin", "SemanticAdmin"];
+
+const joinOr = (items: readonly string[]): string =>
+  items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
+
+/**
+ * The one sentence a picker shows in place of a list this session may not read.
+ *
+ * Naming the roles says what to ask for. `carried` is what the draft already
+ * holds: a new version is pre-filled from its base and `definitionBody` sends
+ * what the draft holds, so those references STAY -- and saying so matters,
+ * because an empty control otherwise reads as "this version will have none".
+ */
+function withheldReason(
+  roles: readonly string[],
+  what: string,
+  verb: string,
+  carried: number,
+  carriedPhrase: string,
+): string {
+  return (
+    `Only sessions holding ${joinOr(roles)} can read ${what}, so none can be ${verb} here; yours holds none of those.` +
+    (carried > 0 ? ` The ${carried} already ${carriedPhrase} stay ${verb}.` : "")
+  );
+}
+
 /** Every picker's options, loaded once per project. The same reads the
  *  screens that own each object make, so a draft -- a new product's or a new
  *  version's -- can only name what the platform has already approved. */
 function useGovernedReferenceOptions(orgId: string, projectId: string | null) {
+  // Each read is held while `/v1/me` is in flight and sent only once identity has answered,
+  // admitted or unavailable (`readDecision`, `lib/roles.ts`); the server's 403 stays the
+  // authority. A session known to be outside a list is never asked.
+  const session = useSession();
+  const ontologyRead = readDecision(session, ONTOLOGY_READ_ROLES);
+  const routinesRead = readDecision(session, ROUTINE_OPTIONS_ROLES);
+  const mayReadOntology = ontologyRead !== "skip";
+  const mayReadRoutines = routinesRead !== "skip";
+  // A held read is loading, not empty: an empty list reads as "nothing has been approved",
+  // which is a claim about the estate that nobody has checked yet.
+  const ontologyHeld = ontologyRead === "wait";
+  const routinesHeld = routinesRead === "wait";
+
   const tableOptions = usePickerOptions(
     (signal) => fetchCatalogRows({ organizationId: orgId, limit: 200 }, signal).then((p) => p.items),
     (row) => ({
@@ -143,7 +209,7 @@ function useGovernedReferenceOptions(orgId: string, projectId: string | null) {
       hint: `${routine.routine_type.toLowerCase()} on ${routine.datasource_name}`,
     }),
     [projectId],
-    { enabled: Boolean(projectId) },
+    { enabled: Boolean(projectId) && routinesRead === "ask" },
   );
 
   /* R11-FP09: only APPROVED versions can be bound; the picker offers exactly those. */
@@ -156,9 +222,13 @@ function useGovernedReferenceOptions(orgId: string, projectId: string | null) {
       hint: row.published_version === row.version ? "current published version" : "earlier approved version",
     }),
     [orgId],
+    { enabled: ontologyRead === "ask" },
   );
 
-  return { tableOptions, semanticOptions, glossaryOptions, toolOptions, routineOptions, ontologyOptions };
+  return {
+    tableOptions, semanticOptions, glossaryOptions, toolOptions, routineOptions, ontologyOptions,
+    mayReadOntology, mayReadRoutines, ontologyHeld, routinesHeld,
+  };
 }
 
 /** The six reference pickers, bound to one draft's id arrays. Shared by the
@@ -175,8 +245,17 @@ function GovernedReferencePickers({
   value: Pick<DraftState, ReferenceKey>;
   onChange: (key: ReferenceKey, ids: string[]) => void;
 }) {
-  const { tableOptions, semanticOptions, glossaryOptions, toolOptions, routineOptions, ontologyOptions } =
-    useGovernedReferenceOptions(orgId, projectId);
+  const {
+    tableOptions, semanticOptions, glossaryOptions, toolOptions, routineOptions, ontologyOptions,
+    mayReadOntology, mayReadRoutines, ontologyHeld, routinesHeld,
+  } = useGovernedReferenceOptions(orgId, projectId);
+  // One honest sentence and no control, for each picker this session may not read.
+  const ontologyUnavailableReason = mayReadOntology
+    ? undefined
+    : withheldReason(ONTOLOGY_READ_ROLES, "ontology versions", "bound", value.ontologyVersionIds.length, "bound to the previous version");
+  const routinesUnavailableReason = mayReadRoutines
+    ? undefined
+    : withheldReason(ROUTINE_OPTIONS_ROLES, "stored procedures and functions", "named", value.routineIds.length, "named by the previous version");
   return (
     <>
       <div className="cpform__span2">
@@ -231,24 +310,26 @@ function GovernedReferencePickers({
         <ReferencePicker
           label="Stored procedures and functions"
           options={routineOptions.options}
-          loading={routineOptions.loading}
+          loading={routineOptions.loading || routinesHeld}
           error={routineOptions.error}
           selected={value.routineIds}
           onChange={(ids) => onChange("routineIds", ids)}
           emptyHint="No active routines on this project's sources. Scan a source that exposes them first."
           visibleRows={4}
+          unavailableReason={routinesUnavailableReason}
         />
       </div>
       <div className="cpform__span2">
         <ReferencePicker
           label="Ontology versions"
           options={ontologyOptions.options}
-          loading={ontologyOptions.loading}
+          loading={ontologyOptions.loading || ontologyHeld}
           error={ontologyOptions.error}
           selected={value.ontologyVersionIds}
           onChange={(ids) => onChange("ontologyVersionIds", ids)}
           emptyHint="No approved ontology versions yet. Publish one from Unified lineage, Manage ontology."
           visibleRows={4}
+          unavailableReason={ontologyUnavailableReason}
         />
       </div>
     </>

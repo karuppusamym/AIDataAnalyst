@@ -7,12 +7,15 @@ work status. The [capability register](20-capability-register.md) keeps implemen
 configuration and real-environment verification, and each row carries the date it was measured.
 This page is a dated summary of both; where they disagree, they win.
 
-Most scheduled implementation has landed: **67 DONE, 32 PARTIAL, 7 BLOCKED, 8 TODO, 22 DEFERRED,
-2 CANCELLED** across 138 unique work packages. Of the 114 that are neither deferred nor cancelled,
-67 are complete; 47 still need implementation, verification or prerequisites. **32 of the 33
+Most scheduled implementation has landed: **72 DONE, 36 PARTIAL, 7 BLOCKED, 4 TODO, 22 DEFERRED,
+2 CANCELLED** across 143 unique work packages. Of the 119 that are neither deferred nor cancelled,
+72 are complete; 47 still need implementation, verification or prerequisites. **32 of the 33
 defects (D-series) are DONE**; D17 keeps a parity run in the target environment. A short TODO list
-is not the same as no pending work: R11-AUD01 to R11-AUD09, added on 2026-09-20, queue the gaps
-that an audit of the code against these documents found.
+is not the same as no pending work: R11-AUD01 to R11-AUD14, added on 2026-09-20 and 2026-09-21, queued the gaps
+that an audit of the code against these documents found. Five are closed (AUD02,
+AUD04, AUD05, AUD09, AUD14), five are partly done (AUD01, AUD03, AUD06, AUD07, AUD08) and four follow-ups
+(AUD10 to AUD13) are open. Whether the nine guard role names become grantable roles or are
+removed (AUD01) is the product owner's call.
 
 Twelve PARTIAL rows closed since the September 12 confirmation: B2 (execution-match scoring), B8
 (freshness observation), C1 (live ontology publication), C3 (unsafe reviewer evidence), C6, C7
@@ -26,13 +29,17 @@ approvals stay off: production configuration refuses `reviewer_agent_enabled`, a
 recorded benchmark approves 9 of 14 false twins and distinguishes no pairs. Deferred expansion is
 not a release requirement unless its recorded trigger is met.
 
-Fresh checks, 2026-09-20: **14,458 tests collected** (collection only; the full suite was not
-re-run in this pass). One Alembic head, `53558182d9fb`, across 192 revision files.
-`scripts/live_role_matrix.py` sent 5,179 probes as each platform role and 2,639 as eight demo role
-bundles to the running API, rebuilt from `543d84a` plus the refusals guard, and every answer
-matched the declared role contract. Opening 47 screens as the eight demo users found 36 raising
-something; after four fixes it is 0, with 7 known conditions. This documentation pass made no live model call, applied no migration and
-changed no production configuration.
+Fresh checks, 2026-09-21, on the round-11 tree (HEAD `4ae9b2c` plus the round-11 changes, uncommitted
+when this was written): the full backend suite, run bare the way CI runs it, gave **14,856 passed,
+184 skipped and 0 failed** in 38 minutes; the frontend suite is 119 files and 1,267 tests; `ruff`,
+`mypy --strict` (426 source files), `lint-imports` (13 contracts kept) and the documentation link
+check are clean. One Alembic head, `53558182d9fb`, across 192 revision files. The running stack was
+rebuilt from that tree and `scripts/check_deployment_parity.py` reported 9 of 9 comparisons matched
+(source digest `38f891ddc13d`). `scripts/live_role_matrix.py` sent 5,179 probes as each platform role
+and 2,407 as the seven non-admin demo role bundles to it, and every answer matched the declared role
+contract; opening 47 screens as the eight demo users gave 0 issues and 5 known conditions. The round
+applied no migration, sent no prompt to a model (the redeployed scheduler's boot passes embedded
+nothing and made a model-listing request to each provider) and changed no production configuration.
 
 ## Historical status snapshots
 

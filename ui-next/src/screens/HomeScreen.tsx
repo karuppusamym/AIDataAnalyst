@@ -9,6 +9,8 @@ import { OnboardingWizard } from "../components/OnboardingWizard";
 import { FirstSourceSetup } from "../components/FirstSourceSetup";
 import { fetchCatalogRows, fetchReviewQueue, get, listOrgDatasources, USE_FIXTURES } from "../lib/api";
 import { useOrgId } from "../lib/org";
+import { readDecision } from "../lib/roles";
+import { useSession } from "../lib/session";
 import type { DataSourceRead, ReviewQueueSummaryRead } from "../lib/types";
 import type { CatalogRowRead, Persona } from "../lib/ui-types";
 import type { Tone } from "../components/primitives";
@@ -20,11 +22,42 @@ interface OverviewData {
   assets: CatalogRowRead[];
   assetTotal: number | null;
   sources: DataSourceRead[];
-  /** How many reviews are waiting. A COUNT, never the reviews themselves. */
-  pendingReviews: number | null;
 }
 
-const EMPTY_DATA: OverviewData = { assets: [], assetTotal: null, sources: [], pendingReviews: null };
+const EMPTY_DATA: OverviewData = { assets: [], assetTotal: null, sources: [] };
+
+/**
+ * The roles `GET /v1/governance/reviews/queue/summary` admits.
+ *
+ * Copied from the surface-control matrix row for
+ * `aida.review_queue_api.get_review_queue_summary`
+ * (`Docs/50-security/surface-control-matrix.md`): DataSteward, PlatformAdmin,
+ * Reviewer, SemanticAdmin. Any other session gets a 403 on every load of this
+ * page, so it is not asked (R11-AUD01: the demo rehearsal found it for an
+ * AgentDeveloper).
+ */
+const REVIEW_QUEUE_SUMMARY_ROLES = ["DataSteward", "PlatformAdmin", "Reviewer", "SemanticAdmin"];
+
+const REVIEW_QUEUE_NOT_APPLICABLE =
+  "Only sessions holding DataSteward, PlatformAdmin, Reviewer or SemanticAdmin read the review queue, " +
+  "so this signal does not apply to your roles.";
+
+/**
+ * The review-queue signal, as four different things that used to be one `0`.
+ *
+ * A read that was refused, a read that failed, a read still in flight and a
+ * session that was never entitled to ask all rendered as "0 decisions
+ * waiting" -- the last two of those are not zero, and the first was a page
+ * telling a non-reviewer there was nothing to review because it had been
+ * refused the count.
+ */
+type ReviewSignal =
+  | { kind: "loading" }
+  | { kind: "count"; value: number }
+  /** The read was attempted and did not come back. `partialError` says so. */
+  | { kind: "unavailable" }
+  /** This session's roles are not admitted; the read was never issued. */
+  | { kind: "not-applicable" };
 
 /**
  * How many reviews are pending (review 2026-09-05, F16).
@@ -75,33 +108,71 @@ export function HomeScreen({
   onNavigate: (navId: string, params?: Record<string, string>) => void;
 }) {
   const organizationId = useOrgId();
+  // The count is held while `/v1/me` is in flight (`readDecision`, `lib/roles.ts`) and
+  // then asked for only by a session in the matrix row: a session outside it is never
+  // asked, and never takes the refusal the request would have earned.
+  const queueRead = readDecision(useSession(), REVIEW_QUEUE_SUMMARY_ROLES);
+
   const [data, setData] = useState<OverviewData>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
-  const [partialError, setPartialError] = useState(false);
+  const [overviewFailed, setOverviewFailed] = useState(false);
+  // Seeded from the roles, so a session that is already known not to be
+  // admitted never paints a clickable "—" tile for the frame before the effect
+  // below turns it into "not applicable".
+  const [reviews, setReviews] = useState<ReviewSignal>(
+    queueRead === "skip" ? { kind: "not-applicable" } : { kind: "loading" },
+  );
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
-    setPartialError(false);
+    setOverviewFailed(false);
 
     Promise.allSettled([
       fetchCatalogRows({ organizationId, limit: 12 }, controller.signal),
       listOrgDatasources(organizationId, controller.signal),
-      fetchPendingReviewCount(controller.signal),
-    ]).then(([catalog, sources, reviews]) => {
+    ]).then(([catalog, sources]) => {
       if (controller.signal.aborted) return;
       setData({
         assets: catalog.status === "fulfilled" ? catalog.value.items : [],
         assetTotal: catalog.status === "fulfilled" ? (catalog.value.total ?? null) : null,
         sources: sources.status === "fulfilled" ? sources.value.items : [],
-        pendingReviews: reviews.status === "fulfilled" ? reviews.value : null,
       });
-      setPartialError([catalog, sources, reviews].some((result) => result.status === "rejected"));
+      setOverviewFailed([catalog, sources].some((result) => result.status === "rejected"));
       setLoading(false);
     });
 
     return () => controller.abort();
   }, [organizationId]);
+
+  /* Its own effect, not a third arm of the one above: the answer to "may this
+     session read the queue" arrives when `/v1/me` does, which is usually after
+     the catalog request has gone out. Sharing an effect would re-fetch the
+     catalog and the source list -- and flash the whole page back to loading --
+     just because identity resolved. */
+  useEffect(() => {
+    if (queueRead === "skip") {
+      setReviews({ kind: "not-applicable" });
+      return;
+    }
+    if (queueRead === "wait") {
+      setReviews({ kind: "loading" });
+      return;
+    }
+    const controller = new AbortController();
+    setReviews({ kind: "loading" });
+    fetchPendingReviewCount(controller.signal).then(
+      (value) => {
+        if (!controller.signal.aborted) setReviews({ kind: "count", value });
+      },
+      () => {
+        if (!controller.signal.aborted) setReviews({ kind: "unavailable" });
+      },
+    );
+    return () => controller.abort();
+  }, [organizationId, queueRead]);
+
+  const partialError = overviewFailed || reviews.kind === "unavailable";
 
   const summary = useMemo(() => {
     const sampled = data.assets.length;
@@ -116,7 +187,6 @@ export function HomeScreen({
       needsOwner,
       qualityAlerts,
       activeSources: data.sources.filter((source) => source.status === "ACTIVE").length,
-      pendingReviews: data.pendingReviews ?? 0,
     };
   }, [data]);
 
@@ -166,11 +236,20 @@ export function HomeScreen({
           <span><b>{loading ? "—" : nf.format(summary.activeSources)}</b><small>Active data sources</small></span>
           <i aria-hidden="true">→</i>
         </button>
-        <button className="homekpi" onClick={() => onNavigate("governance")}>
-          <span className="homekpi__icon homekpi__icon--amber" aria-hidden="true">!</span>
-          <span><b>{loading ? "—" : nf.format(summary.pendingReviews)}</b><small>Decisions waiting</small></span>
-          <i aria-hidden="true">→</i>
-        </button>
+        {reviews.kind === "not-applicable" ? (
+          /* Not a button: the screen it would open is the review queue, which is
+             the surface this session was just found not to be admitted to. */
+          <div className="homekpi homekpi--na" title={REVIEW_QUEUE_NOT_APPLICABLE}>
+            <span className="homekpi__icon homekpi__icon--amber" aria-hidden="true">!</span>
+            <span><b>Not applicable</b><small>Decisions waiting · reviewer roles only</small></span>
+          </div>
+        ) : (
+          <button className="homekpi" onClick={() => onNavigate("governance")}>
+            <span className="homekpi__icon homekpi__icon--amber" aria-hidden="true">!</span>
+            <span><b>{reviews.kind === "count" ? nf.format(reviews.value) : "—"}</b><small>Decisions waiting</small></span>
+            <i aria-hidden="true">→</i>
+          </button>
+        )}
       </section>
 
       <div className="homegrid">
@@ -199,7 +278,11 @@ export function HomeScreen({
           <section className="homepanel homeattention">
             <header className="homepanel__head"><div><span className="homepanel__eyebrow">Focus</span><h2>Needs attention</h2></div></header>
             <div className="homeattention__list">
-              <button onClick={() => onNavigate("governance")}><span className="homeattention__signal homeattention__signal--amber">{summary.pendingReviews}</span><span><b>Review decisions</b><small>Governed changes awaiting judgment</small></span><i>→</i></button>
+              {/* Omitted, not zeroed, for a session that may not read the queue: a
+                  "0" here told a non-reviewer there was nothing to review. */}
+              {reviews.kind === "not-applicable" ? null : (
+                <button onClick={() => onNavigate("governance")}><span className="homeattention__signal homeattention__signal--amber">{reviews.kind === "count" ? reviews.value : "—"}</span><span><b>Review decisions</b><small>Governed changes awaiting judgment</small></span><i>→</i></button>
+              )}
               <button onClick={() => onNavigate("catalog")}><span className="homeattention__signal homeattention__signal--violet">{summary.needsOwner}</span><span><b>Ownership gaps</b><small>Unowned assets in the latest sample</small></span><i>→</i></button>
               <button onClick={() => onNavigate("quality")}><span className="homeattention__signal homeattention__signal--red">{summary.qualityAlerts}</span><span><b>Quality signals</b><small>Open or stale in the latest sample</small></span><i>→</i></button>
             </div>

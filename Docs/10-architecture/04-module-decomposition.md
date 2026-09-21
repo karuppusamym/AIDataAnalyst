@@ -197,8 +197,14 @@ These two are the *only* upward-callable modules, and both are append-or-decide-
 > flat, so such a contract would be either vacuous or a large exemption list, and
 > `05-ci-cd-and-release.md` forbids exemptions. These land with the extraction (`E3`).
 >
-> Note also that `mypy` is configured with `packages = ["aida"]`, so `src/atlas/` is **not**
-> type-checked today.
+> Note also, corrected 2026-09-20: `src/atlas/` **is** type-checked. `pyproject.toml`'s
+> `[tool.mypy]` still says `packages = ["aida"]`, but mypy reads `packages` (like `files` and
+> `modules`) only when no paths are given on the command line (`mypy/main.py` in the locked
+> mypy 1.17.1), and the `quality` CI job runs `mypy src sdk/aida_tool_sdk` (`.github/workflows/ci.yml`),
+> so the setting only limits a bare `mypy` run (see `40-engineering/05-ci-cd-and-release.md`).
+> Resolving those two arguments against the tree on 2026-09-20 gives 424 modules: 378 in `aida`,
+> 40 in `atlas` and 6 in `aida_tool_sdk`. Whether that whole set is clean under `strict = true` is
+> what the CI job reports; this correction did not run the type check.
 
 See `40-engineering/03-coding-standards.md`.
 

@@ -11,6 +11,13 @@ It answers every request with a marker line naming the method and path, so the
 assertion in CI is a plain string match with no JSON parsing. It never binds
 anything but the loopback-reachable container port and holds no state.
 
+The marker also carries `body_bytes=`, the number of request-body bytes this
+process actually received. R11-AUD05 raised the proxy's body limit for the two
+ingestion routes, and a status code alone cannot prove that worked: a proxy that
+cut a large body short would still be answered 200. Counting what arrived lets
+the job assert that the whole body crossed the hop, and lets it tell nginx's own
+413 (which never reaches this process) from a refusal made here.
+
 Usage::
 
     python scripts/proxy_contract_stub_api.py [port]   # default 8000
@@ -23,17 +30,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MARKER = "ATLAS-STUB-UPSTREAM"
 
+# The body is counted and discarded in slices rather than held: the job posts bodies of tens
+# of MiB, and there is nothing to parse.
+_READ_SLICE = 1024 * 1024
+
 
 class StubHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _respond(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        received = 0
+        while received < length:
+            piece = self.rfile.read(min(_READ_SLICE, length - received))
+            if not piece:
+                break
+            received += len(piece)
         authorization = "present" if self.headers.get("Authorization") else "absent"
         body = (
-            f"{MARKER} method={self.command} path={self.path} authorization={authorization}\n"
+            f"{MARKER} method={self.command} path={self.path} authorization={authorization} "
+            f"body_bytes={received}\n"
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")

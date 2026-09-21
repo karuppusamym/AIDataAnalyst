@@ -15,7 +15,7 @@
 import { demoOr, get, postJson } from "./transport";
 import type {
   AccessPolicyCreate,
-  AccessPolicyRead,
+  AccessPolicyProposalRead,
   AuthorizationSimulationRead,
   AuthorizationSimulationRequest,
   BiArtifactImportRead,
@@ -37,10 +37,10 @@ import type {
   SourceBindingRead,
   WorkspaceCreate,
   WorkspaceMembershipCreate,
-  WorkspaceMembershipRead,
+  WorkspaceMembershipProposalRead,
   WorkspaceRead,
 } from "../types";
-import type { PageOf } from "../ui-types";
+import type { AccessPolicyRead, PageOf, WorkspaceMembershipRead } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Administration -- nav id `administration`, the tenant/onboarding wizard
@@ -237,18 +237,21 @@ export function fetchAccessPolicies(
 }
 
 /** `POST /v1/organizations/{organization_id}/access-policies` -- narrower
- *  than the list above (`PlatformAdmin`/`OrganizationAdmin` only). A new
- *  policy always starts `DRAFT` unless the caller explicitly sets
- *  `status: "ACTIVE"` in the body. */
+ *  than the list above (`PlatformAdmin`/`OrganizationAdmin` only). A create is
+ *  a proposal (R11-AUD02): the policy is always saved `DRAFT` and an
+ *  `ACCESS_POLICY` review is opened for it (the response also carries
+ *  `governance_review_id`); it is enforced only once a *different* principal
+ *  approves that review. `status: "ACTIVE"` in the body is refused with a 422,
+ *  so callers send `DRAFT`. */
 export function createAccessPolicy(
   organizationId: string,
   body: AccessPolicyCreate,
   signal?: AbortSignal,
-): Promise<AccessPolicyRead> {
+): Promise<AccessPolicyProposalRead> {
   return demoOr(
     async (fixtures) => fixtures.makeFixtureCreateAccessPolicy(organizationId, body),
     async () => {
-      return postJson<AccessPolicyRead>(`/v1/organizations/${organizationId}/access-policies`, body, signal);
+      return postJson<AccessPolicyProposalRead>(`/v1/organizations/${organizationId}/access-policies`, body, signal);
     },
   );
 }
@@ -288,17 +291,20 @@ export function simulateAuthorization(
 --------------------------------------------------------------------------- */
 
 /** `POST /v1/workspaces/{workspace_id}/members` (`workspace_api.py:160`,
- *  `_ADMIN` only: PlatformAdmin/OrganizationAdmin/DataAdmin). 409s if the
- *  principal already has a membership in this workspace. */
+ *  `_ADMIN` only: PlatformAdmin/OrganizationAdmin/DataAdmin). A proposal, not a
+ *  grant (R11-AUD02): the membership comes back `PENDING_APPROVAL`, with a
+ *  `governance_review_id`, and grants nothing until a *different* principal
+ *  approves the `WORKSPACE_MEMBERSHIP` review. 409s if the principal already has
+ *  a membership -- pending or active -- in this workspace. */
 export function addWorkspaceMember(
   workspaceId: string,
   body: WorkspaceMembershipCreate,
   signal?: AbortSignal,
-): Promise<WorkspaceMembershipRead> {
+): Promise<WorkspaceMembershipProposalRead> {
   return demoOr(
     async (fixtures) => fixtures.makeFixtureAddWorkspaceMember(workspaceId, body),
     async () => {
-      return postJson<WorkspaceMembershipRead>(
+      return postJson<WorkspaceMembershipProposalRead>(
         `/v1/workspaces/${workspaceId}/members`,
         body,
         signal,

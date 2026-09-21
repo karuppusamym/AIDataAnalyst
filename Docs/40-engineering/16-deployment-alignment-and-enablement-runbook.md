@@ -356,9 +356,13 @@ the discovery runs already queued will still run, and anything they discovered
 stays discovered.
 
 A single rescan on demand, without changing the policy, is
-`POST /v1/datasources/{datasource_id}/metadata-ingestions`. That is the right
-way to produce the first change signal for section
-[4.1](#41-first-produce-something-to-consume).
+`POST /v1/datasources/{datasource_id}/analysis-runs` (body `{"mode":
+"INCREMENTAL"}`, the default; roles PlatformAdmin, MetadataAdmin, DataAdmin). It
+reserves a run through the same admission path the scheduler uses, tagged
+`MANUAL`. That is the right way to produce the first change signal for section
+[4.1](#41-first-produce-something-to-consume). It is not
+`POST .../metadata-ingestions`: that is the producer push endpoint, which
+accepts an envelope somebody else built and starts no scan.
 
 ## 6. Authorization posture
 

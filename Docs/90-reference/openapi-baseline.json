@@ -84,8 +84,9 @@
         "title": "AccessPolicyCreate",
         "type": "object"
       },
-      "AccessPolicyRead": {
+      "AccessPolicyProposalRead": {
         "additionalProperties": false,
+        "description": "R11-AUD02: what `POST /v1/organizations/{id}/access-policies` answers.\n\nAn `AccessPolicyRead` plus the review the create opened. A create is a proposal: the\npolicy is `DRAFT` and enforces nothing until a second principal approves the\n`ACCESS_POLICY` review named here. A separate type rather than a field on\n`AccessPolicyRead`, because the list route returns that type too, and a policy read\nback from a list has no such review to name -- an always-null field there would read\nas \"no review\" for a policy that is in fact waiting on one.",
         "properties": {
           "action_match": {
             "items": {
@@ -118,6 +119,11 @@
           },
           "effect": {
             "title": "Effect",
+            "type": "string"
+          },
+          "governance_review_id": {
+            "format": "uuid",
+            "title": "Governance Review Id",
             "type": "string"
           },
           "id": {
@@ -189,9 +195,10 @@
           "status",
           "created_by",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "governance_review_id"
         ],
-        "title": "AccessPolicyRead",
+        "title": "AccessPolicyProposalRead",
         "type": "object"
       },
       "AffectedRunRead": {
@@ -19722,7 +19729,7 @@
             "type": "string"
           },
           "snapshot_type": {
-            "default": "FULL",
+            "default": "INCREMENTAL",
             "enum": [
               "FULL",
               "INCREMENTAL"
@@ -37351,8 +37358,9 @@
         "title": "WorkspaceMembershipCreate",
         "type": "object"
       },
-      "WorkspaceMembershipRead": {
+      "WorkspaceMembershipProposalRead": {
         "additionalProperties": false,
+        "description": "R11-AUD02: what `POST /v1/workspaces/{id}/members` answers.\n\nA `WorkspaceMembershipRead` plus the review the add opened. Adding a member is a\nproposal: the membership is `PENDING_APPROVAL` and grants nothing until a second\nprincipal approves the `WORKSPACE_MEMBERSHIP` review named here. Its own type for the\nreason `AccessPolicyProposalRead` is: the list route returns `WorkspaceMembershipRead`,\nand a member read back from a list has no review to name.",
         "properties": {
           "created_at": {
             "format": "date-time",
@@ -37370,6 +37378,11 @@
               }
             ],
             "title": "Expires At"
+          },
+          "governance_review_id": {
+            "format": "uuid",
+            "title": "Governance Review Id",
+            "type": "string"
           },
           "granted_by": {
             "title": "Granted By",
@@ -37423,9 +37436,10 @@
           "expires_at",
           "status",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "governance_review_id"
         ],
-        "title": "WorkspaceMembershipRead",
+        "title": "WorkspaceMembershipProposalRead",
         "type": "object"
       },
       "WorkspaceRead": {
@@ -75074,6 +75088,7 @@
         ]
       },
       "post": {
+        "description": "Propose an access policy (INV-8, R11-AUD02).\n\nThe policy is always created `DRAFT`, which the policy engine never loads, and an\n`ACCESS_POLICY` review is opened for it; it becomes `ACTIVE` only when a *different*\nprincipal approves that review (`POST /v1/governance/reviews/{id}/decision`), and\n`REJECTED` if one rejects it. The response is still 201 and still the policy; it now also\ncarries `governance_review_id`.\n\nA body asking for `status: ACTIVE` is refused with 422 rather than quietly created as a\ndraft: a caller who believes a DENY or MASK policy is in force when it is not has been\ntold something false, and this is the one field where that is worse than an error.",
         "operationId": "create_access_policy_v1_organizations__organization_id__access_policies_post",
         "parameters": [
           {
@@ -75187,7 +75202,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccessPolicyRead"
+                  "$ref": "#/components/schemas/AccessPolicyProposalRead"
                 }
               }
             },
@@ -109868,6 +109883,7 @@
         ]
       },
       "post": {
+        "description": "Propose a workspace member (INV-8, R11-AUD02).\n\nAny role, `workspace_owner` included, is proposed rather than granted: the membership is\ncreated `PENDING_APPROVAL`, grants nothing, and takes effect only when a *different*\nprincipal approves the `WORKSPACE_MEMBERSHIP` review named in the response\n(`POST /v1/governance/reviews/{id}/decision`). The response is still 201 and still the\nmembership; it now also carries `governance_review_id`.\n\nA principal whose earlier proposal was rejected can be proposed again -- the rejected row\nis reused, because `(workspace, principal)` is unique and a rejection must not be\npermanent. Any other existing membership, pending or active, is a 409.",
         "operationId": "add_member_v1_workspaces__workspace_id__members_post",
         "parameters": [
           {
@@ -109981,7 +109997,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkspaceMembershipRead"
+                  "$ref": "#/components/schemas/WorkspaceMembershipProposalRead"
                 }
               }
             },

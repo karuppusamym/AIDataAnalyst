@@ -49,6 +49,12 @@ from aida.principal_reconciliation import run_principal_reconciliation_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.query_gateway import QueryExecutionGateway
 from aida.reaper_service import run_reaper_scheduler_pass
+from aida.scheduler_leadership import (
+    STANDBY_RETRY_SECONDS,
+    LeaderLockProvider,
+    SchedulerLeadership,
+    default_lock_provider,
+)
 from aida.security import SecurityContext
 from aida.stewardship_api import (
     UNOWNED_BACKLOG_ROUTE_LIMIT,
@@ -1043,7 +1049,16 @@ async def reconcile_cancellation_requests(client: Client, settings: Settings) ->
     return reconciled
 
 
-async def run_scheduler() -> None:
+async def run_scheduler(lock_provider: LeaderLockProvider | None = None) -> None:
+    """Run the maintenance loop -- but only while this replica holds the leadership lock.
+
+    R11-AUD04: most of the periodic passes in `run_scheduler_iteration` rate-limit themselves
+    with in-process trackers, so two replicas would each run every one of them. Every replica
+    now runs this loop, but `SchedulerLeadership.confirm` gates each iteration on a live
+    PostgreSQL advisory lock (`aida.scheduler_leadership`); a replica that does not hold it
+    only retries the lock. `lock_provider` defaults to the real one for the configured
+    database -- the parameter exists so a test can put two replicas on one fake lock.
+    """
     settings = get_settings()
     configure_logging(settings.log_level)
     # R11-FP17: before anything else that can block. `run_footprint_metrics_pass`
@@ -1056,15 +1071,31 @@ async def run_scheduler() -> None:
         settings.temporal_address,
         namespace=settings.temporal_namespace,
     )
+    leadership = SchedulerLeadership(
+        lock_provider if lock_provider is not None else default_lock_provider(settings.database_url)
+    )
     logger.info(
         "fleet_scheduler_started",
         poll_seconds=settings.scheduler_poll_seconds,
         batch_size=settings.scheduler_batch_size,
     )
-    while True:
-        admitted = await run_scheduler_iteration(client, settings)
-        logger.info("fleet_scheduler_iteration", admitted_runs=admitted)
-        await asyncio.sleep(settings.scheduler_poll_seconds)
+    try:
+        while True:
+            # Checked before *every* iteration, not once at start: a leader whose lock
+            # connection has died must not start another pass. An iteration already under
+            # way is not interrupted -- it finishes, and this check then stops the next one.
+            if await leadership.confirm():
+                admitted = await run_scheduler_iteration(client, settings)
+                logger.info("fleet_scheduler_iteration", admitted_runs=admitted)
+                await asyncio.sleep(settings.scheduler_poll_seconds)
+            else:
+                await asyncio.sleep(STANDBY_RETRY_SECONDS)
+    finally:
+        # Cancellation (asyncio.run on Ctrl-C), or an exception out of a pass, ends the
+        # loop; releasing here hands the lock to a standby now instead of when PostgreSQL
+        # notices the process has gone. A SIGTERM/SIGKILL never reaches this line, and does
+        # not need to: the kernel closes the socket and the server drops the session.
+        await leadership.release()
 
 
 if __name__ == "__main__":

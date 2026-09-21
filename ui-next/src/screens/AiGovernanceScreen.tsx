@@ -12,6 +12,7 @@ import {
 import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
+import { KillSwitchPanel } from "./AiGovernanceKillSwitch";
 import "./AiGovernanceScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -39,6 +40,10 @@ import "./AiGovernanceScreen.css";
      - GET  /v1/ai/runtime-status                   ai_runtime_status      api.py:181
      - POST /v1/organizations/{org}/agent-evaluations run_agent_evaluation api.py:294
      - GET  /v1/organizations/{org}/agent-evaluations list_agent_evaluations api.py:349
+     - GET  /v1/organizations/{org}/kill-switch          list_kill_switch_state ai_governance_api.py
+     - POST /v1/organizations/{org}/kill-switch/engage   engage_kill_switch     ai_governance_api.py
+     - POST /v1/organizations/{org}/kill-switch/release  release_kill_switch    ai_governance_api.py
+       (the last three, and why they are here, are in `AiGovernanceKillSwitch.tsx`)
 
    Scope, honestly:
 
@@ -62,15 +67,19 @@ import "./AiGovernanceScreen.css";
    here, not actioned. This screen is honest about that: the chain renders
    as a legend, never as buttons that would silently do nothing.
 
+   The organization kill switch (R11-AUD08) is here now, as its own panel at the
+   head of the right-hand rail (`AiGovernanceKillSwitch.tsx`). It was left out of
+   the port on the ground that it is a *different* control -- single-operator,
+   immediately effective, audited rather than maker-checked ("Deliberately NOT the
+   ModelRouteConfiguration maker-checker lifecycle", `ai_governance_api.py`) and
+   that legacy's `agents-view` never rendered it. Both are still true, and the
+   panel is built accordingly: it does not touch the route lifecycle above, and
+   it has no approval step. What changed is that this is the screen an operator
+   opens to ask whether model use is running, and the API for stopping it had no
+   user interface anywhere. Every role the read admits sees its state; only a
+   PlatformAdmin is offered Engage and Release.
+
    Deliberately left out:
-     - The kill switch (`/organizations/{org}/kill-switch/{engage,release}`,
-       `list_kill_switch_state`, `ai_governance_api.py:305/359/414`) --
-       explicitly a *different*, single-operator/immediately-effective
-       control (module 15's own file comment calls this out: "Deliberately
-       NOT the ModelRouteConfiguration maker-checker lifecycle"). Legacy's
-       `agents-view` never renders it either (no kill-switch DOM under
-       `#agents-view` in `ui/index.html`); it belongs to the
-       Operations-shaped surface, not here.
      - `AgentEvalGateRead`/`.../eval-gate` (`ai_registry_api.py:704/734`) --
        the per-AI-asset-version replay gate. That's `AiRegistryScreen`'s
        data (keyed by `ai_asset_version_id`), not this screen's org-wide
@@ -591,6 +600,8 @@ export function AiGovernanceScreen() {
         </div>
 
         <aside className="aig__rail">
+          <KillSwitchPanel organizationId={ORG} />
+
           {runtimeError ? (
             <ErrorState title="Runtime status could not be loaded" detail={runtimeError} onRetry={() => void loadRuntime()} />
           ) : runtime ? (

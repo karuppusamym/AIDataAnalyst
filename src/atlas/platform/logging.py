@@ -15,6 +15,10 @@ free-text messages rather than structured fields, by value pattern
 (bearer tokens, JWTs, credentialed connection strings, common cloud key
 shapes). It is intentionally conservative about false positives: an
 unmatched value is left alone rather than guessed at.
+
+Records that libraries emit through stdlib `logging` (httpx, uvicorn, aiokafka)
+never reach those processors, so `RedactStdlibLogRecords` gives them the same
+value patterns plus secret-shaped query parameters (R11-AUD14).
 """
 
 import logging
@@ -91,6 +95,44 @@ _VALUE_PATTERNS = [
 ]
 
 
+# Secret-shaped QUERY PARAMETERS, for the stdlib loggers. The structlog processors below never see
+# a record that httpx, uvicorn or aiokafka emit through `logging`, and httpx writes "HTTP Request:
+# GET <full url>" at INFO -- so a key sent as `?key=...` reached the container log on every call
+# (found 2026-09-21: the Gemini model-listing health check; R11-AUD14). The fix is not to put a
+# key in a URL, and `model_route_health` no longer does; this is the net under it for the next
+# call site.
+_SECRET_QUERY_PARAM = re.compile(
+    r"(?i)([?&](?:key|api[_-]?key|access[_-]?token|token|auth|secret|password|sig|signature)=)[^&\s\"']+"
+)
+
+
+def redact_log_text(text: str) -> str:
+    """`_redact_value` for a free-text stdlib log message, plus secret query parameters."""
+    return _SECRET_QUERY_PARAM.sub(rf"\1{_REDACTED}", str(_redact_value(text)))
+
+
+class RedactStdlibLogRecords(logging.Filter):
+    """A handler filter that scrubs stdlib log records before any handler renders them.
+
+    It edits the record in place, so every handler downstream of the first sees the redacted text.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_log_text(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        return True
+
+
+def _install_stdlib_redaction() -> None:
+    """Idempotent: `configure_logging` runs in every process and again in tests."""
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(existing, RedactStdlibLogRecords) for existing in handler.filters):
+            handler.addFilter(RedactStdlibLogRecords())
+
+
 def _key_is_sensitive(key: str) -> bool:
     normalized = re.sub(r"[^a-z]", "", key.lower())
     if normalized in _VALUE_SHAPED_KEY_NAMES:
@@ -134,6 +176,7 @@ def redact_sensitive_data(
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level.upper())
+    _install_stdlib_redaction()
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

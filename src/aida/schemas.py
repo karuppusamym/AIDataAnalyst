@@ -55,6 +55,7 @@ from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
     WorkspaceCreate as WorkspaceCreate,
     WorkspaceEntitlementRead as WorkspaceEntitlementRead,
     WorkspaceMembershipCreate as WorkspaceMembershipCreate,
+    WorkspaceMembershipProposalRead as WorkspaceMembershipProposalRead,
     WorkspaceMembershipRead as WorkspaceMembershipRead,
     WorkspaceRead as WorkspaceRead,
 )
@@ -3301,6 +3302,20 @@ class AccessPolicyRead(ApiModel):
     updated_at: datetime
 
 
+class AccessPolicyProposalRead(AccessPolicyRead):
+    """R11-AUD02: what `POST /v1/organizations/{id}/access-policies` answers.
+
+    An `AccessPolicyRead` plus the review the create opened. A create is a proposal: the
+    policy is `DRAFT` and enforces nothing until a second principal approves the
+    `ACCESS_POLICY` review named here. A separate type rather than a field on
+    `AccessPolicyRead`, because the list route returns that type too, and a policy read
+    back from a list has no such review to name -- an always-null field there would read
+    as "no review" for a policy that is in fact waiting on one.
+    """
+
+    governance_review_id: UUID
+
+
 class AccessPolicyCreate(ApiModel):
     code: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,79}$")
     name: str = Field(min_length=2, max_length=200)
@@ -3313,7 +3328,12 @@ class AccessPolicyCreate(ApiModel):
     transform: dict[str, Any] = Field(default_factory=dict)
     condition: dict[str, Any] = Field(default_factory=dict)
     # A new policy starts DRAFT so that writing one can never silently change who
-    # can reach what; activation is a separate, auditable step.
+    # can reach what; activation is a separate, auditable step. That step is now a
+    # governance review a second principal decides (R11-AUD02), so `ACTIVE` is refused
+    # by the route with a 422 that says why. It stays in the enum rather than being
+    # removed from it: narrowing a request enum is a breaking OpenAPI change the diff gate
+    # would demand a version bump for, and a client that sends it deserves to be told why
+    # it is refused, not to be told its value does not exist.
     status: Literal["DRAFT", "ACTIVE"] = "DRAFT"
 
 

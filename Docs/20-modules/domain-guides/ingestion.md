@@ -37,7 +37,8 @@ inferred, so an illegal transition is refused rather than silently accepted.
 
 ## Entry points
 
-- **HTTP** — 15 routes: the connector capability matrix, connector certification
+- **HTTP** — 15 routes (as of 2026-09-20; count the `@router.` decorators in
+  `router.py`): the connector capability matrix, connector certification
   runs for a datasource, metadata ingestions, and the batch lifecycle (create,
   get, list, upload chunk, list chunks, finalize, pause, cancel, resume, replay).
 - **Mounted through a shim.** `aida.main` imports this router as
@@ -65,10 +66,10 @@ inferred, so an illegal transition is refused rather than silently accepted.
 
 `models.py`, `schemas.py` and `router.py` hold real content — and `schemas.py` is
 substantial, because the envelope format is a genuine contract with external
-producers. `service.py`, `repository.py`, `contracts.py`, `events.py` and
-`workers/` are empty scaffolds: the batch state machine currently lives in the
-router alongside the HTTP translation, and the background work that drives
-ingestion lives in `aida.workflows`, not in this module's `workers/` directory.
+producers. The empty `service.py`, `repository.py`, `contracts.py`, `events.py`
+and `workers/` scaffolds were removed (R11-X4): the batch state machine lives in
+the router alongside the HTTP translation, and the background work that drives
+ingestion lives in `aida.workflows`, outside this module.
 
 The `ingestion module privacy` import-linter contract protects the internals and
 names `aida.ingestion_api` as a permitted importer, which is what makes the shim

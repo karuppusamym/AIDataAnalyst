@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -31,6 +32,7 @@ from aida.model_route_health import (
     REACHABLE,
     UNKNOWN,
     UNREACHABLE,
+    _served_models,
     check_route,
     run_model_route_reachability_pass,
     unreachable_route_summary,
@@ -288,3 +290,33 @@ async def test_the_summary_separates_unreachable_from_never_checked(
     assert summary["approved"] == 2
     assert summary["unreachable"] == ["gone"]
     assert summary["never_checked"] == 1
+
+
+async def test_the_gemini_key_travels_in_a_header_never_in_the_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R11-AUD14: httpx logs the full request URL at INFO, so a key sent as `?key=...` was
+    written to the scheduler's log on every health pass. The gateway and the embedding
+    provider send it in `x-goog-api-key`; this listing now does too."""
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"models": [{"name": "models/gemini-3.6-flash"}]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(answer), **kwargs),
+    )
+    sentinel = "SENTINEL-KEY-NEVER-IN-A-URL-7d21"
+
+    served = await _served_models("GOOGLE_GEMINI", _settings(gemini_api_key=sentinel))
+
+    assert served == {"models/gemini-3.6-flash", "gemini-3.6-flash"}
+    (request,) = seen
+    assert request.url.path.endswith("/models")
+    assert "key" not in request.url.params
+    assert sentinel not in str(request.url)
+    assert request.headers["x-goog-api-key"] == sentinel

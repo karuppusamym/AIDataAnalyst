@@ -37,6 +37,32 @@ PERSONAS = frozenset({"Analyst", "Steward", "Reviewer", "Operator", "Auditor"})
 ALLOWED_SIGNING_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "ES256"})
 MAX_JWKS_BYTES = 1_048_576
 MAX_JWKS_KEYS = 100
+#: The shortest gap, in seconds, between two fetches of the issuer's key set when the reason for
+#: fetching is a token naming a `kid` the cached set does not hold (R11-AUD09).
+#:
+#: `verify` used to reload the key set for EVERY such token, and nothing bounded how often. The
+#: `kid` is read from the token header before any signature is checked, so the caller needs no
+#: key, no account and no valid signature to trigger it: an allowed `alg` and any string for `kid`
+#: is enough to make this API call the identity provider once per request. The asyncio lock in
+#: `OidcVerifier` only lined those calls up one behind another (each bounded by a 5 second
+#: timeout); it never reduced them. While the provider was down the same requests kept retrying,
+#: so an outage became a request-rate amplifier aimed at the service that was already struggling.
+#:
+#: Inside the window an unknown `kid` is answered from the key set already held and is refused
+#: exactly as before ("bearer token signing key is unknown"). The window runs from the end of the
+#: last attempt to load the key set, of any kind -- the cold load, a cache-expiry refresh, an
+#: earlier forced refetch, a failed attempt -- because a key set fetched a moment ago is as fresh
+#: as another fetch could make it, and because a failed attempt has to count or a provider outage
+#: is exactly when the limit would stop working.
+#:
+#: The trade-off is deliberate, and this constant is its bound. When the provider rotates its
+#: signing key, a token signed with the new key is refused until the first unknown-`kid` token
+#: that arrives once this much time has passed since the last fetch; that token's request
+#: performs the fetch, and every token signed with the new key is accepted after it. Worst-case
+#: pickup delay for a legitimate rotation is therefore this many seconds. A provider that
+#: publishes the new key at least `oidc_jwks_cache_seconds` before it starts signing with it never
+#: meets the window at all, because the ordinary cache refresh has already picked the key up.
+JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS = 30.0
 
 
 class OidcVerificationError(RuntimeError):
@@ -186,49 +212,112 @@ def token_identifier(claims: dict[str, Any]) -> str:
 
 
 class OidcVerifier:
-    """Asynchronous JWKS verifier with bounded caching and mandatory issuer/audience checks."""
+    """Asynchronous JWKS verifier with bounded caching and mandatory issuer/audience checks.
+
+    The issuer's key set is loaded again for one of two reasons, and only one of them is
+    limited here:
+
+    * The cached set has outlived `oidc_jwks_cache_seconds`. The next token refreshes it, as it
+      always has. That path is not limited by anything in this class.
+    * A token names a `kid` the cached set does not hold -- normally a rotation the cache has not
+      seen yet. This forced refetch happens at most once per
+      `JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS` (R11-AUD09), measured from the end of the last
+      attempt to load the key set, successful or not. Inside that window the token is answered
+      from the cached set and refused as an unknown signing key.
+
+    The price of that limit is a bounded delay for a legitimate rotation: a token signed with a
+    new key is refused until the first unknown-`kid` token that arrives once the cooldown has
+    elapsed since the last fetch, and that token's own request performs the fetch. Worst-case
+    pickup delay is the cooldown. Why the limit exists is written on the constant. The window is
+    per verifier -- one per worker process and issuer configuration -- so N workers can each make
+    one fetch per window.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._jwks: dict[str, Any] | None = None
         self._expires_at = 0.0
+        # When the most recent attempt to load the key set ENDED, on the same monotonic clock as
+        # `_expires_at`, whether it succeeded or not. `None` until the first attempt. It is
+        # deliberately separate from `_expires_at`: a failed attempt must not move the cache's
+        # expiry (that would either extend a stale set or discard a good one), but it must still
+        # start the cooldown.
+        self._last_fetch_at: float | None = None
         self._lock = asyncio.Lock()
 
-    async def _load_jwks(self, *, force: bool = False) -> dict[str, Any]:
-        if not force and self._jwks is not None and monotonic() < self._expires_at:
+    def _current_key_set(self, *, force: bool) -> dict[str, Any] | None:
+        """The key set this call can answer from without a fetch, or `None` when one is due.
+
+        A normal call is due once the cache has expired -- unchanged. A forced call (unknown
+        `kid`) is due only once the cooldown has elapsed since the last attempt; until then the
+        cached set stands in for the fetch. With nothing cached there is nothing to stand in, so a
+        fetch is always due.
+        """
+        if self._jwks is None:
+            return None
+        now = monotonic()
+        if not force:
+            return self._jwks if now < self._expires_at else None
+        last = self._last_fetch_at
+        if last is not None and now - last < JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS:
             return self._jwks
+        return None
+
+    async def _load_jwks(self, *, force: bool = False) -> dict[str, Any]:
+        cached = self._current_key_set(force=force)
+        if cached is not None:
+            return cached
         async with self._lock:
-            if not force and self._jwks is not None and monotonic() < self._expires_at:
-                return self._jwks
-            if self.settings.oidc_jwks_json:
-                try:
-                    jwks = json.loads(self.settings.oidc_jwks_json)
-                except json.JSONDecodeError as exc:
-                    raise OidcVerificationError("pinned OIDC JWKS JSON is invalid") from exc
-            elif self.settings.oidc_jwks_url:
-                try:
-                    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
-                        response = await client.get(self.settings.oidc_jwks_url)
-                        response.raise_for_status()
-                        if len(response.content) > MAX_JWKS_BYTES:
-                            raise OidcVerificationError("OIDC JWKS document exceeds the size limit")
-                        jwks = response.json()
-                except (httpx.HTTPError, ValueError) as exc:
-                    raise OidcVerificationError("OIDC JWKS endpoint is unavailable") from exc
-            else:
-                raise OidcVerificationError("OIDC JWKS is not configured")
-            if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
-                raise OidcVerificationError("OIDC JWKS document has an invalid shape")
-            keys = jwks["keys"]
-            if (
-                not keys
-                or len(keys) > MAX_JWKS_KEYS
-                or not all(isinstance(key, dict) for key in keys)
-            ):
-                raise OidcVerificationError("OIDC JWKS key set has an invalid shape")
+            # Looked at again under the lock, not just before it. The window is measured from the
+            # END of the last attempt, so a caller that passed the check above while a fetch was
+            # in flight was looking at the attempt before that one. Once the lock is released it
+            # must see the fetch that just finished -- its key set and its timestamp -- or a burst
+            # that arrives during one fetch would fetch one after another, the exact
+            # amplification the cooldown exists to end.
+            cached = self._current_key_set(force=force)
+            if cached is not None:
+                return cached
+            try:
+                jwks = await self._fetch_jwks()
+            finally:
+                # Stamped when the attempt ends, and stamped on failure too: a provider that is
+                # down must not be asked again by every unknown-`kid` request that follows, and
+                # nothing below runs on failure, so `_jwks` and `_expires_at` keep describing the
+                # last good key set. Also stamped if the caller is cancelled mid-fetch -- a client
+                # that hangs up must not buy the next caller a fetch it would not otherwise get.
+                self._last_fetch_at = monotonic()
             self._jwks = jwks
             self._expires_at = monotonic() + self.settings.oidc_jwks_cache_seconds
             return jwks
+
+    async def _fetch_jwks(self) -> dict[str, Any]:
+        """Read and validate the key set from wherever this deployment keeps it.
+
+        Only the mechanism: when to call it is `_load_jwks`'s decision.
+        """
+        if self.settings.oidc_jwks_json:
+            try:
+                jwks = json.loads(self.settings.oidc_jwks_json)
+            except json.JSONDecodeError as exc:
+                raise OidcVerificationError("pinned OIDC JWKS JSON is invalid") from exc
+        elif self.settings.oidc_jwks_url:
+            try:
+                async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+                    response = await client.get(self.settings.oidc_jwks_url)
+                    response.raise_for_status()
+                    if len(response.content) > MAX_JWKS_BYTES:
+                        raise OidcVerificationError("OIDC JWKS document exceeds the size limit")
+                    jwks = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                raise OidcVerificationError("OIDC JWKS endpoint is unavailable") from exc
+        else:
+            raise OidcVerificationError("OIDC JWKS is not configured")
+        if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
+            raise OidcVerificationError("OIDC JWKS document has an invalid shape")
+        keys = jwks["keys"]
+        if not keys or len(keys) > MAX_JWKS_KEYS or not all(isinstance(key, dict) for key in keys):
+            raise OidcVerificationError("OIDC JWKS key set has an invalid shape")
+        return jwks
 
     async def verify(self, token: str) -> dict[str, Any]:
         try:
@@ -242,6 +331,11 @@ class OidcVerifier:
         jwks = await self._load_jwks()
         key_data = next((key for key in jwks["keys"] if key.get("kid") == kid), None)
         if key_data is None:
+            # An unknown `kid` is usually a rotation the cache has not seen, so look once more --
+            # but only once per cooldown (R11-AUD09). The `kid` comes from the header of a token
+            # nobody has authenticated yet, so an unlimited refetch here let any caller make this
+            # API call the identity provider once per request. Inside the window `_load_jwks`
+            # hands back the set already held, and the token is refused just below, as before.
             jwks = await self._load_jwks(force=True)
             key_data = next((key for key in jwks["keys"] if key.get("kid") == kid), None)
         if key_data is None:

@@ -11,16 +11,20 @@
 > the `tests` CI job under a 69% combined coverage floor; there is no tier separation, no
 > per-tier duration budget, and nothing distinguishes a Tier 0 test from a Tier 3 test at
 > collection time. **Tier 0 exists in substance**: `tests/test_tier0_invariants.py` plus one
-> module each for INV-1, 5, 6, 7 and 9 (the §2 table below is the 2026-08-30 tally and has not
-> been re-derived). **Tier 2 exists in part**: the OpenAPI-diff gate
+> module each for INV-1, 5, 6, 7 and 9 (the §2 table below was re-derived on 2026-09-20).
+> **Tier 2 exists in part**: the OpenAPI-diff gate
 > (`tests/test_openapi_diff_gate.py`, and the `openapi-diff` CI job), the event-catalog gate
 > (`tests/test_event_catalog_gate.py`) and the migration/ORM drift gate
 > (`tests/test_migration_orm_drift.py`, in the `migration-drift` CI job) all exist; there is no
 > schema-registry compatibility or fake-parity suite. **Tier 4 exists in part**: a browser
-> journey through the production proxy (the `ui-journey` CI job) and `scripts/verify-local.ps1`.
-> **Tier 5's load, soak, chaos and restore tests do not exist**; `perf-baseline` is an
-> in-process regression gate, not those. Tiers 1 and 3 exist only as ordinary tests in the same
-> flat directory.
+> journey through the production proxy (the `ui-journey` CI job, which runs the four Playwright
+> specs under `e2e/tests/`) and `scripts/verify-local.ps1`. **The user interface has its own
+> tests, outside that count**: `ui-next` holds 114 vitest files as of 2026-09-20
+> (`find ui-next/src -name '*.test.ts' -o -name '*.test.tsx'`), run by `npm run test` in the
+> `ui-next` CI job, and they include the jsdom accessibility sweep
+> (`ui-next/src/a11y-sweep.test.tsx`). **Tier 5's load, soak, chaos and restore tests do not
+> exist**; `perf-baseline` is an in-process regression gate, not those. Tiers 1 and 3 exist only
+> as ordinary tests in the same flat directory.
 
 ```mermaid
 flowchart TB
@@ -46,27 +50,34 @@ flowchart TB
 
 The safety net. Each maps to an invariant in `10-architecture/01-principles-and-invariants.md`.
 
-**Built / planned, verified 2026-08-30** by searching for each function name across the
-repository. Five of nine invariants have their test; four do not. *(This count moves — INV-5's
-test landed while this table was being written. Re-grep rather than trusting the tally.)*
+> **Implementation status (2026-09-20).** **Built, re-verified 2026-09-20** by searching for each
+> function name across `tests/` (`grep -rn "def test_<name>" tests`): all eleven tests below
+> exist, so all nine invariants have a named test. The 2026-08-30 tally was seven built and four
+> planned (INV-1, INV-6, INV-7, INV-9); those four have since landed, in
+> `tests/test_inv1_single_authoritative_store.py`, `tests/test_inv6_value_freedom.py`,
+> `tests/test_inv7_attributability.py` and `tests/test_engine_capability_matrix.py`, while
+> `tests/test_tier0_invariants.py` holds INV-2, INV-3, INV-4, INV-8 and the workspace half of
+> INV-5. The Method column below says what each test does today, which for INV-1, INV-6 and
+> INV-9 is narrower than the method first specified. *(This tally moves. Re-grep rather than
+> trusting it.)*
 
 | Test | Invariant | Status | Method |
 |---|---|---|---|
-| `test_projection_rebuild` | INV-1 | **Planned** | Delete Neo4j and the search index; replay; assert identical query results |
+| `test_projection_rebuild` | INV-1 | **Built** | In `tests/test_inv1_single_authoritative_store.py`: runs the real `project_discovery` twice against a fixed set of authoritative rows served by an in-memory session double (`ModelRoutedSession`, not a live PostgreSQL), discarding the recorded graph in between, and requires the two projections to be identical (replay determinism). Its own docstring says it does not prove that Neo4j applies the projection correctly |
 | `test_no_connector_execution_outside_gateway` | INV-2 | **Built** | AST scan of every module under `src/aida` for a call to either SQL-accepting member |
 | `test_the_connector_handed_to_the_platform_has_no_sql_surface` | INV-2 | **Built** | Fails if the SQL methods are moved back onto `Connector` |
 | `test_model_output_types_are_inert` | INV-3 | **Built** | Assert no proposal type implements or coerces to an executable command interface |
 | `test_production_config_fail_closed` | INV-4 | **Built** | Parameterized over each incomplete-posture case; assert startup refusal or denial |
 | `test_the_secure_production_baseline_itself_is_accepted` | INV-4 | **Built** | The negative control — a correct posture must still start |
 | `test_cross_tenant_denial` | INV-5 | **Built** | Route-table-driven; in `tests/test_inv5_tenant_isolation.py` (plus a second in the Tier-0 file). Also asserts every route is authenticated, every route reaches a tenant check, and every worker is tenant-scoped |
-| `test_no_source_values_in_control_plane` | INV-6 | **Planned** | Sentinel values in source data; scan every table, log line, event payload, and trace |
-| `test_every_mutation_audits` | INV-7 | **Planned** | Reflection over governed models; exercise each mutation; assert a matching audit row |
+| `test_no_source_values_in_control_plane` | INV-6 | **Built** | In `tests/test_inv6_value_freedom.py`: drives the real `QueryExecutionGateway.execute` in process against a fake executor that returns sentinel-laden rows, then searches every row it stages (query record, audit, outbox) for the sentinels. The same module adds structural, profiling, ingestion and trace-span scans. Narrower than the specced full-stack sentinel sweep: there is no real warehouse behind it |
+| `test_every_mutation_audits` | INV-7 | **Built** | In `tests/test_inv7_attributability.py`: derives the mutating routes from HTTP verb and call graph and requires each to reach `record_audit`; `test_no_unaudited_mutation_remains`, in the same file, runs with no exemption list |
 | `test_self_approval_denied` | INV-8 | **Built** | Every governed object type; attempt self-approval |
-| `test_capability_matrix_matches_certification` | INV-9 | **Planned** | Assert every advertised capability has a passing certification check |
+| `test_capability_matrix_matches_certification` | INV-9 | **Built** | In `tests/test_engine_capability_matrix.py`: every `SUPPORTED` or `PARTIAL` cell of the published capability matrix is checked against the code that would have to exist for the claim to hold. The enforcement clause (flags derived from a committed certification result) has its own module, `tests/test_inv9_capability_honesty.py` |
 
-**These are never marked `skip` or `xfail`.** A failing invariant test blocks the merge, full stop. If an invariant genuinely needs to change, that is an ADR, not a test annotation.
+**These are never marked `skip` or `xfail`.** A failing invariant test blocks the merge, full stop. If an invariant genuinely needs to change, that is an ADR, not a test annotation. (As of 2026-09-20 none of the eleven carries either marker. `test_capability_flags_are_derived_from_certification` in `tests/test_inv9_capability_honesty.py` keeps a conditional strict `xfail`, which applies only while `KNOWN_UNCERTIFIED_CLAIMS` is non-empty; it is empty today, so the test runs as an ordinary assertion.)
 
-The two highest-value tests here are `test_cross_tenant_denial` (which is generated by reflection over the route table, so a new endpoint is covered automatically) and `test_no_source_values_in_control_plane` (which catches the class of leak that code review reliably misses). **The first landed on 2026-08-30 and works exactly as described; the second is still unwritten**, and is now the highest-value missing test in the suite — the single most actionable line in this document.
+The two highest-value tests here are `test_cross_tenant_denial` (which is generated by reflection over the route table, so a new endpoint is covered automatically) and `test_no_source_values_in_control_plane` (which catches the class of leak that code review reliably misses). **Both exist as of 2026-09-20.** The first landed on 2026-08-30 and works exactly as described. The second landed later and is narrower than specced: it proves the query path value-free end to end, and the profiling and ingestion paths from the connector boundary inwards, against fakes, so the full-stack sentinel sweep over every table, log line, event payload and trace is still the piece of INV-6 that is not built.
 
 ## 3. Tier 1 — Module unit tests
 
@@ -152,12 +163,12 @@ Full docker-compose stack against a **synthetic banking fixture** — never prod
 
 | Tier | Status |
 |---|---|
-| 0 Invariants | **Partial** — the invariant suite is not yet formalized as a distinct tier |
+| 0 Invariants | **Built as files, not as a distinct tier** (2026-09-20) — all nine invariants have a named test (§2); one `pytest` run collects them with everything else and no marker separates them |
 | 1 Module unit | About 14,450 tests collected on 2026-09-20 (collected, not a pass count); not yet per-module standalone |
 | 2 Contract | Partial — the OpenAPI diff gate and the event-catalog gate exist (2026-09-20); no schema-registry compatibility or fake-parity suite |
 | 3 Integration | Partial |
 | 4 End-to-end | Good — R20 fixture covers batch replay, conflicting-content denial, cross-chunk FK, exact counts, payload cleanup |
-| 5 Performance | **Not run** — no load, soak, chaos, restore, penetration, or accessibility evidence |
+| 5 Performance | **Partial** (2026-09-20) — no target-scale load, soak, chaos, restore or penetration evidence: tracker R11-B15 and R11-C9 are BLOCKED on customer inputs, and the scale measurements on record are proxies, such as the 100,000-table catalog that tracker CT-2 records. **Accessibility is no longer "no evidence"**: it has automated evidence — a jsdom axe sweep of every navigable screen (`ui-next/src/a11y-sweep.test.tsx`, run by the `ui-next` CI job), Playwright axe specs in both themes plus 320px reflow behind the production proxy (`e2e/tests/accessibility.spec.ts`, run by the `ui-journey` job) and a live audit over every screen of a deployed stack (`e2e/scripts/live-a11y-audit.mjs`, `npm run audit:a11y` in `e2e/`). Human acceptance is still open — screen reader, zoom by eye, focus-indicator contrast, multi-monitor scaling (tracker R11-C2) |
 
 ## 10. Priority gaps
 
@@ -173,3 +184,5 @@ Full docker-compose stack against a **synthetic banking fixture** — never prod
 | TS-8 | Chaos and restore drills | P0 |
 | TS-9 | Accessibility audit | P1 |
 | TS-10 | Labelled semantic/relationship benchmark corpus | P1 |
+
+> **Implementation status (2026-09-20).** The table above is the 2026-08-30 gap list. Tracker status today: TS-1 to TS-6 and TS-10 are DONE; TS-7 and TS-8 (load, soak, spike, chaos, restore) were merged into R11-B15, which is BLOCKED on a target size and topology; TS-9 (accessibility audit) was merged into R11-C2, which is PARTIAL, with the automated half landed and human acceptance open.

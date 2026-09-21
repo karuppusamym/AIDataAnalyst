@@ -138,9 +138,6 @@ const KNOWN = [
   { user: /^vic\.viewer$/, screen: /^audit$/, pattern: /audit-events|roles? is required|could not be loaded/, why: "least privilege on purpose (demo Act 5)" },
   // The BI integration is a feature flag that is off.
   { user: /^alex\.operator$/, screen: /^workspace-access$/, pattern: /bi-connections|could not be loaded/, why: "BI integration is disabled" },
-  // Recorded debt (tracker R11-AUD01): the screen calls a route this role bundle is not admitted to.
-  { user: /^sam\.agentdev$/, screen: /^context$/, pattern: /ontology-versions|roles? is required/, why: "AgentDeveloper cannot read ontology versions (R11-AUD01)" },
-  { user: /^sam\.agentdev$/, screen: /^home$/, pattern: /reviews\/queue\/summary/, why: "Home reads the review-queue summary, refused to non-reviewers (R11-AUD01)" },
 ];
 const knownFor = (r, item) => KNOWN.find((k) =>
   k.pattern.test(item) && (!k.user || k.user.test(r.user)) && (!k.screen || k.screen.test(r.screen)));
