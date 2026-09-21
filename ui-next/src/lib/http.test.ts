@@ -19,6 +19,28 @@ function errorResponse(status: number, body: unknown, headers: Record<string, st
 }
 
 describe("decodeError", () => {
+  it("preserves GraphQL admission refusals and their support reference", async () => {
+    const error = await decodeError(errorResponse(400, {
+      errors: [{ message: "OPERATION_NAME_REQUIRED", extensions: {
+        code: "OPERATION_NAME_REQUIRED", detail: "Supply one named operation.",
+      } }],
+      extensions: { correlationId: "graphql-request-1" },
+    }));
+    expect(error.code).toBe("OPERATION_NAME_REQUIRED");
+    expect(error.detail).toBe("OPERATION_NAME_REQUIRED: Supply one named operation.");
+    expect(error.correlationId).toBe("graphql-request-1");
+    expect(error.retryable).toBe(false);
+  });
+
+  it("ignores malformed GraphQL errors and preserves the HTTP failure", async () => {
+    const error = await decodeError(errorResponse(429, {
+      errors: [null, 3, { message: {}, extensions: "invalid" }],
+    }, { "X-Correlation-Id": "rate-limit-reference" }));
+    expect(error.status).toBe(429);
+    expect(error.detail).toContain("429");
+    expect(error.correlationId).toBe("rate-limit-reference");
+  });
+
   it("keeps the structured code, message and correlation id", async () => {
     const error = await decodeError(
       errorResponse(500, {

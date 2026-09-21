@@ -120,6 +120,8 @@ function defaultRetryable(status: number): boolean {
 interface StructuredErrorBody {
   error?: { code?: unknown; message?: unknown; correlation_id?: unknown };
   detail?: unknown;
+  errors?: unknown;
+  extensions?: { correlationId?: unknown };
 }
 
 function messageFromDetail(value: unknown): {
@@ -175,6 +177,24 @@ export async function decodeError(res: Response): Promise<ApiError> {
   try {
     const body = (await res.json()) as StructuredErrorBody;
     if (body && typeof body === "object") {
+      // GraphQL admission failures use a non-2xx response with an errors array.
+      // Keep its refusal reason instead of reducing it to "400 Bad Request".
+      if (Array.isArray(body.errors)) {
+        const messages: string[] = [];
+        for (const item of body.errors) {
+          if (!item || typeof item !== "object") continue;
+          const entry = item as { message?: unknown; extensions?: Record<string, unknown> };
+          const extension = entry.extensions;
+          if (!code && typeof extension?.code === "string") code = extension.code;
+          const summary = typeof entry.message === "string" ? entry.message : "";
+          const detail = typeof extension?.detail === "string" ? extension.detail : "";
+          if (summary || detail) messages.push([summary, detail].filter(Boolean).join(": "));
+        }
+        if (messages.length) message = messages.join("; ");
+        if (typeof body.extensions?.correlationId === "string") {
+          correlationId = body.extensions.correlationId;
+        }
+      }
       const structured = body.error;
       if (structured && typeof structured === "object") {
         if (typeof structured.message === "string" && structured.message) {

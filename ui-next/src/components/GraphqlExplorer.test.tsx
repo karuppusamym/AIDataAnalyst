@@ -73,4 +73,26 @@ describe("GraphqlExplorer", () => {
     expect(screen.getByRole("button", { name: "Run operation" })).toBeDisabled();
     expect(executeGraphQL).not.toHaveBeenCalled();
   });
+
+  it("requires acknowledgement when a fragment precedes a mutation", () => {
+    render(<GraphqlExplorer projectId={null} />);
+    fireEvent.change(screen.getByLabelText("GraphQL operation"), { target: { value:
+      "fragment Receipt on GovernedExecutionReceipt { id }\nmutation Execute($request: ExecuteGovernedToolInput!) { executeGovernedTool(request: $request) { receipt { ...Receipt } } }",
+    } });
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Run operation" })).toBeDisabled();
+    expect(executeGraphQL).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh acknowledgement after execution variables change", () => {
+    render(<GraphqlExplorer projectId={null} />);
+    fireEvent.change(screen.getByLabelText("Example"), { target: { value: "execute-tool" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByRole("button", { name: "Run operation" })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText("GraphQL variables"), {
+      target: { value: '{"request":{"toolVersionId":"another-tool"}}' },
+    });
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Run operation" })).toBeDisabled();
+  });
 });

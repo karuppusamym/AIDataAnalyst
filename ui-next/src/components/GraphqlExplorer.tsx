@@ -98,7 +98,9 @@ function parseVariables(value: string): { value: Record<string, unknown> | null;
 }
 
 function isMutation(query: string): boolean {
-  return /^\s*(?:#[^\n]*\n\s*)*mutation\b/i.test(query);
+  // A fragment may precede the operation. Conservatively require acknowledgement
+  // whenever the document names a mutation; backend parsing remains authoritative.
+  return /\bmutation\b/i.test(query);
 }
 
 export function GraphqlExplorer({ projectId }: { projectId: string | null }) {
@@ -177,12 +179,11 @@ result = response.json()`;
             execution controls as REST.
           </p>
         </div>
-        <Pill tone="info">Introspection disabled</Pill>
+        <Pill tone="info">Introspection off by default</Pill>
       </div>
       <p className="agcard__note">
-        Schema discovery is intentionally unavailable at runtime. Use the versioned published
-        schema and these examples; requests containing <code>__schema</code> or <code>__type</code>
-        are refused before resolver work starts.
+        Use the published schema and these examples. Runtime schema discovery requires explicit
+        enablement and an eligible developer or administrator role; production disables it.
       </p>
 
       <div className="aggraphql__toolbar">
@@ -192,7 +193,10 @@ result = response.json()`;
           </select>
         </Field>
         <Field label="Operation name">
-          <input value={operationName} onChange={(event) => setOperationName(event.target.value)} />
+          <input value={operationName} onChange={(event) => {
+            setOperationName(event.target.value);
+            setConfirmedMutation(false);
+          }} />
         </Field>
       </div>
 
@@ -214,7 +218,10 @@ result = response.json()`;
             aria-label="GraphQL variables"
             value={variables}
             spellCheck={false}
-            onChange={(event) => setVariables(event.target.value)}
+            onChange={(event) => {
+              setVariables(event.target.value);
+              setConfirmedMutation(false);
+            }}
           />
         </Field>
       </div>
