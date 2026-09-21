@@ -116,6 +116,16 @@ def test_the_gate_script_passes_on_this_repository(capsys: pytest.CaptureFixture
         (f"/v1/projects/{_ID}/datasources", 1 * _MIB),
         (f"/v1/datasources/{_ID}/query-executions", 1 * _MIB),
         ("/v1/health", 1 * _MIB),
+        # R11-AUD11: the three file uploads admit what the API admits, and their neighbours
+        # (the import batch's own routes, the bundle download) keep the default.
+        (f"/v1/datasources/{_ID}/model/import", 32 * _MIB),
+        (f"/v1/datasources/{_ID}/model/import/", 32 * _MIB),
+        (f"/v1/context-product-versions/{_ID}/okf-bundle/imports", 32 * _MIB),
+        (f"/v1/context-product-versions/{_ID}/okf-bundle/imports/preview", 32 * _MIB),
+        (f"/v1/model-imports/{_ID}/submit", 1 * _MIB),
+        (f"/v1/datasources/{_ID}/model/import/extra", 1 * _MIB),
+        (f"/v1/context-product-versions/{_ID}/okf-bundle/imports/preview/extra", 1 * _MIB),
+        (f"/v1/context-product-versions/{_ID}/okf-bundle", 1 * _MIB),
         # The two other API prefixes are untouched by this change.
         ("/mcp", 8 * _MIB),
         ("/graphql", 128 * 1024),
@@ -189,6 +199,30 @@ def test_every_route_the_gate_calls_ordinary_is_real_and_not_an_envelope_route()
             "would keep the gate green while checking nothing"
         )
         assert probe not in _envelope_carrying_post_routes()
+
+
+def test_the_upload_limit_is_the_one_the_api_enforces() -> None:
+    """R11-AUD11: the proxy admits exactly the bytes the upload handlers accept.
+
+    Lower, and a file the API would take gets a bare nginx 413; higher, and nginx buffers bytes
+    the API will refuse anyway. Raising either constant fails this until nginx follows.
+    """
+    from aida.model_import import MAX_UPLOAD_BYTES
+    from aida.okf_import_bundle import MAX_ARCHIVE_BYTES
+
+    assert contract.UPLOAD_BODY_BYTES == MAX_UPLOAD_BYTES == MAX_ARCHIVE_BYTES
+    for route in contract.UPLOAD_BODY_ROUTES:
+        assert _limit_for(route) == contract.UPLOAD_BODY_BYTES
+
+
+def test_every_upload_route_the_gate_names_is_a_real_post_route() -> None:
+    posts = {
+        re.sub(r"\{[^}]+\}", _ID, path)
+        for path, operations in app.openapi()["paths"].items()
+        if "post" in operations
+    }
+    for route in contract.UPLOAD_BODY_ROUTES:
+        assert route in posts, f"{route} is not a POST route of the application"
 
 
 def _bytes_at_the_synchronous_caps() -> int:
@@ -375,6 +409,21 @@ _BROKEN_CONFIGS: list[tuple[str, Callable[[str], str], str]] = [
         "needs at least 64 MiB",
     ),
     (
+        "the upload pattern forgets the bundle preview, so it falls back to /v1/'s 1 MiB",
+        _replace("okf-bundle/imports(/preview)?)", "okf-bundle/imports)"),
+        "okf-bundle/imports/preview' is served by location '/v1/' with a body limit of 1 MiB",
+    ),
+    (
+        "the upload limit is lowered below what the API accepts",
+        _replace("client_max_body_size 32m;", "client_max_body_size 16m;"),
+        "the proxy should admit exactly that much",
+    ),
+    (
+        "the upload limit is raised past what the API accepts",
+        _replace("client_max_body_size 32m;", "client_max_body_size 48m;"),
+        "the proxy should admit exactly that much",
+    ),
+    (
         "a location is nested, which the gate refuses to guess about",
         _replace(_V1_OPEN, _V1_OPEN + "\n    location /v1/inner/ { return 204; }"),
         "nested location",
@@ -500,6 +549,12 @@ def test_the_live_proxy_job_posts_oversize_bodies_to_the_real_nginx_image() -> N
     assert f"$(({limit_mib} * mib))" in job, "the job never posts a body of exactly the limit"
     assert f"$(({limit_mib} * mib + 1))" in job, "the job never posts a body one byte over it"
     assert "!= 413" in job
+
+    upload_mib = int(_limit_for(contract.UPLOAD_BODY_ROUTES[0]) // _MIB)
+    for route in contract.UPLOAD_BODY_ROUTES:
+        assert f'"{route.replace(_ID, "$id")}"' in job, f"the job never posts to {route}"
+    assert f"$(({upload_mib} * mib))" in job, "the job never posts an upload of exactly the limit"
+    assert f"$(({upload_mib} * mib + 1))" in job, "the job never posts an upload one byte over it"
 
 
 @pytest.fixture

@@ -995,6 +995,15 @@ jobs:
           reaches "/v1/metadata-ingestion-batches/$id/chunks" $((64 * mib))
           refused "/v1/datasources/$id/metadata-ingestions" $((64 * mib + 1))
           refused "/v1/metadata-ingestion-batches/$id/chunks" $((64 * mib + 1))
+          # R11-AUD11: the three file uploads admit exactly the API's own 32 MiB, and one
+          # byte more is nginx's 413; the import batch's submit keeps the default.
+          reaches "/v1/datasources/$id/model/import" $((2 * mib))
+          reaches "/v1/datasources/$id/model/import" $((32 * mib))
+          reaches "/v1/context-product-versions/$id/okf-bundle/imports" $((32 * mib))
+          reaches "/v1/context-product-versions/$id/okf-bundle/imports/preview" $((32 * mib))
+          refused "/v1/datasources/$id/model/import" $((32 * mib + 1))
+          refused "/v1/context-product-versions/$id/okf-bundle/imports/preview" $((32 * mib + 1))
+          refused "/v1/model-imports/$id/submit" $((2 * mib))
           # And only there: ordinary routes (a create, and the query gateway, where a
           # large body is least welcome) and the ingestion routes that carry no envelope
           # (the manifest and finalize) keep nginx's 1 MiB default.

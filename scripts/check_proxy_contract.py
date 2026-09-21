@@ -24,7 +24,9 @@ concrete route path through the location-matching rules nginx itself applies and
 asserts the limit that request would get. It fails when an envelope route falls
 back to `/v1/`'s default, when its limit drops below what a body at the
 synchronous caps needs, when any limit is unlimited, and when the rest of `/v1/`
-was loosened along with it.
+was loosened along with it. Since R11-AUD11 it also holds the three file-upload
+routes (the workbook import and the OKF bundle import and preview) to exactly
+the 32 MiB the API itself accepts.
 
 Scope and honesty
 -----------------
@@ -94,6 +96,21 @@ INGESTION_MIN_BODY_BYTES = 64 * MIB
 #: The most an envelope route may accept. Twice the floor: enough room to raise the floor once
 #: without touching this, not enough for `0` (unlimited) or a `1g` typed in place of `1m`.
 INGESTION_MAX_BODY_BYTES = 128 * MIB
+
+#: R11-AUD11. The routes whose request body is an uploaded file, sent raw with its filename as a
+#: query parameter: the model workbook import and an edited OKF bundle's preview and apply.
+#: `tests/test_proxy_body_limits.py` checks that each is a POST route of the application.
+UPLOAD_BODY_ROUTES: tuple[str, ...] = (
+    f"/v1/datasources/{_PLACEHOLDER_ID}/model/import",
+    f"/v1/context-product-versions/{_PLACEHOLDER_ID}/okf-bundle/imports",
+    f"/v1/context-product-versions/{_PLACEHOLDER_ID}/okf-bundle/imports/preview",
+)
+
+#: What the API itself accepts on each upload route, and so exactly what nginx must pass: less
+#: refuses a file the API would take, more buffers bytes the API will refuse anyway.
+#: `tests/test_proxy_body_limits.py` binds it to `model_import.MAX_UPLOAD_BYTES` and
+#: `okf_import_bundle.MAX_ARCHIVE_BYTES`.
+UPLOAD_BODY_BYTES = 32 * MIB
 
 #: Real API routes that are NOT envelope routes. Each must still resolve to a proxied location
 #: limited to nginx's default, which is what "raise the limit for the ingestion routes only, do
@@ -380,6 +397,21 @@ def body_limit_problems(nginx_text: str) -> list[str]:
                 "this is what each unauthenticated request may cost"
             )
 
+    for path in UPLOAD_BODY_ROUTES:
+        location = resolve_location(locations, path)
+        if location is None or not location.proxied:
+            problems.append(
+                f"'{path}' is a file-upload route but nginx does not proxy it to the API"
+            )
+            continue
+        limit = effective_body_limit(location, server_limit)
+        if limit != UPLOAD_BODY_BYTES:
+            problems.append(
+                f"'{path}' is served by location '{location.pattern}' with a body limit of "
+                f"{_mib(limit)}; the API accepts up to {_mib(UPLOAD_BODY_BYTES)} there, and the "
+                "proxy should admit exactly that much (R11-AUD11)"
+            )
+
     for path in GENERAL_API_ROUTES:
         location = resolve_location(locations, path)
         if location is None or not location.proxied:
@@ -388,9 +420,10 @@ def body_limit_problems(nginx_text: str) -> list[str]:
         limit = effective_body_limit(location, server_limit)
         if limit > NGINX_DEFAULT_BODY_BYTES:
             problems.append(
-                f"'{path}' is not an envelope route but is served by location "
-                f"'{location.pattern}' with a body limit of {_mib(limit)}; only the ingestion "
-                f"routes may exceed nginx's {_mib(NGINX_DEFAULT_BODY_BYTES)} default -- "
+                f"'{path}' is not an envelope route (nor an upload route) but is served by "
+                f"location "
+                f"'{location.pattern}' with a body limit of {_mib(limit)}; only those routes "
+                f"may exceed nginx's {_mib(NGINX_DEFAULT_BODY_BYTES)} default -- "
                 "loosening `/v1/` generally is not what R11-AUD05 asked for"
             )
     return problems
@@ -487,7 +520,8 @@ def main() -> int:
             "\nEvery public path served by the API must be proxied in BOTH "
             "ui-next/vite.config.ts (development) and ui-next/nginx.conf (production), and "
             "the two envelope-carrying ingestion routes must accept a body at the synchronous "
-            "caps while the rest of /v1/ keeps nginx's default.\n"
+            "caps and the file-upload routes the API's own upload limit, while the rest of /v1/ "
+            "keeps nginx's default.\n"
             "This is a static configuration check; the live proxy behaviour is covered "
             "by the `ui-proxy` job in .github/workflows/ci.yml."
         )
@@ -500,6 +534,10 @@ def main() -> int:
         f"location limited to between {_mib(INGESTION_MIN_BODY_BYTES)} and "
         f"{_mib(INGESTION_MAX_BODY_BYTES)}; {len(GENERAL_API_ROUTES)} other /v1/ routes keep "
         f"nginx's {_mib(NGINX_DEFAULT_BODY_BYTES)} default"
+    )
+    print(
+        f"OK: the {len(UPLOAD_BODY_ROUTES)} file-upload routes admit exactly the "
+        f"{_mib(UPLOAD_BODY_BYTES)} the API accepts"
     )
     print("(static configuration check -- see the `ui-proxy` CI job for the live test)")
     return 0
