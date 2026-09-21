@@ -18,6 +18,7 @@ from uuid import uuid4, uuid5
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from aida.agent_intelligence import RetrievalHit
 from aida.agent_orchestrator import GovernedAgentOrchestrator
 from aida.config import Settings
 from aida.db import Base
@@ -292,6 +293,47 @@ async def test_the_sql_model_gets_the_mapped_tables(session: AsyncSession) -> No
     )
 
     assert {table["qualified_name"] for table in context["tables"]} == {"sales.fct_orders_daily"}
+
+
+@pytest.mark.asyncio
+async def test_through_a_product_the_sql_model_sees_only_the_tables_the_product_names(
+    session: AsyncSession,
+) -> None:
+    """Review 2026-09-16 F01/F02 follow-through: a pinned concept (or a referenced routine) may
+    map to tables the product does not name. The gateway refuses SQL over them, so showing
+    them to the model only leaks their schema and invites a refused answer."""
+    seeded = await _seed(session)
+    hits = await hybrid_retrieve(
+        session, datasource=seeded["datasource"], question=QUESTION, settings=_settings()
+    )
+    fct_id = str(seeded["fct"].id)
+    routine_hit = RetrievalHit(
+        object_type="ROUTINE",
+        object_id=str(uuid4()),
+        display_name="refresh_orders",
+        score=1.0,
+        reason_codes=["TEST"],
+        metadata={"reads_table_ids": [fct_id]},
+    )
+
+    async def shown(scope: frozenset[str] | None, evidence: list[Any]) -> set[str]:
+        context = await GovernedAgentOrchestrator._model_context(  # type: ignore[arg-type]
+            None,
+            session,
+            datasource=seeded["datasource"],
+            retrieval_hits=evidence,
+            table_scope=scope,
+        )
+        return {table["qualified_name"] for table in context["tables"]}
+
+    # A product that does not name the mapped table: the model is shown nothing of it, whether
+    # the concept or a routine reached it.
+    assert await shown(frozenset({str(uuid4())}), hits) == set()
+    assert await shown(frozenset({str(uuid4())}), [routine_hit]) == set()
+    # A product that names it, and a question asked through no product, are unchanged.
+    assert await shown(frozenset({fct_id}), hits) == {"sales.fct_orders_daily"}
+    assert await shown(frozenset({fct_id}), [routine_hit]) == {"sales.fct_orders_daily"}
+    assert await shown(None, hits) == {"sales.fct_orders_daily"}
 
 
 @pytest.mark.asyncio

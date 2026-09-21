@@ -829,7 +829,17 @@ class GovernedAgentOrchestrator:
         *,
         datasource: DataSource,
         retrieval_hits: list[Any],
+        table_scope: frozenset[str] | None = None,
     ) -> dict[str, Any]:
+        """The schema the SQL model is shown: tables the retrieved evidence names or reaches.
+
+        `table_scope` is the table boundary of a context product the question was asked through
+        (`ContextProductScope.table_ids`), or `None` for a product-free question. Through a
+        product only the tables it names are shown: a routine it references or an ontology
+        concept it pins can read or be mapped to tables it does not name, and those reached the
+        model's schema context while any SQL over them was refused at the gateway (review
+        2026-09-16, F01/F02 follow-through).
+        """
         table_ids: set[UUID] = set()
         for hit in retrieval_hits:
             if hit.object_type == "TABLE":
@@ -844,6 +854,8 @@ class GovernedAgentOrchestrator:
             for key in ("reads_table_ids", "writes_table_ids", "mapped_table_ids"):
                 for raw in hit.metadata.get(key) or []:
                     table_ids.add(UUID(str(raw)))
+        if table_scope is not None:
+            table_ids = {table_id for table_id in table_ids if str(table_id) in table_scope}
         bounded_ids = list(sorted(table_ids, key=str))[:25]
         if not bounded_ids:
             return {"dialect": datasource.dialect, "tables": [], "constraints": []}
@@ -1889,7 +1901,14 @@ class GovernedAgentOrchestrator:
             )
             model_context, withheld_tables = self._screened_model_context(
                 await self._model_context(
-                    session, datasource=request.datasource, retrieval_hits=retrieved.hits
+                    session,
+                    datasource=request.datasource,
+                    retrieval_hits=retrieved.hits,
+                    table_scope=(
+                        None
+                        if retrieved.context_product_scope is None
+                        else retrieved.context_product_scope.table_ids
+                    ),
                 )
             )
             system_instruction = (
