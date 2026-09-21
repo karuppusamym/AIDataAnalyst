@@ -33,6 +33,8 @@
    which is what `session.tsx` does with them.
 --------------------------------------------------------------------------- */
 
+import { asPersona, type Persona } from "./ui-types";
+
 export type DataMode = "fixtures" | "live";
 export type AuthMode = "development" | "oidc" | "proxy";
 
@@ -41,6 +43,8 @@ interface RawEnv {
   readonly VITE_AUTH_MODE?: string;
   readonly VITE_DEV_PRINCIPAL_ID?: string;
   readonly VITE_DEV_ROLES?: string;
+  readonly VITE_DEV_PERSONA?: string;
+  readonly VITE_DEV_ORG_ID?: string;
   readonly VITE_OIDC_ISSUER?: string;
   readonly VITE_OIDC_CLIENT_ID?: string;
   readonly VITE_OIDC_SCOPE?: string;
@@ -75,6 +79,19 @@ export interface AppConfig {
   readonly authMode: AuthMode;
   readonly devPrincipalId: string;
   readonly devRoles: string;
+  /**
+   * Development identity only: the persona the shell starts in, so that a UI run for one user
+   * (`scripts/demo-users.ps1`) opens as that user's persona rather than the shell's own default.
+   * `null` when unset or not one of the five personas. Under OIDC the persona is derived from the
+   * verified groups claim and this is ignored.
+   */
+  readonly devPersona?: Persona | null;
+  /**
+   * Development identity only: the organization a browser with nothing remembered starts in.
+   * A user who cannot list organizations has no picker to choose one with, so without this the
+   * shell opens on a placeholder id that exists nowhere. `null` when unset or not a UUID.
+   */
+  readonly devOrgId?: string | null;
   /** True when `VITE_AUTH_MODE` was not set and the default was inferred. */
   readonly authModeInferred: boolean;
   /**
@@ -100,6 +117,15 @@ function readAuthMode(raw: string | undefined): AuthMode | null {
     default:
       return null;
   }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** An organization id from the environment, or null. A malformed value is dropped rather than
+ *  passed on: a wrong id would send every request to a tenant that does not exist. */
+function readOrgId(raw: string | undefined): string | null {
+  const value = (raw ?? "").trim().toLowerCase();
+  return UUID.test(value) ? value : null;
 }
 
 function readOidcConfig(env: RawEnv): OidcClientConfig | null {
@@ -142,6 +168,8 @@ export function resolveAppConfig(
     authModeInferred: declared === null,
     devPrincipalId: env.VITE_DEV_PRINCIPAL_ID || "local-ui-admin",
     devRoles: env.VITE_DEV_ROLES || DEFAULT_DEV_ROLES,
+    devPersona: asPersona(env.VITE_DEV_PERSONA?.trim()),
+    devOrgId: readOrgId(env.VITE_DEV_ORG_ID),
     oidc: readOidcConfig(env),
   };
 }

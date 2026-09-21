@@ -30,11 +30,12 @@ import "./LineageRefusalScreen.css";
                          refusal itself -- what it considered before it
                          refused (`GET /v1/ai-decisions/{run_id}`)
 
-   Honest scope note: `list_refusals` gates on `PlatformAdmin`/`DataAdmin`
-   only (its own `require_roles`, unchanged here) -- narrower than most of
-   this shell's other screens. A Steward or Analyst opening this screen gets
-   the same 403 `ErrorState` any other gated call renders, not a silent
-   empty list.
+   Honest scope note: `list_refusals` gates on `PlatformAdmin`, `DataAdmin`
+   and `Auditor` (its own `require_roles`) -- narrower than most of this
+   shell's other screens. `Auditor` was added on 2026-09-20: the screen sits
+   in the Auditor menu because it is evidence, and an Auditor was refused on
+   it. A Steward or Analyst opening this screen still gets the same 403
+   `ErrorState` any other gated call renders, not a silent empty list.
 --------------------------------------------------------------------------- */
 
 import { useOrgId } from "../lib/org";

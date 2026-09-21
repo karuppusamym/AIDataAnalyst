@@ -194,7 +194,7 @@ const NAV_ENTRIES: NavEntry[] = [
    * R11-S10 moved "Policy refusals" here from Reviewer. It was filed under
    * Reviewer because its name contains a governance word, but nothing on it
    * can be decided: it is a read-only record of refusals an agent run already
-   * made (`GET /v1/ai-decisions/refusals`, PlatformAdmin/DataAdmin only), with
+   * made (`GET /v1/ai-decisions/refusals`, PlatformAdmin/DataAdmin/Auditor), with
    * no approve, no reject and no queue. Grouping it with the two queues taught
    * reviewers there was a third thing waiting for them. It is evidence, which
    * is what the Auditor area is. */
@@ -446,7 +446,7 @@ function AppShell() {
   const canonicalUrl = useAppLocation().canonical;
   const session = useSession();
   const confirmNavigation = useUnsavedNavigationGuard();
-  const [devPersona, setDevPersona] = useState<Persona>("Steward");
+  const [devPersona, setDevPersona] = useState<Persona>(APP_CONFIG.devPersona ?? "Steward");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteInputRef = useRef<HTMLInputElement>(null);
   const [navOpen, setNavOpen] = useState(false);

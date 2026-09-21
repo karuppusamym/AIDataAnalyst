@@ -7,16 +7,35 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from fastapi.routing import APIRoute
 
 from aida.ai_decision_lineage import (
     AiDecisionEdge,
 )
 from aida.ai_decision_lineage_api import router as decision_router
+from tests.support.app_surface import require_roles_gate
 
 
 def test_refusal_route_precedes_dynamic_run_route() -> None:
     paths = [route.path for route in decision_router.routes]
     assert paths.index("/v1/ai-decisions/refusals") < paths.index("/v1/ai-decisions/{run_id}")
+
+
+def test_the_refusal_list_is_evidence_an_auditor_may_read_and_a_working_role_may_not() -> None:
+    """The shell files "Policy refusals" under the Auditor menu because the list is evidence. Its
+    role gate was `PlatformAdmin`/`DataAdmin` only, so an Auditor opened the screen and was refused
+    (found by opening every screen as each demo user, 2026-09-20). The route is read-only and
+    tenant-checked, so admitting `Auditor` widens nothing that mutates. The roles that do the work
+    the list records -- Analyst, Steward, Reviewer -- stay out: this is not a general read."""
+    route = next(
+        r
+        for r in decision_router.routes
+        if isinstance(r, APIRoute) and r.path == "/v1/ai-decisions/refusals"
+    )
+    gate = require_roles_gate(route)
+    assert gate is not None
+    assert set(gate[1]) == {"PlatformAdmin", "DataAdmin", "Auditor"}
+    assert not {"Analyst", "DataSteward", "Reviewer", "Viewer"} & set(gate[1])
 
 # ---------------------------------------------------------------------------
 # Edge construction

@@ -177,7 +177,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/ai-asset-versions/{version_id}/trust-history` | REST | `aida.ai_registry_api.get_ai_asset_trust_history` | AgentDeveloper, Auditor, DataScientist, DataSteward, ModelRiskManager, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/ai-asset-versions/{version_id}/trust` | REST | `aida.ai_registry_api.get_ai_asset_trust` | AgentDeveloper, Auditor, DataScientist, DataSteward, ModelRiskManager, PlatformAdmin, Reviewer, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/ai-decisions/asset/{asset_id}` | REST | `aida.ai_decision_lineage_api.get_asset_decisions` | Analyst, DataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
-| `GET /v1/ai-decisions/refusals` | REST | `aida.ai_decision_lineage_api.list_refusals` | DataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/ai-decisions/refusals` | REST | `aida.ai_decision_lineage_api.list_refusals` | Auditor, DataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/ai-decisions/{run_id}` | REST | `aida.ai_decision_lineage_api.get_run_decisions` | Analyst, DataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/bi-artifact-imports/{artifact_id}/lineage` | REST | `aida.bi_api.get_bi_lineage` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/bi-artifact-imports/{artifact_id}/reports` | REST | `aida.bi_api.list_bi_reports` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |

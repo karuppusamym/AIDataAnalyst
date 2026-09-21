@@ -11,8 +11,9 @@
 
    THE INVARIANT: the request layer must never import the React layer. The
    org-id mirror is the only thing they genuinely share, so it lives here, on
-   its own, importing nothing. `org.tsx` writes it; `api/transport.ts` reads
-   it. Neither imports the other.
+   its own, importing only the build-time configuration (`appConfig.ts`, which
+   has no React and no request code). `org.tsx` writes it; `api/transport.ts`
+   reads it. Neither imports the other.
 
    WHY A MIRROR AT ALL. A handful of backend routes (observability/archive,
    notification-rules, tool-plans) take no `{organization_id}` path segment
@@ -35,18 +36,27 @@
    `enforce_organization` still runs on every request.
 --------------------------------------------------------------------------- */
 
+import { APP_CONFIG } from "./appConfig";
+
 /** The development/fixture organization id every screen used to hard-code. */
 export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
 /** Where the selection is remembered between sessions. */
 export const ORG_STORAGE_KEY = "atlas.org.id";
 
+/** What a browser with nothing remembered starts in. A development build may be given a real
+ *  organization (`VITE_DEV_ORG_ID`) so a user who cannot list organizations, and so has no picker,
+ *  does not open on the placeholder id. Any other build keeps the placeholder. */
+function initialOrgId(): string {
+  return (APP_CONFIG.authMode === "development" && APP_CONFIG.devOrgId) || DEFAULT_ORG_ID;
+}
+
 export function readStoredOrgId(): string {
   try {
-    return localStorage.getItem(ORG_STORAGE_KEY) || DEFAULT_ORG_ID;
+    return localStorage.getItem(ORG_STORAGE_KEY) || initialOrgId();
   } catch {
     /* private mode / storage disabled -- fall back to the default estate. */
-    return DEFAULT_ORG_ID;
+    return initialOrgId();
   }
 }
 

@@ -551,10 +551,13 @@ demo user instead, on ports 5181 to 5188, each sending that user's
 nothing is faked in the browser. `-Action Start` starts them, `-Action Check`
 confirms each serves its own identity, `-Action Stop` ends them, and no
 `-Action` lists the roster. It needs `ui-next/node_modules` (it never installs)
-and the development-identity stack, not the OIDC overlay. A user who cannot
-list organizations, such as a Viewer or Reviewer, gets no organization picker,
-so pick Northwind with the console one-liner the script prints. The
-walkthrough pack has the roster and a demo order:
+and the development-identity stack, not the OIDC overlay. Each UI also opens
+as that user's persona in the Northwind organization (`VITE_DEV_PERSONA` and
+`VITE_DEV_ORG_ID`, set by the launcher), so nothing has to be picked or pasted:
+a user who cannot list organizations, such as a Viewer or Reviewer, has no
+picker to choose one with. `e2e/scripts/demo-rehearsal.mjs` opens every screen
+in each user's own menu from an empty browser and reports anything refused or
+broken. The walkthrough pack has the roster and a demo order:
 [roles and users](../walkthrough/roles-and-users.html) and
 [demo script](../walkthrough/demo-script.html).
 

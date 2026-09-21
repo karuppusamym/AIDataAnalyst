@@ -52,7 +52,7 @@ async def list_refusals(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin")),
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin", "Auditor")),
 ) -> Page:
     """List refusals before the dynamic run route can match ``refusals`` as a UUID."""
     enforce_organization(context, organization_id)

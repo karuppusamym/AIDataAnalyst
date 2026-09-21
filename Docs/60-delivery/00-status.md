@@ -29,8 +29,9 @@ not a release requirement unless its recorded trigger is met.
 Fresh checks, 2026-09-20: **14,458 tests collected** (collection only; the full suite was not
 re-run in this pass). One Alembic head, `53558182d9fb`, across 192 revision files.
 `scripts/live_role_matrix.py` sent 5,179 probes as each platform role and 2,639 as eight demo role
-bundles to the running API, on the stack rebuilt from `787f84b`, and every answer matched the
-declared role contract. This documentation pass made no live model call, applied no migration and
+bundles to the running API, rebuilt from `543d84a` plus the refusals guard, and every answer
+matched the declared role contract. Opening 47 screens as the eight demo users found 36 raising
+something; after four fixes it is 0, with 7 known conditions. This documentation pass made no live model call, applied no migration and
 changed no production configuration.
 
 ## Historical status snapshots
