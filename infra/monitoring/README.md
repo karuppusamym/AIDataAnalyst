@@ -66,7 +66,7 @@ infra/monitoring/
   README.md                              # this file
   prometheus/
     prometheus.yml                       # plain-Prometheus scrape config, for the compose stack
-    rules/atlas.rules.yml                # 4 recording rules, 24 alerts -- THE SOURCE OF TRUTH
+    rules/atlas.rules.yml                # 4 recording rules, 25 alerts -- THE SOURCE OF TRUTH
   k8s/
     kustomization.yaml                   # kustomize base (needs Prometheus Operator CRDs)
     servicemonitor.yaml                  # scrapes the existing aida-api Service
@@ -77,7 +77,7 @@ infra/monitoring/
 `prometheusrule.yaml` is rendered by `scripts/generate_prometheus_rule.py` and
 checked by `tests/test_monitoring_rules.py`. Edit `atlas.rules.yml` and
 regenerate; never edit the generated copy. Two hand-maintained copies of
-twenty-three alerts drift, and the drift is silent in the worst way — the alert fires in one
+twenty-five alerts drift, and the drift is silent in the worst way — the alert fires in one
 environment and not the other, and nobody finds out until the incident it was
 written for.
 
@@ -174,8 +174,8 @@ and a firing instance says so in its own labels so the person paged can tell "th
 estate broke its objective" from "nobody has set this yet".
 
 No load test of this platform has ever been run against a real deployment, so
-**no latency or backlog magnitude in these rules is a measurement.** Seven of the
-twenty-three alerts are placeholders:
+**no latency or backlog magnitude in these rules is a measurement.** Nine of the
+twenty-five alerts are placeholders:
 
 | Alert | Placeholder | How to replace it |
 |---|---|---|
@@ -186,6 +186,8 @@ twenty-three alerts are placeholders:
 | `AtlasHttpServerErrorRateHigh` | `0.05` | The complement of the estate's availability objective. There is no agreed one for this platform. |
 | `AtlasHttpLatencyHigh` | `3s` p95 | Same as the retrieval ceiling, over the whole API surface — or split per route template once the estate knows which routes are interactive and which are reports. |
 | `AtlasSchedulerLeadershipFlapping` | `3` involuntary losses in `1h` | A number above the estate's own steady-state rate of `lost` transitions (`increase(aida_scheduler_leadership_transitions_total{transition="lost"}[1h])` on a healthy week). No failover drill has been run and nobody has measured how often a healthy leader's lock connection fails, so three is where a second loss from the same incident stops being the explanation, not an observation. |
+| `AtlasSchedulerPassFailing` | `3` failures of one pass in `15m` | Above the estate's own steady-state failure rate per pass (`increase(aida_scheduler_pass_failures_total[15m])` on a healthy week). The scheduler backs a failing pass off (30 s doubling to 240 s), so three in fifteen minutes is a pass failing on nearly every attempt; nobody has measured how often a healthy pass fails once. |
+| `AtlasNewlyCreatedTableDrafterRestarting` | `5` consumer starts in `30m` | Above the estate's own rate of `aida_newly_created_table_drafter_starts_total` on a healthy week, where a broker restart or a rebalance costs one or two. A message that kills every consumer restarts it about two dozen times in thirty minutes on the supervisor's 60 s cap, so five sits between the two; neither end has been measured. |
 
 The other sixteen are structural and can be trusted as shipped:
 
@@ -220,8 +222,12 @@ is a decision and it is easy to change one without the other:
   starts -- so an estate that turned the feature off, or never opened the port,
   is silent. What it cannot see is a consumer killed by the same message over and
   over: the gauge is 1 for the moment each attempt starts, so a scrape can land
-  on it and restart the alert's clock. `aida_newly_created_table_drafter_failures_total`
-  rising is the unambiguous reading, and no alert reads it.
+  on it and restart the alert's clock. `AtlasNewlyCreatedTableDrafterRestarting`
+  (added later on 2026-09-21, a placeholder above) reads
+  `aida_newly_created_table_drafter_starts_total` for that loop instead: it counts
+  only the starts that joined the group, so a missing broker leaves it flat and
+  the two alerts never fire for the same cause. The failures counter cannot make
+  that distinction; it rises once a minute in both.
 
 There is deliberately no alert for **more than one leader**. The gauge shows it
 (`sum(aida_scheduler_is_leader) > 1`), but a deposed leader keeps reading 1
@@ -352,7 +358,7 @@ What that Prometheus (v3.5.0) reports about itself:
 Checked, against a working tree with no running stack:
 
 - `python scripts/generate_prometheus_rule.py --check` is current, and the rule
-  file has 4 recording rules and 24 alerts (`tests/test_monitoring_rules.py`,
+  file has 4 recording rules and 25 alerts (`tests/test_monitoring_rules.py`,
   13 tests).
 - The series exist under the names the rules read. A real HTTP scrape of
   `prometheus_client`'s exporter on an ephemeral loopback port, in a throwaway
@@ -386,4 +392,8 @@ Checked, against a working tree with no running stack:
   third caller is new.
 - **Recovery against a real Redpanda coming up** is still stub-only.
 - **A consumer killed by the same message repeatedly** is not reliably caught by
-  the gauge alert (see its annotation); no alert reads the failures counter.
+  the gauge alert (see its annotation). *Later the same day:*
+  `AtlasNewlyCreatedTableDrafterRestarting` reads the new
+  `aida_newly_created_table_drafter_starts_total` for it, checked against the stub
+  consumer only (`tests/test_newly_created_table_drafter_supervisor.py`); no real
+  poison message has been sent through a real broker.

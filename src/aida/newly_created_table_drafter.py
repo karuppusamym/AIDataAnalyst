@@ -63,7 +63,7 @@ the Temporal worker down with it; cancellation and the consumer's own
 stopping state (the SIGINT / SIGTERM flag) are the only ways out.
 
 **What a monitor can scrape (R11-AUD03).** The log lines above tell a person who
-is reading them; two series tell an alert.
+is reading them; three series tell an alert.
 `aida_newly_created_table_drafter_consumer_up` is 1 while the consumer has
 started and is consuming and 0 while it is not -- before its first start,
 while it is being retried, after it ends. `..._failures_total` counts the
@@ -86,7 +86,11 @@ the truth.
 What the gauge cannot see is a consumer that dies on the same message again and
 again. It is 1 for the moment each attempt's `start()` has succeeded and 0 for
 the rest of every backoff, so a scrape occasionally lands on the 1. The failures
-counter is the reading that loop cannot hide from.
+counter cannot tell that loop from a missing broker either: both raise it once a
+minute. `..._starts_total` can. It counts the `start()` calls that succeeded, so
+a missing broker leaves it where it is, a healthy consumer adds one, and a
+message that kills every consumer adds one per restart;
+`AtlasNewlyCreatedTableDrafterRestarting` reads it.
 
 **Per-message semantics are unchanged, on purpose.** An exception
 while handling a message leaves the `async for` before
@@ -200,6 +204,15 @@ DRAFTER_CONSUMER_FAILURES = Counter(
         "been asked for: the broker was unreachable or dropped, or a message could not be "
         "handled. The supervisor restarts the consumer after each. A message that fails on every "
         "delivery shows here even when the up gauge is caught at 1."
+    ),
+)
+DRAFTER_CONSUMER_STARTS = Counter(
+    "aida_newly_created_table_drafter_starts_total",
+    (
+        "Starts of the newly-created-table drafter's consumer that succeeded (the broker answered "
+        "and the group was joined). A missing broker never adds to it and a healthy consumer adds "
+        "one, so more than a few in half an hour is a consumer that starts and is then killed, "
+        "most likely by a message that fails on every delivery."
     ),
 )
 
@@ -898,6 +911,7 @@ async def run_newly_created_table_drafter_consumer(
         await consumer.start()
         started = True
         state.started_at = time.monotonic()
+        DRAFTER_CONSUMER_STARTS.inc()
         _set_consumer_up(1)
         probe = asyncio.create_task(_probe_broker(consumer))
         logger.info(

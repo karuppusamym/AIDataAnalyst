@@ -262,6 +262,7 @@ does only when `AIDA_WORKER_METRICS_PORT` is non-zero in its own environment. Th
 | `aida_scheduler_leadership_transitions_total` (`transition` is `acquired` or `lost`) | `fleet-scheduler` | Changes this process saw. `lost` is a leader whose check failed; a clean shutdown is not counted. |
 | `aida_newly_created_table_drafter_consumer_up` (`consumer_group`) | `metadata-worker` | 1 while the drafter's Kafka consumer has started and is consuming, 0 while it is not. **No series at all** when `auto_enqueue_on_ingest` is off or the process has no listener. |
 | `aida_newly_created_table_drafter_failures_total` | `metadata-worker` | Attempts that ended without a stop having been asked for; the supervisor restarts the consumer after each. |
+| `aida_newly_created_table_drafter_starts_total` | `metadata-worker` | Starts that succeeded (the broker answered and the group was joined). Flat with no broker, one for a healthy consumer, one per restart when a message kills every consumer; `AtlasNewlyCreatedTableDrafterRestarting` reads it. |
 
 Turn it on for the compose stack (the listener is inside each container's network; compose
 publishes no host port for it):
@@ -288,8 +289,8 @@ With the default of 0, `http://localhost:9090/targets` shows `atlas-fleet-schedu
   after 15 minutes there. Start `--profile events` and it goes to 1 without restarting the worker,
   or set `AIDA_AUTO_ENQUEUE_ON_INGEST=false`, which removes the series and silences the alert.
   A message that fails on every delivery keeps the gauge at 0 except for the moment each attempt
-  starts, so a scrape can land on 1; `aida_newly_created_table_drafter_failures_total` rising is the
-  unambiguous view of that loop.
+  starts, so a scrape can land on 1; `AtlasNewlyCreatedTableDrafterRestarting` reads
+  `aida_newly_created_table_drafter_starts_total` for that loop, which a missing broker leaves flat.
 
 **Failover time, and the keepalive settings that decide it.** The leadership lock is held by a
 PostgreSQL backend. When the leader's process dies the operating system closes its socket and

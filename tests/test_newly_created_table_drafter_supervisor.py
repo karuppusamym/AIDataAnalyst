@@ -657,6 +657,12 @@ def _failures() -> float:
     return value
 
 
+def _starts() -> float:
+    value = REGISTRY.get_sample_value("aida_newly_created_table_drafter_starts_total")
+    assert value is not None, "the successful-starts counter is missing"
+    return value
+
+
 def _run_in_a_fresh_interpreter(code: str) -> list[str]:
     """What a process that has only imported the module publishes, without this process's
     history: an earlier test here has already created the gauge series."""
@@ -687,10 +693,11 @@ def test_a_worker_that_only_imports_the_module_publishes_no_consumer_up_series()
         "print(REGISTRY.get_sample_value('aida_newly_created_table_drafter_consumer_up',"
         " {'consumer_group': 'aida-newly-created-table-drafter-v1'}))\n"
         "print(REGISTRY.get_sample_value('aida_newly_created_table_drafter_failures_total'))\n"
+        "print(REGISTRY.get_sample_value('aida_newly_created_table_drafter_starts_total'))\n"
     )
 
-    # No gauge series; the counter is at 0, which an `increase()` reads as nothing happened.
-    assert values == ["None", "0.0"]
+    # No gauge series; the counters are at 0, which an `increase()` reads as nothing happened.
+    assert values == ["None", "0.0", "0.0"]
 
 
 async def test_the_gauge_appears_at_zero_when_the_supervisor_starts_and_stays_there_while_waiting(
@@ -795,6 +802,65 @@ async def test_the_real_consumer_reads_one_only_while_consuming_and_zero_while_i
     assert while_waiting == [0, 0, 0], "down in the wait after each failed start and the failure"
     assert _failures() - before == 3
     assert _up() == 0, "and down at the end: the consumer returned when it was told to stop"
+
+
+async def test_only_a_start_that_succeeded_is_counted_so_a_killing_message_reads_as_restarts(
+    harness: _Harness, kafka: _FakeKafka, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reading `AtlasNewlyCreatedTableDrafterRestarting` rests on. Two starts with no broker,
+    then a message that kills the consumer twice before it is handled: the failures counter rises
+    four times and cannot tell the two causes apart; the starts counter rises only for the three
+    consumers that joined the group, so a missing broker leaves it alone."""
+    kafka.start_failures = [_no_broker()] * 2
+    kafka.log = [_event(NEWLY_CREATED_TABLE_EVENT_TYPE, "t1")]
+    kafka.on_commit = lambda: setattr(harness.state, "stopping", True)
+    handled: list[str] = []
+
+    async def handle(session: Any, payload: dict[str, Any]) -> None:
+        handled.append(payload["table_id"])
+        if len(handled) < 3:
+            raise RuntimeError("write refused")
+
+    monkeypatch.setattr(drafter, "handle_newly_created_table", handle)
+    starts_before, failures_before = _starts(), _failures()
+
+    await supervise_newly_created_table_drafter(
+        run_newly_created_table_drafter_consumer,
+        sleep=harness.sleep,
+        monotonic=harness.clock,
+        state=harness.state,
+    )
+
+    assert [c.started for c in kafka.consumers] == [False, False, True, True, True]
+    assert _starts() - starts_before == 3
+    assert _failures() - failures_before == 4
+
+
+async def test_a_start_that_never_succeeds_is_never_counted_as_one(
+    harness: _Harness, kafka: _FakeKafka
+) -> None:
+    """The default stack: no broker, so the consumer-down alert fires and the restart alert must
+    stay quiet however long the supervisor keeps trying."""
+    kafka.start_failures = [_no_broker()] * 12
+    before = _starts()
+    calls = 0
+
+    async def stop_after_twelve(seconds: float) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 12:
+            harness.state.stopping = True
+        await harness.sleep(seconds)
+
+    await supervise_newly_created_table_drafter(
+        run_newly_created_table_drafter_consumer,
+        sleep=stop_after_twelve,
+        monotonic=harness.clock,
+        state=harness.state,
+    )
+
+    assert len(kafka.consumers) == 12
+    assert _starts() == before
 
 
 async def test_cancelling_a_consumer_that_is_up_takes_the_gauge_to_zero(

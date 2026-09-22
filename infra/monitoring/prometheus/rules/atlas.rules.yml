@@ -670,6 +670,40 @@ groups:
             and the error. One case reads differently: a message that fails on
             every delivery keeps the gauge at 0 except for the moment each
             attempt starts, so a scrape can land on 1 and restart this rule's
-            fifteen minutes -- aida_newly_created_table_drafter_failures_total
-            rising is the unambiguous sign of that loop.
+            fifteen minutes -- AtlasNewlyCreatedTableDrafterRestarting is the
+            alert for that loop.
+          runbook: infra/monitoring/README.md
+
+      # Placeholder: the loop the rule above can miss. A message that fails on
+      # every delivery ends each consumer that is handed it, the supervisor
+      # starts another, and the up gauge is 1 only for the moment in between.
+      # The failures counter rises for that loop and for a missing broker alike,
+      # so it cannot tell them apart; the starts counter rises only for a
+      # consumer that joined the group, so it stays flat with no broker (the
+      # rule above's case) and gains one per restart in the loop.
+      #
+      # Five in thirty minutes is a placeholder. The supervisor's backoff
+      # reaches its 60 s cap after six attempts, so a message that kills every
+      # consumer restarts it about two dozen times in thirty minutes, and a
+      # broker restart or a rebalance costs one or two starts. Nobody has
+      # measured an estate's steady-state rate.
+      - alert: AtlasNewlyCreatedTableDrafterRestarting
+        expr: increase(aida_newly_created_table_drafter_starts_total[30m]) >= 5
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "The newly-created-table drafter's consumer started at least five times in thirty minutes"
+          description: >-
+            The consumer keeps joining the group and being killed, which is
+            most likely one message that fails on every delivery: its offset is
+            never committed, so each new consumer is handed it again and
+            drafting behind it has stopped. The
+            newly_created_table_drafter_unavailable log line names the
+            exception class of each failure. Dead-lettering the message is
+            deliberately not automatic (it would change the delivery
+            guarantee), so a person decides what happens to it. A missing
+            broker does not fire this: a start that never succeeds is not
+            counted. The threshold is a placeholder: no estate has measured
+            its steady-state restart rate.
           runbook: infra/monitoring/README.md
