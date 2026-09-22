@@ -26,12 +26,9 @@ model in `atlas.modules.observability_audit.models` for why a DTO and
 its backing table living in different modules here is intentional
 composition, not an inconsistency to fix.
 
-`ApiModel` stays defined in `aida.schemas` rather than moving here or to
-`atlas.platform` -- it is the shared pydantic base for every module's
-schemas, not this module's, and moving it is out of scope for this pass.
-Importing it back from `aida.schemas` here works safely only because
-`aida.schemas`' shim import of this module comes *after* `ApiModel` is
-defined in that file -- see the comment there.
+`ApiModel` is imported from `atlas.platform.schemas`, the neutral base this module and
+`aida.schemas` both use, so this module no longer imports `aida.schemas` and the two
+no longer form an import cycle (review 2026-09-05 R03, completed 2026-09-21).
 """
 
 from __future__ import annotations
@@ -40,7 +37,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from aida.schemas import ApiModel
+from atlas.platform.schemas import ApiModel
 
 
 class AuditEventRead(ApiModel):

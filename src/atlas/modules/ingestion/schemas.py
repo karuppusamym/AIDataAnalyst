@@ -20,12 +20,9 @@ eventually persisted *as* (a `MetadataTable` row, a `MetadataViewDefinition`
 row, etc.) is catalog's concern, reached through catalog's own service
 layer, not this module's.
 
-`ApiModel` stays defined in `aida.schemas` rather than moving here or to
-`atlas.platform` -- it is the shared pydantic base for every module's
-schemas, not ingestion-owned, and moving it is out of scope for this
-pass. Importing it back from `aida.schemas` here works safely only
-because `aida.schemas`' shim import of this module comes *after*
-`ApiModel` is defined in that file -- see the comment there.
+`ApiModel` is imported from `atlas.platform.schemas`, the neutral base this module and
+`aida.schemas` both use, so this module no longer imports `aida.schemas` and the two
+no longer form an import cycle (review 2026-09-05 R03, completed 2026-09-21).
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from aida.schemas import ApiModel
+from atlas.platform.schemas import ApiModel
 
 MetadataAttribute = str | int | float | bool | None
 

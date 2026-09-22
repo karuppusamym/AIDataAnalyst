@@ -11,9 +11,14 @@ from pydantic import (
 
 from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
 from aida.relationship_validation import public_relationship_evidence
+from atlas.platform.schemas import ApiModel as _SharedApiModel
 
-
-from atlas.platform.schemas import ApiModel as ApiModel
+#: The shared pydantic base, defined in `atlas.platform.schemas` so that neither this module nor the
+#: bounded contexts' schema modules import the other for it (review 2026-09-05 R03, completed
+#: 2026-09-21), and re-exported here for every existing `from aida.schemas import ApiModel`.
+#: Being a statement, it also keeps each re-export group below its own import block, so each
+#: group's `noqa: I001` keeps it one statement per relocated context.
+ApiModel = _SharedApiModel
 
 
 # Re-exported for backward compatibility -- tracker ST-05 moved the classes
