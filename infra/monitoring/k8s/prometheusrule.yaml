@@ -368,6 +368,20 @@ spec:
           estate has replaced it. It counts losses a living process noticed: a leader whose process or
           host disappeared reports none, and shows as AtlasTargetDown instead.'
         runbook: infra/monitoring/README.md
+    - alert: AtlasSchedulerPassFailing
+      expr: sum by (scheduler_pass) (increase(aida_scheduler_pass_failures_total[15m])) >= 3
+      labels:
+        severity: warning
+        threshold_status: placeholder
+      annotations:
+        summary: The scheduler's {{ $labels.scheduler_pass }} pass failed at least three times in fifteen
+          minutes
+        description: 'One maintenance pass keeps raising while the others run on. The scheduler backs
+          a failing pass off, so this is a pass failing on nearly every attempt rather than a single fault.
+          The Operations screen''s Scheduler passes panel names the exception class and when the pass
+          last succeeded; the scheduler''s scheduler_pass_failed log line carries the rest. The threshold
+          is a placeholder: no estate has measured its steady-state failure rate.'
+        runbook: infra/monitoring/README.md
   - name: atlas.drafter
     rules:
     - alert: AtlasNewlyCreatedTableDrafterConsumerDown

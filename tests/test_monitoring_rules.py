@@ -129,13 +129,14 @@ def _resolve(name: str, declared: dict[str, frozenset[str]]) -> str | None:
 
 
 def test_the_rule_file_parses_and_declares_the_documented_number_of_rules() -> None:
-    """27 rules: the README says "4 recording rules, 23 alerts" (20 from R11-FP17, and the
-    leader-election and drafter-consumer alerts of R11-AUD04 and R11-AUD03)."""
+    """28 rules: the README says "4 recording rules, 24 alerts" (20 from R11-FP17, the
+    leader-election and drafter-consumer alerts of R11-AUD04 and R11-AUD03, and the
+    pass-failure alert of R11-VAL04)."""
     rules = _rules()
     alerts = [rule for _, _, rule in rules if "alert" in rule]
     records = [rule for _, _, rule in rules if "record" in rule]
     assert len(records) == 4, f"expected 4 recording rules, found {len(records)}"
-    assert len(alerts) == 23, f"expected 23 alerts, found {len(alerts)}"
+    assert len(alerts) == 24, f"expected 24 alerts, found {len(alerts)}"
 
 
 def test_every_metric_a_rule_reads_is_published_by_some_module() -> None:

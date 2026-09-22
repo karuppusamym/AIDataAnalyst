@@ -599,6 +599,35 @@ groups:
             disappeared reports none, and shows as AtlasTargetDown instead.
           runbook: infra/monitoring/README.md
 
+      # PLACEHOLDER THRESHOLD -- 3 failures of one pass in fifteen minutes (R11-VAL04).
+      #
+      # A pass that raises no longer ends the scheduler loop: it is logged as
+      # `scheduler_pass_failed`, counted here, and backed off (30 s doubling to
+      # 240 s, `aida.workflows.scheduler.PASS_FAILURE_BACKOFF_*`). A pass failing
+      # on every attempt is therefore counted about six times in fifteen minutes,
+      # and one that failed once and recovered once or twice; three separates the
+      # two without a measured failure rate, which no estate has reported. There
+      # is no `for`: the window is the persistence. `>= 3`, not `> 2`, because
+      # `increase` extrapolates to the window's edges. The Operations screen shows
+      # the same failures, per pass, with the exception class
+      # (`GET /v1/operations/scheduler-passes`).
+      - alert: AtlasSchedulerPassFailing
+        expr: sum by (scheduler_pass) (increase(aida_scheduler_pass_failures_total[15m])) >= 3
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "The scheduler's {{ $labels.scheduler_pass }} pass failed at least three times in fifteen minutes"
+          description: >-
+            One maintenance pass keeps raising while the others run on. The
+            scheduler backs a failing pass off, so this is a pass failing on
+            nearly every attempt rather than a single fault. The Operations
+            screen's Scheduler passes panel names the exception class and when
+            the pass last succeeded; the scheduler's scheduler_pass_failed log
+            line carries the rest. The threshold is a placeholder: no estate has
+            measured its steady-state failure rate.
+          runbook: infra/monitoring/README.md
+
   # ---------------------------------------------------------------------------
   # R11-AUD03: the newly-created-table drafter's Kafka consumer, which runs in
   # the Temporal worker (`metadata-worker`). Its gauge exists only after the
