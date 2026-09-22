@@ -65,6 +65,7 @@ test.describe("Stewardship workspace -- DataSteward", () => {
     // One tab stop: only the selected tab is in the tab order.
     await expect(tab(page, "Bulk actions")).toHaveAttribute("tabindex", "-1");
     await expect(tab(page, "Automation")).toHaveAttribute("tabindex", "-1");
+    await expect(tab(page, "Coverage")).toHaveAttribute("tabindex", "-1");
 
     await page.keyboard.press("ArrowRight");
     await expect(tab(page, "Bulk actions")).toHaveAttribute("aria-selected", "true");
@@ -73,6 +74,11 @@ test.describe("Stewardship workspace -- DataSteward", () => {
     await page.keyboard.press("ArrowRight");
     await expect(tab(page, "Automation")).toBeFocused();
 
+    // Round 12 added Coverage as the last tab.
+    await page.keyboard.press("ArrowRight");
+    await expect(tab(page, "Coverage")).toBeFocused();
+    await expect(tab(page, "Coverage")).toHaveAttribute("aria-selected", "true");
+
     // Wraps at the end ...
     await page.keyboard.press("ArrowRight");
     await expect(tab(page, "Work queue")).toBeFocused();
@@ -80,7 +86,7 @@ test.describe("Stewardship workspace -- DataSteward", () => {
 
     // ... and Home / End go to the ends.
     await page.keyboard.press("End");
-    await expect(tab(page, "Automation")).toBeFocused();
+    await expect(tab(page, "Coverage")).toBeFocused();
     await page.keyboard.press("Home");
     await expect(tab(page, "Work queue")).toBeFocused();
   });

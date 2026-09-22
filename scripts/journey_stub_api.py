@@ -320,6 +320,42 @@ ROUTE_RULES: list[Rule] = [
         ),
         "GET /v1/organizations/{organization_id}/stewardship/unowned-backlog",
     ),
+    # Round 12's Coverage tab. The synthesiser's placeholder body (`"dimensions": {"": ...}`,
+    # strings where ids and numbers belong) sent the whole Stewardship screen into its error
+    # boundary the moment the tab was selected, taking the tab bar with it -- the same stub
+    # artifact as the backlog above, found by the keyboard-tablist journey on 2026-09-21.
+    Rule(
+        "GET",
+        rf"^/v1/organizations/{_SEG}/stewardship/coverage/?$",
+        (
+            "Analyst",
+            "Auditor",
+            "DataAdmin",
+            "DataSteward",
+            "MetadataAdmin",
+            "PlatformAdmin",
+            "Reviewer",
+            "SemanticAdmin",
+            "Viewer",
+        ),
+        "GET /v1/organizations/{organization_id}/stewardship/coverage",
+    ),
+    Rule(
+        "GET",
+        rf"^/v1/organizations/{_SEG}/stewardship/coverage/snapshots/?$",
+        (
+            "Analyst",
+            "Auditor",
+            "DataAdmin",
+            "DataSteward",
+            "MetadataAdmin",
+            "PlatformAdmin",
+            "Reviewer",
+            "SemanticAdmin",
+            "Viewer",
+        ),
+        "GET /v1/organizations/{organization_id}/stewardship/coverage/snapshots",
+    ),
     Rule(
         "GET",
         rf"^/v1/datasources/{_SEG}/agent-runs/?$",
@@ -870,6 +906,30 @@ def _overrides(method: str, path: str, identity: str, body: Any) -> Any | None:
             ],
             limit=100,
         )
+    # --- the Stewardship Coverage tab (round 12) ------------------------------
+    if method == "GET" and re.fullmatch(
+        rf"/v1/organizations/{_SEG}/stewardship/coverage/snapshots/?", path
+    ):
+        return _page([], limit=20)
+    if method == "GET" and re.fullmatch(rf"/v1/organizations/{_SEG}/stewardship/coverage/?", path):
+        return {
+            "organization_id": ORG_ID,
+            "datasource_id": None,
+            "domain_id": None,
+            "line_of_business_id": None,
+            "table_count": 12,
+            "overall_score": 41.7,
+            "dimensions": {
+                "documented": {"covered": 6, "total": 12, "percentage": 50.0},
+                "owned": {"covered": 9, "total": 12, "percentage": 75.0},
+                "classified": {"covered": 4, "total": 12, "percentage": 33.3},
+                "certified": {"covered": 0, "total": 12, "percentage": 0.0},
+                "quality_monitored": {"covered": 3, "total": 12, "percentage": 25.0},
+                "semantically_mapped": {"covered": 8, "total": 12, "percentage": 66.7},
+            },
+            "unowned_table_ids": [TABLE_ID],
+            "computed_at": NOW,
+        }
     if method == "GET" and re.fullmatch(rf"/v1/projects/{_SEG}/context-products/?", path):
         # One published product, so the picker has something to select. The real
         # route narrows this to PUBLISHED plus the caller's own consumer role
