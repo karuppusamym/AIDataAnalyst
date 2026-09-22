@@ -1,30 +1,32 @@
 # Delivery Status
 
-## Current delivery confirmation, 2026-09-21 (late evening)
+## Current delivery confirmation, 2026-09-22
 
 [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current
 work status. The [capability register](20-capability-register.md) keeps implementation separate from
 configuration and real-environment verification, and each row carries the date it was measured.
 This page is a dated summary of both; where they disagree, they win. The evidence for this
-confirmation is the [2026-09-21 evening session log](30-round-12-review-and-demo-finalization-2026-09-21.md),
-which follows the morning's [validation log](28-demo-readiness-validation-2026-09-21.md).
+confirmation is the [2026-09-22 addendum](31-last-open-items-2026-09-22.md), on top of the
+[2026-09-21 evening session log](30-round-12-review-and-demo-finalization-2026-09-21.md), which follows
+the morning's [validation log](28-demo-readiness-validation-2026-09-21.md).
 
-Most scheduled implementation has landed: **90 DONE, 28 PARTIAL, 7 BLOCKED, 1 TODO, 22 DEFERRED,
+Most scheduled implementation has landed: **92 DONE, 27 PARTIAL, 7 BLOCKED, 0 TODO, 22 DEFERRED,
 2 CANCELLED** across 150 unique work packages. Of the 126 that are neither deferred nor cancelled,
-90 are complete; 36 still need implementation, verification or prerequisites. **32 of the 33
+92 are complete; 34 still need implementation, verification or prerequisites. **32 of the 33
 defects (D-series) are DONE**; D17 keeps a parity run in the target environment. The audit rows
-R11-AUD01 to AUD15 are closed except AUD11, whose last item is unmeasured (the upload locations'
-read timeout; every route's body is now capped by the API itself). Of the validation rows, VAL01 to
-VAL05 are closed (the eight secret-scan findings were test-fixture values, and the CI job passed),
-and VAL06 queues two stewardship operations the API has and no screen offers, neither on the demo
-path.
+R11-AUD01 to AUD15 are all closed: AUD11's last item, the upload read timeout, was measured and
+set on 2026-09-22. So are the six validation rows: VAL01 to VAL05 (the eight secret-scan findings
+were test-fixture values, and the CI job passed), and VAL06, whose coverage scopes by business
+domain and line of business were built and whose direct bulk-operation screen was dropped as a
+second way to do what the UI's own flows already do.
 
 Decisions taken on the product owner's instruction to proceed, each reversible by editing its row
 and worth confirming: the sixteen-role catalog and the compliance-pack roles (AUD01), the acceptance
 of ADR-0030 (AUD06), the stale-key window (AUD10), three older rows deferred (VAL02), where
 Operations shows the scheduler passes (VAL04), the deletion of `auto_lift_on_material_change` (a
-rejected predicate that returns stays suppressed until lifted, VAL05), and allowlisting the
-secret-scan fixtures by value rather than by path (VAL01).
+rejected predicate that returns stays suppressed until lifted, VAL05), allowlisting the
+secret-scan fixtures by value rather than by path (VAL01), and not building a direct
+bulk-operation screen (VAL06).
 
 Twelve PARTIAL rows closed since the September 12 confirmation: B2 (execution-match scoring), B8
 (freshness observation), C1 (live ontology publication), C3 (unsafe reviewer evidence), C6, C7
@@ -32,11 +34,13 @@ and C8 (authority and correction remainders), D6 (OIDC-session transitions), X2,
 
 Remaining priorities: C2 human accessibility acceptance; B9 real WORM-archive evidence; B10 and I1
 notification, Teams and Slack delivery beyond loopback stubs; the R11-FP01 to FP09 and FP12 to FP17
-remainders; R11-VAL06; and the BLOCKED rows B5, B6, B15, C9, C10, C11 and C13, which wait on customer
+remainders; and the BLOCKED rows B5, B6, B15, C9, C10, C11 and C13, which wait on customer
 connector, IdP, secrets, security, calibration, model-governance, scale and masking prerequisites.
 Unattended reviewer approvals stay off: production configuration refuses `reviewer_agent_enabled`,
 and the latest recorded benchmark approves 9 of 14 false twins and distinguishes no pairs. Deferred
 expansion is not a release requirement unless its recorded trigger is met.
+
+Re-checked 2026-09-22, after the last two open items (R11-AUD11 and R11-VAL06): the stack was rebuilt from a clean worktree of the source `cf835e7` carries (built as `4f15579`, the same commits before they were replayed onto a peer's documentation commit), and `scripts/check_deployment_parity.py` reported 9 of 9 comparisons matched (source digest `7f50718814af`). On it the role matrix sent 5,547 and 2,405 probes with 0 unexpected answers, the read sweep made 2,496 calls with 0 server errors, the accessibility audit found 0 violations on 40 screens, and the rehearsal opened 50 screens with 0 issues. The deployed nginx waits 300 s on the envelope and upload routes, and the Coverage view read the Customer domain at 25.00% over 4 tables and Retail Banking at 9.65% over 19. The 18 static gates, the whole UI suite (148 files, 2,158 tests) and the 46 browser journeys pass; the confirming full backend run at `b21eb24` gave 15,185 passed and 0 failed.
 
 Fresh checks, 2026-09-21, late evening: the running stack was rebuilt from a clean worktree of
 `9128241` and `scripts/check_deployment_parity.py` reported 9 of 9 comparisons matched (source digest
