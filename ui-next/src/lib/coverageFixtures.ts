@@ -17,7 +17,7 @@
 
 import type { CoverageDimensionRead, StewardshipCoverageRead } from "./types";
 import type { PageOf } from "./ui-types";
-import type { CoverageSnapshotRead } from "./api/coverage";
+import type { CoverageScope, CoverageSnapshotRead } from "./api/coverage";
 
 /** The order the API lists dimensions in (`COVERAGE_DIMENSIONS`). */
 const DIMENSIONS = [
@@ -41,9 +41,12 @@ const CURRENT: Ratios = {
   semantically_mapped: 0.6,
 };
 
-/** The organization's tables in the demo; one datasource holds a quarter. */
+/** The organization's tables in the demo; one datasource holds a quarter, one business domain
+ *  an eighth, and one line of business all but a sixth. */
 const ORG_TABLES = 48;
 const DATASOURCE_TABLES = 12;
+const DOMAIN_TABLES = 6;
+const LINE_OF_BUSINESS_TABLES = 40;
 
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 
@@ -66,22 +69,29 @@ function figures(total: number, ratios: Ratios) {
   return { dimensions, overall };
 }
 
-const tablesIn = (datasourceId: string | null): number =>
-  datasourceId ? DATASOURCE_TABLES : ORG_TABLES;
+/** The demo population of a scope: the narrowest field given decides it. */
+const tablesIn = (scope: CoverageScope): number =>
+  scope.domainId
+    ? DOMAIN_TABLES
+    : scope.datasourceId
+      ? DATASOURCE_TABLES
+      : scope.lineOfBusinessId
+        ? LINE_OF_BUSINESS_TABLES
+        : ORG_TABLES;
+
+const isOrganization = (scope: CoverageScope): boolean =>
+  !scope.datasourceId && !scope.domainId && !scope.lineOfBusinessId;
 
 /** The figures now, as `GET .../stewardship/coverage` answers them. */
-export function fixtureCoverage(
-  organizationId: string,
-  datasourceId: string | null,
-): StewardshipCoverageRead {
-  const total = tablesIn(datasourceId);
+export function fixtureCoverage(organizationId: string, scope: CoverageScope): StewardshipCoverageRead {
+  const total = tablesIn(scope);
   const { dimensions, overall } = figures(total, CURRENT);
   const unowned = total - dimensions.owned!.covered;
   return {
     organization_id: organizationId,
-    datasource_id: datasourceId,
-    domain_id: null,
-    line_of_business_id: null,
+    datasource_id: scope.datasourceId ?? null,
+    domain_id: scope.domainId ?? null,
+    line_of_business_id: scope.lineOfBusinessId ?? null,
     table_count: total,
     overall_score: overall,
     dimensions,
@@ -95,17 +105,17 @@ export function fixtureCoverage(
    snapshot; a datasource starts with none, which is the empty state. */
 const store = new Map<string, CoverageSnapshotRead[]>();
 
-const scopeKey = (organizationId: string, datasourceId: string | null): string =>
-  `${organizationId}:${datasourceId ?? ""}`;
+const scopeKey = (organizationId: string, scope: CoverageScope): string =>
+  `${organizationId}:${scope.datasourceId ?? ""}:${scope.domainId ?? ""}:${scope.lineOfBusinessId ?? ""}`;
 
 const DAY = 86_400_000;
 
-function historyFor(organizationId: string, datasourceId: string | null): CoverageSnapshotRead[] {
-  const key = scopeKey(organizationId, datasourceId);
+function historyFor(organizationId: string, scope: CoverageScope): CoverageSnapshotRead[] {
+  const key = scopeKey(organizationId, scope);
   const existing = store.get(key);
   if (existing) return existing;
   const seeded: CoverageSnapshotRead[] = [];
-  if (!datasourceId) {
+  if (isOrganization(scope)) {
     // Newest first, as the server returns them: each older row a little less covered.
     [
       { daysAgo: 7, scale: 0.94 },
@@ -137,27 +147,27 @@ function historyFor(organizationId: string, datasourceId: string | null): Covera
 /** `GET .../stewardship/coverage/snapshots`, newest first. */
 export function fixtureCoverageSnapshots(
   organizationId: string,
-  datasourceId: string | null,
+  scope: CoverageScope,
   limit: number,
   offset: number,
 ): PageOf<CoverageSnapshotRead> {
-  const all = historyFor(organizationId, datasourceId);
+  const all = historyFor(organizationId, scope);
   return { items: all.slice(offset, offset + limit), limit, offset, total: all.length };
 }
 
 /** `POST .../stewardship/coverage/snapshots`: compute again, store that, answer with it. */
 export function fixtureTakeCoverageSnapshot(
   organizationId: string,
-  datasourceId: string | null,
+  scope: CoverageScope,
 ): StewardshipCoverageRead {
-  const coverage = fixtureCoverage(organizationId, datasourceId);
-  const history = historyFor(organizationId, datasourceId);
+  const coverage = fixtureCoverage(organizationId, scope);
+  const history = historyFor(organizationId, scope);
   history.unshift({
     id: `snap_demo_${Date.now().toString(36)}_${history.length}`,
     organization_id: organizationId,
-    datasource_id: datasourceId,
-    domain_id: null,
-    line_of_business_id: null,
+    datasource_id: scope.datasourceId ?? null,
+    domain_id: scope.domainId ?? null,
+    line_of_business_id: scope.lineOfBusinessId ?? null,
     table_count: coverage.table_count,
     dimensions: coverage.dimensions,
     overall_score: coverage.overall_score,

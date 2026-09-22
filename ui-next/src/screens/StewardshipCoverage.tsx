@@ -3,7 +3,9 @@ import type { StewardshipCoverageRead } from "../lib/types";
 import {
   COVERAGE_READ_ROLES,
   COVERAGE_SNAPSHOT_ROLES,
+  fetchCoverageDomains,
   fetchCoverageSnapshots,
+  fetchOrgLinesOfBusiness,
   fetchStewardshipCoverage,
   takeCoverageSnapshot,
 } from "../lib/api";
@@ -59,11 +61,18 @@ import "./StewardshipCoverage.css";
    session is told coverage is not available to its roles rather than shown the
    403 a doomed request would earn.
 
-   SCOPE. The organization, or one datasource (`?ds=`, the estate context the
-   workspace already reads). The API's domain and line-of-business scopes are not
-   offered. The history is the scope's own -- the organization's does not contain
-   a datasource's snapshots -- and the dialog names which scope a snapshot is
-   stored under.
+   SCOPE. The organization, one datasource (`?ds=`, the estate context the
+   workspace already reads), one business domain (`?domain=`: the tables annotated
+   with it) or one line of business (`?lob=`: the tables of its projects' sources)
+   -- the four the API accepts (R11-VAL06). One select offers them in groups, each
+   group only to a session its list admits: the domains come from the business map,
+   which admits exactly the coverage roles; the lines of business from their own
+   list, which admits fewer (`LINE_OF_BUSINESS_LIST_ROLES`), so a DataSteward is not
+   offered a group whose list would refuse it. Choosing one clears the others; a
+   link that names several is read as the API reads it, all of them at once, and
+   the select says so. The history is the scope's own -- the organization's does
+   not contain a datasource's snapshots -- and the dialog names which scope a
+   snapshot is stored under.
 --------------------------------------------------------------------------- */
 
 /**
@@ -90,6 +99,13 @@ const DATASOURCE_LIST_ROLES = [
   "PlatformAdmin",
   "Viewer",
 ];
+
+/**
+ * The roles `GET /v1/organizations/{organization_id}/lines-of-business` admits, copied from the
+ * surface-control matrix row for `atlas.modules.identity_tenancy.router.list_lines_of_business`:
+ * DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer.
+ */
+const LINE_OF_BUSINESS_LIST_ROLES = ["DataAdmin", "OrganizationAdmin", "PlatformAdmin", "Viewer"];
 
 /** How many stored snapshots the history asks for. The table says when there are more. */
 const HISTORY_LIMIT = 50;
@@ -155,7 +171,12 @@ export function StewardshipCoverage() {
 
   const [params, setParams] = useUrlState();
   const ds = params.get("ds") ?? "";
-  const scope = useMemo(() => ({ datasourceId: ds || null }), [ds]);
+  const domain = params.get("domain") ?? "";
+  const lob = params.get("lob") ?? "";
+  const scope = useMemo(
+    () => ({ datasourceId: ds || null, domainId: domain || null, lineOfBusinessId: lob || null }),
+    [ds, domain, lob],
+  );
 
   /* The tenant's sources, not the ones the active scope reaches: coverage is an organization-level
      read, and a steward scoping it should see every source it can be scoped to. Not asked for by a
@@ -165,16 +186,61 @@ export function StewardshipCoverage() {
     selectedId: ds || null,
     enabled: read === "ask" && roleAllows(roles, DATASOURCE_LIST_ROLES),
   });
-  const scopeName = ds ? (datasourceName(sources.datasources, ds) ?? "the selected datasource") : "the whole organization";
+  const domains = useAsyncResource(
+    (signal) => fetchCoverageDomains(ORG, signal),
+    [ORG],
+    { enabled: read === "ask" },
+  );
+  const lobRead = readDecision(session, LINE_OF_BUSINESS_LIST_ROLES);
+  const linesOfBusiness = useAsyncResource(
+    (signal) => fetchOrgLinesOfBusiness(ORG, signal),
+    [ORG],
+    { enabled: read === "ask" && lobRead === "ask" },
+  );
+  const domainOptions = domains.data?.domains ?? [];
+  const lobOptions = linesOfBusiness.data?.items ?? [];
+
+  const scopeParts: string[] = [];
+  if (ds) scopeParts.push(datasourceName(sources.datasources, ds) ?? "the selected datasource");
+  if (domain) {
+    const name = domainOptions.find((option) => option.id === domain)?.name;
+    scopeParts.push(name ? `the ${name} business domain` : "the selected business domain");
+  }
+  if (lob) {
+    const name = lobOptions.find((option) => option.id === lob)?.name;
+    scopeParts.push(name ? `the ${name} line of business` : "the selected line of business");
+  }
+  const scopeName = scopeParts.length ? scopeParts.join(" within ") : "the whole organization";
+  const combined = scopeParts.length > 1;
+  const selectValue = combined
+    ? "combined"
+    : ds
+      ? `ds:${ds}`
+      : domain
+        ? `domain:${domain}`
+        : lob
+          ? `lob:${lob}`
+          : "";
+  const chooseScope = (value: string) => {
+    if (value === "combined") return;
+    const cut = value.indexOf(":");
+    const kind = cut < 0 ? "" : value.slice(0, cut);
+    const id = cut < 0 ? "" : value.slice(cut + 1);
+    setParams({
+      ds: kind === "ds" ? id : null,
+      domain: kind === "domain" ? id : null,
+      lob: kind === "lob" ? id : null,
+    });
+  };
 
   const coverage = useAsyncResource<StewardshipCoverageRead>(
     (signal) => fetchStewardshipCoverage(ORG, scope, signal),
-    [ORG, ds],
+    [ORG, ds, domain, lob],
     { enabled: read === "ask" },
   );
   const history = useAsyncResource(
     (signal) => fetchCoverageSnapshots(ORG, scope, { limit: HISTORY_LIMIT }, signal),
-    [ORG, ds],
+    [ORG, ds, domain, lob],
     { enabled: read === "ask" },
   );
   const reloadCoverage = coverage.reload;
@@ -190,7 +256,7 @@ export function StewardshipCoverage() {
     setConfirming(false);
     setNotice(null);
     resetTake();
-  }, [ds, resetTake]);
+  }, [ds, domain, lob, resetTake]);
 
   const confirm = async () => {
     const stored = await take.run(() => takeCoverageSnapshot(ORG, scope));
@@ -204,7 +270,14 @@ export function StewardshipCoverage() {
   };
 
   const data = coverage.data;
-  const dsListNote = read === "ask" && sources.error ? `The datasource list could not be loaded: ${sources.error}` : null;
+  const listNotes = [
+    read === "ask" && sources.error ? `The datasource list could not be loaded: ${sources.error}` : null,
+    read === "ask" && domains.error ? `The business domains could not be loaded: ${domains.error}` : null,
+    domains.data?.incomplete
+      ? "The business map stops at 2,000 annotations, so some business domains may be missing from the list."
+      : null,
+    linesOfBusiness.error ? `The lines of business could not be loaded: ${linesOfBusiness.error}` : null,
+  ].filter((note): note is string => note !== null);
 
   return (
     <div className="stew stewcov">
@@ -243,16 +316,43 @@ export function StewardshipCoverage() {
 
               <div className="stewcov__controls">
                 <Field label="Scope">
-                  <select value={ds} onChange={(event) => setParams({ ds: event.target.value || null })}>
+                  <select value={selectValue} onChange={(event) => chooseScope(event.target.value)}>
                     <option value="">Whole organization</option>
-                    {/* A scope named in the URL that the list has not (yet, or ever) returned: kept as an
+                    {combined ? <option value="combined">{`The link's scope: ${scopeName}`}</option> : null}
+                    {/* A scope named in the URL that its list has not (yet, or ever) returned: kept as an
                         option so the select never shows a scope other than the one being read. */}
-                    {ds && !sources.datasources.some((source) => source.id === ds) ? (
-                      <option value={ds}>{scopeName === "the selected datasource" ? "Selected datasource" : scopeName}</option>
+                    {!combined && ds && !sources.datasources.some((source) => source.id === ds) ? (
+                      <option value={`ds:${ds}`}>
+                        {scopeParts[0] === "the selected datasource" ? "Selected datasource" : scopeParts[0]}
+                      </option>
                     ) : null}
-                    {sources.datasources.map((source) => (
-                      <option key={source.id} value={source.id}>{source.name}</option>
-                    ))}
+                    {!combined && domain && !domainOptions.some((option) => option.id === domain) ? (
+                      <option value={`domain:${domain}`}>Selected business domain</option>
+                    ) : null}
+                    {!combined && lob && !lobOptions.some((option) => option.id === lob) ? (
+                      <option value={`lob:${lob}`}>Selected line of business</option>
+                    ) : null}
+                    {sources.datasources.length ? (
+                      <optgroup label="Data sources">
+                        {sources.datasources.map((source) => (
+                          <option key={source.id} value={`ds:${source.id}`}>{source.name}</option>
+                        ))}
+                      </optgroup>
+                    ) : null}
+                    {domainOptions.length ? (
+                      <optgroup label="Business domains">
+                        {domainOptions.map((option) => (
+                          <option key={option.id} value={`domain:${option.id}`}>{option.name}</option>
+                        ))}
+                      </optgroup>
+                    ) : null}
+                    {lobOptions.length ? (
+                      <optgroup label="Lines of business">
+                        {lobOptions.map((option) => (
+                          <option key={option.id} value={`lob:${option.id}`}>{option.name}</option>
+                        ))}
+                      </optgroup>
+                    ) : null}
                   </select>
                 </Field>
                 {mayTake ? (
@@ -269,7 +369,15 @@ export function StewardshipCoverage() {
                   </Button>
                 ) : null}
               </div>
-              {dsListNote ? <p className="stew__note" role="status">{dsListNote}</p> : null}
+              {listNotes.map((note) => (
+                <p key={note} className="stew__note" role="status">{note}</p>
+              ))}
+              {domain || lob ? (
+                <p className="stew__note">
+                  A business domain counts the active tables annotated with it; a line of business counts the active
+                  tables of the sources its projects hold.
+                </p>
+              ) : null}
               {!mayTake && identityKnown ? (
                 <p className="stew__note">
                   Only {listOr(COVERAGE_SNAPSHOT_ROLES)} can take a snapshot; everyone who can read coverage sees the

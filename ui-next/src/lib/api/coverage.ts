@@ -24,17 +24,19 @@
    `StewardshipCoverageRead`, not the stored row; the caller re-reads the
    history to see the row.
 
-   SCOPE. The API also accepts `domain_id` and `line_of_business_id`; this
-   client offers only the organization and one datasource, which are the two
-   scopes a steward can name from the estate a screen already shows. The
-   history is filtered to EXACTLY the scope asked for (`column IS NULL` for
-   every scope field not given), so the organization's history does not contain
-   a datasource's snapshots.
+   SCOPE. The organization, one datasource, one business domain (the tables
+   annotated with it, `MetadataBusinessAnnotation.domain_id`) or one line of
+   business (the sources of its projects) -- the four the API accepts, sent as
+   `datasource_id`, `domain_id` and `line_of_business_id`. The API ANDs any it is
+   given; the screen sends one. The history is filtered to EXACTLY the scope asked
+   for (`column IS NULL` for every scope field not given), so the organization's
+   history does not contain a datasource's snapshots.
 
    Transport, identity headers and the demo switch come from `./transport`.
    Re-exported from `lib/api.ts`.
 --------------------------------------------------------------------------- */
 
+import { fetchBusinessMap } from "./catalog";
 import { demoOr, get, noDemoData, postJson } from "./transport";
 import type { CoverageDimensionRead, StewardshipCoverageRead } from "../types";
 import type { PageOf } from "../ui-types";
@@ -99,16 +101,48 @@ export interface CoverageSnapshotRead {
   created_at: string;
 }
 
-/** Which population a figure or a history is about. */
+/** Which population a figure or a history is about. Every field absent is the whole organization. */
 export interface CoverageScope {
-  /** One datasource, or null/absent for the whole organization. */
+  /** One datasource. */
   datasourceId?: string | null;
+  /** One business domain (`BusinessDomain.id`): the tables annotated with it. */
+  domainId?: string | null;
+  /** One line of business: the tables of the sources its projects hold. */
+  lineOfBusinessId?: string | null;
 }
 
 function scopeQuery(scope: CoverageScope): URLSearchParams {
   const params = new URLSearchParams();
   if (scope.datasourceId) params.set("datasource_id", scope.datasourceId);
+  if (scope.domainId) params.set("domain_id", scope.domainId);
+  if (scope.lineOfBusinessId) params.set("line_of_business_id", scope.lineOfBusinessId);
   return params;
+}
+
+/** A business domain a coverage figure can be scoped to. */
+export interface CoverageDomainOption {
+  id: string;
+  name: string;
+}
+
+/**
+ * The business domains `GET .../stewardship/coverage` can be scoped to, read from
+ * `GET /v1/organizations/{organization_id}/business-map` -- the only route that names
+ * them with their ids, and one that admits exactly `COVERAGE_READ_ROLES`. Its DOMAIN
+ * nodes are `domain:<BusinessDomain.id>`; a domain with no annotated table is not on
+ * the map, and its coverage would be over no tables anyway. `incomplete` is the map's
+ * own `truncated`: the map stops at `limit` annotations, so a domain can be missing.
+ */
+export async function fetchCoverageDomains(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<{ domains: CoverageDomainOption[]; incomplete: boolean }> {
+  const map = await fetchBusinessMap({ organizationId, limit: 2000 }, signal);
+  const domains = map.nodes
+    .filter((node) => node.node_type === "DOMAIN" && node.id.startsWith("domain:"))
+    .map((node) => ({ id: node.id.slice("domain:".length), name: node.label }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { domains, incomplete: map.truncated };
 }
 
 const withQuery = (path: string, params: URLSearchParams): string => {
@@ -130,7 +164,7 @@ export function fetchStewardshipCoverage(
 ): Promise<StewardshipCoverageRead> {
   return demoOr(
     async () =>
-      (await coverageDemo()).fixtureCoverage(organizationId, scope.datasourceId ?? null),
+      (await coverageDemo()).fixtureCoverage(organizationId, scope),
     () =>
       get<StewardshipCoverageRead>(
         withQuery(`/v1/organizations/${organizationId}/stewardship/coverage`, scopeQuery(scope)),
@@ -154,12 +188,7 @@ export function fetchCoverageSnapshots(
   const offset = page.offset ?? 0;
   return demoOr(
     async () =>
-      (await coverageDemo()).fixtureCoverageSnapshots(
-        organizationId,
-        scope.datasourceId ?? null,
-        limit,
-        offset,
-      ),
+      (await coverageDemo()).fixtureCoverageSnapshots(organizationId, scope, limit, offset),
     () => {
       const params = scopeQuery(scope);
       params.set("limit", String(limit));
@@ -187,10 +216,7 @@ export function takeCoverageSnapshot(
 ): Promise<StewardshipCoverageRead> {
   return demoOr(
     async () =>
-      (await coverageDemo()).fixtureTakeCoverageSnapshot(
-        organizationId,
-        scope.datasourceId ?? null,
-      ),
+      (await coverageDemo()).fixtureTakeCoverageSnapshot(organizationId, scope),
     () =>
       postJson<StewardshipCoverageRead>(
         withQuery(

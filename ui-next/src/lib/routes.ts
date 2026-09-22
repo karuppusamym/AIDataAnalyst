@@ -325,8 +325,11 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
      (the backend's `CatalogBulk*Request.table_ids`/`filter` are mutually
      exclusive). Declared here for the same reason `pattern` is: an
      undeclared field is dropped from the link before Bulk actions ever sees
-     it. */
-  stewardship: ["action", "ds", "field", "ids", "pattern", "view"],
+     it.
+
+     R11-VAL06: `domain` and `lob` scope the Coverage view to one business domain or one
+     line of business, as `ds` scopes it to one datasource. */
+  stewardship: ["action", "domain", "ds", "field", "ids", "lob", "pattern", "view"],
   /* R11-AUD08 (part 2): `view` chooses Assignments, Rules or Leaver reassignment.
      `subject_type`/`subject_id` are the Assignments filter -- the two the list
      route accepts -- and are declared here or `normalizeLocation` drops them from

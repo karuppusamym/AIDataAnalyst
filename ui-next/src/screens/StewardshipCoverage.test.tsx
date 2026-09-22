@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { ApiError } from "../lib/api";
-import type { CoverageScope, CoverageSnapshotRead } from "../lib/api";
+import type { CoverageDomainOption, CoverageScope, CoverageSnapshotRead } from "../lib/api";
 import { resetLocationCacheForTests } from "../lib/location";
-import type { DataSourceRead, MeRead, StewardshipCoverageRead } from "../lib/types";
+import type { DataSourceRead, LineOfBusinessRead, MeRead, StewardshipCoverageRead } from "../lib/types";
 import type { Session, SessionState } from "../lib/session";
 import type { PageOf } from "../lib/ui-types";
 import { expectNoAxeViolations, unnamedFocusableElements } from "../test/a11y";
@@ -49,6 +49,12 @@ const fetchCoverageSnapshots = vi.fn<
 const takeCoverageSnapshot = vi.fn<
   (organizationId: string, scope?: CoverageScope, signal?: AbortSignal) => Promise<StewardshipCoverageRead>
 >();
+const fetchCoverageDomains = vi.fn<
+  (organizationId: string, signal?: AbortSignal) => Promise<{ domains: CoverageDomainOption[]; incomplete: boolean }>
+>();
+const fetchOrgLinesOfBusiness = vi.fn<
+  (organizationId: string, signal?: AbortSignal) => Promise<PageOf<LineOfBusinessRead>>
+>();
 const listOrgDatasources = vi.fn<
   (organizationId: string, signal?: AbortSignal, options?: unknown) => Promise<PageOf<DataSourceRead> & { truncated?: boolean }>
 >();
@@ -69,6 +75,9 @@ vi.mock("../lib/api", async (importOriginal) => {
       takeCoverageSnapshot(organizationId, scope, signal),
     listOrgDatasources: (organizationId: string, signal?: AbortSignal, options?: unknown) =>
       listOrgDatasources(organizationId, signal, options),
+    fetchCoverageDomains: (organizationId: string, signal?: AbortSignal) => fetchCoverageDomains(organizationId, signal),
+    fetchOrgLinesOfBusiness: (organizationId: string, signal?: AbortSignal) =>
+      fetchOrgLinesOfBusiness(organizationId, signal),
   };
 });
 
@@ -152,6 +161,19 @@ const SOURCE: DataSourceRead = {
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
 };
 
+const LOB: LineOfBusinessRead = {
+  id: "lob_1", organization_id: ORG, name: "Retail Banking", code: "RTL", status: "ACTIVE",
+  created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+};
+
+/** The scope object every read is sent, with the fields a test names. */
+const scopeOf = (fields: CoverageScope = {}): CoverageScope => ({
+  datasourceId: null,
+  domainId: null,
+  lineOfBusinessId: null,
+  ...fields,
+});
+
 const takeButton = () => screen.queryByRole("button", { name: "Take a snapshot" });
 const READ_ONLY = /Only DataSteward, MetadataAdmin, PlatformAdmin or SemanticAdmin can take a snapshot/;
 
@@ -168,6 +190,10 @@ beforeEach(() => {
   takeCoverageSnapshot.mockReset();
   listOrgDatasources.mockReset();
   listOrgDatasources.mockResolvedValue({ items: [SOURCE], limit: 500, offset: 0, total: 1, truncated: false });
+  fetchCoverageDomains.mockReset();
+  fetchCoverageDomains.mockResolvedValue({ domains: [{ id: "dom_customer", name: "Customer" }], incomplete: false });
+  fetchOrgLinesOfBusiness.mockReset();
+  fetchOrgLinesOfBusiness.mockResolvedValue({ items: [LOB], limit: 500, offset: 0, total: 1 });
   sessionMe = null;
   sessionState = "connected";
   window.history.replaceState(null, "", "/");
@@ -186,8 +212,8 @@ describe("who is asked, and who may take a snapshot", () => {
       mount();
 
       expect(await screen.findByText("9.65%")).toBeInTheDocument();
-      expect(fetchStewardshipCoverage).toHaveBeenCalledWith(ORG, { datasourceId: null }, expect.any(AbortSignal));
-      expect(fetchCoverageSnapshots).toHaveBeenCalledWith(ORG, { datasourceId: null }, { limit: 50 }, expect.any(AbortSignal));
+      expect(fetchStewardshipCoverage).toHaveBeenCalledWith(ORG, scopeOf(), expect.any(AbortSignal));
+      expect(fetchCoverageSnapshots).toHaveBeenCalledWith(ORG, scopeOf(), { limit: 50 }, expect.any(AbortSignal));
       expect(takeButton()).not.toBeInTheDocument();
       // Told why, rather than left to wonder where the control is.
       expect(screen.getByText(READ_ONLY)).toBeInTheDocument();
@@ -510,9 +536,9 @@ describe("the scope", () => {
     mount("/?view=coverage&ds=ds_1#/steward/stewardship");
 
     expect(await screen.findByText(/overall for snowflake_prod/)).toBeInTheDocument();
-    expect(fetchStewardshipCoverage).toHaveBeenCalledWith(ORG, { datasourceId: "ds_1" }, expect.any(AbortSignal));
-    expect(fetchCoverageSnapshots).toHaveBeenCalledWith(ORG, { datasourceId: "ds_1" }, { limit: 50 }, expect.any(AbortSignal));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Scope" })).toHaveValue("ds_1"));
+    expect(fetchStewardshipCoverage).toHaveBeenCalledWith(ORG, scopeOf({ datasourceId: "ds_1" }), expect.any(AbortSignal));
+    expect(fetchCoverageSnapshots).toHaveBeenCalledWith(ORG, scopeOf({ datasourceId: "ds_1" }), { limit: 50 }, expect.any(AbortSignal));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Scope" })).toHaveValue("ds:ds_1"));
     expect(screen.getByText("No snapshots have been stored for snowflake_prod")).toBeInTheDocument();
   });
 
@@ -522,18 +548,18 @@ describe("the scope", () => {
     await screen.findByText("9.65%");
     await waitFor(() => expect(screen.getByRole("option", { name: "snowflake_prod" })).toBeInTheDocument());
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Scope" }), { target: { value: "ds_1" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Scope" }), { target: { value: "ds:ds_1" } });
 
     await waitFor(() =>
-      expect(fetchStewardshipCoverage).toHaveBeenLastCalledWith(ORG, { datasourceId: "ds_1" }, expect.any(AbortSignal)),
+      expect(fetchStewardshipCoverage).toHaveBeenLastCalledWith(ORG, scopeOf({ datasourceId: "ds_1" }), expect.any(AbortSignal)),
     );
-    expect(fetchCoverageSnapshots).toHaveBeenLastCalledWith(ORG, { datasourceId: "ds_1" }, { limit: 50 }, expect.any(AbortSignal));
+    expect(fetchCoverageSnapshots).toHaveBeenLastCalledWith(ORG, scopeOf({ datasourceId: "ds_1" }), { limit: 50 }, expect.any(AbortSignal));
     expect(new URLSearchParams(location.search).get("ds")).toBe("ds_1");
     // ... and back to the organization drops the field rather than writing an empty one.
     fireEvent.change(screen.getByRole("combobox", { name: "Scope" }), { target: { value: "" } });
     await waitFor(() => expect(new URLSearchParams(location.search).has("ds")).toBe(false));
     await waitFor(() =>
-      expect(fetchStewardshipCoverage).toHaveBeenLastCalledWith(ORG, { datasourceId: null }, expect.any(AbortSignal)),
+      expect(fetchStewardshipCoverage).toHaveBeenLastCalledWith(ORG, scopeOf(), expect.any(AbortSignal)),
     );
   });
 
@@ -542,8 +568,88 @@ describe("the scope", () => {
     mount("/?view=coverage&ds=ds_unknown#/steward/stewardship");
 
     expect(await screen.findByText(/overall for the selected datasource/)).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Scope" })).toHaveValue("ds_unknown");
+    expect(screen.getByRole("combobox", { name: "Scope" })).toHaveValue("ds:ds_unknown");
     expect(screen.getByRole("option", { name: "Selected datasource" })).toBeInTheDocument();
+  });
+
+  it("offers the business domains the map names, and reads one for both panels when it is chosen", async () => {
+    sessionMe = asRoles("Analyst");
+    mount("/?view=coverage&ds=ds_1#/steward/stewardship");
+    await waitFor(() => expect(screen.getByRole("option", { name: "Customer" })).toBeInTheDocument());
+    expect(screen.getByRole("group", { name: "Business domains" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Scope" }), { target: { value: "domain:dom_customer" } });
+
+    await waitFor(() =>
+      expect(fetchStewardshipCoverage).toHaveBeenLastCalledWith(ORG, scopeOf({ domainId: "dom_customer" }), expect.any(AbortSignal)),
+    );
+    expect(fetchCoverageSnapshots).toHaveBeenLastCalledWith(
+      ORG,
+      scopeOf({ domainId: "dom_customer" }),
+      { limit: 50 },
+      expect.any(AbortSignal),
+    );
+    // Choosing a domain clears the datasource: the select is one scope, not a pile of filters.
+    const query = new URLSearchParams(location.search);
+    expect(query.get("domain")).toBe("dom_customer");
+    expect(query.has("ds")).toBe(false);
+    expect(await screen.findByText(/overall for the Customer business domain/)).toBeInTheDocument();
+    expect(screen.getByText(/A business domain counts the active tables annotated with it/)).toBeInTheDocument();
+  });
+
+  it("offers lines of business only to a session their list admits", async () => {
+    sessionMe = asRoles("DataSteward"); // admitted to coverage, not to the list of lines of business
+    const view = mount();
+    await screen.findByText("9.65%");
+    expect(fetchOrgLinesOfBusiness).not.toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: "Lines of business" })).not.toBeInTheDocument();
+    view.unmount();
+
+    sessionMe = asRoles("Viewer");
+    mount();
+    await waitFor(() => expect(screen.getByRole("option", { name: "Retail Banking" })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox", { name: "Scope" }), { target: { value: "lob:lob_1" } });
+
+    await waitFor(() =>
+      expect(fetchStewardshipCoverage).toHaveBeenLastCalledWith(ORG, scopeOf({ lineOfBusinessId: "lob_1" }), expect.any(AbortSignal)),
+    );
+    expect(new URLSearchParams(location.search).get("lob")).toBe("lob_1");
+    expect(await screen.findByText(/overall for the Retail Banking line of business/)).toBeInTheDocument();
+  });
+
+  it("reads a link that names two scopes as the API does, both at once, and says so", async () => {
+    sessionMe = asRoles("Analyst");
+    mount("/?view=coverage&ds=ds_1&domain=dom_customer#/steward/stewardship");
+
+    await waitFor(() =>
+      expect(fetchStewardshipCoverage).toHaveBeenCalledWith(
+        ORG,
+        scopeOf({ datasourceId: "ds_1", domainId: "dom_customer" }),
+        expect.any(AbortSignal),
+      ),
+    );
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Scope" })).toHaveValue("combined"));
+    expect(
+      screen.getByRole("option", { name: "The link's scope: snowflake_prod within the Customer business domain" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says the business domains could not be loaded, and still offers every other scope", async () => {
+    sessionMe = asRoles("Analyst");
+    fetchCoverageDomains.mockRejectedValue(new ApiError(500, "business map unavailable"));
+    mount();
+
+    expect(await screen.findByText("The business domains could not be loaded: business map unavailable")).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "snowflake_prod" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Business domains" })).not.toBeInTheDocument();
+  });
+
+  it("says when the business map was cut short, so a missing domain is not taken for none", async () => {
+    sessionMe = asRoles("Analyst");
+    fetchCoverageDomains.mockResolvedValue({ domains: [{ id: "dom_customer", name: "Customer" }], incomplete: true });
+    mount();
+
+    expect(await screen.findByText(/some business domains may be missing from the list/)).toBeInTheDocument();
   });
 
   it("says the source list could not be loaded, and still offers the organization", async () => {
@@ -608,7 +714,7 @@ describe("taking a snapshot", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Take snapshot" }));
 
-    await waitFor(() => expect(takeCoverageSnapshot).toHaveBeenCalledWith(ORG, { datasourceId: null }, undefined));
+    await waitFor(() => expect(takeCoverageSnapshot).toHaveBeenCalledWith(ORG, scopeOf(), undefined));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(
       await screen.findByText("Snapshot stored for the whole organization: 19 active tables, overall 9.65%."),
@@ -626,8 +732,23 @@ describe("taking a snapshot", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Take snapshot" }));
 
-    await waitFor(() => expect(takeCoverageSnapshot).toHaveBeenCalledWith(ORG, { datasourceId: "ds_1" }, undefined));
+    await waitFor(() => expect(takeCoverageSnapshot).toHaveBeenCalledWith(ORG, scopeOf({ datasourceId: "ds_1" }), undefined));
     expect(await screen.findByText(/Snapshot stored for snowflake_prod: 1 active table, overall 9.65%\./)).toBeInTheDocument();
+  });
+
+  it("stores the snapshot under the business domain on screen", async () => {
+    takeCoverageSnapshot.mockResolvedValue({ ...COVERAGE, domain_id: "dom_customer", table_count: 4 });
+    const dialog = await openConfirmation("/?view=coverage&domain=dom_customer#/steward/stewardship");
+    await waitFor(() => expect(dialog).toHaveTextContent("for the Customer business domain"));
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Take snapshot" }));
+
+    await waitFor(() =>
+      expect(takeCoverageSnapshot).toHaveBeenCalledWith(ORG, scopeOf({ domainId: "dom_customer" }), undefined),
+    );
+    expect(
+      await screen.findByText(/Snapshot stored for the Customer business domain: 4 active tables, overall 9.65%\./),
+    ).toBeInTheDocument();
   });
 
   it("keeps the dialog open on a refusal and shows the server's own words, claiming nothing", async () => {

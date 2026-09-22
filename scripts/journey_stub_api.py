@@ -356,6 +356,24 @@ ROUTE_RULES: list[Rule] = [
         ),
         "GET /v1/organizations/{organization_id}/stewardship/coverage/snapshots",
     ),
+    # The Coverage tab's business-domain scopes (R11-VAL06) come from the business map, which
+    # admits exactly the coverage roles.
+    Rule(
+        "GET",
+        rf"^/v1/organizations/{_SEG}/business-map/?$",
+        (
+            "Analyst",
+            "Auditor",
+            "DataAdmin",
+            "DataSteward",
+            "MetadataAdmin",
+            "PlatformAdmin",
+            "Reviewer",
+            "SemanticAdmin",
+            "Viewer",
+        ),
+        "GET /v1/organizations/{organization_id}/business-map",
+    ),
     Rule(
         "GET",
         rf"^/v1/datasources/{_SEG}/agent-runs/?$",
@@ -907,6 +925,43 @@ def _overrides(method: str, path: str, identity: str, body: Any) -> Any | None:
             limit=100,
         )
     # --- the Stewardship Coverage tab (round 12) ------------------------------
+    if method == "GET" and re.fullmatch(rf"/v1/organizations/{_SEG}/business-map/?", path):
+        # One domain over one entity and the stub's one table: enough for the Coverage scope's
+        # "Business domains" group to hold an option with a real id and name.
+        domain_node = "domain:00000000-0000-0000-0000-0000000000f1"
+        entity_node = "entity:00000000-0000-0000-0000-0000000000f2"
+        return {
+            "organization_id": ORG_ID,
+            "nodes": [
+                {
+                    "id": domain_node,
+                    "node_type": "DOMAIN",
+                    "label": "Customer",
+                    "parent_id": None,
+                    "metadata": {"domain_key": "customer"},
+                },
+                {
+                    "id": entity_node,
+                    "node_type": "ENTITY",
+                    "label": "Customer",
+                    "parent_id": domain_node,
+                    "metadata": {"entity_key": "customer"},
+                },
+                {
+                    "id": f"table:{TABLE_ID}",
+                    "node_type": "TABLE",
+                    "label": "customer",
+                    "parent_id": entity_node,
+                    "metadata": {},
+                },
+            ],
+            "edges": [],
+            "domain_count": 1,
+            "entity_count": 1,
+            "table_count": 1,
+            "cross_domain_edge_count": 0,
+            "truncated": False,
+        }
     if method == "GET" and re.fullmatch(
         rf"/v1/organizations/{_SEG}/stewardship/coverage/snapshots/?", path
     ):

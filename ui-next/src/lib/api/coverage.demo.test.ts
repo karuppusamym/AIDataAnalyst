@@ -63,6 +63,18 @@ describe("demo coverage", () => {
     expect(history).toEqual({ items: [], limit: 50, offset: 0, total: 0 });
   });
 
+  it("scopes to a business domain or a line of business: its own population and its own history", async () => {
+    const { fetchCoverageSnapshots, fetchStewardshipCoverage } = await import("./coverage");
+
+    const domain = await fetchStewardshipCoverage(ORG, { domainId: "dom_customer" });
+    const lob = await fetchStewardshipCoverage(ORG, { lineOfBusinessId: "lob_retail" });
+
+    expect(domain.domain_id).toBe("dom_customer");
+    expect(domain.table_count).toBeLessThan(lob.table_count);
+    expect(lob.line_of_business_id).toBe("lob_retail");
+    expect((await fetchCoverageSnapshots(ORG, { domainId: "dom_customer" })).total).toBe(0);
+  });
+
   it("lists the organization's history newest first", async () => {
     const { fetchCoverageSnapshots } = await import("./coverage");
 
