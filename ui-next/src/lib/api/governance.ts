@@ -510,8 +510,12 @@ export interface CompliancePackQuery {
 
 /** `GET /v1/compliance/packs` (`list_compliance_packs`, `compliance_api.py:119`).
  *  Gated server-side behind `PlatformAdmin`/`DataSteward`/`Auditor`/`Viewer`
- *  (`PACK_READERS`) -- a Viewer can see the list (name/framework/status/generated_at)
- *  but not a pack's evidence body, see `downloadCompliancePack` below. */
+ *  (`PACK_READERS`). The list and the detail already return each pack's `sections`,
+ *  which is everything `downloadCompliancePack` returns too (today aggregate counts per
+ *  section), so a Viewer sees the same content the download gate withholds; the gate
+ *  decides who gets the file, not who sees the numbers (checked 2026-09-21). If sections
+ *  ever carry evidence rows, the list and detail read models must stop returning them to
+ *  Viewer first. */
 export function fetchCompliancePacks(
   query: CompliancePackQuery = {},
   signal?: AbortSignal,
