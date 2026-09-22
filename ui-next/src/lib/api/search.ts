@@ -18,12 +18,13 @@
        searched, whatever the `object_type` filter's own description says
        ("TABLE, COLUMN, ANNOTATION"): there is no annotation branch, so filtering
        to ANNOTATION returns nothing and is not offered.
-     * A TABLE hit carries the id of its datasource. A COLUMN hit carries neither
-       the datasource nor the table it belongs to: the handler builds
-       `metadata.table_id` on the hit and `_build_evidence_for_result` then
-       writes `metadata={}`, so five columns called `customer_id` in five tables
-       are five identical rows. Nothing here invents the parent; see
-       `lib/searchTargets.ts`.
+     * A TABLE hit carries the id of its datasource, and `evidence.metadata`
+       carries `table_id`. A COLUMN hit carries its table's datasource,
+       `qualified_name` as `table.column`, and `column_id`, `table_id` and
+       `table_name` in `evidence.metadata` (since 2026-09-21, R11-AUD08; before
+       that the handler dropped them, so five columns called `customer_id` in
+       five tables were five identical rows). Nothing here invents the parent
+       when a hit lacks it; see `lib/searchTargets.ts`.
      * `datasource_name`, `domain_name` and `description` exist on the result and
        are never filled today.
      * Words under two letters and common stop words are dropped from the query
@@ -85,7 +86,7 @@ export interface SearchEvidenceRead {
   factors: SearchFactorRead[];
   graph_expansion_path: string[];
   source_signals: string[];
-  /** `{}` for every hit today -- see the note above on COLUMN hits. */
+  /** A hit's identifiers (`table_id`; for a column also `column_id` and `table_name`) -- see the note above. */
   metadata: Record<string, unknown>;
 }
 

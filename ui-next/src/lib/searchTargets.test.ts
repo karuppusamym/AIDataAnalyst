@@ -26,8 +26,8 @@ describe("searchTargetFor", () => {
     ).not.toHaveProperty("ds");
   });
 
-  it("gives a column NO destination while the API does not say which table it is in", () => {
-    // The live answer: `evidence.metadata` is `{}` and `datasource_id` is null for every column hit.
+  it("gives a column NO destination when the hit does not say which table it is in", () => {
+    // What a server before 2026-09-21 answered: `evidence.metadata` `{}` and `datasource_id` null.
     expect(
       searchTargetFor({
         object_type: "COLUMN",

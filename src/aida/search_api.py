@@ -49,8 +49,14 @@ def _build_evidence_for_result(
     object_id: str,
     display_name: str,
     score: float,
+    metadata: dict[str, Any],
 ) -> RetrievalEvidence:
-    """Build a minimal evidence payload for a search result."""
+    """Build a minimal evidence payload for a search result.
+
+    `metadata` carries the hit's identifiers: `table_id` for a table, and
+    `table_id`, `table_name` and `column_id` for a column, which is how a
+    column hit can open the table it belongs to.
+    """
     return RetrievalEvidence(
         object_type=object_type,
         object_id=object_id,
@@ -68,7 +74,7 @@ def _build_evidence_for_result(
         ],
         graph_expansion_path=[],
         source_signals=["lexical"],
-        metadata={},
+        metadata=metadata,
     )
 
 
@@ -138,7 +144,7 @@ async def global_search(
     if object_type is None or object_type == "COLUMN":
         col_filters = [func.lower(MetadataColumn.name).contains(t) for t in query_tokens[:10]]
         col_stmt = (
-            select(MetadataColumn)
+            select(MetadataColumn, MetadataTable.name, MetadataTable.datasource_id)
             .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
             .where(
                 MetadataTable.organization_id == organization_id,
@@ -151,19 +157,22 @@ async def global_search(
             col_stmt = col_stmt.where(MetadataTable.datasource_id == datasource_id)
         col_stmt = col_stmt.limit(500)
 
-        col_rows = (await session.scalars(col_stmt)).all()
-        for col in col_rows:
+        # A column hit names its table and datasource (R11-AUD08): without them five columns
+        # called `customer_id` were five identical rows, and none could open its table.
+        col_rows = (await session.execute(col_stmt)).all()
+        for col, table_name, table_datasource_id in col_rows:
             text = " ".join(filter(None, [col.name, col.physical_type]))
             documents.append({
                 "object_type": "COLUMN",
                 "object_id": str(col.id),
                 "display_name": col.name,
-                "qualified_name": col.name,
+                "qualified_name": f"{table_name}.{col.name}",
                 "text": text,
-                "datasource_id": None,
+                "datasource_id": str(table_datasource_id),
                 "metadata": {
                     "column_id": str(col.id),
                     "table_id": str(col.table_id),
+                    "table_name": table_name,
                 },
             })
 
@@ -193,6 +202,7 @@ async def global_search(
                 object_id=hit.object_id,
                 display_name=hit.display_name,
                 score=hit.ts_rank,
+                metadata=hit.metadata,
             ),
             # `FullTextHit.datasource_id` is already `UUID | None`; wrapping it in
             # `UUID(...)` raised TypeError for every hit that had one.

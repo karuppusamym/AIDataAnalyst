@@ -53,7 +53,7 @@ function hit(row: CatalogRowRead): SearchResultRead {
       factors: [{ signal: "lexical", raw_score: 1, weight: 1, weighted_score: 1, rank: null }],
       graph_expansion_path: [],
       source_signals: ["lexical"],
-      metadata: {},
+      metadata: { table_id: row.id },
     },
     datasource_id: row.datasource_id,
     datasource_name: null,

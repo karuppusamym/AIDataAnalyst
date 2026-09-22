@@ -40,12 +40,12 @@ import "./SearchScreen.css";
    did not send.
 
    WHERE A RESULT OPENS (`lib/searchTargets.ts`, shared with the palette): a
-   TABLE opens in the Catalog, on that table. A COLUMN does not, and the page
-   says why in one sentence rather than pretending: the search answer names a
-   column and gives neither its table nor its datasource, so five columns called
-   `customer_id` are five identical rows with nowhere to go. That is the API's
-   gap to close (its handler builds the table id and then drops it); this screen
-   opens a column's table the day the answer carries it. A session whose roles
+   TABLE opens in the Catalog, on that table, and so does a COLUMN's table once
+   the hit says which one (`evidence.metadata.table_id`, which the API fills
+   since 2026-09-21; its `qualified_name` is `table.column`, so five columns
+   called `customer_id` are no longer five identical rows). A column hit that
+   does not say, from an older server, gets no link and one sentence saying
+   why rather than a guess. A session whose roles
    the Catalog refuses (`CATALOG_ROWS_ROLES`) gets the same results with no
    links and a sentence saying why -- never a link that ends in a refusal.
 

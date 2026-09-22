@@ -18,13 +18,12 @@
       -- the search box shows the name, and a banner says the list is one
       source -- so nothing is narrowed silently.
 
-   2. A COLUMN HIT DOES NOT SAY WHICH TABLE IT IS IN. `GET /v1/search` returns a
-      column's name and id and neither its table nor its datasource (see
-      `lib/api/search.ts`), and no route resolves a column id to its table. So
-      the honest answer for a column is "no destination", not a guess at one. If
-      the API ever fills `evidence.metadata.table_id` -- the handler already
-      builds it on the hit and drops it -- the column opens its table with no
-      change here; today the field is `{}` and a column has no link.
+   2. A COLUMN OPENS ITS TABLE ONLY WHEN THE HIT SAYS WHICH ONE. Since
+      2026-09-21 `GET /v1/search` puts `table_id` in `evidence.metadata` and the
+      table's datasource in `datasource_id` (see `lib/api/search.ts`); before
+      that it built the table id and dropped it, and no route resolves a column
+      id to its table. A hit without `table_id` (an older server) still gets "no
+      destination", not a guess at one.
 --------------------------------------------------------------------------- */
 
 /**

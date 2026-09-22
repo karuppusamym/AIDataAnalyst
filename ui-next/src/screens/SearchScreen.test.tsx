@@ -371,7 +371,7 @@ describe("where a result opens", () => {
     expect(within(columns).getByText("c-2")).toBeInTheDocument();
   });
 
-  it("opens a column's table the day the API says which it is", async () => {
+  it("opens a column's table when the hit says which it is", async () => {
     sessionMe = asRoles("Analyst");
     const withTable = hit({ object_type: "COLUMN", object_id: "c-9", display_name: "customer_id", datasource_id: "ds-3" });
     withTable.evidence.metadata = { table_id: "t-9", column_id: "c-9" };
