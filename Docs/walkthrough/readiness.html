@@ -130,7 +130,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <p class="eyebrow">Readiness</p>
 <h1>Ready to demo, not ready to deploy</h1>
 <p class="lede">An honest read of where Atlas stands: the work queue counted, production controls scored against the code, and what to say and not say in front of an audience.</p>
-<div class="stamp"><span>Tracker section P counted at <b>4ae9b2c plus round 11</b></span><span>Date <b>2026-09-21</b></span><span>Tests collected <b>15,040</b></span></div>
+<div class="stamp"><span>Tracker section P counted at <b>0eb0656</b>; stack runs <b>e534c1b</b></span><span>Date <b>2026-09-21</b></span><span>Tests collected <b>15,040</b></span></div>
 
 <nav class="chips" aria-label="On this page" style="margin-top:1rem">
   <a class="chip" href="#verdict" style="text-decoration:none">Verdict</a>
@@ -152,17 +152,17 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 </div>
 
 <h2 id="queue">Work queue at a glance</h2>
-<p>Tracker section P is the only status authority. Counted from the table on 2026-09-20: 143 work packages (129 before this review added fourteen audit rows). Of the 119 that are neither deferred nor cancelled, 72 are done and 47 still need implementation, verification or a customer prerequisite. These are work packages, not features.</p>
+<p>Tracker section P is the only status authority. Counted from the table on 2026-09-21: 148 work packages. Of the 124 that are neither deferred nor cancelled, 74 are done and 50 still need implementation, verification or a customer prerequisite. Since 2026-09-20, R11-AUD12 and AUD13 closed, AUD11 moved to partial, and the end-to-end validation added five rows (R11-VAL01 to VAL05). These are work packages, not features.</p>
 <div class="grid">
-  <div class="tile"><div class="k">Done</div><div class="v" style="color:var(--allow)">72</div><div class="s">acceptance evidenced</div></div>
-  <div class="tile"><div class="k">Partial</div><div class="v" style="color:var(--warn)">36</div><div class="s">code kept, remainder named</div></div>
+  <div class="tile"><div class="k">Done</div><div class="v" style="color:var(--allow)">74</div><div class="s">acceptance evidenced</div></div>
+  <div class="tile"><div class="k">Partial</div><div class="v" style="color:var(--warn)">38</div><div class="s">code kept, remainder named</div></div>
   <div class="tile"><div class="k">Blocked</div><div class="v" style="color:var(--deny)">7</div><div class="s">waiting on a prerequisite</div></div>
-  <div class="tile"><div class="k">To do</div><div class="v">4</div><div class="s">found by this review</div></div>
+  <div class="tile"><div class="k">To do</div><div class="v">5</div><div class="s">R11-AUD10, R11-VAL01, 02, 04, 05</div></div>
   <div class="tile"><div class="k">Deferred</div><div class="v">22</div><div class="s">each with a named trigger</div></div>
   <div class="tile"><div class="k">Cancelled</div><div class="v">2</div><div class="s">obsolete</div></div>
 </div>
-<div role="img" aria-label="Stacked bar: 72 done, 36 partial, 7 blocked, 4 to do, 22 deferred, 2 cancelled out of 143" style="display:flex;height:14px;border-radius:7px;overflow:hidden;border:1px solid var(--line);max-width:720px">
-  <span style="flex:72;background:var(--allow)"></span><span style="flex:36;background:var(--warn)"></span><span style="flex:7;background:var(--deny)"></span><span style="flex:4;background:var(--info)"></span><span style="flex:22;background:var(--muted);opacity:.55"></span><span style="flex:2;background:var(--line)"></span>
+<div role="img" aria-label="Stacked bar: 74 done, 38 partial, 7 blocked, 5 to do, 22 deferred, 2 cancelled out of 148" style="display:flex;height:14px;border-radius:7px;overflow:hidden;border:1px solid var(--line);max-width:720px">
+  <span style="flex:74;background:var(--allow)"></span><span style="flex:38;background:var(--warn)"></span><span style="flex:7;background:var(--deny)"></span><span style="flex:5;background:var(--info)"></span><span style="flex:22;background:var(--muted);opacity:.55"></span><span style="flex:2;background:var(--line)"></span>
 </div>
 
 <h2 id="scorecard">Production scorecard</h2>
@@ -213,7 +213,9 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-B9, R11-D17</td><td>Partial</td><td>WORM archive proven only against an Object Lock double; the parity gate must run in the target environment.</td></tr>
 <tr><td><span class="pill p-deny">A</span></td><td class="mono">R11-AUD10</td><td>To do</td><td>Found while closing AUD09: an unknown key id can no longer force a refetch of the identity provider's key set more than once per 30 seconds, but an expired key set with the provider down is still refetched on every request.</td></tr>
 <tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-AUD01, 03, 06 to 08</td><td>Partial</td><td>Built this round, remainder open: the guard-role catalog decision (nine names no token can carry; the product owner's call); a readiness or metric signal for the Kafka consumer, which now retries loudly; ADR-0030 on the API conventions, proposed and not accepted; OIDC persona bundles, proven by token tests but not signed in through the login form; the API-only capabilities, of which the kill-switch panel and the audit export now exist and global search, the coverage scorecard, glossary conflicts, link proposals, ownership rules and Studio authoring do not.</td></tr>
-<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-AUD11 to 13</td><td>To do</td><td>Found this round: the workbook and OKF imports sit behind the 1 MiB proxy default and the API has no body cap; the review queue shows no structured diff for an access policy or membership; the Kubernetes migration Job runs one head where compose runs every head.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-AUD11</td><td>Partial</td><td>Proxy half fixed 2026-09-21 and measured on the deployed nginx: the workbook and OKF bundle imports pass exactly the 32 MiB the API accepts, and one byte more is refused with 413. Open: a chunked body with no declared length is read whole by the API before its size check, and the proxy read timeout for a very large push is unmeasured.</td></tr>
+<tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-VAL01 to 05</td><td>To do, VAL03 partial</td><td>Found by the 2026-09-21 validation: 8 secret-scan findings not yet identified; four older rows with no disposition; configuration statements the code contradicted, three corrected the same day, and one startup trap left (<code>AIDA_BASE_URL</code> in <code>.env</code> stops every app container); a scheduler pass that fails without trace; leftovers of rows closed as done.</td></tr>
+<tr><td><span class="pill p-allow">B</span></td><td class="mono">R11-AUD12, AUD13</td><td>Done</td><td>Closed 2026-09-21: both review surfaces show what an access policy or workspace grant would do before it is approved; the Kubernetes migration Job runs every Alembic head, as compose does.</td></tr>
 <tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-C10, C13</td><td>Blocked</td><td>Relationship confidence needs a labelled corpus; dynamic masking needs a licensed vault transform (refusal retained).</td></tr>
 <tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-B10, I1</td><td>Partial</td><td>Notification, Teams and Slack delivery verified only against loopback stubs.</td></tr>
 <tr><td><span class="pill p-warn">B</span></td><td class="mono">R11-C2, C14, S13</td><td>Partial</td><td>Human screen-reader acceptance; live certification of Oracle, Snowflake, BigQuery and Databricks; scope and review-surface consolidation.</td></tr>
@@ -235,11 +237,13 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 </div>
 
 <h2 id="predemo">Before you demo</h2>
-<div class="note allow"><b>The stack matches the code.</b> It was rebuilt on 2026-09-21 from a clean worktree of HEAD <span class="mono">4ae9b2c</span> plus the round-11 changes, and <span class="mono">scripts/check_deployment_parity.py</span> reported 9 of 9 comparisons matched (source digest <span class="mono">38f891ddc13d</span>). Until those changes are committed, HEAD alone is not what is running. The role checks on the roles page and the rehearsal ran on this build. If HEAD has moved since, rebuild from a clean worktree and rerun the parity check first.</div>
+<div class="note allow"><b>The stack matches the code.</b> It was rebuilt on 2026-09-21 at 10:52 from a clean worktree of <span class="mono">e534c1b</span>, and <span class="mono">scripts/check_deployment_parity.py</span> reported 9 of 9 comparisons matched (source digest <span class="mono">a22a9bce5bf7</span>, built from <span class="mono">e534c1b</span>). The commits after it (<span class="mono">0870d5c</span>, <span class="mono">0eb0656</span>) change only CI configuration and this pack. On this build: the role checks (7,586 probes, 0 failures), the read-route sweep (0 server errors), the accessibility audit (37 screens, 0 violations in either theme) and the rehearsal (47 screens, 0 issues, 5 known conditions). If HEAD has moved since, rebuild from a clean worktree and rerun the parity check first.</div>
 <ul>
 <li><b>Keep it off shared networks.</b> Every service port binds to all interfaces with default passwords, and <code>X-Roles: PlatformAdmin</code> on port 8000 grants admin. The UI bakes in an all-roles development identity.</li>
 <li><b>Ask sends prompts to real providers.</b> The deployed API holds live OpenAI and Gemini keys and the approved route is labelled residency <code>development</code>. Demo without live generation, or decide deliberately that prompts may leave the machine.</li>
 <li><b>Rotate the Gemini key, and keep container logs off the screen.</b> The scheduler printed it into its log (R11-AUD14). It no longer does, but a log written before the fix still holds it.</li>
+<li><b>Do not press:</b> the organization kill switch's Engage (alex), the per-agent Kill in the Agent inbox (sam or alex), Approve in Riya's queue outside the loop, or anything on notification delivery. Omar's Review queue and vic's Agent inbox answer 403 by design; stay on the script.</li>
+<li><b>Freeze the working tree while presenting.</b> The eight per-user UIs are Vite dev servers that hot-reload whatever a peer session saves; restart them from a clean checkout if other sessions are active.</li>
 <li><b>Leave notification delivery alone.</b> Nine governance notifications have been retrying since 2026-09-12, at up to five attempts each. Enabling or changing the delivery worker would start delivering or dead-lettering them.</li>
 <li><b>Say what is not proven:</b> no WORM claim (archive status is <code>NO_ARCHIVES</code>), no alerting claim (no Alertmanager), no HA, DR, scale or p95 claim, and do not call workspace authorization enforced: it is observing.</li>
 <li><b>Authentication claim.</b> The local stack trusts identity headers by design. Say so, then show the OIDC overlay if the audience needs the production shape.</li>

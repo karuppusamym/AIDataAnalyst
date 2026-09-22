@@ -109,9 +109,11 @@ data:
   # one costs. Uncommenting one is a deliberate act with a runbook:
   # `Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md`.
   #
-  # These reach the fleet-scheduler Deployment, not just the API: the
-  # scheduler is the process that runs the passes. A value set only on the
-  # API ConfigMap changes nothing.
+  # These are read by the fleet-scheduler process, not the API: the
+  # scheduler is the process that runs the passes. This directory has no
+  # fleet-scheduler Deployment yet (see README.md), so a value set here
+  # changes nothing until one exists and reads this ConfigMap (corrected
+  # 2026-09-21, R11-VAL03).
   #
   # ORDER MATTERS, because of DQ-3: an open CRITICAL incident fails governed
   # tools closed. The two passes that OPEN incidents are the freshness and

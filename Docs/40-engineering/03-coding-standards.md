@@ -7,13 +7,13 @@
 
 | Tool | Purpose | Gate |
 |---|---|---|
-| `ruff` | Lint + format | Fails CI — **wired** (`.github/workflows/ci.yml`, `quality` job) |
+| `ruff` | Lint + format | `ruff check` fails CI — **wired** (`.github/workflows/ci.yml`, `quality` job). `ruff format` is **not** a gate: the tree is not format-clean, so format only the lines you change (corrected 2026-09-21). |
 | `mypy --strict` | Type checking | Fails CI — **wired** (`quality` job) |
 | `import-linter` | Module boundary contracts | Fails CI — **wired** (`quality` job); 4 contracts as of 2026-08-30, incl. INV-2 gateway exclusivity and the C4/ST-11 lineage→gateway direction. Cross-module contracts await the extraction — see `10-architecture/04-module-decomposition.md` §5.2 |
 | `alembic` | Migrations | Single-head check fails CI — **wired** (`migrations` job) |
 | `pytest` | Tests | Fails CI — **wired** (`tests` job); includes the Tier-0 invariant suite |
 | `bandit` / SAST | Security lint | Fails CI on high — **not wired yet**; tool not in `dev` extras |
-| `pip-audit` | Dependency vulnerabilities | Fails CI on critical — **not wired yet**; tool not in `dev` extras |
+| `pip-audit` | Dependency vulnerabilities | Fails CI on any known vulnerability not in the job's baseline (currently empty) — **wired** (`dependency-scan` job, run through `uvx`, so not a `dev` extra; corrected 2026-09-21) |
 
 CI exists as of 2026-08-30 (`.github/workflows/ci.yml`, tracker ST-02). Before that date this
 table described intent, not behaviour: there was no pipeline at all. The two unwired rows are
