@@ -670,6 +670,8 @@ by this documentation reconciliation.
 **Confirmed 2026-09-21 (counted from the table at the commit carrying the validation log; R11-VAL01 to R11-VAL05 added):** 83 DONE, 33 PARTIAL, 7 BLOCKED, 2 TODO, 22 DEFERRED, 2 CANCELLED (149 unique rows). These are work packages, not feature or certification counts. Of the 125 rows that are neither deferred nor cancelled, 83 are DONE and 42 still need implementation, verification or a customer prerequisite. Since the 2026-09-20 line (72 DONE, 36 PARTIAL, 4 TODO over 143 rows): R11-AUD12 and AUD13 closed, AUD11 moved to PARTIAL, and the five VAL rows were added (VAL03 already PARTIAL). The 2026-09-12 confirmation read 36 DONE, 16 PARTIAL, 7 BLOCKED, 23 DEFERRED, 1 CANCELLED over 83 rows.
 
 
+**Closure recount, 2026-09-21 (`168ed19`):** 87 DONE, 29 PARTIAL, 7 BLOCKED, 2 TODO, 22 DEFERRED and 2 CANCELLED (149 unique rows). Of the 125 non-deferred, non-cancelled packages, 38 remain open. The four additional closures are FP10, FP11, GQL02 and OKF01; [the addendum](29-partial-item-closures-2026-09-21.md) records their scope and verification.
+
 **Confirmation and ID correction, 2026-09-12.** The original R11-B16 continues to mean
 incremental connector discovery (DEFERRED). The later model-retirement health finding is
 R11-B18 (DONE); earlier commit messages and source comments calling that finding B16 are
