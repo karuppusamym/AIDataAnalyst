@@ -1,4 +1,8 @@
-from datetime import datetime
+# noqa: I001 is on the first import because the re-export groups below keep one import
+# statement per relocated bounded context (`X as X` aliases), which the isort rules would
+# split into one statement per name; with nothing between the blocks since R03, the whole
+# import section is one block and the suppression has to sit on its first line.
+from datetime import datetime  # noqa: I001
 from typing import Any, Literal
 from uuid import UUID
 
@@ -11,14 +15,12 @@ from pydantic import (
 
 from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
 from aida.relationship_validation import public_relationship_evidence
-from atlas.platform.schemas import ApiModel as _SharedApiModel
-
-#: The shared pydantic base, defined in `atlas.platform.schemas` so that neither this module nor the
-#: bounded contexts' schema modules import the other for it (review 2026-09-05 R03, completed
-#: 2026-09-21), and re-exported here for every existing `from aida.schemas import ApiModel`.
-#: Being a statement, it also keeps each re-export group below its own import block, so each
-#: group's `noqa: I001` keeps it one statement per relocated context.
-ApiModel = _SharedApiModel
+# The shared pydantic base lives in `atlas.platform.schemas`, so neither this module nor the
+# bounded contexts' schema modules import the other for it (review 2026-09-05 R03, completed
+# 2026-09-21); it is re-exported here for every existing `from aida.schemas import ApiModel`.
+# An import, not an assignment: mypy's pydantic plugin only recognises a model whose base it
+# can resolve to the class itself.
+from atlas.platform.schemas import ApiModel as ApiModel
 
 
 # Re-exported for backward compatibility -- tracker ST-05 moved the classes
