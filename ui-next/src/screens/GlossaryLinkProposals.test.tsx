@@ -340,6 +340,8 @@ describe("Link proposals: the list", () => {
   });
 
   it("opens the table in the Catalog and the term in Business meaning", async () => {
+    // A role the Catalog list admits (`CATALOG_ROWS_ROLES`); a DataSteward is not one -- below.
+    sessionMe = asRoles("MetadataAdmin");
     mount();
     await screen.findByRole("list", { name: "Term-link proposals" });
     const row = within(itemFor("customers → Customer"));
@@ -352,6 +354,28 @@ describe("Link proposals: the list", () => {
     expect(location.hash).toBe("#/steward/meaning");
     expect(new URLSearchParams(location.search).get("q")).toBe("Customer");
     expect(new URLSearchParams(location.search).get("view")).toBe("glossary");
+  });
+
+  it.each(["DataSteward", "SemanticAdmin", "Auditor", "DataAdmin", "Reviewer"])(
+    "does not send %s to a Catalog that would refuse them, and still offers the term",
+    async (role) => {
+      sessionMe = asRoles(role);
+      mount();
+      await screen.findByRole("list", { name: "Term-link proposals" });
+      const row = within(itemFor("customers → Customer"));
+
+      expect(row.queryByRole("button", { name: "Open table customers" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /^Open table / })).not.toBeInTheDocument();
+      expect(row.getByRole("button", { name: "Open term Customer" })).toBeInTheDocument();
+    },
+  );
+
+  it.each(["Analyst", "PlatformAdmin", "Viewer"])("offers %s the table's Catalog link", async (role) => {
+    sessionMe = asRoles(role);
+    mount();
+    await screen.findByRole("list", { name: "Term-link proposals" });
+
+    expect(within(itemFor("customers → Customer")).getByRole("button", { name: "Open table customers" })).toBeInTheDocument();
   });
 
   it("says a proposal in review is waiting on a different reviewer, and links to that review for a role the queue admits", async () => {

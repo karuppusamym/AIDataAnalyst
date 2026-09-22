@@ -105,3 +105,43 @@ describe("the fixture module's reachability", () => {
     expect(transport).toMatch(/import\.meta\.env\.VITE_USE_FIXTURES === "0"/);
   });
 });
+
+/* The per-screen demo stores (R11-AUD08). Each keeps its own small store, so each is its own
+   module, loaded by the API module that answers from it. Loaded only INSIDE a demo arm handed to
+   `demoOr`, every one of them was still emitted as a chunk of a live build -- Rollup keeps a
+   function it cannot prove is never called, and the `import()` in it -- which nothing then
+   loaded. The loaders now test the build's literal themselves, where it folds
+   (`noDemoData` in `api/transport.ts`); checked against a real `vite build` on 2026-09-21,
+   where the five chunks disappeared from the live output and stayed in `--mode demo`. This
+   pins the source shape that makes it so. */
+const DEMO_STORES = [
+  "coverageFixtures",
+  "glossaryReviewFixtures",
+  "ownershipFixtures",
+  "searchFixtures",
+  "studioAuthoringDemo",
+];
+
+describe("the per-screen demo stores' reachability", () => {
+  it.each(DEMO_STORES)("loads %s only behind the build's demo literal, and never statically", (store) => {
+    // `typeof import("...")` is a type, erased before bundling; only a call is a request for the module.
+    const call = new RegExp(`(?<!typeof\\s)\\bimport\\(\\s*"[^"]*/${store}"\\s*\\)`, "g");
+    const guarded = new RegExp(
+      `import\\.meta\\.env\\.VITE_USE_FIXTURES === "0"\\s*\\?\\s*noDemoData\\(\\)\\s*:\\s*import\\(\\s*"[^"]*/${store}"\\s*\\)`,
+      "g",
+    );
+    const staticImport = new RegExp(`^\\s*(?:import|export)(?!\\s+type\\b)[^;]*?from\\s*"[^"]*/${store}";`, "m");
+    const client = Object.entries(SOURCES).filter(([path]) => !isTest(path));
+
+    // `match`, not `test`: a global pattern's `test` carries `lastIndex` from one source to the next.
+    const loaders = client.filter(([, source]) => (source.match(call) ?? []).length > 0);
+    expect(loaders.length).toBeGreaterThan(0);
+    for (const [path, source] of loaders) {
+      expect({ module: named(path), unguarded: (source.match(call) ?? []).length - (source.match(guarded) ?? []).length }).toEqual({
+        module: named(path),
+        unguarded: 0,
+      });
+    }
+    expect(client.filter(([, source]) => staticImport.test(source)).map(([path]) => named(path))).toEqual([]);
+  });
+});

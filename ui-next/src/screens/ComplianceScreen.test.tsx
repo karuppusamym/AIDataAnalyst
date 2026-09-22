@@ -172,8 +172,9 @@ describe("ComplianceScreen: who is offered Generate and Download", () => {
     await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Generate pack" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download evidence" })).toBeInTheDocument();
-    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toBeInTheDocument();
-    expect(screen.getByText(/list the packs below and download their evidence/)).toBeInTheDocument();
+    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toHaveTextContent(
+      "Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither. Your roles can list the packs below and download their evidence.",
+    );
     expect(screen.queryByText("Not available to your roles")).not.toBeInTheDocument();
     expect(generateCompliancePack).not.toHaveBeenCalled();
   });
@@ -188,7 +189,10 @@ describe("ComplianceScreen: who is offered Generate and Download", () => {
     await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Generate pack" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Download evidence" })).not.toBeInTheDocument();
-    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toBeInTheDocument();
+    // Two sentences, with the space between them (they once rendered as "neither.Your").
+    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toHaveTextContent(
+      "Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither. Your roles can list the packs below.",
+    );
     expect(screen.getByText("Not available to your roles")).toBeInTheDocument();
     expect(generateCompliancePack).not.toHaveBeenCalled();
     expect(downloadCompliancePack).not.toHaveBeenCalled();

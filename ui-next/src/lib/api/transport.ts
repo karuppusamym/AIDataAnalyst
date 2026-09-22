@@ -138,6 +138,25 @@ export function demoOr<T>(
 }
 
 /**
+ * What a module's own demo-store loader answers in a build that carries no demo data.
+ *
+ * `demoOr` folds away `lib/fixtures.ts`, but not a SECOND demo module that an API module
+ * loads inside its demo arm (`studioAuthoringDemo`, `ownershipFixtures`, ...): the arm is a
+ * function handed to `demoOr`, and Rollup keeps a function it cannot prove is never called,
+ * with the `import()` inside it -- so each of those modules was emitted as a chunk of a live
+ * build that nothing loads. The loaders therefore test the same literal themselves, in their
+ * own module, where it folds:
+ *
+ *     const demo = () => import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../x");
+ *
+ * In a live build the `import()` is in a dead branch and the chunk is not emitted. This
+ * branch is never taken at run time either: in a live build `demoOr` never calls a demo arm.
+ */
+export function noDemoData(): Promise<never> {
+  return Promise.reject(new Error("This build carries no demo data."));
+}
+
+/**
  * A request adapter for domain modules moved off a private `fetch` copy.
  *
  * Those call sites pass `RequestInit` with an already-stringified body, which

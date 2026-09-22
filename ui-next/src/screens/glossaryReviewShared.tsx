@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
-import { readDecision, roleHolds } from "../lib/roles";
+import { readDecision, roleAllows, roleHolds } from "../lib/roles";
 import type { ReadDecision } from "../lib/roles";
+import { CATALOG_ROWS_ROLES } from "../lib/searchTargets";
 import { useSession } from "../lib/session";
 import { navigateTo } from "../lib/navigate";
 import { Button } from "../components/primitives";
@@ -62,8 +63,12 @@ export const GLOSSARY_REVIEW_WRITE_ROLES = ["DataSteward", "MetadataAdmin", "Pla
  *
  * Copied from the matrix rows for `aida.review_queue_api.get_review_queue` and
  * `get_review_queue_summary`: DataSteward, PlatformAdmin, Reviewer, SemanticAdmin.
+ *
+ * Exported because Ownership offers the same link after the same kind of
+ * request (`OwnershipParts.useMayOpenReviewQueue`): one list, so the two screens
+ * cannot disagree about who the queue admits.
  */
-const REVIEW_QUEUE_READ_ROLES = ["DataSteward", "PlatformAdmin", "Reviewer", "SemanticAdmin"];
+export const REVIEW_QUEUE_READ_ROLES =["DataSteward", "PlatformAdmin", "Reviewer", "SemanticAdmin"];
 
 export const listOr = (items: readonly string[]): string =>
   items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
@@ -77,6 +82,13 @@ export interface GlossaryReviewAccess {
   readonly identityKnown: boolean;
   /** Known to hold a role the review queue admits. */
   readonly mayOpenReviewQueue: boolean;
+  /**
+   * May follow a link into the Catalog list (`CATALOG_ROWS_ROLES`: Analyst, MetadataAdmin,
+   * PlatformAdmin, Viewer). Narrower than the read list, so a DataSteward reads a proposal
+   * without being handed an "Open table" that ends in a refusal. Decided as Search decides it
+   * (`roleAllows`): a link is not a request, so it is not held back while identity resolves.
+   */
+  readonly mayOpenCatalog: boolean;
 }
 
 /**
@@ -96,6 +108,7 @@ export function useGlossaryReviewAccess(): GlossaryReviewAccess {
     mayWrite: roleHolds(roles, GLOSSARY_REVIEW_WRITE_ROLES),
     identityKnown: roles !== undefined,
     mayOpenReviewQueue: roleHolds(roles, REVIEW_QUEUE_READ_ROLES),
+    mayOpenCatalog: roleAllows(roles, CATALOG_ROWS_ROLES),
   };
 }
 

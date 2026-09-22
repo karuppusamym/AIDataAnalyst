@@ -5,7 +5,14 @@ import { readDecision } from "../lib/roles";
 import { useSession } from "../lib/session";
 import { Button, Empty, ErrorState, Pill } from "../components/primitives";
 import { useAsyncResource } from "../components/screenState";
-import { NotApplicable, describeOperationStatus, openReview, stamp, stringParameter } from "./OwnershipParts";
+import {
+  NotApplicable,
+  describeOperationStatus,
+  openReview,
+  stamp,
+  stringParameter,
+  useMayOpenReviewQueue,
+} from "./OwnershipParts";
 
 /* ---------------------------------------------------------------------------
    Requests -- what happened to the reviews a rule or a leaver opened
@@ -70,6 +77,9 @@ const isLeaverRequest = (operation: BulkStewardshipOperationRead): boolean =>
 
 function Outcome({ operation, noun }: { operation: BulkStewardshipOperationRead; noun: string }) {
   const count = operation.subject_ids.length;
+  // The list admits nine roles and the Review queue four: a Viewer reads that a request is
+  // waiting and is not handed a link into a queue that would refuse them.
+  const mayOpenReviewQueue = useMayOpenReviewQueue();
   if (operation.status === "APPLIED") {
     const left = Math.max(0, count - operation.applied_count);
     return (
@@ -89,8 +99,13 @@ function Outcome({ operation, noun }: { operation: BulkStewardshipOperationRead;
   }
   return (
     <div className="own__opline">
-      <span>Nothing has changed yet: a different reviewer has to approve this.</span>{" "}
-      <Button onClick={() => openReview(operation)}>Open this review</Button>
+      <span>Nothing has changed yet: a different reviewer has to approve this.</span>
+      {mayOpenReviewQueue ? (
+        <>
+          {" "}
+          <Button onClick={() => openReview(operation)}>Open this review</Button>
+        </>
+      ) : null}
     </div>
   );
 }

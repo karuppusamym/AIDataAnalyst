@@ -20,7 +20,6 @@
 
 .cs__pre{font-family:var(--mono);font-size:10.5px;background:var(--sunk);border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:8px;overflow-x:auto;max-height:220px;overflow-y:auto;margin:0}
 .cs__none{font-size:12px;color:var(--ink-3);margin:0}
-.cs__submiterr{width:100%;color:var(--bad);font-size:12px}
 
 /* Authoring (R11-AUD08): the actions bar, per-item actions, the test / conflict / eval results and the forms. */
 .cs__actions{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}

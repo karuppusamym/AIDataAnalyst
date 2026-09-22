@@ -25,9 +25,9 @@ import {
 import { readDecision, roleHolds } from "../lib/roles";
 import { useSession } from "../lib/session";
 import { VirtualList } from "../components/VirtualList";
-import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
-import { StatusStrip, useStatusChannel } from "../components/screenState";
+import { StatusStrip, useStatusChannel, useSubmitAction } from "../components/screenState";
 import { AddItemDialog, NewChangeSetDialog, RemoveItemDialog } from "./StudioAuthoring";
 import { ItemCheck, hasCheck } from "./StudioChecks";
 import { EvalQuestionsDialog, EvalRunSection } from "./StudioEval";
@@ -52,6 +52,11 @@ import "./StudioChangeSetsScreen.css";
    a client-side status flip. A 409 from that gate (untested items, a
    regressed eval question) renders as the endpoint's own detail string,
    exactly like every other governed write this shell makes.
+
+   Submitting is ONE-WAY, so it asks first (`SubmitChangeSetDialog`). It moves
+   the change set to SUBMITTED, after which nothing on it can be added, removed,
+   tested or submitted again, and no route moves a SUBMITTED change set back:
+   this screen has no way to withdraw one. It used to go on a single click.
 
    AUTHORING (R11-AUD08). This screen used to read change sets and submit them;
    nothing in the UI could create one, so the "Create one from the Studio
@@ -113,7 +118,59 @@ function ChangeSetRow({
   );
 }
 
-type DetailDialog = "add" | "test" | "conflicts" | null;
+type DetailDialog = "add" | "test" | "conflicts" | "submit" | null;
+
+/**
+ * `POST .../submit`, behind a confirmation that says it cannot be undone.
+ *
+ * What it states is what `submit_change_set` does once its gate passes: the change set
+ * becomes SUBMITTED (read-only from then on, and nothing moves it back), each
+ * CONTEXT_PRODUCT item is opened as a governance review in the Review queue, and the
+ * submission is audited. The count of context-product items is the pane's own item list;
+ * while that list is still loading the sentence says "any" rather than guessing a number.
+ * A refusal -- the test gate, a regressed eval question -- stays in the dialog, verbatim.
+ */
+function SubmitChangeSetDialog({
+  changeSet,
+  items,
+  onClose,
+  onDone,
+}: {
+  changeSet: StudioChangeSetRead;
+  items: readonly StudioChangeItemRead[] | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const submit = useSubmitAction<StudioChangeSetRead>();
+  const contextProducts = items?.filter((item) => item.object_type === "CONTEXT_PRODUCT").length ?? null;
+  const reviews =
+    contextProducts === null
+      ? " Any context product item in it is opened as a governance review in the Review queue."
+      : contextProducts === 0
+        ? " It has no context product item, so no governance review is opened."
+        : ` Its ${contextProducts} context product item${contextProducts === 1 ? " is" : "s are"} opened as governance review${contextProducts === 1 ? "" : "s"} in the Review queue.`;
+  const confirm = async () => {
+    const done = await submit.run(() => submitStudioChangeSet(changeSet.id));
+    if (done) onDone();
+  };
+  return (
+    <ConfirmDialog
+      title="Submit for review?"
+      description={
+        `Sends “${changeSet.name}” for review. The API accepts it only if every item has passed its tests and the latest eval run, if there is one, passed. ` +
+        "It then moves to SUBMITTED: items can no longer be added, removed or tested, and it cannot be submitted again. This screen has no way to withdraw a submission." +
+        reviews +
+        " The submission is recorded in the audit ledger."
+      }
+      confirmLabel="Submit for review"
+      destructive
+      busy={submit.submitting}
+      error={submit.error}
+      onConfirm={() => void confirm()}
+      onCancel={onClose}
+    />
+  );
+}
 
 function ChangeSetDetail({ cs, onChanged }: { cs: StudioChangeSetRead; onChanged: () => void }) {
   const session = useSession();
@@ -129,8 +186,6 @@ function ChangeSetDetail({ cs, onChanged }: { cs: StudioChangeSetRead; onChanged
   const [diff, setDiff] = useState<StudioDiffRead | null>(null);
   const [impact, setImpact] = useState<StudioImpactPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const [dialog, setDialog] = useState<DetailDialog>(null);
   const [removing, setRemoving] = useState<StudioChangeItemRead | null>(null);
@@ -183,18 +238,11 @@ function ChangeSetDetail({ cs, onChanged }: { cs: StudioChangeSetRead; onChanged
     }
   }, [loadAll, failure]);
 
-  const submit = useCallback(async () => {
-    setSubmitting(true);
-    setSubmitError(null);
-    try {
-      await submitStudioChangeSet(cs.id);
-      onChanged();
-    } catch (e) {
-      setSubmitError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [cs.id, onChanged]);
+  const afterSubmit = () => {
+    setDialog(null);
+    channel.clear();
+    onChanged(); // the change set is SUBMITTED now: re-read the list rather than flip the status here
+  };
 
   const afterAdd = async (added: StudioChangeItemRead) => {
     setDialog(null);
@@ -327,8 +375,8 @@ function ChangeSetDetail({ cs, onChanged }: { cs: StudioChangeSetRead; onChanged
         <CopyLinkButton target={{ screen: "studio", params: { cs: cs.id } }} />
         {canSubmit ? (
           mayWrite ? (
-            <Button variant="primary" disabled={submitting} onClick={() => void submit()}>
-              {submitting ? "Submitting…" : "Submit for review"}
+            <Button variant="primary" onClick={() => setDialog("submit")}>
+              Submit for review
             </Button>
           ) : identityKnown ? (
             <span className="evp__hint">read-only for your roles — editing and submitting need {listOr(STUDIO_WRITE_ROLES)}</span>
@@ -336,9 +384,11 @@ function ChangeSetDetail({ cs, onChanged }: { cs: StudioChangeSetRead; onChanged
         ) : (
           <span className="evp__hint">{cs.status.toLowerCase()} — nothing left to submit</span>
         )}
-        {submitError ? <div className="cs__submiterr" role="alert">{submitError}</div> : null}
       </footer>
 
+      {dialog === "submit" ? (
+        <SubmitChangeSetDialog changeSet={cs} items={items} onClose={() => setDialog(null)} onDone={afterSubmit} />
+      ) : null}
       {dialog === "add" ? (
         <AddItemDialog changeSet={cs} onClose={() => setDialog(null)} onAdded={(added) => void afterAdd(added)} />
       ) : null}

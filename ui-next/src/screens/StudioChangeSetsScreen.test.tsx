@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { MeRead, StudioChangeItemRead, StudioChangeSetRead, StudioDiffRead, StudioImpactPreview } from "../lib/types";
 import type { Session } from "../lib/session";
 import { ApiError } from "../lib/api";
@@ -116,38 +116,77 @@ describe("StudioChangeSetsScreen against the real studio_api.py", () => {
     expect(new URLSearchParams(location.search).get("cs")).toBe("cs_1");
   });
 
-  it("submits through the real test-gated endpoint and refetches on success", async () => {
+  /* Submitting is one-way: it moves the change set to SUBMITTED, opens a review for any context
+     product item, and nothing moves it back. So the button asks first, and only the confirmation
+     sends the request. */
+  async function openSubmitConfirmation(items: StudioChangeItemRead[] = []) {
     fetchStudioChangeSets.mockResolvedValue([CHANGE_SET]);
-    fetchStudioChangeSetItems.mockResolvedValue([]);
+    fetchStudioChangeSetItems.mockResolvedValue(items);
     fetchStudioDiff.mockResolvedValue({ change_set_id: "cs_1", items: [] });
     fetchStudioImpact.mockResolvedValue({ change_set_id: "cs_1", affected_object_count: 0, affected_objects: [] });
-    submitStudioChangeSet.mockResolvedValue({ ...CHANGE_SET, status: "SUBMITTED" });
     const StudioChangeSetsScreen = await loadScreen();
     render(<StudioChangeSetsScreen />);
     await waitFor(() => expect(screen.getByText("Exclude intercompany transfers")).toBeInTheDocument());
     screen.getByRole("button", { name: /Exclude intercompany transfers/ }).click();
-    await screen.findByText("Items (0)");
+    await screen.findByText(`Items (${items.length})`);
 
-    screen.getByRole("button", { name: "Submit for review" }).click();
+    fireEvent.click(screen.getByRole("button", { name: "Submit for review" }));
+    return await screen.findByRole("dialog", { name: "Submit for review?" });
+  }
+
+  it("asks before submitting, says the submission cannot be undone, and sends nothing on the first click", async () => {
+    const dialog = await openSubmitConfirmation();
+
+    expect(dialog).toHaveTextContent("moves to SUBMITTED");
+    expect(dialog).toHaveTextContent("items can no longer be added, removed or tested, and it cannot be submitted again");
+    expect(dialog).toHaveTextContent("This screen has no way to withdraw a submission.");
+    expect(dialog).toHaveTextContent("It has no context product item, so no governance review is opened.");
+    expect(dialog).toHaveTextContent("recorded in the audit ledger");
+    expect(submitStudioChangeSet).not.toHaveBeenCalled();
+  });
+
+  it("says how many reviews a submission opens, counted from the change set's context product items", async () => {
+    const cp = (id: string): StudioChangeItemRead => ({
+      id, organization_id: "org1", change_set_id: "cs_1", object_type: "CONTEXT_PRODUCT",
+      object_id: `cp:${id}`, operation: "CREATE", before_snapshot: null, after_snapshot: null,
+      diff: null, test_status: "PASSED", created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
+    });
+    const dialog = await openSubmitConfirmation([cp("a"), cp("b")]);
+
+    expect(dialog).toHaveTextContent("Its 2 context product items are opened as governance reviews in the Review queue.");
+  });
+
+  it("cancelling the confirmation sends nothing and leaves the change set as it was", async () => {
+    const dialog = await openSubmitConfirmation();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(submitStudioChangeSet).not.toHaveBeenCalled();
+    expect(fetchStudioChangeSets).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Submit for review" })).toBeEnabled();
+  });
+
+  it("submits through the real test-gated endpoint once confirmed, and refetches on success", async () => {
+    submitStudioChangeSet.mockResolvedValue({ ...CHANGE_SET, status: "SUBMITTED" });
+    const dialog = await openSubmitConfirmation();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Submit for review" }));
 
     await waitFor(() => expect(submitStudioChangeSet).toHaveBeenCalledWith("cs_1", undefined));
+    expect(submitStudioChangeSet).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(fetchStudioChangeSets).toHaveBeenCalledTimes(2));
   });
 
-  it("shows the real 409 test-gate failure without changing status client-side", async () => {
-    fetchStudioChangeSets.mockResolvedValue([CHANGE_SET]);
-    fetchStudioChangeSetItems.mockResolvedValue([]);
-    fetchStudioDiff.mockResolvedValue({ change_set_id: "cs_1", items: [] });
-    fetchStudioImpact.mockResolvedValue({ change_set_id: "cs_1", affected_object_count: 0, affected_objects: [] });
+  it("shows the real 409 test-gate failure in the confirmation without changing status client-side", async () => {
     submitStudioChangeSet.mockRejectedValue(new ApiError(409, "1 item(s) have not passed testing"));
-    const StudioChangeSetsScreen = await loadScreen();
-    render(<StudioChangeSetsScreen />);
-    await waitFor(() => expect(screen.getByText("Exclude intercompany transfers")).toBeInTheDocument());
-    screen.getByRole("button", { name: /Exclude intercompany transfers/ }).click();
-    await screen.findByText("Items (0)");
+    const dialog = await openSubmitConfirmation();
 
-    screen.getByRole("button", { name: "Submit for review" }).click();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Submit for review" }));
 
-    expect(await screen.findByText("1 item(s) have not passed testing")).toBeInTheDocument();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/^1 item\(s\) have not passed testing$/);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(fetchStudioChangeSets).toHaveBeenCalledTimes(1);
   });
 });

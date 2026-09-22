@@ -1600,6 +1600,10 @@ describe("Submit for review", () => {
     fetchStudioChangeSets.mockResolvedValue([changeSet({ status: "SUBMITTED" })]);
 
     fireEvent.click(within(pane).getByRole("button", { name: "Submit for review" }));
+    // One-way, so it asks first; the button itself sends nothing.
+    const confirmation = await dialogNamed("Submit for review?");
+    expect(submitStudioChangeSet).not.toHaveBeenCalled();
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Submit for review" }));
 
     await waitFor(() => expect(submitStudioChangeSet).toHaveBeenCalledWith("cs_1", undefined));
     await waitFor(() => expect(fetchStudioChangeSets).toHaveBeenCalledTimes(2));
@@ -1607,13 +1611,29 @@ describe("Submit for review", () => {
     expect(within(pane).queryByRole("button", { name: "Run tests" })).not.toBeInTheDocument();
   });
 
-  it("shows the API's test-gate refusal verbatim", async () => {
+  it("shows the API's test-gate refusal verbatim, in the confirmation it came from", async () => {
     submitStudioChangeSet.mockRejectedValue(new ApiError(409, "1 item(s) have not passed testing; 1 mined eval question(s) regressed: ['q_2']"));
     const { pane } = await openDetail(["DataSteward"], { items: [item()] });
 
     fireEvent.click(within(pane).getByRole("button", { name: "Submit for review" }));
+    const confirmation = await dialogNamed("Submit for review?");
+    fireEvent.click(within(confirmation).getByRole("button", { name: "Submit for review" }));
 
-    expect(await within(pane).findByText("1 item(s) have not passed testing; 1 mined eval question(s) regressed: ['q_2']")).toBeInTheDocument();
+    expect(await within(confirmation).findByRole("alert")).toHaveTextContent(
+      /^1 item\(s\) have not passed testing; 1 mined eval question\(s\) regressed: \['q_2'\]$/,
+    );
+    expect(fetchStudioChangeSets).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels without submitting anything", async () => {
+    const { pane } = await openDetail(["DataSteward"], { cs: { status: "TESTING" }, items: [item({ test_status: "PASSED" })] });
+
+    fireEvent.click(within(pane).getByRole("button", { name: "Submit for review" }));
+    fireEvent.click(within(await dialogNamed("Submit for review?")).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(submitStudioChangeSet).not.toHaveBeenCalled();
+    expect(within(pane).getByRole("button", { name: "Submit for review" })).toBeEnabled();
   });
 });
 
@@ -1676,6 +1696,7 @@ describe("Studio authoring: accessibility", () => {
     ["Add item", "Add item"],
     ["Detect conflicts", "Detect conflicts"],
     ["Run tests", "Run the tests?"],
+    ["Submit for review", "Submit for review?"],
   ])("has no WCAG A/AA violation with the %s dialog open", async (button, dialogName) => {
     const { pane } = await openDetail(["DataSteward"], { items: [item(), TOOL_ITEM] });
     fireEvent.click(within(pane).getByRole("button", { name: button }));

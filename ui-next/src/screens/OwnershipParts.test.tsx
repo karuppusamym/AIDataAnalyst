@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 
 import type { BulkStewardshipOperationRead } from "../lib/types";
+import type { Session } from "../lib/session";
 import {
   EXPIRY_WARN_DAYS,
   HintedField,
@@ -13,6 +14,37 @@ import {
   stamp,
   stringParameter,
 } from "./OwnershipParts";
+
+const navigateTo = vi.fn<(screen: string, params?: Record<string, string>) => void>();
+vi.mock("../lib/navigate", () => ({
+  navigateTo: (screen: string, params?: Record<string, string>) => navigateTo(screen, params),
+}));
+
+/* `RequestedReview` offers "Open this review" only to a session the Review queue admits. */
+let sessionRoles: string[] | undefined;
+vi.mock("../lib/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/session")>();
+  return {
+    ...actual,
+    useSession: (): Session => ({
+      state: "connected",
+      me:
+        sessionRoles === undefined
+          ? null
+          : {
+              principal_id: "someone", principal_type: "USER", organization_id: null, roles: sessionRoles,
+              persona: null, identity_provider: "DEVELOPMENT",
+            },
+      lapsed: false,
+      lastSuccessAt: null,
+      error: null,
+      dataMode: "live",
+      authMode: "development",
+      authModeInferred: false,
+      reload: () => undefined,
+    }),
+  };
+});
 
 /* ---------------------------------------------------------------------------
    The pieces the Ownership panels share (R11-AUD08, part 2): the words for an
@@ -188,5 +220,37 @@ describe("RequestedReview", () => {
       <RequestedReview operation={operation()} noun="ownerships" headline="h" remainder="2 stay with priya." onDismiss={() => undefined} />,
     );
     expect(screen.getByRole("status")).toHaveTextContent("2 stay with priya.");
+  });
+
+  it.each(["DataSteward", "PlatformAdmin", "Reviewer", "SemanticAdmin"])(
+    "offers %s, whom the Review queue admits, the review the request opened",
+    (role) => {
+      sessionRoles = [role];
+      navigateTo.mockReset();
+      render(<RequestedReview operation={operation()} noun="tables" headline="h" onDismiss={() => undefined} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Open this review" }));
+
+      expect(navigateTo).toHaveBeenCalledWith("governance", { review: "review-1" });
+    },
+  );
+
+  it.each(["MetadataAdmin", "Viewer", "Auditor"])(
+    "does not send %s to a Review queue that would refuse them, and still says what happens next",
+    (role) => {
+      sessionRoles = [role];
+      render(<RequestedReview operation={operation()} noun="tables" headline="h" onDismiss={() => undefined} />);
+
+      expect(screen.queryByRole("button", { name: "Open this review" })).not.toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("Nothing changes until a different reviewer approves it");
+      expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    },
+  );
+
+  it("offers no review link on a guess while identity is in flight", () => {
+    sessionRoles = undefined;
+    render(<RequestedReview operation={operation()} noun="tables" headline="h" onDismiss={() => undefined} />);
+
+    expect(screen.queryByRole("button", { name: "Open this review" })).not.toBeInTheDocument();
   });
 });

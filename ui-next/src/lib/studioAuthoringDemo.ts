@@ -5,8 +5,9 @@
    `documentFixtures.ts` gives: it keeps a small STORE, so create -> add item ->
    test -> submit behaves the way the server does instead of each answer being
    an independent canned sentence, and nothing else reads it. `api/studio.ts`
-   reaches it through `demoOr`, so a production build (which folds that guard)
-   never ships it.
+   reaches it through `demoOr`, by a dynamic import behind a loader that tests the
+   build's demo literal (`noDemoData` in `api/transport.ts`), so a production
+   build does not contain it.
 
    The store is SEEDED from the two bundled change sets the read-only screen
    always showed, so the demo estate looks the same until somebody edits it;

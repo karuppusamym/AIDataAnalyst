@@ -6,6 +6,7 @@ import { useUrlState } from "../lib/useUrlState";
 import { useUnsavedNavigationGuard } from "../lib/unsavedChanges";
 import { OwnershipAssignments } from "./OwnershipAssignments";
 import { OwnershipLeaver } from "./OwnershipLeaver";
+import { useMayOpenReviewQueue } from "./OwnershipParts";
 import { OwnershipRules } from "./OwnershipRules";
 import "./OwnershipScreen.css";
 
@@ -25,7 +26,8 @@ import "./OwnershipScreen.css";
    is owned, how do owners get assigned in bulk, and what happens when an owner
    goes. It lives in the Steward work area: a steward is who does all three. The
    Work queue (unowned assets, your own expiring ownerships) stays where it is and
-   links here; this screen links back to it and to the Review queue.
+   links here; this screen links back to it and, for a role the queue admits, to
+   the Review queue.
 
    WHAT EVERY VIEW HAS TO KEEP SAYING, because the verbs suggest otherwise: NOTHING
    HERE CHANGES AN OWNER BY ITSELF. A rule applied and a leaver reassigned each open a
@@ -74,18 +76,18 @@ export function ownershipViewFrom(params: URLSearchParams): OwnershipView {
 }
 
 /** Where the adjacent jobs live. Each target keeps its own scope and authorization; a link is a request. */
-const RELATED: CrossLink[] = [
-  {
-    screen: "stewardship",
-    label: "Unowned assets",
-    title: "Tables with no owner, and any ownership of yours about to lapse, in the Stewardship work queue.",
-  },
-  {
-    screen: "governance",
-    label: "Review queue",
-    title: "Where a different reviewer approves or rejects the requests made here.",
-  },
-];
+const WORK_QUEUE_LINK: CrossLink = {
+  screen: "stewardship",
+  label: "Unowned assets",
+  title: "Tables with no owner, and any ownership of yours about to lapse, in the Stewardship work queue.",
+};
+/** Offered only to a session the Review queue admits (`useMayOpenReviewQueue`): the panels here
+ *  are read by more roles than the queue's four, and a link that ends in a refusal is not a link. */
+const REVIEW_QUEUE_LINK: CrossLink = {
+  screen: "governance",
+  label: "Review queue",
+  title: "Where a different reviewer approves or rejects the requests made here.",
+};
 
 const PANEL_ID = "own-panel";
 const tabId = (view: OwnershipView) => `own-tab-${view}`;
@@ -96,6 +98,7 @@ export function OwnershipScreen() {
   const confirmSwitch = useUnsavedNavigationGuard();
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const active = OWNERSHIP_VIEWS.find((entry) => entry.value === view)!;
+  const related = useMayOpenReviewQueue() ? [WORK_QUEUE_LINK, REVIEW_QUEUE_LINK] : [WORK_QUEUE_LINK];
 
   /** Switch views. False when the unsaved-change prompt was declined. */
   const show = useCallback(
@@ -171,7 +174,7 @@ export function OwnershipScreen() {
       </div>
       <p className="ownws__scope">{active.scope}</p>
       <div className="ownws__links">
-        <CrossLinks label="Related work" links={RELATED} />
+        <CrossLinks label="Related work" links={related} />
       </div>
 
       <div className="ownws__panel" id={PANEL_ID} role="tabpanel" aria-labelledby={tabId(view)}>

@@ -2,7 +2,8 @@
    Demo data for Glossary review (fixture mode only).
 
    Its own module rather than a block in `fixtures.ts`, and reached only through
-   a dynamic import in `./api/glossaryReview.ts`: it keeps a small in-memory
+   a dynamic import in `./api/glossaryReview.ts` (behind a loader a live build
+   folds away, `noDemoData` in `./api/transport.ts`): it keeps a small in-memory
    store so detect -> resolve and generate -> submit behave the way the server
    does, and nothing else reads it.
 

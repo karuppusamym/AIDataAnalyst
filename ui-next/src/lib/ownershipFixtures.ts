@@ -4,8 +4,9 @@
    Its own module rather than a block in `fixtures.ts`, for the reason
    `documentFixtures.ts` gives: it keeps a small store so create -> apply -> the
    requests list behaves the way the server does, and nothing else reads it. It is
-   imported from inside the demo arm of `lib/api/ownership.ts`, so a production
-   build, which folds `demoOr` to its live arm, contains none of it.
+   imported from inside the demo arm of `lib/api/ownership.ts`, through a loader
+   that tests the build's demo literal (`noDemoData` in `lib/api/transport.ts`), so
+   a production build does not contain it.
 
    The rules follow `aida.stewardship_api`, not what would demo well:
 

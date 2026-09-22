@@ -72,8 +72,11 @@ import "./StewardshipCoverage.css";
  * Copied from the surface-control matrix row for
  * `aida.operational_api.list_organization_datasources`
  * (`Docs/50-security/surface-control-matrix.md`): Analyst, DataAdmin,
- * MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin,
- * Viewer. Coverage admits four roles this list does not (Auditor, DataSteward,
+ * MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, Viewer.
+ * (`ProjectAdmin` used to be listed here too. R11-AUD01 retired it: it is not in
+ * the platform role catalog, `aida.oidc.PLATFORM_ROLES`, and the matrix row does
+ * not name it.) Coverage admits four
+ * roles this list does not (Auditor, DataSteward,
  * Reviewer, SemanticAdmin), so for a session holding only those the scope
  * picker is not asked for and the scorecard offers the organization -- which is
  * what that session can be shown.
@@ -85,7 +88,6 @@ const DATASOURCE_LIST_ROLES = [
   "Operations",
   "OrganizationAdmin",
   "PlatformAdmin",
-  "ProjectAdmin",
   "Viewer",
 ];
 

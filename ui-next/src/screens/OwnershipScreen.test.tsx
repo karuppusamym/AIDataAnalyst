@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { useUnsavedChanges } from "../components/primitives";
 import { resetUnsavedRegistryForTests } from "../lib/unsavedChanges";
 import { resetLocationCacheForTests } from "../lib/location";
+import type { Session } from "../lib/session";
 import { OwnershipScreen, ownershipViewFrom } from "./OwnershipScreen";
 
 /* ---------------------------------------------------------------------------
@@ -17,7 +18,8 @@ import { OwnershipScreen, ownershipViewFrom } from "./OwnershipScreen";
      * an unfinished rule or an unsent reassignment is not thrown away in silence by
        a view switch, whether the switch came from a click or from the keyboard;
      * the keyboard model of a tablist: one tab stop, arrows wrap, Home/End;
-     * the two destinations next door are one link away, on their own routes.
+     * the two destinations next door are one link away, on their own routes -- the
+       Review queue only for a session it admits.
 
    The panels are stubbed: a test about the shell that mounts three real panels is a
    test about three panels' mocks.
@@ -29,6 +31,32 @@ function DirtyLeaver() {
   return <p>leaver content</p>;
 }
 let leaverDirty = false;
+/* Who the Review queue link is offered to is a property of the shell: it is the one link here whose
+   target admits fewer roles than the screen does. */
+let sessionRoles: string[] | undefined = ["DataSteward"];
+vi.mock("../lib/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/session")>();
+  return {
+    ...actual,
+    useSession: (): Session => ({
+      state: "connected",
+      me:
+        sessionRoles === undefined
+          ? null
+          : {
+              principal_id: "someone", principal_type: "USER", organization_id: null, roles: sessionRoles,
+              persona: null, identity_provider: "DEVELOPMENT",
+            },
+      lapsed: false,
+      lastSuccessAt: null,
+      error: null,
+      dataMode: "live",
+      authMode: "development",
+      authModeInferred: false,
+      reload: () => undefined,
+    }),
+  };
+});
 vi.mock("./OwnershipAssignments", () => ({ OwnershipAssignments: () => <p>assignments content</p> }));
 vi.mock("./OwnershipRules", () => ({ OwnershipRules: () => <p>rules content</p> }));
 vi.mock("./OwnershipLeaver", () => ({ OwnershipLeaver: () => (leaverDirty ? <DirtyLeaver /> : <p>leaver content</p>) }));
@@ -44,6 +72,7 @@ const tab = (name: string) => screen.getByRole("tab", { name });
 
 beforeEach(() => {
   leaverDirty = false;
+  sessionRoles = ["DataSteward"];
   resetUnsavedRegistryForTests();
   history.replaceState(null, "", "/");
   resetLocationCacheForTests();
@@ -224,6 +253,35 @@ describe("the destinations next door are one link away", () => {
 
     // The Review queue keeps its own scope and authorization.
     await waitFor(() => expect(location.hash).toBe("#/reviewer/governance"));
+  });
+
+  it.each(["MetadataAdmin", "Viewer", "Analyst", "Auditor", "DataAdmin"])(
+    "does not send %s to a Review queue that would refuse them, and keeps the Work queue link",
+    (role) => {
+      sessionRoles = [role];
+      mount();
+
+      const related = within(screen.getByRole("navigation", { name: "Related work" }));
+      expect(related.getAllByRole("button").map((element) => element.textContent)).toEqual(["Unowned assets →"]);
+    },
+  );
+
+  it.each(["PlatformAdmin", "Reviewer", "SemanticAdmin"])("offers %s the Review queue link", (role) => {
+    sessionRoles = [role];
+    mount();
+
+    expect(
+      within(screen.getByRole("navigation", { name: "Related work" })).getByRole("button", { name: /Review queue/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not offer the Review queue link on a guess while identity is in flight", () => {
+    sessionRoles = undefined;
+    mount();
+
+    expect(
+      within(screen.getByRole("navigation", { name: "Related work" })).queryByRole("button", { name: /Review queue/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("links back to the Work queue from every view, not only the first", async () => {

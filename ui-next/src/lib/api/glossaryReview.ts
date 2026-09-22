@@ -38,14 +38,15 @@
    Demo mode answers from `../glossaryReviewFixtures`, a small in-memory store
    that follows those same rules (an OPEN conflict only, a DRAFT proposal only),
    so the journey can be walked without a backend. The fixtures are reached
-   through a dynamic import inside the demo arm: a live build folds `demoOr` to
-   its live arm and the module is never in its graph.
+   through a dynamic import behind a loader that tests the build's demo literal
+   itself (`noDemoData` says why `demoOr` alone did not drop it), so a live build
+   does not contain them.
 
    Transport, identity headers and the demo switch come from `./transport`.
    Re-exported from `lib/api.ts`.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get, postJson } from "./transport";
+import { demoOr, get, noDemoData, postJson } from "./transport";
 import type { GlossaryLinkProposalRead } from "./glossary";
 import type {
   GlossaryConflictCreate,
@@ -55,6 +56,10 @@ import type {
   GovernanceReviewRead,
 } from "../types";
 import type { PageOf } from "../ui-types";
+
+/** The demo store, loaded only where a demo arm runs, and absent from a live build (`noDemoData`). */
+const glossaryReviewDemo = (): Promise<typeof import("../glossaryReviewFixtures")> =>
+  import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../glossaryReviewFixtures");
 
 /** What `generate` accepts, from `GlossaryLinkProposalGenerate` in `schemas.py`.
  *  Mirrored so the form can refuse a value the server would refuse anyway. */
@@ -96,7 +101,7 @@ export function fetchGlossaryConflicts(
   signal?: AbortSignal,
 ): Promise<PageOf<GlossaryConflictRead>> {
   return demoOr(
-    () => import("../glossaryReviewFixtures").then((m) => m.fixtureGlossaryConflicts(query)),
+    () => glossaryReviewDemo().then((m) => m.fixtureGlossaryConflicts(query)),
     () =>
       get<PageOf<GlossaryConflictRead>>(
         `/v1/organizations/${organizationId}/glossary-conflicts?${listParams(query)}`,
@@ -114,7 +119,7 @@ export function detectGlossaryConflicts(
   signal?: AbortSignal,
 ): Promise<PageOf<GlossaryConflictRead>> {
   return demoOr(
-    () => import("../glossaryReviewFixtures").then((m) => m.fixtureDetectGlossaryConflicts()),
+    () => glossaryReviewDemo().then((m) => m.fixtureDetectGlossaryConflicts()),
     () =>
       postJson<PageOf<GlossaryConflictRead>>(
         `/v1/organizations/${organizationId}/glossary-conflicts/detect`,
@@ -132,7 +137,7 @@ export function raiseGlossaryConflict(
   signal?: AbortSignal,
 ): Promise<GlossaryConflictRead> {
   return demoOr(
-    () => import("../glossaryReviewFixtures").then((m) => m.fixtureRaiseGlossaryConflict(body)),
+    () => glossaryReviewDemo().then((m) => m.fixtureRaiseGlossaryConflict(body)),
     () =>
       postJson<GlossaryConflictRead>(
         `/v1/organizations/${organizationId}/glossary-conflicts`,
@@ -153,7 +158,7 @@ export function submitGlossaryConflictResolution(
 ): Promise<GovernanceReviewRead> {
   return demoOr(
     () =>
-      import("../glossaryReviewFixtures").then((m) =>
+      glossaryReviewDemo().then((m) =>
         m.fixtureSubmitGlossaryConflictResolution(conflictId, body),
       ),
     () =>
@@ -173,7 +178,7 @@ export function fetchGlossaryLinkProposals(
   signal?: AbortSignal,
 ): Promise<PageOf<GlossaryLinkProposalRead>> {
   return demoOr(
-    () => import("../glossaryReviewFixtures").then((m) => m.fixtureGlossaryLinkProposals(query)),
+    () => glossaryReviewDemo().then((m) => m.fixtureGlossaryLinkProposals(query)),
     () =>
       get<PageOf<GlossaryLinkProposalRead>>(
         `/v1/organizations/${organizationId}/glossary-link-proposals?${listParams(query)}`,
@@ -193,7 +198,7 @@ export function generateGlossaryLinkProposals(
 ): Promise<PageOf<GlossaryLinkProposalRead>> {
   return demoOr(
     () =>
-      import("../glossaryReviewFixtures").then((m) => m.fixtureGenerateGlossaryLinkProposals(body)),
+      glossaryReviewDemo().then((m) => m.fixtureGenerateGlossaryLinkProposals(body)),
     () =>
       postJson<PageOf<GlossaryLinkProposalRead>>(
         `/v1/organizations/${organizationId}/glossary-link-proposals/generate`,
@@ -213,7 +218,7 @@ export function submitGlossaryLinkProposal(
 ): Promise<GovernanceReviewRead> {
   return demoOr(
     () =>
-      import("../glossaryReviewFixtures").then((m) => m.fixtureSubmitGlossaryLinkProposal(proposalId)),
+      glossaryReviewDemo().then((m) => m.fixtureSubmitGlossaryLinkProposal(proposalId)),
     () =>
       postJson<GovernanceReviewRead>(
         `/v1/glossary-link-proposals/${proposalId}/submit`,

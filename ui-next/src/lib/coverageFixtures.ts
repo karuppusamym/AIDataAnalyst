@@ -5,7 +5,9 @@
    `documentFixtures.ts` gives: it keeps a small store, so "Take a snapshot"
    behaves the way the server does -- the history gains a row, newest first --
    and nothing else reads it. Reached only through `demoOr` in
-   `lib/api/coverage.ts`, by a dynamic import, so a live build never ships it.
+   `lib/api/coverage.ts`, by a dynamic import behind a loader that tests the
+   build's demo literal (`noDemoData` in `lib/api/transport.ts`), so a live build
+   does not contain it.
 
    The arithmetic is the server's (`build_stewardship_coverage`): each
    dimension is `{covered, total, percentage}` with the percentage rounded to two

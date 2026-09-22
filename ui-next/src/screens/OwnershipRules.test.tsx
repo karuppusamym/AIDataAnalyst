@@ -609,8 +609,8 @@ describe("Ownership rules: the requests they opened", () => {
     expect(list).toHaveTextContent("Applied by riya.reviewer at 2026-09-21 08:15 UTC");
   });
 
-  it("says a rejected request changed nothing, and offers the review of a pending one", async () => {
-    sessionMe = asRoles("Viewer");
+  it("says a rejected request changed nothing, and offers the review of a pending one to a role the queue admits", async () => {
+    sessionMe = asRoles("Reviewer");
     fetchOwnershipOperations.mockResolvedValue(
       page([ruleRequest({ id: "op-a", status: "REJECTED" }), ruleRequest({ id: "op-b", governance_review_id: "review-b" })]),
     );
@@ -622,6 +622,33 @@ describe("Ownership rules: the requests they opened", () => {
     expect(pending).toHaveTextContent("Nothing has changed yet: a different reviewer has to approve this.");
     fireEvent.click(within(pending!).getByRole("button", { name: "Open this review" }));
     expect(navigateTo).toHaveBeenCalledWith("governance", { review: "review-b" });
+  });
+
+  it.each(["Viewer", "MetadataAdmin", "Analyst"])(
+    "tells %s a request is waiting without sending them to a Review queue that would refuse them",
+    async (role) => {
+      sessionMe = asRoles(role);
+      fetchOwnershipOperations.mockResolvedValue(page([ruleRequest({ id: "op-b", governance_review_id: "review-b" })]));
+      render(<OwnershipRules />);
+
+      const list = await screen.findByRole("list", { name: "Rule requests" });
+      expect(list).toHaveTextContent("Nothing has changed yet: a different reviewer has to approve this.");
+      expect(within(list).queryByRole("button", { name: "Open this review" })).not.toBeInTheDocument();
+    },
+  );
+
+  it("does not offer a MetadataAdmin who applied a rule a link into the Review queue", async () => {
+    applyOwnershipRule.mockResolvedValue(operation({ governance_review_id: "review-77" }));
+    sessionMe = asRoles("MetadataAdmin");
+    render(<OwnershipRules />);
+    await screen.findByText("Retail tables", { selector: "strong" });
+    fireEvent.click(screen.getByRole("button", { name: /^Apply Retail tables/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Apply “Retail tables”?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Request review" }));
+
+    const result = await screen.findByRole("status", { name: "Review requested" });
+    expect(result).toHaveTextContent("Nothing changes until a different reviewer approves it");
+    expect(within(result).queryByRole("button", { name: "Open this review" })).not.toBeInTheDocument();
   });
 
   it("names a rule that is no longer listed as such rather than inventing a name", async () => {

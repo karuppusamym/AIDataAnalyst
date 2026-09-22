@@ -33,12 +33,13 @@
    not copied.
 
    Transport, identity headers and the demo switch come from `./transport`.
-   Demo answers come from `../ownershipFixtures`, imported inside the demo arm so
-   a production build, which folds `demoOr` to its live arm, ships none of it.
+   Demo answers come from `../ownershipFixtures`, imported through a loader that
+   tests the build's demo literal itself (`noDemoData` says why `demoOr` alone did
+   not drop it), so a live build does not contain it.
    Re-exported from `lib/api.ts`.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get, postJson } from "./transport";
+import { demoOr, get, noDemoData, postJson } from "./transport";
 import { fetchOwnershipAssignments } from "./catalog";
 import type { OwnershipAssignmentRead } from "./catalog";
 import type {
@@ -84,7 +85,9 @@ export const OWNERSHIP_LIST_LIMIT = 500;
 /** How far the leaver preview reads before it stops and says so: 20 pages of 500. */
 export const OWNERSHIP_PORTFOLIO_MAX_PAGES = 20;
 
-const demo = () => import("../ownershipFixtures");
+/** The demo store, absent from a live build (`noDemoData`). */
+const demo = (): Promise<typeof import("../ownershipFixtures")> =>
+  import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../ownershipFixtures");
 
 /** `GET /v1/organizations/{organization_id}/ownership-rules` -- the ACTIVE rules,
  *  by display name, capped at 500 by the handler. It takes no filter and does not

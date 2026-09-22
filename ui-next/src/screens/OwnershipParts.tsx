@@ -3,18 +3,38 @@ import type { ReactNode } from "react";
 import { Button, Dialog, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { navigateTo } from "../lib/navigate";
+import { roleHolds } from "../lib/roles";
+import { useSession } from "../lib/session";
 import type { BulkStewardshipOperationRead } from "../lib/types";
+import { REVIEW_QUEUE_READ_ROLES } from "./glossaryReviewShared";
 
 /* ---------------------------------------------------------------------------
    The pieces the three Ownership panels share (R11-AUD08, part 2).
 
-   Nothing here decides who may do what and nothing here calls an endpoint. The
-   role lists sit beside the requests they guard, in each panel, so a reader of a
-   request sees the roles it is admitted to (`lib/roles.ts` says why). What is
-   shared is wording and layout that would otherwise be typed three times and
-   drift: how an expiry reads, how a status reads, the confirmation every write
-   goes through, and the answer a request that opened a review gets back.
+   Nothing here calls an endpoint. The role lists for the panels' own requests
+   sit beside those requests, in each panel, so a reader of a request sees the
+   roles it is admitted to (`lib/roles.ts` says why). What is shared is wording
+   and layout that would otherwise be typed three times and drift: how an expiry
+   reads, how a status reads, the confirmation every write goes through, the
+   answer a request that opened a review gets back -- and whether this session
+   may follow that answer into the Review queue, which is not a panel's request
+   but another screen's.
 --------------------------------------------------------------------------- */
+
+/**
+ * Whether this session may open the Review queue -- so a link into it is
+ * offered only to a session the queue would not refuse.
+ *
+ * The queue admits DataSteward, PlatformAdmin, Reviewer and SemanticAdmin
+ * (`REVIEW_QUEUE_READ_ROLES`, the same list Glossary review gates the same link
+ * with). A MetadataAdmin may apply a rule or request a leaver reassignment and
+ * may not open the queue; a Viewer may read the requests list and may not
+ * either. Fails CLOSED (`roleHolds`), as Glossary review does: while `/v1/me` is
+ * in flight the link is simply not there yet.
+ */
+export function useMayOpenReviewQueue(): boolean {
+  return roleHolds(useSession().me?.roles, REVIEW_QUEUE_READ_ROLES);
+}
 
 /** "a, b or c" -- the sentence form of a role list. */
 export const listOr = (items: readonly string[]): string =>
@@ -205,6 +225,10 @@ export function OwnershipConfirm({
  * `remainder` is what the caller knows this request does NOT cover -- the leaver
  * request's `selection_truncated`, or the portfolio the preview found to be larger
  * than what was asked for -- so the steward is told what was left, not just what was sent.
+ *
+ * "Open this review" is offered only to a session the Review queue admits
+ * (`useMayOpenReviewQueue`): a MetadataAdmin who applied a rule is told where the
+ * request went without being sent to a screen that refuses them.
  */
 export function RequestedReview({
   operation,
@@ -222,6 +246,7 @@ export function RequestedReview({
 }) {
   const status = describeOperationStatus(operation.status);
   const count = operation.subject_ids.length;
+  const mayOpenReviewQueue = useMayOpenReviewQueue();
   return (
     <section className="own__result" role="status" aria-label="Review requested">
       <div className="own__resulthead">
@@ -236,9 +261,11 @@ export function RequestedReview({
       </p>
       {remainder ? <p className="own__resultline">{remainder}</p> : null}
       <div className="own__actions">
-        <Button variant="primary" onClick={() => openReview(operation)}>
-          Open this review
-        </Button>
+        {mayOpenReviewQueue ? (
+          <Button variant="primary" onClick={() => openReview(operation)}>
+            Open this review
+          </Button>
+        ) : null}
         <Button onClick={onDismiss}>Dismiss</Button>
       </div>
     </section>

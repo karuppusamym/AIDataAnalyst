@@ -38,8 +38,12 @@
    Re-exported from `lib/api.ts`.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get } from "./transport";
+import { demoOr, get, noDemoData } from "./transport";
 import type { SearchSuggestion } from "../types";
+
+/** The demo index, loaded only where a demo arm runs, and absent from a live build (`noDemoData`). */
+const searchDemo = (): Promise<typeof import("../searchFixtures")> =>
+  import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../searchFixtures");
 
 /**
  * The roles `GET /v1/search` and `GET /v1/search/suggest` admit.
@@ -131,7 +135,7 @@ export function fetchSearchResults(
   const offset = query.offset ?? 0;
   return demoOr(
     async (fixtures) =>
-      (await import("../searchFixtures")).fixtureSearch(fixtures, organizationId, {
+      (await searchDemo()).fixtureSearch(fixtures, organizationId, {
         ...query,
         limit,
         offset,
@@ -158,7 +162,7 @@ export function fetchSearchSuggestions(
 ): Promise<SearchSuggestion[]> {
   return demoOr(
     async (fixtures) =>
-      (await import("../searchFixtures")).fixtureSuggest(fixtures, organizationId, q, limit),
+      (await searchDemo()).fixtureSuggest(fixtures, organizationId, q, limit),
     () => {
       const params = new URLSearchParams({
         q,

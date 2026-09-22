@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   BULK_REAFFIRM_MAX_ITEMS,
@@ -11,7 +11,8 @@ import type { OwnershipAssignmentBulkReaffirmResult, OwnershipAssignmentRead } f
 import type { PageOf } from "../lib/ui-types";
 import { navigateTo } from "../lib/navigate";
 import { useOrgId } from "../lib/org";
-import { readDecision, roleHolds } from "../lib/roles";
+import { readDecision, roleAllows, roleHolds } from "../lib/roles";
+import { CATALOG_ROWS_ROLES } from "../lib/searchTargets";
 import { useSession } from "../lib/session";
 import { useUrlState } from "../lib/useUrlState";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
@@ -150,6 +151,12 @@ export function OwnershipAssignments() {
   // Controls fail closed: offered only to a session KNOWN to hold a reaffirming role.
   const mayReaffirm = roleHolds(roles, REAFFIRM_ROLES);
   const mayReaffirmAny = roleHolds(roles, REAFFIRM_ANY_OWNER_ROLES);
+  // A table's "Catalog" link is offered only where the Catalog list would answer: `CATALOG_ROWS_ROLES`
+  // (Analyst, MetadataAdmin, PlatformAdmin, Viewer) is narrower than this list's nine roles, and a
+  // DataSteward, Auditor, DataAdmin, Reviewer or SemanticAdmin who followed it would land on a refusal.
+  // Decided exactly as Search decides it (`roleAllows`): a link is not a request, so it is not held
+  // back while `/v1/me` is in flight.
+  const mayOpenCatalog = roleAllows(roles, CATALOG_ROWS_ROLES);
   const identityKnown = roles !== undefined;
 
   const [params, setParams] = useUrlState();
@@ -163,6 +170,33 @@ export function OwnershipAssignments() {
   // boundary is dropped from `rows` (below), and paging by the deduplicated length would ask for the
   // same page again.
   const [fetched, setFetched] = useState(0);
+
+  /* "Load more" continues ONE reading of the list: this filter, from this first page. A reply that
+     arrives after the filter (or the organization) changed, or after the first page was read again,
+     belongs to a list that is no longer on screen -- appended, it put the old filter's rows under the
+     new one and counted them into the next offset. So each page request carries the generation it
+     continues, and anything that starts a new reading moves the generation on and aborts the page
+     request in flight (the same ticket-and-abort pair `useAsyncResource` uses for the first page). */
+  const [moreBusy, setMoreBusy] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const moreGeneration = useRef(0);
+  const moreInflight = useRef<AbortController | null>(null);
+  const supersedeMore = useCallback(() => {
+    moreGeneration.current += 1;
+    moreInflight.current?.abort();
+    moreInflight.current = null;
+    setMoreBusy(false);
+    setMoreError(null);
+  }, []);
+  useEffect(() => supersedeMore(), [organizationId, subjectType, subjectId, supersedeMore]);
+  useEffect(
+    () => () => {
+      moreGeneration.current += 1;
+      moreInflight.current?.abort();
+    },
+    [],
+  );
+
   const list = useAsyncResource<PageOf<OwnershipAssignmentRead>>(
     (signal) =>
       fetchOwnershipAssignments(
@@ -171,26 +205,39 @@ export function OwnershipAssignments() {
         signal,
       ),
     [organizationId, subjectType, subjectId],
-    { enabled: read === "ask", onLoad: (page) => setFetched(page.items.length) },
+    {
+      enabled: read === "ask",
+      onLoad: (page) => {
+        // A fresh first page: whatever "Load more" was continuing is not what is on screen now.
+        supersedeMore();
+        setFetched(page.items.length);
+      },
+    },
   );
   const rows = useMemo(() => list.data?.items ?? [], [list.data]);
   const total = list.data?.total ?? 0;
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
 
-  const [moreBusy, setMoreBusy] = useState(false);
-  const [moreError, setMoreError] = useState<string | null>(null);
   const loadMore = async () => {
-    if (!list.data || moreBusy) return;
+    if (!list.data || moreInflight.current) return;
+    const generation = moreGeneration.current;
+    const controller = new AbortController();
+    moreInflight.current = controller;
     setMoreBusy(true);
     setMoreError(null);
     try {
-      const next = await fetchOwnershipAssignments(organizationId, {
-        subject_type: subjectType || null,
-        subject_id: subjectId || null,
-        limit: PAGE,
-        offset: fetched,
-      });
+      const next = await fetchOwnershipAssignments(
+        organizationId,
+        {
+          subject_type: subjectType || null,
+          subject_id: subjectId || null,
+          limit: PAGE,
+          offset: fetched,
+        },
+        controller.signal,
+      );
+      if (generation !== moreGeneration.current) return; // a page of a list no longer on screen
       setFetched((count) => count + next.items.length);
       // The listing pages by creation time and rows created together share one, so a page
       // boundary can repeat a row. Each id is kept once.
@@ -200,9 +247,12 @@ export function OwnershipAssignments() {
         return { ...next, items: [...previous.items, ...next.items.filter((row) => !seen.has(row.id))] };
       });
     } catch (failure) {
+      // Superseded (and so aborted): the failure is about a list no longer on screen.
+      if (generation !== moreGeneration.current) return;
       setMoreError(describeLoadMoreFailure(failure));
     } finally {
-      setMoreBusy(false);
+      if (moreInflight.current === controller) moreInflight.current = null;
+      if (generation === moreGeneration.current) setMoreBusy(false);
     }
   };
 
@@ -420,7 +470,7 @@ export function OwnershipAssignments() {
                         <td>
                           <Pill tone="mute">{row.subject_type.toLowerCase()}</Pill>{" "}
                           <code className="own__code">{row.subject_id}</code>
-                          {row.subject_type === "TABLE" ? (
+                          {row.subject_type === "TABLE" && mayOpenCatalog ? (
                             <>
                               {" "}
                               <button

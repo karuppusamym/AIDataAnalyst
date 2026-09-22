@@ -23,11 +23,12 @@
    DEMO MODE. Every function answers from `../studioAuthoringDemo` when the
    build carries demo data -- the existing reads included, so that a change set
    created in demo mode is on the very next list read. The demo module is
-   imported dynamically inside the demo arm, which is what lets a production
-   build (where `demoOr` folds to its live arm) drop it.
+   imported dynamically, through a loader that tests the build's demo literal
+   itself (`noDemoData` says why `demoOr` alone did not drop it), so a live
+   build does not contain it.
 --------------------------------------------------------------------------- */
 
-import { deleteRequest, demoOr, get, postJson } from "./transport";
+import { deleteRequest, demoOr, get, noDemoData, postJson } from "./transport";
 import type {
   StudioChangeItemCreate,
   StudioChangeItemRead,
@@ -46,8 +47,9 @@ import type {
   StudioTestResultRead,
 } from "../types";
 
-/** The demo store, loaded only where a demo arm runs. */
-const studioDemo = () => import("../studioAuthoringDemo");
+/** The demo store, loaded only where a demo arm runs, and absent from a live build (`noDemoData`). */
+const studioDemo = (): Promise<typeof import("../studioAuthoringDemo")> =>
+  import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../studioAuthoringDemo");
 
 export interface StudioChangeSetQuery {
   status?: string | null;

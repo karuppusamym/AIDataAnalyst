@@ -237,6 +237,26 @@ describe("Ownership assignments: what each row says", () => {
     expect(within(rowFor("term-1")).queryByRole("button", { name: /Catalog/ })).not.toBeInTheDocument();
   });
 
+  it.each(["Analyst", "MetadataAdmin", "PlatformAdmin"])("offers %s, whom the Catalog admits, the table's Catalog link", async (role) => {
+    sessionMe = asRoles(role);
+    render(<OwnershipAssignments />);
+
+    await screen.findByText("t_a1");
+    expect(within(rowFor("t_a1")).getByRole("button", { name: /Catalog/ })).toBeInTheDocument();
+  });
+
+  it.each(["DataSteward", "SemanticAdmin", "Auditor", "DataAdmin", "Reviewer"])(
+    "does not send %s to a Catalog that would refuse them, and still lists the table",
+    async (role) => {
+      sessionMe = asRoles(role);
+      render(<OwnershipAssignments />);
+
+      await screen.findByText("t_a1");
+      expect(rowFor("t_a1")).toHaveTextContent("t_a1");
+      expect(screen.queryByRole("button", { name: /Catalog/ })).not.toBeInTheDocument();
+    },
+  );
+
   it("keeps the scrolling table reachable by keyboard, named, even when nothing in it is focusable", async () => {
     // A region that scrolls has to take focus (WCAG 2.1.1); a read-only list of glossary terms has no
     // checkbox and no Catalog link to be the thing that does.
@@ -343,7 +363,7 @@ describe("Ownership assignments: paging", () => {
 
     await screen.findByText("t_p4");
     expect(fetchOwnershipAssignments).toHaveBeenLastCalledWith(
-      ORG, { subject_type: null, subject_id: null, limit: 100, offset: 3 }, undefined,
+      ORG, { subject_type: null, subject_id: null, limit: 100, offset: 3 }, expect.any(AbortSignal),
     );
     expect(screen.getAllByText("t_p2")).toHaveLength(1);
     expect(screen.getByText("5 of 8 shown")).toBeInTheDocument();
@@ -355,7 +375,7 @@ describe("Ownership assignments: paging", () => {
 
     await screen.findByText("t_p7");
     expect(fetchOwnershipAssignments).toHaveBeenLastCalledWith(
-      ORG, { subject_type: null, subject_id: null, limit: 100, offset: 6 }, undefined,
+      ORG, { subject_type: null, subject_id: null, limit: 100, offset: 6 }, expect.any(AbortSignal),
     );
     expect(screen.getByText("8 of 8 shown")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Load more/ })).not.toBeInTheDocument();
@@ -373,6 +393,71 @@ describe("Ownership assignments: paging", () => {
     expect(await screen.findByText("More results could not be loaded: index unavailable")).toBeInTheDocument();
     expect(screen.getByText("t_a1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Load more/ })).toBeEnabled();
+  });
+
+  it("drops a next page that answers after the filter changed, and aborts it", async () => {
+    sessionMe = asRoles("Viewer");
+    fetchOwnershipAssignments.mockResolvedValueOnce(page([row("p0"), row("p1")], 5));
+    render(<OwnershipAssignments />);
+    const more = await screen.findByRole("button", { name: "Load more (2 of 5 shown)" });
+
+    // The next page of the UNFILTERED list is slow...
+    let answerStale: (value: PageOf<OwnershipAssignmentRead>) => void = () => undefined;
+    fetchOwnershipAssignments.mockImplementationOnce(() => new Promise((resolve) => { answerStale = resolve; }));
+    fireEvent.click(more);
+    await screen.findByRole("button", { name: "Loading…" });
+    const staleSignal = fetchOwnershipAssignments.mock.calls.at(-1)![2]!;
+
+    // ...and the steward filters before it answers.
+    fetchOwnershipAssignments.mockResolvedValueOnce(page([row("f0", { subject_type: "TERM", subject_id: "term-f0" })], 3));
+    fireEvent.change(screen.getByLabelText("Subject type"), { target: { value: "TERM" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply filter" }));
+    await screen.findByText("term-f0");
+    expect(staleSignal.aborted).toBe(true);
+
+    answerStale(page([row("p2"), row("p3")], 5, 2));
+    await Promise.resolve();
+
+    // The filtered list is exactly what the filtered read returned, and paging continues from ITS first page.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Load more (1 of 3 shown)" })).toBeEnabled());
+    expect(screen.queryByText("t_p2")).not.toBeInTheDocument();
+    expect(screen.queryByText("t_p0")).not.toBeInTheDocument();
+    expect(screen.getByText("1 of 3 shown")).toBeInTheDocument();
+
+    fetchOwnershipAssignments.mockResolvedValueOnce(page([row("f1", { subject_type: "TERM", subject_id: "term-f1" })], 3, 1));
+    fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
+    await screen.findByText("term-f1");
+    expect(fetchOwnershipAssignments).toHaveBeenLastCalledWith(
+      ORG, { subject_type: "TERM", subject_id: null, limit: 100, offset: 1 }, expect.any(AbortSignal),
+    );
+  });
+
+  it("drops a next page that answers after the list was read again from the first page", async () => {
+    sessionMe = asPrincipal("steward-1", "PlatformAdmin");
+    fetchOwnershipAssignments.mockResolvedValueOnce(page([row("p0"), row("p1")], 4));
+    bulkReaffirmOwnershipAssignments.mockResolvedValue({
+      reaffirmed: 1, skipped: 0, items: [{ assignment_id: "p0", outcome: "REAFFIRMED", detail: null }],
+    } as unknown as OwnershipAssignmentBulkReaffirmResult);
+    render(<OwnershipAssignments />);
+    const more = await screen.findByRole("button", { name: "Load more (2 of 4 shown)" });
+
+    let answerStale: (value: PageOf<OwnershipAssignmentRead>) => void = () => undefined;
+    fetchOwnershipAssignments.mockImplementationOnce(() => new Promise((resolve) => { answerStale = resolve; }));
+    fireEvent.click(more);
+    await screen.findByRole("button", { name: "Loading…" });
+
+    // A bulk reaffirm re-reads the first page while that next page is still out.
+    fetchOwnershipAssignments.mockResolvedValueOnce(page([row("r0"), row("r1")], 4));
+    fireEvent.click(screen.getByLabelText("Select TABLE t_p0"));
+    fireEvent.click(screen.getByRole("button", { name: "Reaffirm selected" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Reaffirm" }));
+    await screen.findByText("t_r0");
+
+    answerStale(page([row("p2"), row("p3")], 4, 2));
+    await Promise.resolve();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Load more (2 of 4 shown)" })).toBeEnabled());
+    expect(screen.queryByText("t_p2")).not.toBeInTheDocument();
   });
 });
 

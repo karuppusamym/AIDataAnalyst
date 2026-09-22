@@ -109,11 +109,13 @@ function ProposalItem({
   proposal,
   mayWrite,
   mayOpenReviewQueue,
+  mayOpenCatalog,
   onSubmit,
 }: {
   proposal: GlossaryLinkProposalRead;
   mayWrite: boolean;
   mayOpenReviewQueue: boolean;
+  mayOpenCatalog: boolean;
   onSubmit: (proposal: GlossaryLinkProposalRead) => void;
 }) {
   const sentence = evidenceSentence(proposal);
@@ -146,12 +148,14 @@ function ProposalItem({
       </div>
 
       <div className="glrev__links">
-        <Button
-          onClick={() => navigateTo("catalog", { asset: proposal.table_id })}
-          title="Open this table in the Catalog"
-        >
-          {`Open table ${proposal.table_name}`}
-        </Button>
+        {mayOpenCatalog ? (
+          <Button
+            onClick={() => navigateTo("catalog", { asset: proposal.table_id })}
+            title="Open this table in the Catalog"
+          >
+            {`Open table ${proposal.table_name}`}
+          </Button>
+        ) : null}
         <Button
           onClick={() =>
             navigateTo("meaning", { view: "glossary", q: proposal.term_display_name })
@@ -454,6 +458,7 @@ export function GlossaryLinkProposals() {
                     proposal={proposal}
                     mayWrite={access.mayWrite}
                     mayOpenReviewQueue={access.mayOpenReviewQueue}
+                    mayOpenCatalog={access.mayOpenCatalog}
                     onSubmit={openSubmit}
                   />
                 ))}

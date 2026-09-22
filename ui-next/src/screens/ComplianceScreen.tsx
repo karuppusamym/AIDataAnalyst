@@ -312,7 +312,7 @@ export function ComplianceScreen() {
           </form>
         ) : (
           <p className="cplx__lede">
-            Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither.
+            Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither.{" "}
             {mayDownload
               ? "Your roles can list the packs below and download their evidence."
               : "Your roles can list the packs below."}

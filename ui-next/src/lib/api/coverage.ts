@@ -35,9 +35,13 @@
    Re-exported from `lib/api.ts`.
 --------------------------------------------------------------------------- */
 
-import { demoOr, get, postJson } from "./transport";
+import { demoOr, get, noDemoData, postJson } from "./transport";
 import type { CoverageDimensionRead, StewardshipCoverageRead } from "../types";
 import type { PageOf } from "../ui-types";
+
+/** The demo store, loaded only where a demo arm runs, and absent from a live build (`noDemoData`). */
+const coverageDemo = (): Promise<typeof import("../coverageFixtures")> =>
+  import.meta.env.VITE_USE_FIXTURES === "0" ? noDemoData() : import("../coverageFixtures");
 
 /**
  * The roles `GET .../stewardship/coverage` and `GET .../coverage/snapshots` admit.
@@ -126,7 +130,7 @@ export function fetchStewardshipCoverage(
 ): Promise<StewardshipCoverageRead> {
   return demoOr(
     async () =>
-      (await import("../coverageFixtures")).fixtureCoverage(organizationId, scope.datasourceId ?? null),
+      (await coverageDemo()).fixtureCoverage(organizationId, scope.datasourceId ?? null),
     () =>
       get<StewardshipCoverageRead>(
         withQuery(`/v1/organizations/${organizationId}/stewardship/coverage`, scopeQuery(scope)),
@@ -150,7 +154,7 @@ export function fetchCoverageSnapshots(
   const offset = page.offset ?? 0;
   return demoOr(
     async () =>
-      (await import("../coverageFixtures")).fixtureCoverageSnapshots(
+      (await coverageDemo()).fixtureCoverageSnapshots(
         organizationId,
         scope.datasourceId ?? null,
         limit,
@@ -183,7 +187,7 @@ export function takeCoverageSnapshot(
 ): Promise<StewardshipCoverageRead> {
   return demoOr(
     async () =>
-      (await import("../coverageFixtures")).fixtureTakeCoverageSnapshot(
+      (await coverageDemo()).fixtureTakeCoverageSnapshot(
         organizationId,
         scope.datasourceId ?? null,
       ),
