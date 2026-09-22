@@ -20,9 +20,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from aida import xlsx_reader
 from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
@@ -57,6 +58,7 @@ from aida.models import (
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
+    ModelImportBatch,
     ModelImportChange,
     Organization,
     Project,
@@ -468,6 +470,25 @@ async def test_a_workbook_with_no_recognised_sheets_is_refused(session) -> None:
     with pytest.raises(HTTPException) as exc_info:
         await _upload(session, datasource, content)
     assert exc_info.value.status_code == 422
+
+
+async def test_a_sheet_longer_than_the_reader_reads_is_refused_not_cut(
+    session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reader keeps its first MAX_ROWS_PER_SHEET rows and flags the sheet. A batch diffed from
+    those would look complete and leave the rest out without a word, so the upload is refused."""
+    datasource, _, _ = await _seed(session)
+    content = await _export(session, datasource)
+    rows = len(read_workbook(content)[COLUMN_SHEET].rows)
+    assert rows >= 1
+    monkeypatch.setattr(xlsx_reader, "MAX_ROWS_PER_SHEET", rows - 1)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _upload(session, datasource, content)
+
+    assert exc_info.value.status_code == 422
+    assert f"'{COLUMN_SHEET}' sheet has more than {rows - 1:,} rows" in exc_info.value.detail
+    assert (await session.scalar(select(func.count()).select_from(ModelImportBatch))) == 0
 
 
 async def test_a_non_workbook_upload_is_refused(session) -> None:

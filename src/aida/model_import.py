@@ -58,6 +58,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida import xlsx_reader
 from aida.asset_description_service import publish_asset_documentation_version
 from aida.business_annotation_versions import (
     AnnotationVersionContent,
@@ -455,6 +456,22 @@ async def parse_and_diff_workbook(
 
     columns_sheet = _sheet_or_none(sheets, COLUMN_SHEET)
     tables_sheet = _sheet_or_none(sheets, TABLE_SHEET)
+    # The reader stops at its row ceiling and says so; diffing what it kept would record a batch
+    # that looks complete and silently leaves out every row past the ceiling (found 2026-09-21).
+    cut = [
+        sheet.name
+        for sheet in (tables_sheet, columns_sheet)
+        if sheet is not None and sheet.truncated
+    ]
+    if cut:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"the {' and '.join(repr(name) for name in cut)} sheet has more than "
+                f"{xlsx_reader.MAX_ROWS_PER_SHEET:,} rows, the most one upload reads, so the rows "
+                "past that would be left out. Split the edits across smaller uploads."
+            ),
+        )
     if columns_sheet is None and tables_sheet is None:
         raise HTTPException(
             status_code=422,
