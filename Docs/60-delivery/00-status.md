@@ -46,9 +46,13 @@ platform roles and 2,405 as the seven non-admin demo bundles, and every answer m
 role contract; `scripts/live_role_sweep.py` made 2,496 read calls with 0 server errors; the live
 accessibility audit (40 screens, both themes, 320 px reflow) reported 0 violations; and opening 50
 screens as the eight demo users gave 0 issues and 5 known conditions. The 18 static CI gates pass
-(at `cb4c767`); the frontend suite is 148 files and 2,147 tests, all passing, and `tsc` is clean; the
-full backend suite at `80ad325` gave 15,177 passed, 184 skipped and 2 failed, both order-dependent test
-problems fixed in `e1c11b5` and `b21eb24` and re-run together. The pass applied one migration,
+(at `cb4c767`); the frontend suite is 148 files and 2,147 tests, all passing, and `tsc` is clean. The
+full backend suite at `80ad325` gave 15,177 passed, 184 skipped and 2 failed; both order-dependent test
+problems were fixed in `e1c11b5` and `b21eb24`. The confirming pushed CI run for final commit
+`b357500` completed successfully on 2026-09-22: all 17 executed jobs passed, including the full
+backend suite with coverage, frontend typecheck/build/tests, browser journey, migration/ORM drift,
+connector fixtures, security scans, image build, proxy checks and generated-artifact gates. The
+deployment-parity job was correctly skipped because CI has no deployment target. The pass applied one migration,
 `c4a7e2d9b815` (the scheduler-pass table), changed no production configuration, and put no question
 to a model.
 
