@@ -20,6 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import gate_read
@@ -219,51 +220,61 @@ async def parse_deep_procedure_lineage_endpoint(
         session, datasource, routine, parse_procedure_lineage(body, dialect=datasource.dialect)
     )
     settings = get_settings()
-    persisted = await persist_routine_edges(
-        session,
-        datasource=datasource,
-        routine=routine,
-        result=result,
-        review_mode=settings.lineage_parsed_edges_review_mode,
-        threshold=settings.lineage_high_confidence_auto_active_threshold,
-        created_by=context.principal_id,
-    )
-    # F06.4: record how completely this body was understood, per object, in the
-    # same transaction as the edges it produced. Without it, the only trace of
-    # `is_fully_parsed` is this response and the audit entry below -- and
-    # "which routines are not fully understood?" would have to be re-derived
-    # from UNPARSED edges, which answers a different question once a re-parse
-    # under review mode has replaced them.
-    await record_routine_parse_coverage(
-        session,
-        datasource=datasource,
-        routine=routine,
-        result=result,
-        measured_by=context.principal_id,
-    )
-    record_audit(
-        session,
-        context,
-        action="procedure_lineage.deep_parse",
-        resource_type="metadata_routine",
-        resource_id=str(routine_id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
-        details={
-            "persisted_edges": persisted,
-            "dialect": datasource.dialect,
-            "is_fully_parsed": result.is_fully_parsed,
-            "is_read_only": result.is_read_only,
-            "statement_count": result.statement_count,
-            "review_mode": settings.lineage_parsed_edges_review_mode,
-            # R11-FP03: codes only -- the grain a package was attributed at.
-            "member_attribution": result.member_attribution,
-            "member_fallback_reason": result.member_fallback_reason,
-        },
-    )
-    # R11-AUD08: keep the edges, the coverage row and the audit row; the request's session is
-    # rolled back when it closes.
-    await session.commit()
+    # A second parse of the same routine racing this one (a double click, or a person and the
+    # lineage agent at once) collides on the edge and coverage tables' unique constraints. That
+    # is a conflict the caller can retry, not a server error: roll back and say so.
+    try:
+        persisted = await persist_routine_edges(
+            session,
+            datasource=datasource,
+            routine=routine,
+            result=result,
+            review_mode=settings.lineage_parsed_edges_review_mode,
+            threshold=settings.lineage_high_confidence_auto_active_threshold,
+            created_by=context.principal_id,
+        )
+        # F06.4: record how completely this body was understood, per object, in the
+        # same transaction as the edges it produced. Without it, the only trace of
+        # `is_fully_parsed` is this response and the audit entry below -- and
+        # "which routines are not fully understood?" would have to be re-derived
+        # from UNPARSED edges, which answers a different question once a re-parse
+        # under review mode has replaced them.
+        await record_routine_parse_coverage(
+            session,
+            datasource=datasource,
+            routine=routine,
+            result=result,
+            measured_by=context.principal_id,
+        )
+        record_audit(
+            session,
+            context,
+            action="procedure_lineage.deep_parse",
+            resource_type="metadata_routine",
+            resource_id=str(routine_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "persisted_edges": persisted,
+                "dialect": datasource.dialect,
+                "is_fully_parsed": result.is_fully_parsed,
+                "is_read_only": result.is_read_only,
+                "statement_count": result.statement_count,
+                "review_mode": settings.lineage_parsed_edges_review_mode,
+                # R11-FP03: codes only -- the grain a package was attributed at.
+                "member_attribution": result.member_attribution,
+                "member_fallback_reason": result.member_fallback_reason,
+            },
+        )
+        # R11-AUD08: keep the edges, the coverage row and the audit row; the request's session is
+        # rolled back when it closes.
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="this routine was parsed by another request at the same time; retry the parse",
+        ) from exc
 
     return DeepProcedureLineageParseResponse(
         edges=[_edge_read(edge) for edge in result.edges],

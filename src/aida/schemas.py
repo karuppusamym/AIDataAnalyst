@@ -3,8 +3,6 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     field_serializer,
     field_validator,
@@ -15,18 +13,14 @@ from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTI
 from aida.relationship_validation import public_relationship_evidence
 
 
-class ApiModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True, extra="forbid")
+from atlas.platform.schemas import ApiModel as ApiModel
 
 
 # Re-exported for backward compatibility -- tracker ST-05 moved the classes
 # below to `atlas.modules.identity_tenancy.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import OrganizationCreate` (etc.) caller keeps working
-# unchanged. This import must come after `ApiModel` is defined above: the
-# moved module imports `ApiModel` back from this file, so `aida.schemas`
-# must already have it bound in its namespace before that circular import
-# resolves -- see the docstring in `atlas.modules.identity_tenancy.schemas`.
+# unchanged. Both paths share the independent `atlas.platform.schemas` base.
 from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
     BusinessAssignmentCreate as BusinessAssignmentCreate,
     BusinessAssignmentRead as BusinessAssignmentRead,
@@ -64,8 +58,7 @@ from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.connectivity.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import DataSourceCreate` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# unchanged.
 from atlas.modules.connectivity.schemas import (  # noqa: E402, I001
     DATASOURCE_BULK_ONBOARD_MAX_ITEMS as DATASOURCE_BULK_ONBOARD_MAX_ITEMS,
     ConnectorCapabilityRead as ConnectorCapabilityRead,
@@ -83,8 +76,7 @@ from atlas.modules.connectivity.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.ingestion.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import MetadataIngestionCreate` (etc.) caller keeps
-# working unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# working unchanged.
 from atlas.modules.ingestion.schemas import (  # noqa: E402, I001
     MetadataAttribute as MetadataAttribute,
     MetadataCatalogEnvelope as MetadataCatalogEnvelope,
@@ -108,8 +100,7 @@ from atlas.modules.ingestion.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.catalog.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import MetadataTableRead` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# unchanged.
 from atlas.modules.catalog.schemas import (  # noqa: E402, I001
     MetadataColumnRead as MetadataColumnRead,
     MetadataConstraintRead as MetadataConstraintRead,
@@ -122,8 +113,7 @@ from atlas.modules.catalog.schemas import (  # noqa: E402, I001
 # below to `atlas.modules.observability_audit.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`). Every existing
 # `from aida.schemas import AuditEventRead` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the
-# identity_tenancy shim above.
+# unchanged.
 from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
     ArchiveStatusRead as ArchiveStatusRead,
     AuditEventRead as AuditEventRead,
@@ -135,8 +125,7 @@ from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
 # the classes below to `atlas.modules.profiling.schemas` (Phase 3 of
 # `Docs/40-engineering/06-refactor-plan.md`, tracker ST-05). Every existing
 # `from aida.schemas import AnalysisRunRead` (etc.) caller keeps working
-# unchanged. Same after-`ApiModel` placement requirement as the four shims
-# above. The procedure is
+# unchanged. The procedure is
 # `Docs/40-engineering/10-bounded-context-relocation-procedure.md`.
 from atlas.modules.profiling.schemas import (  # noqa: E402, I001
     AnalysisRunCreate as AnalysisRunCreate,

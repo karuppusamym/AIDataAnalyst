@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings, get_settings
 from aida.connector_health import ConnectorHealthScore
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -24,6 +25,7 @@ from aida.models import (
     ScanPolicy,
 )
 from aida.resource_scope import load_datasource_in_scope, load_project_in_scope
+from aida.scheduler_pass_status import read_pass_status, stale_after
 from aida.schemas import (
     AnalysisRunRead,
     AuditEventRead,
@@ -490,6 +492,76 @@ async def _status_counts(
         )
     ).all()
     return {str(status): int(count) for status, count in rows}
+
+
+class SchedulerPassStatusRead(ApiModel):
+    """One fleet-scheduler pass as it last ran (R11-VAL04)."""
+
+    pass_name: str
+    state: Literal["OK", "FAILING", "STALE", "NEVER_RUN"]
+    last_attempt_at: datetime | None
+    last_success_at: datetime | None
+    last_failure_at: datetime | None
+    #: The exception's class name only; its message is never stored.
+    last_error_class: str | None
+    consecutive_failures: int
+
+
+class SchedulerPassStatusListRead(ApiModel):
+    generated_at: datetime
+    #: A pass with no attempt for this long is STALE.
+    stale_after_seconds: int
+    failing: int
+    stale: int
+    never_run: int
+    items: list[SchedulerPassStatusRead]
+
+
+#: Platform operators. Not OrganizationAdmin or Auditor: the passes run over every tenant, and
+#: what they report is platform operation rather than any one organization's data.
+_SCHEDULER_STATUS_ROLES = ("PlatformAdmin", "Operations")
+
+
+@router.get("/operations/scheduler-passes", response_model=SchedulerPassStatusListRead)
+async def scheduler_pass_status(
+    context: SecurityContext = Depends(require_roles(*_SCHEDULER_STATUS_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> SchedulerPassStatusListRead:
+    """R11-VAL04: every fleet-scheduler pass with its last outcome, failing ones first.
+
+    A pass that raises no longer stops the scheduler (it is logged as `scheduler_pass_failed`
+    and counted in `aida_scheduler_pass_failures_total`), but both of those live in the
+    scheduler process. This reads what the leading replica persists once per iteration
+    (`aida.scheduler_pass_status`), so the Operations screen can show a pass failing on every
+    iteration, or a scheduler that has stopped attempting anything (STALE), without log access.
+    Platform-wide and tenant-free: rows carry pass names, times, counts and exception class
+    names, never an organization's data.
+    """
+    now = datetime.now(UTC)
+    statuses = await read_pass_status(
+        session, now=now, poll_seconds=settings.scheduler_poll_seconds
+    )
+    items = [
+        SchedulerPassStatusRead(
+            pass_name=status.pass_name,
+            state=status.state,
+            last_attempt_at=status.last_attempt_at,
+            last_success_at=status.last_success_at,
+            last_failure_at=status.last_failure_at,
+            last_error_class=status.last_error_class,
+            consecutive_failures=status.consecutive_failures,
+        )
+        for status in statuses
+    ]
+    return SchedulerPassStatusListRead(
+        generated_at=now,
+        stale_after_seconds=int(stale_after(settings.scheduler_poll_seconds).total_seconds()),
+        failing=sum(1 for item in items if item.state == "FAILING"),
+        stale=sum(1 for item in items if item.state == "STALE"),
+        never_run=sum(1 for item in items if item.state == "NEVER_RUN"),
+        items=items,
+    )
 
 
 @router.get("/organizations/{organization_id}/fleet-summary", response_model=FleetSummaryRead)

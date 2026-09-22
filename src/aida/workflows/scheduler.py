@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Coroutine, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -56,6 +57,8 @@ from aida.scheduler_leadership import (
     SchedulerLeadership,
     default_lock_provider,
 )
+from aida.scheduler_pass_status import SCHEDULER_PASS_NAMES as PERSISTED_PASS_NAMES
+from aida.scheduler_pass_status import save_pass_outcomes
 from aida.security import SecurityContext
 from aida.stewardship_api import (
     UNOWNED_BACKLOG_ROUTE_LIMIT,
@@ -861,33 +864,18 @@ async def run_context_rebuild_pass(settings: Settings, *, now: datetime | None =
     return swept
 
 
-#: Every step of `run_scheduler_iteration` that `_isolated` guards, by the label its failures carry.
-#: `tests/test_scheduler_pass_isolation.py` holds this tuple to the calls the iteration makes.
-SCHEDULER_PASS_NAMES = (
-    "cancellation_reconcile",
-    "priority_rebalance",
-    "owner_routing",
-    "custom_rule_packs",
-    "graph_reconciliation",
-    "rollup_rebuild",
-    "vector_index_rebuild",
-    "model_route_reachability",
-    "classification_propagation",
-    "freshness_evaluation",
-    "change_signal_processing",
-    "context_rebuild",
-    "footprint_metrics",
-    "due_playbooks",
-    "task_agent_schedule",
-    "value_profile_purge",
-    "reaper",
-    "certification_expiry_warning",
-    "ownership_expiry",
-    "principal_reconciliation",
-    "review_notification",
-    "delivery_worker",
-    "entitlement_fulfilment",
-    "scan_policy_selection",
+#: Every step `_isolated` guards, by the label its failures carry. Defined in
+#: `aida.scheduler_pass_status` so the API can read it without importing this module;
+#: `tests/test_scheduler_pass_isolation.py` holds it to the calls the iteration makes.
+SCHEDULER_PASS_NAMES = PERSISTED_PASS_NAMES
+#: The label of the one step the iteration guards per item rather than with `_isolated`.
+_SCAN_POLICY_PROCESSING = "scan_policy_processing"
+
+#: The outcome of each pass of the iteration now running: `None` when it returned, else the
+#: class name of what it raised. Set by `run_scheduler_iteration`, filled by `_isolated`, and
+#: saved at the end of the iteration for the Operations screen (R11-VAL04).
+_PASS_OUTCOMES: ContextVar[dict[str, str | None] | None] = ContextVar(
+    "scheduler_pass_outcomes", default=None
 )
 
 SCHEDULER_PASS_FAILURES = Counter(
@@ -905,10 +893,42 @@ for _pass_name in SCHEDULER_PASS_NAMES:
     SCHEDULER_PASS_FAILURES.labels(scheduler_pass=_pass_name)
 
 
-def _record_pass_failure(name: str) -> None:
-    """Log the exception being handled and count it. Call from inside an `except` block."""
-    logger.exception("scheduler_pass_failed", scheduler_pass=name)
+def _record_pass_failure(name: str, error: BaseException | None = None) -> None:
+    """Log the exception being handled and count it. Call from inside an `except` block.
+
+    `error_type` is the one piece of the cause that survives the platform's log redaction, which
+    blanks the formatted traceback: without it the line named the pass and not what went wrong.
+    """
+    error_type = type(error).__name__ if error is not None else "Exception"
+    logger.exception("scheduler_pass_failed", scheduler_pass=name, error_type=error_type)
     SCHEDULER_PASS_FAILURES.labels(scheduler_pass=name).inc()
+    _note_outcome(name, error_type)
+
+
+def _note_outcome(name: str, error_class: str | None) -> None:
+    """Remember one pass's outcome for this iteration's `save_pass_outcomes`, if one is running."""
+    outcomes = _PASS_OUTCOMES.get()
+    if outcomes is not None:
+        outcomes[name] = error_class
+
+
+#: After a pass fails it is skipped for this long, doubling per consecutive failure up to the cap,
+#: and attempted again on the first iteration after. Most passes record their "last run" only when
+#: they succeed, so one that fails every time used to be retried on every poll (every 10 s by
+#: default: about 8,640 failures and log lines a day for a daily pass). The cap stays under the
+#: five-minute STALE bound of `aida.scheduler_pass_status`, so a pass in backoff reads FAILING on
+#: the Operations screen, never STALE, and `AtlasSchedulerPassFailing` still sees it fail.
+PASS_FAILURE_BACKOFF_BASE_SECONDS = 30
+PASS_FAILURE_BACKOFF_MAX_SECONDS = 240
+
+#: Per pass: consecutive failures, and when it may run again. In process memory, like every cadence
+#: tracker here: a new leader starts with none, which costs at most one early retry.
+_pass_backoff: dict[str, tuple[int, datetime]] = {}
+
+
+def _now() -> datetime:
+    """The clock `_isolated` reads; a test replaces it."""
+    return datetime.now(UTC)
 
 
 async def _isolated(name: str, step: Awaitable[object]) -> None:
@@ -916,16 +936,51 @@ async def _isolated(name: str, step: Awaitable[object]) -> None:
 
     An exception out of any one pass used to leave `run_scheduler_iteration`, and `run_scheduler`
     with it: the loop ended, leadership was released, and every other pass stopped for a fault
-    in one. Now the failing pass is logged and counted and the rest of the iteration runs.
-    Cancellation is not an `Exception` and still propagates, so shutdown is unaffected.
+    in one. Now the failing pass is logged and counted and the rest of the iteration runs, and it
+    is not attempted again until its backoff (`PASS_FAILURE_BACKOFF_*`) has passed. Cancellation
+    is not an `Exception` and still propagates, so shutdown is unaffected.
     """
+    now = _now()
+    held = _pass_backoff.get(name)
+    if held is not None and now < held[1]:
+        # Not attempted this iteration, so there is no outcome to note; the coroutine the caller
+        # built is closed rather than left un-awaited.
+        if isinstance(step, Coroutine):
+            step.close()
+        return
     try:
         await step
+    except Exception as error:
+        _record_pass_failure(name, error)
+        failures = (held[0] if held is not None else 0) + 1
+        delay = min(
+            PASS_FAILURE_BACKOFF_BASE_SECONDS * 2 ** (failures - 1),
+            PASS_FAILURE_BACKOFF_MAX_SECONDS,
+        )
+        _pass_backoff[name] = (failures, now + timedelta(seconds=delay))
+    else:
+        _pass_backoff.pop(name, None)
+        _note_outcome(name, None)
+
+
+async def _save_pass_outcomes(outcomes: dict[str, str | None]) -> None:
+    """Persist this iteration's outcomes (R11-VAL04). Never raises: the loop must outlive it.
+
+    A database that cannot take the write is already failing the passes themselves, and each of
+    those is logged and counted; this adds one log line of its own and nothing else.
+    """
+    if not outcomes:
+        return
+    try:
+        async with session_factory() as session:
+            await save_pass_outcomes(session, outcomes, datetime.now(UTC))
     except Exception:
-        _record_pass_failure(name)
+        logger.exception("scheduler_pass_status_write_failed", passes=len(outcomes))
 
 
 async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
+    outcomes: dict[str, str | None] = {}
+    _PASS_OUTCOMES.set(outcomes)
     await _isolated("cancellation_reconcile", reconcile_cancellation_requests(client, settings))
     now = datetime.now(UTC)
     await _isolated("priority_rebalance", rebalance_usage_weighted_priorities(settings, now=now))
@@ -1046,15 +1101,29 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
             policy_ids = (
                 await session.scalars(due_scan_policies_statement(settings, now))
             ).all()
-    except Exception:
-        _record_pass_failure("scan_policy_selection")
+    except Exception as error:
+        _record_pass_failure("scan_policy_selection", error)
         policy_ids = []
+    else:
+        _note_outcome("scan_policy_selection", None)
     admitted = 0
+    # Admitting each due policy is its own step for the counter and the Operations screen
+    # (`scan_policy_processing`): a policy that fails is logged with its id and the next one runs,
+    # and the iteration reports the step as failing if any policy failed.
+    processing_error: str | None = None
     for policy_id in policy_ids:
         try:
             admitted += int(await process_scan_policy(policy_id, client, settings, now=now))
-        except Exception:
-            logger.exception("scan_policy_processing_failed", policy_id=str(policy_id))
+        except Exception as error:
+            processing_error = type(error).__name__
+            logger.exception(
+                "scan_policy_processing_failed",
+                policy_id=str(policy_id),
+                error_type=processing_error,
+            )
+            SCHEDULER_PASS_FAILURES.labels(scheduler_pass=_SCAN_POLICY_PROCESSING).inc()
+    _note_outcome(_SCAN_POLICY_PROCESSING, processing_error)
+    await _save_pass_outcomes(outcomes)
     return admitted
 
 

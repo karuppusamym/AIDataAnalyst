@@ -264,8 +264,8 @@ async def gather_documentation_worklist_signals(
         session, [table for table, _, _ in candidate_rows]
     )
     # SW-1 adoption: downstream impact and the five-field deficit, from the
-    # same `enrich_tables` `compute_worklist` uses -- so "documented" has one
-    # definition on this platform rather than one per surface. AT-5's own
+    # shared `enrich_tables` scorer, so "documented" has one definition on
+    # this platform rather than one per surface. AT-5's own
     # UX-12 precedence chain still decides the description field; SW-1 is
     # handed that answer rather than computing a weaker one of its own.
     enrichment = await enrich_tables(

@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -96,3 +98,23 @@ async def test_a_parse_is_measured_and_audited_on_the_next_request(estate: Estat
     async with estate.maker() as session:
         actions = (await session.scalars(select(AuditEvent.action))).all()
     assert list(actions) == ["procedure_lineage.deep_parse"]
+
+
+async def test_a_parse_that_collides_with_a_concurrent_one_is_a_409_and_writes_nothing(
+    estate: Estate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two parses of one routine at once (a double click, or a person and the lineage agent)
+    collide on the edge and coverage tables' unique constraints. The loser used to answer 500."""
+    from aida import procedure_lineage_api
+
+    async def collide(session: AsyncSession, **kwargs: object) -> None:
+        raise IntegrityError("INSERT INTO routine_parse_coverage", {}, Exception("duplicate key"))
+
+    monkeypatch.setattr(procedure_lineage_api, "record_routine_parse_coverage", collide)
+
+    parsed = await estate.client.post(f"{estate.base}/lineage/parse", headers=STEWARD)
+
+    assert parsed.status_code == 409, parsed.text
+    assert "retry" in parsed.json()["detail"]
+    async with estate.maker() as session:
+        assert (await session.scalars(select(AuditEvent.action))).all() == []

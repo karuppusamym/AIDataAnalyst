@@ -604,6 +604,27 @@ class KillSwitchState(Base, TimestampMixin):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SchedulerPassStatus(Base):
+    """The last outcome of each of the fleet scheduler's maintenance passes (R11-VAL04).
+
+    One mutable row per pass, written by the leading scheduler replica at the end of every
+    iteration (`aida.scheduler_pass_status.save_pass_outcomes`) and read by the Operations
+    screen. A failing pass used to be visible only as a log line and a counter in the
+    scheduler's own metrics registry, which the API process cannot read. Platform-wide, not
+    per tenant: a pass runs over every organization, and the row holds a pass name, times, a
+    count and an exception *class* name -- never the exception's message, which can carry data.
+    """
+
+    __tablename__ = "scheduler_pass_status"
+
+    pass_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_class: Mapped[str | None] = mapped_column(String(200))
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class SemanticModelVersion(Base, TimestampMixin):
     __tablename__ = "semantic_model_version"
     __table_args__ = (

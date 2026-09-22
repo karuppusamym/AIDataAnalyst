@@ -219,20 +219,21 @@ SHIMS: tuple[Shim, ...] = (
         kind="python-partial",
         path="src/aida/schemas.py",
         module="aida.schemas",
-        replacement="`atlas.modules.<context>.schemas` (re-exported DTOs only)",
+        replacement="`atlas.modules.<context>.schemas` and `atlas.platform.schemas.ApiModel`",
         replacement_detail=(
             "Each re-exported DTO has moved to the `schemas` module of the bounded "
-            "context that owns it. The rest of the file has not moved."
+            "context that owns it. The shared `ApiModel` lives independently in "
+            "`atlas.platform.schemas`; this file preserves its identity alias. "
+            "The rest of the file has not moved."
         ),
         owner="Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, "
         "observability_audit, profiling) jointly",
         introduced="ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md",
         removal_condition=(
-            "Same shape as `aida.models`, plus one hard constraint: the moved DTO "
-            "modules import `ApiModel` back from this file, so the re-export block "
-            "cannot be removed before `ApiModel` moves somewhere neither side owns. "
-            "The circular import resolves today only because the block sits below "
-            "`ApiModel`'s definition."
+            "Same shape as `aida.models`: move supported callers to the owning "
+            "module before removing a re-export. The shared base no longer "
+            "creates an import cycle; keep `ApiModel` as an identity alias until "
+            "its supported callers also move to `atlas.platform.schemas`."
         ),
     ),
     # --- Phase 5 (tracker ST-07 Commits A/B): catalog service moves ---

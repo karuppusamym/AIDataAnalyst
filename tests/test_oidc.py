@@ -325,6 +325,8 @@ class _IdentityProvider:
         self.clock = clock
         self.fetches = 0
         self.down = False
+        # A status other than 200 is answered with an empty body of that status.
+        self.status = 200
         self.fetch_takes = 0.0
         # While set, an arriving request is held until the test opens it: a fetch that is still in
         # flight, and so can be cancelled.
@@ -340,6 +342,8 @@ class _IdentityProvider:
         await asyncio.sleep(0)
         if self.down:
             raise httpx.ConnectError("identity provider is down", request=request)
+        if self.status != 200:
+            return httpx.Response(self.status, request=request)
         return httpx.Response(200, json={"keys": self.keys})
 
 
@@ -905,19 +909,56 @@ async def test_a_concurrent_cold_burst_against_a_dead_provider_makes_one_attempt
 
 
 @pytest.mark.asyncio
-async def test_an_empty_key_set_is_a_failed_refresh_and_does_not_replace_the_good_one(
-    rig: _Rig,
-) -> None:
-    """A provider answering, but with nothing usable, is a failed refresh like one that does not
-    answer: the good key set is kept and served stale, and the answer is not asked for again."""
+async def test_an_empty_key_set_is_an_answer_and_the_old_keys_end_at_expiry(rig: _Rig) -> None:
+    """A provider that answers with no keys is saying something about its keys, not failing.
+
+    An issuer withdraws a compromised key by no longer publishing it, and in an emergency by
+    publishing none. Serving the last good set in its place (as before 2026-09-21) kept a withdrawn
+    key verifying for the whole stale grace. Now the held set lasts to its expiry and no longer:
+    past it the token is refused, the provider is not asked again inside the backoff, and the next
+    good answer restores service.
+    """
     await rig.verifier.verify(rig.token("bank-key-1"))
+    published = list(rig.idp.keys)
     rig.idp.keys = []
     rig.clock.advance(_cache_seconds(rig) + 1)
 
     for _ in range(5):
-        claims = await rig.verifier.verify(rig.token("bank-key-1"))
-        assert claims["sub"] == "bank-user-123"
+        with pytest.raises(OidcVerificationError):
+            await rig.verifier.verify(rig.token("bank-key-1"))
     assert rig.idp.fetches == 2
+
+    rig.idp.keys = published
+    rig.clock.advance(BACKOFF + 1)
+    claims = await rig.verifier.verify(rig.token("bank-key-1"))
+    assert claims["sub"] == "bank-user-123"
+    assert rig.idp.fetches == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 410, 401, 403])
+async def test_a_client_error_from_the_provider_is_an_answer_not_an_outage(
+    rig: _Rig, status: int
+) -> None:
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.idp.status = status
+    rig.clock.advance(_cache_seconds(rig) + 1)
+
+    with pytest.raises(OidcVerificationError):
+        await rig.verifier.verify(rig.token("bank-key-1"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 502, 503, 429])
+async def test_a_server_error_or_throttling_is_an_outage_and_the_last_good_set_is_served(
+    rig: _Rig, status: int
+) -> None:
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.idp.status = status
+    rig.clock.advance(_cache_seconds(rig) + 1)
+
+    claims = await rig.verifier.verify(rig.token("bank-key-1"))
+    assert claims["sub"] == "bank-user-123"
 
 
 @pytest.mark.asyncio

@@ -105,7 +105,12 @@ JWKS_REFRESH_FAILURE_BACKOFF_SECONDS = 30.0
 #: (`aida.token_revocation`) is per token, not per key. So the stale service has to end on its own.
 #:
 #: With a reachable provider a withdrawn key stops verifying after at most `oidc_jwks_cache_seconds`
-#: -- exposure the deployment already accepted. With an unreachable one it is at most that PLUS this
+#: -- exposure the deployment already accepted. "Reachable" means the provider ANSWERED: a 4xx, an
+#: empty or malformed key set, or an oversized document is the provider saying something about its
+#: keys, not an outage, so none of those is answered from the stale set (`JwksRejected`; before
+#: 2026-09-21 every failed refresh was, so an issuer that withdrew its keys by publishing an empty
+#: set kept them verifying through the whole grace). Only a transport failure, a timeout, a 5xx or a
+#: 429 is an outage. With an unreachable provider the exposure is at most the cache time PLUS this
 #: constant: 15 minutes at the shipped 300 second cache, and never more, because past it the key
 #: set is not served at all. A request is then refused exactly as when no key set could ever be
 #: loaded ("OIDC JWKS endpoint is unavailable"), which is INV-4: an identity that cannot be checked
@@ -128,6 +133,15 @@ _JWKS_UNAVAILABLE = "OIDC JWKS endpoint is unavailable"
 
 class OidcVerificationError(RuntimeError):
     pass
+
+
+class JwksRejected(OidcVerificationError):
+    """The provider answered, and the answer holds no usable key set.
+
+    A 4xx or a redirect, a body that is not JSON, one over the size limit, or a key set that is
+    empty, oversized or malformed. Unlike an outage this is information about the keys, so the last
+    good set is not served in its place (`OidcVerifier._servable_stale`).
+    """
 
 
 class OidcTokenExpired(OidcVerificationError):
@@ -338,6 +352,10 @@ class OidcVerifier:
         # reason and not for a vaguer one. Always one of this module's fixed messages -- never
         # text taken from the provider's answer.
         self._failure_reason: str | None = None
+        # False after an attempt the provider ANSWERED with no usable key set (`JwksRejected`):
+        # then the held set is not served past its expiry, because the provider has just said it
+        # no longer vouches for it. True again after the next good load.
+        self._stale_allowed = True
         self._lock = asyncio.Lock()
 
     def _servable_stale(self, now: float) -> dict[str, Any] | None:
@@ -347,6 +365,8 @@ class OidcVerifier:
         held set may be used" means during a backoff that began before the set expired.
         """
         held = self._jwks
+        if not self._stale_allowed and now >= self._expires_at:
+            return None
         if held is not None and now < self._expires_at + JWKS_STALE_KEY_SET_GRACE_SECONDS:
             return held
         return None
@@ -436,6 +456,7 @@ class OidcVerifier:
         self._expires_at = monotonic() + self.settings.oidc_jwks_cache_seconds
         self._retry_after = None
         self._failure_reason = None
+        self._stale_allowed = True
         if recovered:
             _log.info("oidc_jwks_refresh_recovered", key_count=len(jwks["keys"]))
 
@@ -450,6 +471,7 @@ class OidcVerifier:
         reason = str(exc) if isinstance(exc, OidcVerificationError) else _JWKS_UNAVAILABLE
         self._retry_after = now + JWKS_REFRESH_FAILURE_BACKOFF_SECONDS
         self._failure_reason = reason
+        self._stale_allowed = not isinstance(exc, JwksRejected)
         held = self._jwks
         # One line per failed attempt, so at most one per backoff window per process: an operator
         # learns that the provider is unreachable and how long the stale key set has left, rather
@@ -478,24 +500,34 @@ class OidcVerifier:
             try:
                 jwks = json.loads(self.settings.oidc_jwks_json)
             except json.JSONDecodeError as exc:
-                raise OidcVerificationError("pinned OIDC JWKS JSON is invalid") from exc
+                raise JwksRejected("pinned OIDC JWKS JSON is invalid") from exc
         elif self.settings.oidc_jwks_url:
             try:
                 async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
                     response = await client.get(self.settings.oidc_jwks_url)
                     response.raise_for_status()
                     if len(response.content) > MAX_JWKS_BYTES:
-                        raise OidcVerificationError("OIDC JWKS document exceeds the size limit")
+                        raise JwksRejected("OIDC JWKS document exceeds the size limit")
                     jwks = response.json()
-            except (httpx.HTTPError, ValueError) as exc:
+            except httpx.HTTPStatusError as exc:
+                # A 5xx or a 429 is the provider failing or shedding load: an outage. Any other
+                # non-2xx (a 404, a 410, a 401, a redirect) is an answer, and not a key set.
+                status = exc.response.status_code
+                if status >= 500 or status == 429:
+                    raise OidcVerificationError(_JWKS_UNAVAILABLE) from exc
+                raise JwksRejected(_JWKS_UNAVAILABLE) from exc
+            except httpx.HTTPError as exc:
+                # Connect, read and write errors and timeouts: the provider could not be asked.
                 raise OidcVerificationError(_JWKS_UNAVAILABLE) from exc
+            except ValueError as exc:
+                raise JwksRejected(_JWKS_UNAVAILABLE) from exc
         else:
             raise OidcVerificationError("OIDC JWKS is not configured")
         if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
-            raise OidcVerificationError("OIDC JWKS document has an invalid shape")
+            raise JwksRejected("OIDC JWKS document has an invalid shape")
         keys = jwks["keys"]
         if not keys or len(keys) > MAX_JWKS_KEYS or not all(isinstance(key, dict) for key in keys):
-            raise OidcVerificationError("OIDC JWKS key set has an invalid shape")
+            raise JwksRejected("OIDC JWKS key set has an invalid shape")
         return jwks
 
     async def verify(self, token: str) -> dict[str, Any]:

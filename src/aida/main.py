@@ -92,6 +92,7 @@ from aida.readiness import (
     probe_workspace_authorization_posture,
 )
 from aida.relationship_validation_api import router as relationship_validation_router
+from aida.request_body_limits import RequestBodyLimitMiddleware
 from aida.retrieval_ops_api import router as retrieval_ops_router
 from aida.review_batch_api import router as review_batch_router
 from aida.review_queue_api import router as review_queue_router
@@ -508,6 +509,11 @@ app.include_router(
 # R11-GQL01: POST /graphql -- typed metadata reads over the same authorization the
 # REST catalog reads make. Read-only; governed execution is R11-GQL02.
 app.include_router(graphql_router)
+
+# R11-AUD11: the proxy's body bounds on the API's own port, ahead of every route's body parse.
+# Added before `request_context` below, so that one stays outermost and a 413 still carries a
+# correlation id and is counted like any other response.
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.middleware("http")

@@ -42,11 +42,24 @@
 # and watching the leak count stay at 1. Keep these merged until the pinned
 # version moves.
 
+# The third set is four more *values* (R11-VAL01, 2026-09-21). The job was red
+# again from 2026-09-18: the report of run 35601042250 (at `cb69f42`) lists 8
+# findings, every one the default `generic-api-key` rule matching a `key` or
+# `subject_key` field in a test fixture. None is a credential: they are the
+# descending-hex placeholder `fedcba9876543210...` used as a knowledge-bundle
+# object key in `KnowledgeView.test.tsx` and `ObjectSourceKnowledge.test.tsx`;
+# the idempotency keys `journey-gql02-000N` in `tests/test_footprint_journey.py`;
+# and, in `tests/test_okf_import_hostile.py`, a document key digest and the
+# tampered copy the test substitutes for it. Allowlisted by exact value for the
+# same reason as `ci-smoke-token`: the files stay scanned, so a real secret
+# pasted into them still fails the job. History cannot be edited, so fixing the
+# files alone would not clear the findings.
+
 [extend]
 useDefault = true
 
 [allowlist]
-  description = "Synthetic connector-auth fixtures in unit tests, and the CI proxy-contract smoke placeholder -- not real credentials"
+  description = "Synthetic connector-auth fixtures in unit tests, the CI proxy-contract smoke placeholder, and four synthetic test-fixture key values -- not real credentials"
   regexTarget = "match"
   paths = [
     '''tests/test_connectors_databricks\.py''',
@@ -55,4 +68,8 @@ useDefault = true
   ]
   regexes = [
     '''ci-smoke-token''',
+    '''fedcba9876543210fedcba9876543210''',
+    '''journey-gql02-000[0-9]''',
+    '''eecde9b0abfa5ed6c95a70064d99018b''',
+    '''0000b0abfa5ed6c95a70064d99018b00''',
   ]

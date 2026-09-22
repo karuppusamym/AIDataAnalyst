@@ -61,6 +61,22 @@ def _fresh_logger(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(scheduler, "logger", structlog.get_logger(scheduler.__name__))
 
 
+@pytest.fixture(autouse=True)
+def _saved_outcomes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str | None]]:
+    """Capture what each iteration would persist (R11-VAL04) instead of writing it anywhere.
+
+    The stub database below has no `add`, and the real `session_factory` would reach whatever
+    database the settings name. `tests/test_scheduler_pass_status.py` covers the write itself.
+    """
+    saved: list[dict[str, str | None]] = []
+
+    async def record(outcomes: dict[str, str | None]) -> None:
+        saved.append(dict(outcomes))
+
+    monkeypatch.setattr(scheduler, "_save_pass_outcomes", record)
+    return saved
+
+
 class _Nothing:
     def all(self) -> list[Any]:
         return []
@@ -114,7 +130,10 @@ def _failures(label: str) -> float:
 
 
 def test_the_labels_are_exactly_the_steps_the_iteration_guards() -> None:
-    assert set(scheduler.SCHEDULER_PASS_NAMES) == set(PASSES) | {"scan_policy_selection"}
+    assert set(scheduler.SCHEDULER_PASS_NAMES) == set(PASSES) | {
+        "scan_policy_selection",
+        "scan_policy_processing",
+    }
     assert len(scheduler.SCHEDULER_PASS_NAMES) == len(set(scheduler.SCHEDULER_PASS_NAMES))
     assert len(PASSES) > 20, "the scan of the iteration's source found almost nothing"
     for function in PASSES.values():
@@ -174,6 +193,8 @@ async def test_a_failure_is_logged_with_its_pass_and_its_exception(
     assert [entry["scheduler_pass"] for entry in failed] == ["ownership_expiry"]
     assert failed[0]["log_level"] == "error"
     assert failed[0]["exc_info"] is True
+    # The traceback is redacted by the platform's log processors; the class name is not.
+    assert failed[0]["error_type"] == "_Boom"
 
 
 async def test_a_failure_choosing_the_due_scan_policies_is_contained_and_counted(
@@ -208,3 +229,87 @@ async def test_cancellation_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(asyncio.CancelledError):
         await _iterate()
+
+
+# --- R11-VAL04: what the iteration hands to the Operations screen ---------------------------
+
+
+async def test_every_pass_outcome_is_handed_on_once_per_iteration(
+    monkeypatch: pytest.MonkeyPatch, _saved_outcomes: list[dict[str, str | None]]
+) -> None:
+    _stub_every_pass(monkeypatch, failing={"reaper", "delivery_worker"})
+
+    await _iterate()
+
+    assert len(_saved_outcomes) == 1
+    (outcomes,) = _saved_outcomes
+    assert set(outcomes) == set(scheduler.SCHEDULER_PASS_NAMES)
+    assert outcomes["reaper"] == outcomes["delivery_worker"] == "_Boom"
+    assert {name for name, error in outcomes.items() if error is None} == (
+        set(scheduler.SCHEDULER_PASS_NAMES) - {"reaper", "delivery_worker"}
+    )
+
+
+async def test_the_scan_policy_step_hands_on_its_own_outcome(
+    monkeypatch: pytest.MonkeyPatch, _saved_outcomes: list[dict[str, str | None]]
+) -> None:
+    _stub_every_pass(monkeypatch, failing=set())
+    await _iterate()
+
+    class _Refused(_NoDatabase):
+        async def scalars(self, statement: object) -> _Nothing:
+            raise _Boom("database unreachable")
+
+    monkeypatch.setattr(scheduler, "session_factory", lambda: _Refused())
+    await _iterate()
+
+    assert [saved["scan_policy_selection"] for saved in _saved_outcomes] == [None, "_Boom"]
+
+
+async def test_an_iteration_that_is_cancelled_hands_on_nothing(
+    monkeypatch: pytest.MonkeyPatch, _saved_outcomes: list[dict[str, str | None]]
+) -> None:
+    import asyncio
+
+    async def cancelled(*args: object, **kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    _stub_every_pass(monkeypatch, failing=set())
+    monkeypatch.setattr(scheduler, PASSES["reaper"], cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _iterate()
+    assert _saved_outcomes == []
+
+
+async def test_a_scan_policy_that_fails_to_be_admitted_is_counted_and_reported(
+    monkeypatch: pytest.MonkeyPatch, _saved_outcomes: list[dict[str, str | None]]
+) -> None:
+    """Round 12 logged a failed admission but counted it nowhere."""
+    _stub_every_pass(monkeypatch, failing=set())
+
+    class _OnePolicyDue(_NoDatabase):
+        async def scalars(self, statement: object) -> Any:
+            class _Due:
+                def all(self) -> list[str]:
+                    return ["policy-1", "policy-2"]
+
+            return _Due()
+
+    admitted: list[str] = []
+
+    async def process(policy_id: str, *args: object, **kwargs: object) -> bool:
+        if policy_id == "policy-1":
+            raise _Boom("admission broke")
+        admitted.append(policy_id)
+        return True
+
+    monkeypatch.setattr(scheduler, "session_factory", lambda: _OnePolicyDue())
+    monkeypatch.setattr(scheduler, "process_scan_policy", process)
+    before = _failures("scan_policy_processing")
+
+    assert await _iterate() == 1
+    assert admitted == ["policy-2"]
+    assert _failures("scan_policy_processing") == before + 1
+    assert _saved_outcomes[-1]["scan_policy_processing"] == "_Boom"
+
