@@ -228,6 +228,8 @@ export interface RequestOptions {
   readonly headers?: Record<string, string>;
   /** JSON request body. Omit for GET/DELETE. */
   readonly body?: unknown;
+  /** Unencoded bytes, e.g. a workbook File. Mutually exclusive with body. */
+  readonly rawBody?: BodyInit;
 }
 
 /** Supplies per-request headers (identity, organization). Set by `api.ts`. */
@@ -283,6 +285,9 @@ export async function request<T>(
   options: RequestOptions = {},
 ): Promise<T> {
   const hasBody = options.body !== undefined;
+  if (hasBody && options.rawBody !== undefined) {
+    throw new TypeError("A request cannot contain both JSON and raw bodies.");
+  }
   const headers: Record<string, string> = {
     Accept: "application/json",
     ...(hasBody ? { "Content-Type": "application/json" } : {}),
@@ -297,7 +302,9 @@ export async function request<T>(
       signal: options.signal,
       headers,
       credentials: "same-origin",
-      ...(hasBody ? { body: JSON.stringify(options.body) } : {}),
+      ...(options.rawBody !== undefined
+        ? { body: options.rawBody }
+        : hasBody ? { body: JSON.stringify(options.body) } : {}),
     });
   } catch (cause) {
     // An aborted request is the caller's own doing, not a transport failure,

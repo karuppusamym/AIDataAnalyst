@@ -37,7 +37,7 @@ import * as transformations from "./transformations";
       implementations of the same endpoint, only one of them reachable.
 --------------------------------------------------------------------------- */
 
-/** The transport is where the client's single `fetch` lives, by definition. */
+/** Domain transport installs headers; HTTP mechanics live in ../http.ts. */
 const TRANSPORT = "./transport.ts";
 
 /* Read through Vite rather than `node:fs`: `@types/node` is deliberately not
@@ -86,12 +86,9 @@ describe("one transport", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("the transport module is the only place that calls fetch", () => {
+  it("the domain transport delegates all HTTP mechanics to http.ts", () => {
     const transport = SOURCES[TRANSPORT] ?? "";
-    // One raw-body upload, because `http.ts`'s `request` JSON-stringifies its
-    // body and cannot carry a `File`. If this count grows, a second transport
-    // is being written -- add the verb to `http.ts` instead.
-    expect(withoutComments(transport).match(/\bfetch\s*\(/g) ?? []).toHaveLength(1);
+    expect(withoutComments(transport).match(/\bfetch\s*\(/g) ?? []).toHaveLength(0);
   });
 });
 

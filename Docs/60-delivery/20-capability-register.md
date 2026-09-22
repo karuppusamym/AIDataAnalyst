@@ -1,5 +1,7 @@
 # Capability register — current state
 
+> **Upload transport correction, 2026-09-21 (R11-VAL05):** workbook uploads now use the common HTTP request path. Their original bytes and identity headers are preserved; success, refusal and network failure reach the shell's connection observers, while cancellation does not report an outage. Verified by 36 focused frontend tests and the production build. The schema import cycle and unused-symbol decisions remain open in tracker section P.
+
 > **Reconciliation 2026-09-11:** this register owns dated capability evidence, not work status. [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns execution.
 >
 > **Refresh 2026-09-12 (R11-B14), completed.** Every row that still carried a 2026-09-06 measurement — 34 of them — was re-measured against the tree on 2026-09-12, one at a time, and now carries that date. Six rows had already been re-measured earlier the same day (the query execution gateway, Kafka/Redpanda outbox publication, Neo4j graph projection, and the three capabilities in the "added this cycle" section).

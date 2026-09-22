@@ -28,7 +28,7 @@
 
 import { identityHeaders as configuredIdentityHeaders } from "../appConfig";
 import { authorizationHeaders } from "../authSession";
-import { decodeError, request, setHeaderProvider } from "../http";
+import { request, setHeaderProvider } from "../http";
 import { getCurrentOrgId } from "../org-context";
 
 export { ApiError, requestBlob } from "../http";
@@ -163,24 +163,8 @@ export function requestWithInit<T>(
 }
 
 /**
- * The one raw-byte upload in this client.
- *
- * `request` JSON-stringifies its body, so a `File` cannot go through it: an
- * octet-stream upload has to hand `fetch` the `File` itself. That is a real
- * gap in `http.ts`, not a licence for a second transport -- so the exception
- * lives here, once, and uses the same header provider and the same
- * `decodeError` as every other verb. `./columnDocumentation.ts` hand-rolled
- * five `fetch` calls, of which this is the only one that has to: three were
- * plain JSON POSTs and one was a download `requestBlob` already covers. Each
- * carried a private decoder that understood only `{"detail": ...}`, so the
- * error code, correlation id and 422 field errors F14 preserves were dropped
- * on all five.
- *
- * KNOWN GAP, deliberately not hidden: an outcome here does not reach
- * `observeRequests`, because `http.ts` does not export its notifier. So a
- * failed workbook upload is invisible to the shell's connection state (F13).
- * Closing it means a raw-body verb in `http.ts`; this module cannot fix it
- * from the outside.
+ * Upload bytes through the same identity, error decoder and outcome observers
+ * as JSON requests. Passing rawBody preserves the File without JSON encoding.
  */
 export async function requestRawBody<T>(
   method: "POST" | "PUT",
@@ -189,13 +173,9 @@ export async function requestRawBody<T>(
   contentType: string,
   signal?: AbortSignal,
 ): Promise<T> {
-  const res = await fetch(path, {
-    method,
+  return request<T>(method, path, {
     signal,
-    body,
-    headers: { Accept: "application/json", "Content-Type": contentType, ...requestHeaders() },
-    credentials: "same-origin",
+    rawBody: body,
+    headers: { "Content-Type": contentType },
   });
-  if (!res.ok) throw await decodeError(res);
-  return (await res.json()) as T;
 }
