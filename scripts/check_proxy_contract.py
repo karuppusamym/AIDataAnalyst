@@ -112,6 +112,16 @@ UPLOAD_BODY_ROUTES: tuple[str, ...] = (
 #: `okf_import_bundle.MAX_ARCHIVE_BYTES`.
 UPLOAD_BODY_BYTES = 32 * MIB
 
+#: How long nginx must wait for the API's answer on the envelope and upload routes (R11-AUD11).
+#: Each parses, diffs and records a large body inside one synchronous request, and nginx's own
+#: 60 s default would answer 504 while the API went on to commit: the caller told "failed" about
+#: a batch that exists. Measured 2026-09-21: the workbook's worst case, a sheet just under the
+#: reader's 128 MiB uncompressed cap, parsed in about 10 s on a developer machine; the diff is one
+#: query and a batch records at most 5,000 changes. The synchronous envelope at its caps was not
+#: measured. 300 s is the bound `/mcp` already uses; a push that needs longer belongs in the batch
+#: contract.
+LONG_REQUEST_READ_TIMEOUT_SECONDS = 300
+
 #: Real API routes that are NOT envelope routes. Each must still resolve to a proxied location
 #: limited to nginx's default, which is what "raise the limit for the ingestion routes only, do
 #: not loosen `/v1/` generally" means when it is checked rather than intended. The batch manifest,
@@ -288,6 +298,10 @@ _BODY_LIMIT = re.compile(
     r"(?:^|(?<=[;{}]))\s*client_max_body_size\s+(\d+)([kKmMgG]?)\s*;", re.MULTILINE
 )
 _UNIT_BYTES = {"": 1, "k": 1024, "m": MIB, "g": 1024 * MIB}
+_READ_TIMEOUT = re.compile(
+    r"(?:^|(?<=[;{}]))\s*proxy_read_timeout\s+(\d+)(ms|s|m|h|d)?\s*;", re.MULTILINE
+)
+_UNIT_SECONDS = {"ms": 0.001, "": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 def _limit_from(text: str) -> float | None:
@@ -301,6 +315,25 @@ def _limit_from(text: str) -> float | None:
         return None
     size = int(match.group(1)) * _UNIT_BYTES[match.group(2).lower()]
     return math.inf if size == 0 else float(size)
+
+
+def _read_timeout_from(text: str) -> float | None:
+    """The `proxy_read_timeout` a block sets, in seconds, or `None` if it sets none.
+
+    nginx reads a bare number as seconds, and so does this.
+    """
+    match = _READ_TIMEOUT.search(text)
+    if match is None:
+        return None
+    return int(match.group(1)) * _UNIT_SECONDS[match.group(2) or ""]
+
+
+def server_level_read_timeout(text: str) -> float | None:
+    """The read timeout set on the `server` itself, which a location without its own inherits."""
+    remaining = text
+    for match in reversed(list(_LOCATION_OPEN.finditer(text))):
+        remaining = remaining[: match.start()] + remaining[_block_end(text, match.end()) :]
+    return _read_timeout_from(remaining)
 
 
 def server_level_body_limit(text: str) -> float | None:
@@ -410,6 +443,23 @@ def body_limit_problems(nginx_text: str) -> list[str]:
                 f"'{path}' is served by location '{location.pattern}' with a body limit of "
                 f"{_mib(limit)}; the API accepts up to {_mib(UPLOAD_BODY_BYTES)} there, and the "
                 "proxy should admit exactly that much (R11-AUD11)"
+            )
+
+    server_timeout = server_level_read_timeout(nginx_text)
+    for path in (*INGESTION_BODY_ROUTES, *UPLOAD_BODY_ROUTES):
+        location = resolve_location(locations, path)
+        if location is None or not location.proxied:
+            continue  # already reported above
+        timeout = _read_timeout_from(location.body)
+        if timeout is None:
+            timeout = server_timeout
+        if timeout is None or timeout < LONG_REQUEST_READ_TIMEOUT_SECONDS:
+            shown = "nginx's 60 s default" if timeout is None else f"{timeout:g} s"
+            problems.append(
+                f"'{path}' is served by location '{location.pattern}' with a read timeout of "
+                f"{shown}; a body this large is parsed and recorded inside the request, so the "
+                f"proxy must wait at least {LONG_REQUEST_READ_TIMEOUT_SECONDS} s rather than "
+                "answer 504 while the API commits (R11-AUD11)"
             )
 
     for path in GENERAL_API_ROUTES:
@@ -538,6 +588,10 @@ def main() -> int:
     print(
         f"OK: the {len(UPLOAD_BODY_ROUTES)} file-upload routes admit exactly the "
         f"{_mib(UPLOAD_BODY_BYTES)} the API accepts"
+    )
+    print(
+        f"OK: every envelope and upload route waits at least {LONG_REQUEST_READ_TIMEOUT_SECONDS} s "
+        "for the API's answer"
     )
     print("(static configuration check -- see the `ui-proxy` CI job for the live test)")
     return 0

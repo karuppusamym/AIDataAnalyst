@@ -144,10 +144,12 @@ def test_the_ingestion_location_proxies_exactly_as_v1_does() -> None:
 
     def directives(body: str) -> set[str]:
         # The two blocks name their upstream variable differently; the variable is not the point.
+        # The body limit and the timeouts are what the block exists to change (R11-AUD05, AUD11).
+        own = ("set ", "client_max_body_size", "proxy_read_timeout", "proxy_send_timeout")
         return {
             re.sub(r"\$\w+_upstream", "$upstream", re.sub(r"\s+", " ", line.strip()))
             for line in body.splitlines()
-            if line.strip() and not line.strip().startswith(("set ", "client_max_body_size"))
+            if line.strip() and not line.strip().startswith(own)
         }
 
     assert directives(ingestion.body) == directives(v1.body)
@@ -213,6 +215,32 @@ def test_the_upload_limit_is_the_one_the_api_enforces() -> None:
     assert contract.UPLOAD_BODY_BYTES == MAX_UPLOAD_BYTES == MAX_ARCHIVE_BYTES
     for route in contract.UPLOAD_BODY_ROUTES:
         assert _limit_for(route) == contract.UPLOAD_BODY_BYTES
+
+
+def test_every_envelope_and_upload_route_waits_for_the_api_long_enough() -> None:
+    """R11-AUD11: these requests parse and record a large body before answering, and nginx's 60 s
+    default would turn a slow success into a 504 for a batch the API goes on to record."""
+    locations = contract.parse_nginx_locations(NGINX)
+    for route in (*contract.INGESTION_BODY_ROUTES, *contract.UPLOAD_BODY_ROUTES):
+        location = contract.resolve_location(locations, route)
+        assert location is not None, route
+        timeout = contract._read_timeout_from(location.body)
+        assert timeout is not None, f"{route} relies on nginx's 60 s default"
+        assert timeout >= contract.LONG_REQUEST_READ_TIMEOUT_SECONDS, (route, timeout)
+
+
+@pytest.mark.parametrize(
+    ("directive", "seconds"),
+    [
+        ("proxy_read_timeout 300s;", 300),
+        ("proxy_read_timeout 300;", 300),
+        ("proxy_read_timeout 5m;", 300),
+        ("proxy_read_timeout 300000ms;", 300),
+        ("proxy_send_timeout 300s;", None),
+    ],
+)
+def test_the_timeout_parser_reads_nginx_s_units(directive: str, seconds: float | None) -> None:
+    assert contract._read_timeout_from(directive) == seconds
 
 
 def test_every_upload_route_the_gate_names_is_a_real_post_route() -> None:
@@ -358,6 +386,21 @@ def _replace(old: str, new: str) -> Callable[[str], str]:
 
 
 _INGESTION_LIMIT = "client_max_body_size 64m;"
+_UPLOAD_LIMIT = "client_max_body_size 32m;"
+
+
+def _in_block(limit: str, old: str, new: str) -> Callable[[str], str]:
+    """Edit only the location block that sets `limit`, since `/mcp` and both long-request
+    blocks carry the same timeout line."""
+
+    def transform(text: str) -> str:
+        start = text.rindex("location", 0, text.index(limit))
+        end = text.index("}", start)
+        block = text[start:end]
+        assert old in block, f"the block setting {limit!r} no longer contains {old!r}"
+        return text[:start] + block.replace(old, new, 1) + text[end:]
+
+    return transform
 _V1_OPEN = "location /v1/ {"
 _REGEX = "^/v1/(datasources/[^/]+/metadata-ingestions|metadata-ingestion-batches/[^/]+/chunks)/?$"
 
@@ -422,6 +465,16 @@ _BROKEN_CONFIGS: list[tuple[str, Callable[[str], str], str]] = [
         "the upload limit is raised past what the API accepts",
         _replace("client_max_body_size 32m;", "client_max_body_size 48m;"),
         "the proxy should admit exactly that much",
+    ),
+    (
+        "the upload location drops its read timeout and falls back to nginx's 60 s",
+        _in_block(_UPLOAD_LIMIT, "proxy_read_timeout 300s;", ""),
+        "with a read timeout of nginx's 60 s default",
+    ),
+    (
+        "the envelope location's read timeout is cut back to 60 s",
+        _in_block(_INGESTION_LIMIT, "proxy_read_timeout 300s;", "proxy_read_timeout 60s;"),
+        "with a read timeout of 60 s",
     ),
     (
         "a location is nested, which the gate refuses to guess about",
