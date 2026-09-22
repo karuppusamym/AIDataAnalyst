@@ -64,11 +64,16 @@ def test_many_distinct_unknown_urls_produce_one_series_not_n() -> None:
     for index in range(40):
         assert client.get(f"/definitely-not-a-route/{index}/{'x' * index}").status_code == 404
 
-    added = _path_labels() - before
-    assert added == {main_module.UNMATCHED_PATH_LABEL}, (
+    after = _path_labels()
+    added = after - before
+    # An earlier test in the same process may already have made the constant label (a request
+    # the body cap refuses is counted under it too: it never reaches routing). So the check is
+    # that no per-URL label appeared and the constant one is there, whichever test made it.
+    assert added <= {main_module.UNMATCHED_PATH_LABEL}, (
         f"40 distinct unknown URLs added {len(added)} metric label values: {sorted(added)}. "
         "Unmatched paths must collapse onto one constant label."
     )
+    assert main_module.UNMATCHED_PATH_LABEL in after
 
 
 def test_matched_routes_still_report_their_own_template() -> None:
