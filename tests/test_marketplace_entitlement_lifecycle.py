@@ -174,7 +174,7 @@ async def _seed(session: AsyncSession, *, consumer_roles: list[str] | None = Non
         usage_terms="Approved analytical use only.",
         classification="INTERNAL",
         discoverable_roles=["*"],
-        consumer_roles=consumer_roles if consumer_roles is not None else ["DataProductOwner"],
+        consumer_roles=consumer_roles if consumer_roles is not None else ["DataSteward"],
         fingerprint=uuid4().hex,
         created_by=OWNER,
         published_at=QUEUED_AT,
@@ -277,7 +277,7 @@ async def test_approved_request_provisions_then_consumption_succeeds_then_revoke
     assert [port.port_key for port in consumption.ports] == ["revenue_model"]
 
     # Revoke, as the product owner.
-    owner = _context(OWNER, "DataProductOwner", organization_id=org.id)
+    owner = _context(OWNER, "DataSteward", organization_id=org.id)
     revoked = await revoke_marketplace_access(
         access_request.id, context=owner, session=session
     )
@@ -303,7 +303,7 @@ async def test_every_transition_leaves_an_audit_receipt(session: AsyncSession) -
     await consume_marketplace_product(version.id, context=consumer, session=session)
     await revoke_marketplace_access(
         access_request.id,
-        context=_context(OWNER, "DataProductOwner", organization_id=org.id),
+        context=_context(OWNER, "DataSteward", organization_id=org.id),
         session=session,
     )
     with pytest.raises(HTTPException):

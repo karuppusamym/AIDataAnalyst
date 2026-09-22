@@ -58,6 +58,7 @@ from aida.okf_import_review import (
     OkfReviewPreview,
     read_okf_import_review,
 )
+from aida.request_body import read_body_within
 from aida.schemas import ApiModel
 from aida.security import SecurityContext, require_roles
 
@@ -239,14 +240,17 @@ def _require_enabled(settings: Settings) -> None:
 
 
 async def _archive(request: Request) -> bytes:
-    """The raw body, refused on its declared size before it is read into memory."""
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > MAX_ARCHIVE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail={"reason_code": ARCHIVE_TOO_LARGE, "detail": "the archive is too large"},
-        )
-    content = await request.body()
+    """The raw body, refused as soon as it is known to pass `MAX_ARCHIVE_BYTES` (R11-AUD11).
+
+    On its declared length before any of it is read, and otherwise -- a chunked body declares none
+    -- as soon as what has arrived passes the limit, so an over-limit upload is never buffered
+    past the limit plus one chunk.
+    """
+    content = await read_body_within(
+        request,
+        MAX_ARCHIVE_BYTES,
+        detail={"reason_code": ARCHIVE_TOO_LARGE, "detail": "the archive is too large"},
+    )
     if not content:
         raise HTTPException(status_code=422, detail="the request body is empty")
     return content

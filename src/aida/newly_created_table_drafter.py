@@ -62,6 +62,32 @@ consumer raises can end the supervisor, so nothing it raises can take
 the Temporal worker down with it; cancellation and the consumer's own
 stopping state (the SIGINT / SIGTERM flag) are the only ways out.
 
+**What a monitor can scrape (R11-AUD03).** The log lines above tell a person who
+is reading them; two series tell an alert.
+`aida_newly_created_table_drafter_consumer_up` is 1 while the consumer has
+started and is consuming and 0 while it is not -- before its first start,
+while it is being retried, after it ends. `..._failures_total` counts the
+attempts that ended without a stop having been asked for, the same events the
+`newly_created_table_drafter_unavailable` line reports. Both live in the
+Temporal worker's registry and reach a scrape only when the worker opens its
+metrics listener (`aida.worker_metrics`, `worker_metrics_port`, off by default).
+
+The gauge carries one label, `consumer_group`, and that is not decoration. This
+module is imported by the worker whether or not `auto_enqueue_on_ingest` is on,
+and a gauge with no label is exported at 0 from the moment it is created: a
+worker that had switched the feature off would publish "consumer down" forever,
+and an alert on it would page for a decision somebody made. A labelled gauge has
+no series until `.labels()` is first called, which the supervisor does when it
+starts -- so the series exists exactly where the consumer is supposed to be
+running, and an alert on `== 0` cannot fire anywhere else. Where it does fire is
+the default stack: `auto_enqueue_on_ingest` is on, there is no broker, and 0 is
+the truth.
+
+What the gauge cannot see is a consumer that dies on the same message again and
+again. It is 1 for the moment each attempt's `start()` has succeeded and 0 for
+the rest of every backoff, so a scrape occasionally lands on the 1. The failures
+counter is the reading that loop cannot hide from.
+
 **Per-message semantics are unchanged, on purpose.** An exception
 while handling a message leaves the `async for` before
 `consumer.commit()`, so the offset stays where it was and the group
@@ -96,6 +122,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
+from prometheus_client import Counter, Gauge
 from sqlalchemy import select
 
 from aida.agent_contracts import REASON_CONTRACT_MISSING, agent_kill_blocking_reason
@@ -147,6 +174,41 @@ _AUTO_ENQUEUE_PRINCIPAL = "auto-enqueue-drafter"
 # treats as "already in flight; do not stack another one on top of this".
 _OPEN_DRAFT_STATUSES = ("DRAFT", "PENDING_APPROVAL")
 _APPROVED_DOC_STATUS = "APPROVED"
+
+#: The Kafka consumer group this side-car reads the shared topic as. A constant because two
+#: things must name the same group: the consumer that joins it and the label on the gauge that
+#: says whether that consumer is up -- a label that drifted from the group would report on a
+#: consumer that does not exist.
+DRAFTER_CONSUMER_GROUP = "aida-newly-created-table-drafter-v1"
+
+DRAFTER_CONSUMER_UP = Gauge(
+    "aida_newly_created_table_drafter_consumer_up",
+    (
+        "1 while the newly-created-table drafter's Kafka consumer has started and is consuming, "
+        "0 while it is not (before its first start, while it is being retried). Absent when the "
+        "supervisor never ran, e.g. auto_enqueue_on_ingest is off. 0 is expected on the default "
+        "stack, which has no broker."
+    ),
+    labelnames=("consumer_group",),
+)
+DRAFTER_CONSUMER_FAILURES = Counter(
+    "aida_newly_created_table_drafter_failures_total",
+    (
+        "Attempts by the newly-created-table drafter's consumer that ended without a stop having "
+        "been asked for: the broker was unreachable or dropped, or a message could not be "
+        "handled. The supervisor restarts the consumer after each. A message that fails on every "
+        "delivery shows here even when the up gauge is caught at 1."
+    ),
+)
+
+
+def _set_consumer_up(value: int) -> None:
+    """The one place the gauge is written, so its label is written the same way everywhere.
+
+    The first call creates the series (see the module docstring on why that must not be at
+    import): the supervisor makes it at start, the consumer moves it after that.
+    """
+    DRAFTER_CONSUMER_UP.labels(consumer_group=DRAFTER_CONSUMER_GROUP).set(value)
 
 
 #: ADR-0029: the ledger intent of a draft made on ingest by an organization's
@@ -784,7 +846,7 @@ async def run_newly_created_table_drafter_consumer(
     consumer = AIOKafkaConsumer(
         "aida.platform.events.v1",
         bootstrap_servers=settings.kafka_bootstrap_servers,
-        group_id="aida-newly-created-table-drafter-v1",
+        group_id=DRAFTER_CONSUMER_GROUP,
         client_id="aida-newly-created-table-drafter",
         enable_auto_commit=False,
         auto_offset_reset="earliest",
@@ -799,6 +861,7 @@ async def run_newly_created_table_drafter_consumer(
         await consumer.start()
         started = True
         state.started_at = time.monotonic()
+        _set_consumer_up(1)
         logger.info(
             "newly_created_table_drafter_started",
             bootstrap_servers=settings.kafka_bootstrap_servers,
@@ -827,6 +890,10 @@ async def run_newly_created_table_drafter_consumer(
             if state.stopping:
                 break
     finally:
+        # First, before the awaits below: from here on nothing is consuming -- whether the loop
+        # ended, a message failed, `start()` never succeeded or this was cancelled -- and
+        # `stop()` against a broker that is gone can take a while to give up.
+        _set_consumer_up(0)
         try:
             await consumer.stop()
         except Exception as exc:
@@ -893,11 +960,17 @@ async def supervise_newly_created_table_drafter(
     driven by a fake consumer and a fake clock; the defaults are the real ones.
     When it creates the state it also installs the SIGINT / SIGTERM handlers that
     set it, as the bare consumer used to.
+
+    It also owns the two series in the module docstring: it creates the gauge, at 0, when
+    it starts (the consumer moves it to 1 once `start()` has succeeded and back to 0 when it
+    ends), and it counts each failed attempt into `DRAFTER_CONSUMER_FAILURES` where it logs it.
     """
     bootstrap_servers = get_settings().kafka_bootstrap_servers
     if state is None:
         state = DrafterConsumerState()
         _stop_on_signals(state)
+    # Not consuming yet, and the moment the series comes to exist: see the module docstring.
+    _set_consumer_up(0)
     failed_attempts = 0
     while not state.stopping:
         state.started_at = None
@@ -922,6 +995,9 @@ async def supervise_newly_created_table_drafter(
         ):
             failed_attempts = 0
         failed_attempts += 1
+        # Every failed attempt, not only the ones the log escalates: the counter is what a
+        # rate() over a window reads, and it must agree with the WARNING lines between the ERRORs.
+        DRAFTER_CONSUMER_FAILURES.inc()
         delay = drafter_retry_delay_seconds(failed_attempts)
         fields: dict[str, Any] = {
             "attempt": failed_attempts,

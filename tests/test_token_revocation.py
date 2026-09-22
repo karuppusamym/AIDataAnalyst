@@ -16,10 +16,12 @@ check *is* the replay defense (see `aida.token_revocation`'s module docstring).
 
 import itertools
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 import pytest_asyncio
@@ -36,7 +38,7 @@ from aida.db import Base
 from aida.models import AuditEvent, RevokedToken
 from aida.oidc import OidcVerifier, token_identifier
 from aida.reaper_service import _expired_token_revocations_stmt
-from aida.security import get_security_context
+from aida.security import get_security_context, reset_shared_oidc_verifiers, shared_oidc_verifier
 from aida.security_types import SecurityContext
 from aida.token_revocation import TokenRevokedError, enforce_not_revoked
 from aida.token_revocation_api import TokenRevocationRequest, revoke_token
@@ -424,3 +426,192 @@ async def test_an_expired_token_is_refused_as_expired_not_as_rejected(
 
     assert excinfo.value.status_code == 401
     assert excinfo.value.detail == "bearer token has expired"
+
+
+# --- one shared verifier per process (R11-AUD10) ---------------------------------
+#
+# `revoke_token` built a new `OidcVerifier` on every call: an empty key cache, so a JWKS fetch per
+# revocation, and no memory of the unknown-`kid` cooldown or of a provider that is down, so none
+# of the limits that protect the provider applied to it. These count real fetches through the
+# real `httpx` call, behind a fake provider, and make the same requests both ways.
+
+_ISSUER = "https://identity.bank.example"
+_JWKS_URL = "https://identity.bank.example/.well-known/jwks.json"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_shared_verifiers() -> Iterator[None]:
+    """The shared verifier is per process, so tests in one process would share it -- and the key
+    set, the backoff and the failure it remembers. Start and leave every test with none."""
+    reset_shared_oidc_verifiers()
+    yield
+    reset_shared_oidc_verifiers()
+
+
+class _Provider:
+    """The JWKS endpoint: counts how often it is asked, and can be down."""
+
+    def __init__(self, private_key: rsa.RSAPrivateKey) -> None:
+        jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
+        jwk.update({"kid": "bank-key-1", "use": "sig", "alg": "RS256"})
+        self.keys = [jwk]
+        self.fetches = 0
+        self.down = False
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.fetches += 1
+        if self.down:
+            raise httpx.ConnectError("identity provider is down", request=request)
+        return httpx.Response(200, json={"keys": self.keys})
+
+
+@pytest.fixture(scope="module")
+def signing_key() -> rsa.RSAPrivateKey:
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def provider(monkeypatch: pytest.MonkeyPatch, signing_key: rsa.RSAPrivateKey) -> _Provider:
+    fake = _Provider(signing_key)
+    real_client = httpx.AsyncClient
+
+    def client_with_fake_provider(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(fake.handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("aida.oidc.httpx.AsyncClient", client_with_fake_provider)
+    # A clock that never moves, so neither a cache lifetime nor a backoff window can elapse
+    # between two calls of a test.
+    monkeypatch.setattr("aida.oidc.monotonic", lambda: 1_000.0)
+    return fake
+
+
+def _url_settings() -> Settings:
+    return Settings(
+        identity_provider="oidc",
+        oidc_issuer=_ISSUER,
+        oidc_audience="atlas",
+        oidc_jwks_url=_JWKS_URL,
+    )
+
+
+def _alice(org_id: object) -> SecurityContext:
+    return SecurityContext(
+        principal_id="alice",
+        principal_type="USER",
+        organization_id=org_id,
+        roles=frozenset({"Analyst"}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_revoking_several_tokens_costs_one_key_set_fetch(
+    session: AsyncSession, provider: _Provider, signing_key: rsa.RSAPrivateKey
+) -> None:
+    settings = _url_settings()
+    org_id = uuid4()
+
+    for index in range(5):
+        token = _sign(
+            settings, signing_key, sub="alice", jti=f"alices-token-{index}", org=str(org_id)
+        )
+        result = await revoke_token(
+            TokenRevocationRequest(token=token, reason="user-initiated logout"),
+            context=_alice(org_id),
+            settings=settings,
+            session=session,
+        )
+        assert result.self_revocation is True
+
+    # A verifier built per call fetched the key set five times. One shared verifier holds it.
+    assert provider.fetches == 1
+
+
+@pytest.mark.asyncio
+async def test_the_revoke_route_uses_the_verifier_the_request_was_authenticated_with(
+    session: AsyncSession, provider: _Provider, signing_key: rsa.RSAPrivateKey
+) -> None:
+    """Signing in and then logging out is one process, one identity provider, one key set."""
+    settings = _url_settings()
+    org_id = uuid4()
+    token = _sign(settings, signing_key, sub="alice", jti="alices-session", org=str(org_id))
+
+    context = await get_security_context(
+        settings=settings,
+        session=session,
+        principal_id=None,
+        principal_type="USER",
+        organization_header=None,
+        roles="Viewer",
+        authorization=f"Bearer {token}",
+        business_purpose=None,
+    )
+    assert context.principal_id == "alice"
+    assert provider.fetches == 1
+
+    await revoke_token(
+        TokenRevocationRequest(token=token, reason="user-initiated logout"),
+        context=_alice(org_id),
+        settings=settings,
+        session=session,
+    )
+
+    assert provider.fetches == 1
+
+
+@pytest.mark.asyncio
+async def test_revocation_against_a_dead_provider_is_limited_like_any_other_verification(
+    session: AsyncSession, provider: _Provider, signing_key: rsa.RSAPrivateKey
+) -> None:
+    """The window is what this route never had: with the provider down, a burst of revocations
+    used to make one failed fetch each. It is now one attempt, and the rest are refused from the
+    failure that attempt recorded."""
+    provider.down = True
+    settings = _url_settings()
+    org_id = uuid4()
+    token = _sign(settings, signing_key, sub="alice", jti="alices-token", org=str(org_id))
+
+    for _ in range(10):
+        with pytest.raises(HTTPException) as excinfo:
+            await revoke_token(
+                TokenRevocationRequest(token=token, reason="user-initiated logout"),
+                context=_alice(org_id),
+                settings=settings,
+                session=session,
+            )
+        assert excinfo.value.status_code == 400
+        assert excinfo.value.detail == "the supplied token could not be verified"
+
+    assert provider.fetches == 1
+
+
+def test_one_verifier_per_identity_provider_configuration() -> None:
+    settings = _url_settings()
+
+    verifier = shared_oidc_verifier(settings)
+
+    # The same configuration, even in a different `Settings` object, is the same verifier ...
+    assert shared_oidc_verifier(settings) is verifier
+    assert shared_oidc_verifier(_url_settings()) is verifier
+    # ... and any setting the verifier reads makes it a different one.
+    for changed in (
+        {"oidc_issuer": "https://other-issuer.bank.example"},
+        {"oidc_audience": "another-product"},
+        {"oidc_jwks_url": "https://identity.bank.example/other/jwks.json"},
+        {"oidc_clock_skew_seconds": 5},
+        {"oidc_jwks_cache_seconds": 60},
+    ):
+        assert shared_oidc_verifier(settings.model_copy(update=changed)) is not verifier, changed
+    pinned = settings.model_copy(
+        update={"oidc_jwks_url": None, "oidc_jwks_json": '{"keys": [{"kid": "k"}]}'}
+    )
+    assert shared_oidc_verifier(pinned) is not verifier
+
+
+def test_resetting_the_shared_verifiers_gives_the_next_use_a_fresh_one() -> None:
+    settings = _url_settings()
+    verifier = shared_oidc_verifier(settings)
+
+    reset_shared_oidc_verifiers()
+
+    assert shared_oidc_verifier(settings) is not verifier

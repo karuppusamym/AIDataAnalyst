@@ -207,7 +207,7 @@ async def test_request_marketplace_access_flushes_review_before_access_insert(
         quality_score=92,
         lineage_coverage=80,
         discoverable_roles=["Analyst"],
-        consumer_roles=["DataConsumer"],
+        consumer_roles=["Viewer"],
         fingerprint="portfolio-fingerprint",
         created_by="owner",
     )

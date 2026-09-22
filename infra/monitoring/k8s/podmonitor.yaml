@@ -1,12 +1,14 @@
-# Prometheus Operator PodMonitors for the two background processes that publish
-# metrics nothing can currently reach (R11-FP17).
+# Prometheus Operator PodMonitors for the three background processes that publish
+# metrics nothing can currently reach (R11-FP17, R11-AUD03, R11-AUD04).
 #
 # **Read this before applying it: it selects pods that do not exist.**
 # `infra/k8s/base/README.md` records that four of the platform's six
-# application processes have no manifest at all, and two of those four are
+# application processes have no manifest at all, and three of those four are
 # exactly the ones below -- the fleet scheduler (which publishes every
-# `aida_footprint_*` gauge) and the graph projector (which publishes every
-# `aida_graph_projection_*` series). There is no Deployment for either, and no
+# `aida_footprint_*` gauge and the leader-election series), the graph projector
+# (which publishes every `aida_graph_projection_*` series) and the Temporal
+# worker (which publishes the newly-created-table drafter's consumer series).
+# There is no Deployment for any of them, and no
 # Service, which is why these are PodMonitors rather than ServiceMonitors:
 # there is no Service to select, and inventing one in a directory this change
 # does not own would be worse than pointing honestly at pods.
@@ -18,12 +20,12 @@
 # without a metrics listener -- which is the actual finding behind the tracker
 # row's "no deployment scrapes these gauges yet".
 #
-# **Two things must be true before either monitor has anything to scrape:**
+# **Two things must be true before any of these monitors has anything to scrape:**
 #
 #   1. A Deployment exists for the process, carrying the
 #      `app.kubernetes.io/name` label the selector below matches, and declaring
 #      a container port named `metrics`.
-#   2. `AIDA_WORKER_METRICS_PORT` is set for that process. Both processes are
+#   2. `AIDA_WORKER_METRICS_PORT` is set for that process. All three processes are
 #      long-lived asyncio loops with no HTTP server of their own;
 #      `aida.worker_metrics.serve_worker_metrics` starts one when that setting
 #      is non-zero, and does nothing at all when it is 0 (the default). With
@@ -70,6 +72,33 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: aida-graph-projector
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+# The Temporal worker (`python -m aida.workflows.worker`, `metadata-worker` in
+# compose). R11-AUD03: it is the first series this process has published -- the
+# newly-created-table drafter's consumer-up gauge and failed-attempts counter --
+# which is why this monitor exists now and did not before. The gauge is present
+# only while `auto_enqueue_on_ingest` is on.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: aida-metadata-worker
+  namespace: aida
+  labels:
+    app.kubernetes.io/name: aida-metadata-worker
+    app.kubernetes.io/part-of: aida-platform
+    release: REPLACE_ME_PROMETHEUS_RELEASE_LABEL
+spec:
+  namespaceSelector:
+    matchNames:
+      - aida
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aida-metadata-worker
   podMetricsEndpoints:
     - port: metrics
       path: /metrics

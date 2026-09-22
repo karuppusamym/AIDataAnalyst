@@ -1,54 +1,51 @@
 # Delivery Status
 
-## Current delivery confirmation, 2026-09-21
+## Current delivery confirmation, 2026-09-20
 
 [Tracker section P](03-tracker.md#p-current-execution-queue-reconciled-2026-09-11) owns current
 work status. The [capability register](20-capability-register.md) keeps implementation separate from
 configuration and real-environment verification, and each row carries the date it was measured.
-This page is a dated summary of both; where they disagree, they win. The evidence for this
-confirmation is the [2026-09-21 validation log](28-demo-readiness-validation-2026-09-21.md).
+This page is a dated summary of both; where they disagree, they win.
 
-**74 DONE, 38 PARTIAL, 7 BLOCKED, 5 TODO, 22 DEFERRED, 2 CANCELLED** across 148 unique work
-packages. Of the 124 that are neither deferred nor cancelled, 74 are complete and 50 still need
-implementation, verification or prerequisites. **32 of the 33 defects (D-series) are DONE**; D17
-keeps a parity run in the target environment. Since 2026-09-20: R11-AUD12 (an access change shows
-a structured diff on both review surfaces) and AUD13 (the Kubernetes migration Job runs every head)
-closed; AUD11 moved to PARTIAL (the UI proxy now passes the workbook and OKF uploads the API
-accepts; an API-side cap for a length-less body is open); and an end-to-end validation added
-R11-VAL01 to VAL05: eight unidentified secret-scan findings, four older rows with no disposition,
-configuration statements the code contradicts, a scheduler pass that fails without trace, and
-leftovers of rows closed as done. The R11-AUD01 role-catalog change, AUD03/AUD04, AUD06, AUD07,
-AUD08's screens, AUD10 and AUD11's API half were built in another session after this validation and
-were uncommitted when this was written; they are not counted here.
+Most scheduled implementation has landed: **83 DONE, 33 PARTIAL, 7 BLOCKED, 2 TODO, 22 DEFERRED,
+2 CANCELLED** across 149 unique work packages. Of the 125 that are neither deferred nor cancelled,
+83 are complete; 42 still need implementation, verification or prerequisites. **32 of the 33
+defects (D-series) are DONE**; D17 keeps a parity run in the target environment. A short TODO list
+is not the same as no pending work: R11-AUD01 to R11-AUD15, added on 2026-09-20 and 2026-09-21, queued the gaps
+that an audit of the code against these documents found. Fourteen are closed (AUD01 to AUD10 and AUD12 to
+AUD15) and one is partly done (AUD11: `POST /mcp` has no API-side body cap and the upload read timeout is
+unmeasured). Three of the closures were decisions taken on the
+product owner's instruction to proceed, and are worth confirming: the sixteen-role catalog and the
+compliance-pack roles (AUD01), the acceptance of ADR-0030 (AUD06) and the stale-key window (AUD10).
 
-The same validation fixed, in code: a context product's scope now also bounds the schema the SQL
-model is shown (R11-FP12; before, a product routine's lineage could show it tables the product does
-not name); demo users are no longer offered Compliance and Knowledge controls their roles are
-refused; the Reliability screen no longer claims a WORM trail (the stack reports `NO_ARCHIVES`); and
-the agent-facing asset-context message no longer says nothing triggers classification propagation.
+Twelve PARTIAL rows closed since the September 12 confirmation: B2 (execution-match scoring), B8
+(freshness observation), C1 (live ontology publication), C3 (unsafe reviewer evidence), C6, C7
+and C8 (authority and correction remainders), D6 (OIDC-session transitions), X2, X4, X5 and S9.
 
 Remaining priorities: C2 human accessibility acceptance; B9 real WORM-archive evidence; B10 and I1
-notification, Teams and Slack delivery beyond loopback stubs; R11-VAL01 (the secret scan); the
-R11-FP01 to FP17 remainders; and the BLOCKED rows B5, B6, B15, C9, C10, C11 and C13, which wait on
-customer connector, IdP, secrets, security, calibration, model-governance, scale and masking
-prerequisites. Unattended reviewer approvals stay off: production configuration refuses
-`reviewer_agent_enabled`, and the latest recorded benchmark approves 9 of 14 false twins and
-distinguishes no pairs. Deferred expansion is not a release requirement unless its recorded
-trigger is met.
+notification, Teams and Slack delivery beyond loopback stubs; the R11-FP01 to FP17 remainders; and
+the BLOCKED rows B5, B6, B15, C9, C10, C11 and C13, which wait on customer connector, IdP, secrets,
+security, calibration, model-governance, scale and masking prerequisites. Unattended reviewer
+approvals stay off: production configuration refuses `reviewer_agent_enabled`, and the latest
+recorded benchmark approves 9 of 14 false twins and distinguishes no pairs. Deferred expansion is
+not a release requirement unless its recorded trigger is met.
 
-Fresh checks, 2026-09-21. The local stack was rebuilt from a clean worktree of `e534c1b` and
-`scripts/check_deployment_parity.py` reported 9 of 9 comparisons matched (source digest
-`a22a9bce5bf7`). On it: `scripts/live_role_matrix.py` sent 5,179 probes as each platform role and
-2,407 as the seven non-admin demo bundles, with 0 failures; `scripts/live_role_sweep.py` saw 0
-server errors over 2,412 calls; the live accessibility audit found 0 violations on 37 screens in
-both themes; and opening 47 screens as the eight demo users gave 0 issues and 5 known conditions.
-The full backend suite, run bare from a clean worktree of `6c376d0`, gave **14,889 passed, 184 skipped and 0 failed**. The frontend suite gave 120 files and 1,286 tests passed. `ruff`, `mypy --strict`,
-`lint-imports`, the migration-drift gate on real PostgreSQL, the OpenAPI and UI-type gates, the
-proxy contract and the documentation checks are clean; one Alembic head, `53558182d9fb`.
-The Playwright journey suite passed 46 of 46 against the `6c376d0` UI image. On GitHub, the last pushed commit (`cb69f42`) failed three jobs: Tests at its 30-minute
-limit, the live proxy job on a startup race (both fixed in `0870d5c`, not yet pushed), and the secret
-scan (R11-VAL01). The validation applied no migration, sent no prompt to a model and changed no
-production configuration.
+Fresh checks, 2026-09-21, on the round-12 tree (HEAD `6c376d0` plus the round-12 changes, uncommitted
+when this was written): the full backend suite, run bare the way CI runs it, gave **15,102 passed,
+184 skipped and 0 failed** in 42 minutes; the frontend suite is 146 files and 2,085 tests; `ruff`,
+`mypy --strict` (427 source files), `lint-imports` (13 contracts kept), the generated-artifact checks and
+the documentation link check are clean. One Alembic head, `53558182d9fb`, across 192 revision files. The
+running stack was rebuilt from that tree and `scripts/check_deployment_parity.py` reported 9 of 9
+comparisons matched (source digest `042939a49316`). `scripts/live_role_matrix.py` sent 5,547 probes as
+each of the sixteen platform roles and 2,405 as the seven non-admin demo role bundles to it, and every
+answer matched the declared role contract; opening 50 screens as the eight demo users gave 0 issues and 5
+known conditions; the live accessibility audit of the deployed UI (40 screens, both themes, 320 px reflow)
+reported 0 violations after one reflow defect in the Ownership screen was fixed; a Studio change set was
+taken from creation to submission through the running API on the test organization; a killed scheduler
+leader was replaced by its standby in about 4 seconds; and a Kafka broker stopped and started again let
+the drafter consumer recover with no worker restart. The round applied no migration and changed no
+production configuration; the scheduler was restarted several times, its last boot's index pass embedded
+nothing (298 objects unchanged), and no question was put to a model.
 
 ## Historical status snapshots
 

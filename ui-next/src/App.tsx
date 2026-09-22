@@ -10,6 +10,7 @@ import {
 } from "react";
 import { HomeScreen } from "./screens/HomeScreen";
 import { AgentInboxScreen } from "./screens/AgentInboxScreen";
+import { PaletteAssetResults } from "./components/PaletteAssetResults";
 import { PersonaNav } from "./components/PersonaNav";
 import { Dialog } from "./components/primitives";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
@@ -43,6 +44,7 @@ import { useUnsavedNavigationGuard } from "./lib/unsavedChanges";
 import "./App.css";
 
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
+const SearchScreen = lazy(() => import("./screens/SearchScreen").then((module) => ({ default: module.SearchScreen })));
 /* R11-S10: one review surface. The parsed-lineage queue is a tab inside this
    screen now, and lazily loaded from there -- it is no longer a route of its
    own, so the shell no longer names it. */
@@ -74,6 +76,9 @@ const TransformationsScreen = lazy(() => import("./screens/TransformationsScreen
    and Automation. Playbooks is its Automation view now, lazily loaded from the
    workspace rather than named here; `#/playbooks` is a retired alias. */
 const StewardshipWorkspace = lazy(() => import("./screens/StewardshipWorkspace").then((module) => ({ default: module.StewardshipWorkspace })));
+/* R11-AUD08 (part 2): ownership rules, assignments and leaver reassignment -- one
+   screen in the Steward area, three views. */
+const OwnershipScreen = lazy(() => import("./screens/OwnershipScreen").then((module) => ({ default: module.OwnershipScreen })));
 const WorkspaceAccessScreen = lazy(() => import("./screens/WorkspaceAccessScreen").then((module) => ({ default: module.WorkspaceAccessScreen })));
 const AccessPolicyScreen = lazy(() => import("./screens/AccessPolicyScreen").then((module) => ({ default: module.AccessPolicyScreen })));
 const ReliabilityScreen = lazy(() => import("./screens/ReliabilityScreen").then((module) => ({ default: module.ReliabilityScreen })));
@@ -83,6 +88,9 @@ const AgentRosterScreen = lazy(() => import("./screens/AgentRosterScreen").then(
 const ReviewerAgentScreen = lazy(() => import("./screens/ReviewerAgentScreen").then((module) => ({ default: module.ReviewerAgentScreen })));
 const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
 const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
+/* R11-AUD08: glossary conflicts and term-link proposals, two tabs of one
+   destination -- each still its own lazy chunk, loaded from the workspace. */
+const GlossaryReviewWorkspace = lazy(() => import("./screens/GlossaryReviewWorkspace").then((module) => ({ default: module.GlossaryReviewWorkspace })));
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
 /* R11-S13 (M3): one documentation workspace. The worklist, the description
    drafts and the dictionary imports were three routes over three steps of one
@@ -130,6 +138,7 @@ const NAV_ENTRIES: NavEntry[] = [
   // --- Analyst: answer a question, and trust the answer -------------------
   { id: "analyst", label: "Ask Atlas", icon: "✦", keywords: "question query analyst ai" },
   { id: "catalog", label: "Catalog", icon: "▦", keywords: "assets tables columns definitions descriptions data search" },
+  { id: "search", label: "Search", icon: "⌕", keywords: "find global search tables columns names typeahead suggest everything" },
   { id: "semantics", label: "Semantic layer", icon: "ƒ", keywords: "metrics models measures" },
   { id: "tools", label: "Tool registry", icon: "⛭", keywords: "sql tool version execute registry" },
   { id: "tool-plans", label: "Tool plans", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
@@ -155,7 +164,8 @@ const NAV_ENTRIES: NavEntry[] = [
      actions and Automation views. The keywords of the Playbooks entry it
      absorbed are merged in, so a steward searching "playbook" or "scheduled"
      in the palette is still offered the page that now holds them. */
-  { id: "stewardship", label: "Stewardship", icon: "⚑", keywords: "work queue bulk actions tag classify own certify unowned backlog route escalation ownership expiry reaffirm automation playbook playbooks scheduled at-1" },
+  { id: "stewardship", label: "Stewardship", icon: "⚑", keywords: "work queue bulk actions tag classify own certify unowned backlog route escalation ownership expiry reaffirm automation playbook playbooks scheduled at-1 coverage scorecard snapshot snapshots history" },
+  { id: "ownership", label: "Ownership", icon: "⚐", keywords: "ownership owner rules assignments leaver reassignment reassign successor reaffirm expiry expiring assign owners apply rule gl-7 p2-07" },
   /* R11-S13 (M3): one destination for documenting the estate. The keywords of
      the two entries it absorbed are merged in, so a steward searching "csv
      import" or "description draft" in the palette is still offered the page
@@ -167,6 +177,10 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: "task-agents", label: "Task agents", icon: "✧", keywords: "steward agent lineage agent quality agent adr-0029 draft propose descriptions glossary links worklist view definitions parse edges rules row count floor null rate ceiling profiles autonomy tier kill switch acceptance t2" },
   { id: "negative-knowledge", label: "Negative knowledge", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", icon: "Aa", keywords: "glossary terms annotations" },
+  /* R11-AUD08: what the platform found about what the glossary means -- terms
+     that collide, and tables it suggests a term for -- and the reviews a
+     steward opens from them. */
+  { id: "glossary-review", label: "Glossary review", icon: "≟", keywords: "glossary conflicts detect resolve synonym collision definition disagreement link proposals generate submit evidence confidence maker checker" },
   { id: "relationships", label: "Relationships", icon: "⌁", keywords: "keys graph links" },
   { id: "cross-source", label: "Cross-source", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
   { id: "transformations", label: "Transformations", icon: "▤", keywords: "dbt models sql transforms manifest" },
@@ -236,6 +250,7 @@ function Screen({
 }) {
   switch (view) {
     case "catalog": return <CatalogScreen />;
+    case "search": return <SearchScreen />;
     case "governance": return <ReviewQueueScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;
@@ -247,6 +262,7 @@ function Screen({
     case "cross-source": return <CrossSourceScreen />;
     case "semantics": return <SemanticsScreen />;
     case "meaning": return <BusinessMeaningScreen />;
+    case "glossary-review": return <GlossaryReviewWorkspace />;
     case "quality": return <QualityScreen />;
     case "ai": return <AiRegistryScreen />;
     case "agent-roster": return <AgentRosterScreen />;
@@ -261,6 +277,7 @@ function Screen({
     case "agents": return <AiGovernanceScreen />;
     case "administration": return <AdministrationScreen />;
     case "stewardship": return <StewardshipWorkspace />;
+    case "ownership": return <OwnershipScreen />;
     case "worklist": return <DocumentationWorkspace />;
     case "task-agents": return <TaskAgentsScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
@@ -826,6 +843,7 @@ function AppShell() {
             ) : (
               <div className="palette__empty">No matching page</div>
             )}
+            <PaletteAssetResults query={query} pagesMatched={matches.length > 0} onOpen={navigate} />
           </div>
         </Dialog>
       ) : null}

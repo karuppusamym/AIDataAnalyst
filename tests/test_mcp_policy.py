@@ -45,7 +45,6 @@ def _ctx(
 CATALOG_RESOURCE_READER_ROLES: frozenset[str] = frozenset({
     "PlatformAdmin",
     "OrganizationAdmin",
-    "ProjectAdmin",
     "MetadataAdmin",
     "DataAdmin",
     "SemanticAdmin",

@@ -43,9 +43,11 @@ name: aida-platform
 #   temporal-ui  temporal-ui                   Developer convenience.
 #   monitoring   prometheus                    R11-FP17. Scrapes `api:8000` and,
 #                                              when AIDA_WORKER_METRICS_PORT is
-#                                              set, the two worker processes that
-#                                              publish gauges nothing could reach
-#                                              before. Off by default because a
+#                                              set, the three background processes
+#                                              that publish series nothing could
+#                                              reach before (the scheduler, the
+#                                              graph projector and the Temporal
+#                                              worker). Off by default because a
 #                                              scrape target set and an alert
 #                                              routing decision belong to the
 #                                              estate, not to a default stack.
@@ -487,7 +489,16 @@ services:
       sample-source:
         condition: service_healthy
     env_file: *app-env-file
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      # R11-AUD03. The newly-created-table drafter's consumer-up gauge and
+      # failed-attempts counter are published into this process's registry, and
+      # nothing serves it until this process listens -- the same reason as
+      # `fleet-scheduler` below. 0 (the `Settings` default) means "do not listen"
+      # and stays the default: the port is the operator's decision, made together
+      # with `--profile monitoring`. Set AIDA_WORKER_METRICS_PORT=9108, the value
+      # `infra/monitoring/prometheus/prometheus.yml` scrapes, to turn it on.
+      AIDA_WORKER_METRICS_PORT: ${AIDA_WORKER_METRICS_PORT:-0}
     command: ["python", "-m", "aida.workflows.worker"]
     restart: unless-stopped
 

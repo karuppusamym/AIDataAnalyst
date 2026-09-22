@@ -117,7 +117,7 @@ def _version(
         lineage_coverage=lineage_coverage,
         context_product_version_id=context_product_version_id,
         discoverable_roles=["Analyst"],
-        consumer_roles=["DataConsumer"],
+        consumer_roles=["Viewer"],
         fingerprint=f"fp-{product.product_key}",
         created_by="owner@example.com",
     )

@@ -90,7 +90,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `principal_reconciliation_enabled` | `bool` | `False` | 1 | Opt-in: useful only once an identity source emits principal lifecycle events |
 | `vector_index_url` | `str | None` | `None` | 2 | Supplied: the persisted vector index; the vector channel embeds live when unset (R11-B2) |
 | `embedding_credential_reference` | `str` | `''` | 1 | Supplied: the embedding provider credential |
-| `worker_metrics_port` | `int` | `0` | 1 | Opt-in: R11-FP17: the fleet scheduler and graph projector publish their gauges into their own process registry, which only this port exposes; 0 opens no port, because opening one changes a deployment's network surface and belongs with whoever configures the scrape (`infra/monitoring/README.md`) |
+| `worker_metrics_port` | `int` | `0` | 1 | Opt-in: R11-FP17: the fleet scheduler, graph projector and Temporal worker publish their series into their own process registry, which only this port exposes; 0 opens no port, because opening one changes a deployment's network surface and belongs with whoever configures the scrape (`infra/monitoring/README.md`) |
 | `entitlement_webhook_url` | `str | None` | `None` | 4 | Supplied: the entitlement fulfilment target |
 | `entitlement_webhook_token` | `SecretStr | None` | `None` | 2 | Supplied: the entitlement webhook credential |
 | `dq_itsm_webhook_url` | `str | None` | `None` | 2 | Supplied: the ITSM target; setting it is the opt-in (R11-S9 retired the separate switch) |
@@ -132,8 +132,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `oidc_groups_claim` | `str` | `'groups'` | 1 |
 | `oidc_persona_mappings` | `dict[str, str]` | `dict` | 1 |
 | `oidc_default_persona` | `str | None` | `None` | 2 |
-| `oidc_jwks_cache_seconds` | `int` | `300` | 1 |
-| `oidc_clock_skew_seconds` | `int` | `30` | 1 |
+| `oidc_jwks_cache_seconds` | `int` | `300` | 2 |
+| `oidc_clock_skew_seconds` | `int` | `30` | 2 |
 | `credential_provider` | `Literal['env', 'vault', 'cyberark', 'aws-sm', 'azure-kv', 'gcp-sm']` | `'env'` | 4 |
 | `secret_cache_ttl_seconds` | `int` | `60` | 2 |
 | `secrets_vault_url` | `str | None` | `None` | 1 |

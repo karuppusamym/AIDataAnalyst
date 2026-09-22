@@ -23,7 +23,7 @@ S1 (author and curate), A4 (build a reusable tool), and the authoring half of R1
 - Git-backed change sets for teams that manage semantics as code.
 - Impact preview before submission.
 
-> **Implementation status (2026-09-20).** Change sets, conflict detection, the test harness, the diff, the impact preview, the parameter-contract validator, context-product items and the usage-derived eval gate are built on the API (`src/aida/studio_api.py`; tracker ST-A1 to ST-A5, ST-A7 and ST-A8). The UI is narrower: `ui-next/src/screens/StudioChangeSetsScreen.tsx`, over the five calls in `ui-next/src/lib/api/studio.ts`, lists change sets, shows their items, diff and impact, and submits them. It cannot create a change set, add an item, run the tests, detect conflicts or mine eval questions, so those are API-only, and its empty state points to a Studio authoring surface that does not exist. Tracker row R11-X5 owns studio authoring with a date. Git-backed change sets are not built: there is no Git binding model, route or worker in `src/` (ST-A6, deferred with R11-C12 at P2). The sample estate holds no change sets as of 2026-09-20.
+> **Implementation status (2026-09-20).** Change sets, conflict detection, the test harness, the diff, the impact preview, the parameter-contract validator, context-product items and the usage-derived eval gate are built on the API (`src/aida/studio_api.py`; tracker ST-A1 to ST-A5, ST-A7 and ST-A8). The UI is narrower: `ui-next/src/screens/StudioChangeSetsScreen.tsx`, over the calls in `ui-next/src/lib/api/studio.ts`, lists change sets, shows their items, diff, impact and latest eval run, and submits them. As of 2026-09-21 (tracker R11-AUD08) it also lets the four roles that may write Studio (DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin) create a change set, add an item and remove one (DRAFT only), run the tests, detect conflicts against a published state the author supplies, and mine eval questions, and lets any role that may read Studio run the two definition checks (parameter contract, context product) on an item. That is tested with mocked transport and in the demo build; it has not been exercised against the running API. The API side did not keep its writes until 2026-09-21: create, add, remove, run-tests and detect-conflicts flushed and never committed, so a change set that answered 201 was gone on the next request. Fixed the same day and pinned by `tests/test_studio_writes_persist.py`, which sends each call as its own request. The test run returns totals, not the reason an item failed. Tracker row R11-X5 owns studio authoring with a date. Git-backed change sets are not built: there is no Git binding model, route or worker in `src/` (ST-A6, deferred with R11-C12 at P2). The sample estate holds no change sets as of 2026-09-20.
 
 ## 4. Not responsibilities
 
@@ -113,14 +113,14 @@ Emits `studio.changeset_created|submitted|abandoned`, `studio.tests_run`, `studi
 
 ## 12. Current state → target
 
-Studio is **partly built**. It has change sets, conflict detection, the test harness, diff, impact preview and the eval gate on the API (tracker ST-A1 to ST-A5, ST-A7 and ST-A8), and a screen that reads and submits them. Git binding is deferred (P2, R11-C12) and has no code. Authoring is still form-based inside the Atlas portal: metric composer, tool authoring, and business-meaning review are individual screens, and nothing in the UI creates a change set.
+Studio is **partly built**. It has change sets, conflict detection, the test harness, diff, impact preview and the eval gate on the API (tracker ST-A1 to ST-A5, ST-A7 and ST-A8), and a screen that reads, authors and submits them (R11-AUD08). Git binding is deferred (P2, R11-C12) and has no code. The metric composer, tool authoring and business-meaning review are still individual form-based screens that write their own objects; none of them writes into a change set yet.
 
 | Capability | Now | Target |
 |---|---|---|
 | Metric composer | Implemented (form) | Move into Studio with diff and test |
 | Tool authoring | Implemented (form) | Parameter-contract designer with test harness |
-| Change sets | Implemented on the API (ST-A1); the UI lists, inspects and submits them but cannot create one | Core Studio primitive, authored in the UI |
-| Test harness | Implemented on the API (ST-A2); no UI to run it | Required before submission |
+| Change sets | Implemented on the API (ST-A1); the UI lists, inspects, creates and submits them, and adds or removes items while DRAFT (R11-AUD08) | Core Studio primitive, authored in the UI |
+| Test harness | Implemented on the API (ST-A2); run from the change-set screen (R11-AUD08). Running it moves a DRAFT to TESTING, which locks its items; the response gives totals, not per-item failure reasons | Required before submission |
 | Diff view | Implemented on the API (ST-A3); shown on the change-set screen | Required for reviewers |
 | Impact preview | Implemented on the API (ST-A5); shown on the change-set screen | Integrated into submission |
 | Git binding | Not implemented; deferred (ST-A6, P2, R11-C12) | Optional |

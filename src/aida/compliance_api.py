@@ -25,6 +25,16 @@ from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["compliance"])
 
+# R11-AUD01: these routes named `ComplianceOfficer`, a role no OIDC token can carry, and refused an
+# `Auditor`, whose whole job is reading evidence like this. The role is gone; an Auditor now READS
+# and DOWNLOADS a pack, and generating one (which writes a record) stays with the roles that
+# produce evidence. The list and detail routes name `Auditor` although `Viewer` already admits it,
+# so a least-privilege Auditor-only session works and does not depend on also holding the
+# baseline read role.
+PACK_GENERATORS = ("PlatformAdmin", "DataSteward")
+PACK_DOWNLOADERS = ("PlatformAdmin", "DataSteward", "Auditor")
+PACK_READERS = ("PlatformAdmin", "DataSteward", "Auditor", "Viewer")
+
 
 # ---------------------------------------------------------------------------
 # Request / response schemas
@@ -66,9 +76,7 @@ class CompliancePackRead(ApiModel):
 )
 async def generate_compliance_pack(
     body: GeneratePackRequest,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ComplianceOfficer", "DataSteward")
-    ),
+    context: SecurityContext = Depends(require_roles(*PACK_GENERATORS)),
     session: AsyncSession = Depends(get_session),
 ) -> CompliancePackRead:
     """Generate an audit-ready compliance pack from runtime evidence."""
@@ -124,9 +132,7 @@ async def list_compliance_packs(
     framework: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ComplianceOfficer", "DataSteward", "Viewer")
-    ),
+    context: SecurityContext = Depends(require_roles(*PACK_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     """List generated compliance packs."""
@@ -153,9 +159,7 @@ async def list_compliance_packs(
 )
 async def get_compliance_pack(
     pack_id: UUID,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ComplianceOfficer", "DataSteward", "Viewer")
-    ),
+    context: SecurityContext = Depends(require_roles(*PACK_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> CompliancePackRead:
     """Get compliance pack detail."""
@@ -177,9 +181,7 @@ async def get_compliance_pack(
 )
 async def download_compliance_pack(
     pack_id: UUID,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ComplianceOfficer", "DataSteward")
-    ),
+    context: SecurityContext = Depends(require_roles(*PACK_DOWNLOADERS)),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Download compliance pack as structured JSON."""

@@ -22,13 +22,20 @@ no database, no real waiting):
    cleaned up, and a message whose handling fails is redelivered because its offset
    was not committed (per-message semantics are deliberately unchanged);
 8. `run_worker` starting the supervised task when `auto_enqueue_on_ingest` is on and
-   not when it is off, and logging -- not raising -- if that task ever dies.
+   not when it is off, and logging -- not raising -- if that task ever dies;
+9. the two series a scrape reads (the consumer-up gauge and the failed-attempts counter):
+   no gauge series until the supervisor runs, 0 while waiting to retry, 1 only while the
+   real consumer coroutine is consuming, 0 again however it ends, every failed attempt
+   counted -- and `run_worker` opening the metrics listener, first, as `metadata-worker`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -36,10 +43,13 @@ from typing import Any
 import pytest
 import structlog
 from aiokafka.errors import KafkaConnectionError
+from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
 from aida import newly_created_table_drafter as drafter
 from aida.newly_created_table_drafter import (
+    DRAFTER_CONSUMER_GROUP,
+    DRAFTER_CONSUMER_UP,
     DRAFTER_HEALTHY_AFTER_SECONDS,
     NEWLY_CREATED_TABLE_EVENT_TYPE,
     DrafterConsumerState,
@@ -65,6 +75,16 @@ def _fresh_logger(monkeypatch: pytest.MonkeyPatch) -> None:
     the whole suite and passed alone. A logger created for the test binds on its first call,
     inside the capture."""
     monkeypatch.setattr(drafter, "logger", structlog.get_logger(drafter.__name__))
+
+
+@pytest.fixture(autouse=True)
+def _no_gauge_series_yet() -> None:
+    """Start every test as a worker whose supervisor has not run: no consumer-up series.
+
+    That is the state the gauge is in, on purpose, until the supervisor starts (a labelled
+    gauge has no series before `.labels()`), and an earlier test in this process would
+    otherwise have created it. `remove` is a no-op when the series is not there."""
+    DRAFTER_CONSUMER_UP.remove(DRAFTER_CONSUMER_GROUP)
 
 
 @pytest.fixture(autouse=True)
@@ -436,6 +456,11 @@ class _FakeKafka:
         self.log: list[bytes] = []
         self.committed = 0
         self.on_commit: Callable[[], None] = lambda: None
+        #: A consumer that has read the whole log waits for more, as a real one does, instead of
+        #: ending: what a test needs to hold a consumer "up" and then cancel it.
+        self.block_when_drained = False
+        #: Set by any consumer's `start()` once it has succeeded, so a test can wait for it.
+        self.a_consumer_started = asyncio.Event()
         self.consumers: list[_FakeConsumer] = []
 
     def __call__(self, *topics: str, **kwargs: Any) -> _FakeConsumer:
@@ -458,6 +483,7 @@ class _FakeConsumer:
         if self.kafka.start_failures:
             raise self.kafka.start_failures.pop(0)
         self.started = True
+        self.kafka.a_consumer_started.set()
 
     async def stop(self) -> None:
         self.stops += 1
@@ -474,6 +500,8 @@ class _FakeConsumer:
 
     async def __anext__(self) -> SimpleNamespace:
         if self.position >= len(self.kafka.log):
+            if self.kafka.block_when_drained:
+                await asyncio.Event().wait()  # only cancellation ends this
             raise StopAsyncIteration
         message = SimpleNamespace(value=self.kafka.log[self.position])
         self.position += 1
@@ -540,6 +568,9 @@ async def test_a_broker_that_appears_late_is_picked_up_and_each_failed_start_is_
     assert kafka.consumers[-1].commits == 1
     assert kafka.consumers[-1].kwargs["bootstrap_servers"] == BOOTSTRAP
     assert kafka.consumers[-1].kwargs["enable_auto_commit"] is False, "manual commit is unchanged"
+    assert kafka.consumers[-1].kwargs["group_id"] == DRAFTER_CONSUMER_GROUP, (
+        "the gauge is labelled with the group the consumer actually joins"
+    )
 
     assert len(_unavailable(logs)) == 3
     started = [e for e in logs if e["event"] == "newly_created_table_drafter_started"]
@@ -610,6 +641,182 @@ async def test_a_stop_that_fails_does_not_replace_the_error_that_ended_the_consu
     assert entry["error_type"] == "OSError"
 
 
+# -- what a scrape reads -----------------------------------------------------------
+
+
+def _up() -> float | None:
+    """The consumer-up gauge as a scrape would read it: None when there is no series."""
+    return REGISTRY.get_sample_value(
+        "aida_newly_created_table_drafter_consumer_up", {"consumer_group": DRAFTER_CONSUMER_GROUP}
+    )
+
+
+def _failures() -> float:
+    value = REGISTRY.get_sample_value("aida_newly_created_table_drafter_failures_total")
+    assert value is not None, "the failed-attempts counter is missing"
+    return value
+
+
+def _run_in_a_fresh_interpreter(code: str) -> list[str]:
+    """What a process that has only imported the module publishes, without this process's
+    history: an earlier test here has already created the gauge series."""
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in sys.path if p),
+        "AIDA_ENVIRONMENT": "test",
+    }
+    completed = subprocess.run(  # noqa: S603 -- our own interpreter, a fixed probe from this file
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.split()
+
+
+def test_a_worker_that_only_imports_the_module_publishes_no_consumer_up_series() -> None:
+    """The reason the gauge is labelled. The worker imports this module whether or not
+    `auto_enqueue_on_ingest` is on; an unlabelled gauge would be exported at 0 from the import
+    and an alert on `== 0` would page for a feature somebody switched off."""
+    values = _run_in_a_fresh_interpreter(
+        "from prometheus_client import REGISTRY\n"
+        "import aida.newly_created_table_drafter\n"
+        "print(REGISTRY.get_sample_value('aida_newly_created_table_drafter_consumer_up',"
+        " {'consumer_group': 'aida-newly-created-table-drafter-v1'}))\n"
+        "print(REGISTRY.get_sample_value('aida_newly_created_table_drafter_failures_total'))\n"
+    )
+
+    # No gauge series; the counter is at 0, which an `increase()` reads as nothing happened.
+    assert values == ["None", "0.0"]
+
+
+async def test_the_gauge_appears_at_zero_when_the_supervisor_starts_and_stays_there_while_waiting(
+    harness: _Harness,
+) -> None:
+    assert _up() is None
+    waits: list[float | None] = []
+
+    async def note_the_gauge_then_wait(seconds: float) -> None:
+        waits.append(_up())
+        await harness.sleep(seconds)
+
+    await supervise_newly_created_table_drafter(
+        _Runner([_no_broker(), _no_broker()]),
+        sleep=note_the_gauge_then_wait,
+        monotonic=harness.clock,
+        state=harness.state,
+    )
+
+    # Neither failed attempt had a consumer to say otherwise, and the wait after each one read 0.
+    assert waits == [0, 0]
+
+
+async def test_every_failed_attempt_is_counted_not_only_the_ones_the_log_escalates(
+    harness: _Harness,
+) -> None:
+    before = _failures()
+
+    await harness.supervise(_Runner([_no_broker()] * 12))
+
+    assert _failures() - before == 12  # attempts 1 and 10 are ERRORs; the other ten are WARNINGs
+
+
+async def test_a_consumer_that_returns_without_being_stopped_counts_as_a_failed_attempt(
+    harness: _Harness,
+) -> None:
+    calls = 0
+
+    async def returns_at_once(state: DrafterConsumerState) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            state.stopping = True
+
+    before = _failures()
+    await harness.supervise(returns_at_once)
+
+    assert _failures() - before == 2  # the two early returns; the third was a stop
+
+
+async def test_a_clean_stop_and_a_failure_while_stopping_are_not_failed_attempts(
+    harness: _Harness,
+) -> None:
+    async def stops(state: DrafterConsumerState) -> None:
+        state.stopping = True
+
+    async def fails_while_stopping(state: DrafterConsumerState) -> None:
+        state.stopping = True
+        raise _no_broker()
+
+    before = _failures()
+    await harness.supervise(stops)
+    harness.state.stopping = False
+    await harness.supervise(fails_while_stopping)
+
+    assert _failures() == before  # neither is the outage the counter is for
+
+
+async def test_the_real_consumer_reads_one_only_while_consuming_and_zero_while_it_waits_to_retry(
+    harness: _Harness, kafka: _FakeKafka, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two failed starts, then one that handles a message that fails once, then a good one.
+
+    The gauge is read where a scrape could read it: in each wait between attempts, and inside
+    the handler while a message is being processed."""
+    kafka.start_failures = [_no_broker()] * 2
+    kafka.log = [_event(NEWLY_CREATED_TABLE_EVENT_TYPE, "t1")]
+    kafka.on_commit = lambda: setattr(harness.state, "stopping", True)
+    while_handling: list[float | None] = []
+    while_waiting: list[float | None] = []
+
+    async def handle(session: Any, payload: dict[str, Any]) -> None:
+        while_handling.append(_up())
+        if len(while_handling) == 1:
+            raise RuntimeError("write refused")
+
+    async def note_the_gauge_then_wait(seconds: float) -> None:
+        while_waiting.append(_up())
+        await harness.sleep(seconds)
+
+    monkeypatch.setattr(drafter, "handle_newly_created_table", handle)
+    before = _failures()
+
+    await supervise_newly_created_table_drafter(
+        run_newly_created_table_drafter_consumer,
+        sleep=note_the_gauge_then_wait,
+        monotonic=harness.clock,
+        state=harness.state,
+    )
+
+    assert while_handling == [1, 1], "up while a message is being handled, both times"
+    assert while_waiting == [0, 0, 0], "down in the wait after each failed start and the failure"
+    assert _failures() - before == 3
+    assert _up() == 0, "and down at the end: the consumer returned when it was told to stop"
+
+
+async def test_cancelling_a_consumer_that_is_up_takes_the_gauge_to_zero(
+    harness: _Harness, kafka: _FakeKafka
+) -> None:
+    """The worker's shutdown cancels the supervised task: nothing may go on saying it is up."""
+    kafka.block_when_drained = True
+    task = asyncio.create_task(run_newly_created_table_drafter_consumer(harness.state))
+    async with asyncio.timeout(2):
+        await kafka.a_consumer_started.wait()
+    # Nothing between `start()` returning and the consumer blocking for a message yields to this
+    # test, so by the time it runs the consumer has said it is up.
+    assert _up() == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _up() == 0
+    assert [c.stops for c in kafka.consumers] == [1]
+
+
 # -- the worker --------------------------------------------------------------------
 
 
@@ -638,6 +845,9 @@ def worker_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(module, "Worker", _FakeTemporalWorker)
     # Reconfiguring structlog would outlive the test and break every `capture_logs` after it.
     monkeypatch.setattr(module, "configure_logging", lambda level: None)
+    # The listener is opened from `Settings.worker_metrics_port`, which the namespace below has
+    # no reason to carry. A test that is about the listener replaces this with a recorder.
+    monkeypatch.setattr(module, "serve_worker_metrics", lambda settings, *, process: None)
     return module
 
 
@@ -713,3 +923,31 @@ async def test_a_supervisor_that_dies_anyway_is_logged_and_does_not_end_the_work
     (entry,) = [e for e in logs if e["event"] == "newly_created_table_drafter_supervisor_failed"]
     assert entry["log_level"] == "error"
     assert entry["error_type"] == "RuntimeError"
+
+
+async def test_the_worker_opens_its_metrics_listener_first_as_the_metadata_worker(
+    worker_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gauges above are published into this process's registry, and only a listener lets a
+    scrape read it. It comes before the Temporal connection, which can block or fail: a worker
+    that cannot reach Temporal is exactly when its target should still answer."""
+    order: list[str] = []
+    settings = _worker_settings(auto_enqueue_on_ingest=False)()
+
+    class _RecordingTemporalClient:
+        @staticmethod
+        async def connect(*args: Any, **kwargs: Any) -> object:
+            order.append("temporal connect")
+            return object()
+
+    def record_the_listener(passed: object, *, process: str) -> None:
+        assert passed is settings, "the listener reads the same settings the worker runs on"
+        order.append(f"metrics listener: {process}")
+
+    monkeypatch.setattr(worker_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_module, "Client", _RecordingTemporalClient)
+    monkeypatch.setattr(worker_module, "serve_worker_metrics", record_the_listener)
+
+    await worker_module.run_worker()
+
+    assert order == ["metrics listener: metadata-worker", "temporal connect"]

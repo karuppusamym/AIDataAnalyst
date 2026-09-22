@@ -25,6 +25,12 @@ import "./StewardshipWorkspace.css";
    request body, role check or control's enablement moved -- the action map in
    `Docs/10-architecture/23-stewardship-action-map.md` lists every one.
 
+   R11-AUD08: a fourth view, Coverage, is the stewardship SCORECARD
+   (`StewardshipCoverage.tsx`, over `GET/POST .../stewardship/coverage`). It is
+   a report on the three views above rather than a place to change anything --
+   its one write stores a snapshot of the figures -- so it sits last, and each
+   of its dimensions links back to the view or screen that closes the gap.
+
    WHAT IS DELIBERATELY NOT HERE:
      * Task agents. Bounded agent execution is a different contract from
        human-authored playbook configuration, so Automation LINKS to the
@@ -70,6 +76,9 @@ const StewardshipBulkActions = lazy(() =>
 const PlaybooksScreen = lazy(() =>
   import("./PlaybooksScreen").then((module) => ({ default: module.PlaybooksScreen })),
 );
+const StewardshipCoverage = lazy(() =>
+  import("./StewardshipCoverage").then((module) => ({ default: module.StewardshipCoverage })),
+);
 
 /** The view axis. `queue` is the default, and is written as the ABSENCE of
  *  `?view=` so the canonical URL for the destination stays
@@ -92,6 +101,15 @@ export const STEWARDSHIP_VIEWS = [
     label: "Automation",
     scope:
       "This organization — a playbook may target any source in the tenant, and runs on its schedule or when run now.",
+  },
+  /* R11-AUD08: the scorecard the coverage routes had no screen for. Last, so
+     the three views a steward already works in keep their places; it reports
+     on their work rather than being a place to do any. */
+  {
+    value: "coverage",
+    label: "Coverage",
+    scope:
+      "This organization, or one datasource you choose — how much of its active tables stewardship has reached. The figures are worked out when the view opens; a snapshot stores them.",
   },
 ] as const;
 
@@ -136,6 +154,14 @@ const VIEW_LINKS: Record<StewardshipView, { label: string; links: CrossLink[] }>
         label: "Rejected and suppressed assertions",
         title: "What reviewers already rejected, and whether each suppression is still in force.",
       },
+      /* R11-AUD08 (part 2): an unowned table is answered by a rule or a bulk
+         assignment, and a leaver's tables by a reassignment -- all of them live
+         in Ownership, which is its own destination (see `OwnershipScreen.tsx`). */
+      {
+        screen: "ownership",
+        label: "Ownership rules and reassignment",
+        title: "Every ownership assignment, the rules that assign owners in bulk, and reassigning a leaver's ownerships.",
+      },
     ],
   },
   bulk: { label: "Related work", links: [] },
@@ -159,6 +185,48 @@ const VIEW_LINKS: Record<StewardshipView, { label: string; links: CrossLink[] }>
         label: "Quality agent",
         params: { agent: "quality" },
         title: "Bounded agent runs are supervised in Task agents; playbooks here are rules a person wrote.",
+      },
+    ],
+  },
+  /* One link per dimension the scorecard measures, to the place that closes it
+     -- so a low bar is one click from the work. Owned/classified/certified are
+     views of THIS workspace and open with the action already chosen. Each
+     target keeps its own scope and authorization. */
+  coverage: {
+    label: "Close the gaps",
+    links: [
+      {
+        screen: "worklist",
+        label: "Documentation priorities",
+        title: "Which tables are worth documenting next, in the Documentation workspace.",
+      },
+      {
+        screen: "stewardship",
+        label: "Unowned assets",
+        params: { view: "queue" },
+        title: "Tables with no assigned owner, and their escalation.",
+      },
+      {
+        screen: "stewardship",
+        label: "Classify in bulk",
+        params: { view: "bulk", action: "classify" },
+        title: "Classify the columns of every table a filter matches.",
+      },
+      {
+        screen: "stewardship",
+        label: "Certify in bulk",
+        params: { view: "bulk", action: "certify" },
+        title: "Certify every table a filter matches.",
+      },
+      {
+        screen: "quality",
+        label: "Data quality",
+        title: "Which tables have quality checks and open incidents.",
+      },
+      {
+        screen: "meaning",
+        label: "Business meaning",
+        title: "Map tables to business terms and domains.",
       },
     ],
   },
@@ -270,6 +338,8 @@ export function StewardshipWorkspace() {
             <StewardshipBulkActions />
           ) : view === "automation" ? (
             <PlaybooksScreen />
+          ) : view === "coverage" ? (
+            <StewardshipCoverage />
           ) : (
             <StewardshipWorkQueue />
           )}

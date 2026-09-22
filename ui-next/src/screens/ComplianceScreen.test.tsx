@@ -160,7 +160,9 @@ describe("ComplianceScreen against the real compliance_api.py", () => {
 });
 
 describe("ComplianceScreen: who is offered Generate and Download", () => {
-  it("tells an Auditor (who reaches the screen through Viewer) instead of offering controls that answer 403", async () => {
+  it("offers an Auditor the evidence to read, and tells them why there is no Generate (R11-AUD01)", async () => {
+    // The Auditor's job is reading evidence: the download route admits them, generating a pack
+    // (which writes a record) still does not.
     sessionMe = asRoles("Auditor", "Viewer");
     fetchCompliancePacks.mockResolvedValue({ items: [PACK], limit: 100, offset: 0, total: 1 });
     const ComplianceScreen = await loadScreen();
@@ -169,14 +171,30 @@ describe("ComplianceScreen: who is offered Generate and Download", () => {
 
     await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Generate pack" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download evidence" })).toBeInTheDocument();
+    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toBeInTheDocument();
+    expect(screen.getByText(/list the packs below and download their evidence/)).toBeInTheDocument();
+    expect(screen.queryByText("Not available to your roles")).not.toBeInTheDocument();
+    expect(generateCompliancePack).not.toHaveBeenCalled();
+  });
+
+  it("tells a Viewer, who may only list packs, instead of offering controls that answer 403", async () => {
+    sessionMe = asRoles("Viewer");
+    fetchCompliancePacks.mockResolvedValue({ items: [PACK], limit: 100, offset: 0, total: 1 });
+    const ComplianceScreen = await loadScreen();
+
+    render(<ComplianceScreen />);
+
+    await waitFor(() => expect(screen.getByText("BCBS 239 Q2 2026")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Generate pack" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Download evidence" })).not.toBeInTheDocument();
-    expect(screen.getByText(/need the ComplianceOfficer, DataSteward or PlatformAdmin role/)).toBeInTheDocument();
+    expect(screen.getByText(/Generating a pack needs the DataSteward or PlatformAdmin role/)).toBeInTheDocument();
     expect(screen.getByText("Not available to your roles")).toBeInTheDocument();
     expect(generateCompliancePack).not.toHaveBeenCalled();
     expect(downloadCompliancePack).not.toHaveBeenCalled();
   });
 
-  it.each(["ComplianceOfficer", "DataSteward", "PlatformAdmin"])("offers both to %s", async (role) => {
+  it.each(["DataSteward", "PlatformAdmin"])("offers both to %s", async (role) => {
     sessionMe = asRoles(role);
     fetchCompliancePacks.mockResolvedValue({ items: [PACK], limit: 100, offset: 0, total: 1 });
     const ComplianceScreen = await loadScreen();

@@ -22,11 +22,14 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 import structlog
+from prometheus_client import REGISTRY
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
@@ -63,6 +66,16 @@ def _fresh_logger(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         scheduler_leadership, "_log", structlog.get_logger(scheduler_leadership.__name__)
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_process_gauge() -> None:
+    """Start every test as a replica that has just started: the gauge at its import value.
+
+    The gauge is process-wide and a real process runs one election, so a real standby never
+    inherits a `1`. Tests run many elections in one process, and an earlier one that ended
+    leading (most do not release) would otherwise be read as this one's history."""
+    scheduler_leadership.SCHEDULER_IS_LEADER.set(0)
 
 
 _LIFECYCLE = {
@@ -330,6 +343,143 @@ async def test_release_is_idempotent_and_survives_a_failing_provider() -> None:
     assert not broken.is_leader
 
 
+# --- what a scrape reads: the gauge and the transition counter --------------------------------
+#
+# The registry is per process and the series are process-wide, so one `SchedulerLeadership` per
+# test decides them; the counters are read as before/after deltas because every earlier test in
+# the process has already moved them.
+
+
+def _sample(name: str, **labels: str) -> float | None:
+    return REGISTRY.get_sample_value(name, labels or None)
+
+
+def _leader_gauge() -> float | None:
+    return _sample("aida_scheduler_is_leader")
+
+
+def _transition_counts() -> tuple[float, float]:
+    """(acquired, lost) so far, as a scrape would read them."""
+    acquired = _sample("aida_scheduler_leadership_transitions_total", transition="acquired")
+    lost = _sample("aida_scheduler_leadership_transitions_total", transition="lost")
+    assert acquired is not None and lost is not None, "a transition series is missing"
+    return acquired, lost
+
+
+def _moved_since(before: tuple[float, float]) -> tuple[float, float]:
+    acquired, lost = _transition_counts()
+    return acquired - before[0], lost - before[1]
+
+
+async def test_the_gauge_is_one_while_this_replica_leads_and_zero_after_it_releases() -> None:
+    before = _transition_counts()
+    leadership = SchedulerLeadership(FakeLockProvider(SharedFakeLock(), "a"), replica="a")
+
+    assert await leadership.confirm() is True
+    assert _leader_gauge() == 1
+    assert await leadership.confirm() is True  # re-verified on the next tick, still leading
+    assert _leader_gauge() == 1
+
+    await leadership.release()
+    assert _leader_gauge() == 0
+    # One acquisition. A clean release is not a loss: the process is going away with its counters.
+    assert _moved_since(before) == (1, 0)
+
+
+async def test_a_standby_reads_zero_however_often_it_retries_and_counts_no_transition() -> None:
+    before = _transition_counts()
+    lock = SharedFakeLock()
+    lock.holder = lock.open_session()  # some other replica leads
+    standby = SchedulerLeadership(FakeLockProvider(lock, "b"), replica="b")
+
+    for _ in range(3):
+        assert await standby.confirm() is False
+        assert _leader_gauge() == 0
+
+    assert _moved_since(before) == (0, 0)  # refused attempts are not transitions
+
+
+async def test_a_lost_leadership_drops_the_gauge_and_counts_one_loss_not_one_per_tick() -> None:
+    lock = SharedFakeLock()
+    provider = FakeLockProvider(lock, "a")
+    leadership = SchedulerLeadership(provider, replica="a")
+    assert await leadership.confirm() is True
+    before = _transition_counts()
+
+    provider.sever()
+    assert await leadership.confirm() is False
+    assert _leader_gauge() == 0
+    assert _moved_since(before) == (0, 1)
+    assert await leadership.confirm() is False  # still standing by: not a second loss
+    assert _moved_since(before) == (0, 1)
+
+    lock.server_notices_dead_sessions()  # PostgreSQL drops the dead session; the retry succeeds
+    assert await leadership.confirm() is True
+    assert _leader_gauge() == 1
+    assert _moved_since(before) == (1, 1)
+
+
+async def test_a_loss_regained_within_one_tick_is_counted_both_ways_and_ends_at_one() -> None:
+    provider = FakeLockProvider(SharedFakeLock(), "a")
+    leadership = SchedulerLeadership(provider, replica="a")
+    assert await leadership.confirm() is True
+    before = _transition_counts()
+
+    provider.terminate()  # the server frees the lock at once, so the retry in the tick wins it
+    assert await leadership.confirm() is True
+
+    assert _leader_gauge() == 1
+    assert _moved_since(before) == (1, 1)  # flapping shows as losses even when the gap is a tick
+
+
+async def test_an_error_while_verifying_is_a_loss_and_an_error_while_acquiring_is_not() -> None:
+    provider = FakeLockProvider(SharedFakeLock(), "a")
+    leadership = SchedulerLeadership(provider, replica="a")
+    assert await leadership.confirm() is True
+    before = _transition_counts()
+
+    provider.raises = {"still_held"}  # a leader that cannot verify is no leader
+    assert await leadership.confirm() is False
+    assert _leader_gauge() == 0
+    assert _moved_since(before) == (0, 1)
+
+    provider.raises = {"try_acquire"}  # a standby that cannot ask has lost nothing
+    assert await leadership.confirm() is False
+    assert _leader_gauge() == 0
+    assert _moved_since(before) == (0, 1)
+
+
+def _run_in_a_fresh_interpreter(code: str) -> list[str]:
+    """What a process that has only imported the module publishes, without this process's
+    history: every earlier test here has already created series."""
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    completed = subprocess.run(  # noqa: S603 -- our own interpreter, a fixed probe from this file
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.split()
+
+
+def test_both_transition_series_exist_from_import_and_the_gauge_starts_at_zero() -> None:
+    """A series that only appears with its first event makes `increase()` skip that event, and
+    an election with no history looks like a scrape that failed."""
+    values = _run_in_a_fresh_interpreter(
+        "from prometheus_client import REGISTRY\n"
+        "import aida.scheduler_leadership\n"
+        "name = 'aida_scheduler_leadership_transitions_total'\n"
+        "print(REGISTRY.get_sample_value(name, {'transition': 'acquired'}))\n"
+        "print(REGISTRY.get_sample_value(name, {'transition': 'lost'}))\n"
+        "print(REGISTRY.get_sample_value('aida_scheduler_is_leader'))\n"
+    )
+
+    assert values == ["0.0", "0.0", "0.0"]
+
+
 # --- run_scheduler on the fake lock -----------------------------------------------------------
 
 _REPLICA: contextvars.ContextVar[str] = contextvars.ContextVar("replica")
@@ -516,6 +666,25 @@ async def test_cancelling_the_scheduler_releases_the_lock(harness: Harness) -> N
 
     assert lock.holder is None
     assert provider.calls[-1] == "release"
+
+
+async def test_the_running_scheduler_reads_one_during_every_pass_and_zero_once_it_has_stopped(
+    harness: Harness,
+) -> None:
+    """The gauge through `run_scheduler` itself, not only through `confirm()`: a scrape during a
+    pass must see a leader, and one after the loop's `finally` must not."""
+    seen: list[float | None] = []
+
+    async def read_the_gauge(_name: str) -> None:
+        seen.append(_leader_gauge())
+
+    harness.during = read_the_gauge
+    harness.start("a", FakeLockProvider(SharedFakeLock(), "a"))
+    await harness.wait_until(lambda: len(seen) >= 3)
+    await harness.stop_all()
+
+    assert seen[:3] == [1, 1, 1]
+    assert _leader_gauge() == 0  # `run_scheduler`'s `finally` released the lock
 
 
 async def test_an_exception_out_of_a_pass_releases_the_lock(harness: Harness) -> None:

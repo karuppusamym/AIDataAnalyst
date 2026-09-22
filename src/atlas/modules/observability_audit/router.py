@@ -118,7 +118,7 @@ async def get_cost_showback(
     period_start: datetime = Query(...),
     period_end: datetime = Query(...),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataAdmin", "Operations", "ComplianceOfficer", "Viewer")
+        require_roles("PlatformAdmin", "DataAdmin", "Operations", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> CostShowbackRead:

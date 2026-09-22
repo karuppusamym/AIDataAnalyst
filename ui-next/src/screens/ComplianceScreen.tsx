@@ -40,18 +40,25 @@ import "./ComplianceScreen.css";
 
    `download_compliance_pack` and `generate_compliance_pack` are deliberately
    narrower than `list_compliance_packs`/`get_compliance_pack` — they exclude
-   `Viewer` (`compliance_api.py:70`/`:181` vs `:128`/`:152`), and with it the
-   Auditor persona, which reaches this screen through Viewer. Both controls
-   are therefore offered only to a session that may use them (`roleAllows`,
-   `lib/roles.ts`); a session known to hold none of the roles is told so
-   instead of being handed a button that answers 403 (found 2026-09-21 as
-   `omar.auditor`). The server's 403 stays the authority, and still renders
-   as an inline error scoped to the row if identity was not yet known.
+   `Viewer` (the `PACK_DOWNLOADERS` and `PACK_GENERATORS` lists in
+   `compliance_api.py` vs `PACK_READERS`). They are two different lists: an
+   Auditor may DOWNLOAD evidence (R11-AUD01; this screen used to refuse the
+   Auditor persona, found 2026-09-21 as `omar.auditor`) but may not GENERATE a
+   pack, which writes a record. Each control is offered only to a session that
+   may use it (`roleAllows`, `lib/roles.ts`); a session known to hold none of
+   its roles is told so instead of being handed a button that answers 403. The
+   server's 403 stays the authority, and still renders as an inline error
+   scoped to the row if identity was not yet known.
 --------------------------------------------------------------------------- */
 
-/** `POST /v1/compliance/packs/generate` and `GET /v1/compliance/packs/{pack_id}/download`,
- *  copied from `Docs/50-security/surface-control-matrix.md` (the two rows agree). */
-const COMPLIANCE_PACK_WRITE_ROLES = ["ComplianceOfficer", "DataSteward", "PlatformAdmin"] as const;
+/** `POST /v1/compliance/packs/generate`, copied from `Docs/50-security/surface-control-matrix.md`.
+ *  It writes a record, so it stays with the roles that produce evidence. R11-AUD01 removed
+ *  `ComplianceOfficer`, a role no OIDC token can carry. */
+const COMPLIANCE_PACK_GENERATE_ROLES = ["DataSteward", "PlatformAdmin"] as const;
+
+/** `GET /v1/compliance/packs/{pack_id}/download`, from the same matrix. An `Auditor` reads and
+ *  downloads evidence since R11-AUD01: reading it is the role's whole purpose. */
+const COMPLIANCE_PACK_DOWNLOAD_ROLES = ["Auditor", "DataSteward", "PlatformAdmin"] as const;
 
 const FRAMEWORKS: GeneratePackRequest["framework"][] = [
   "MODEL_RISK",
@@ -161,8 +168,10 @@ export function ComplianceScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evidenceById, setEvidenceById] = useState<Record<string, EvidenceState>>({});
-  // Offered unless identity is known and holds none of the roles (`roleAllows`).
-  const mayWrite = roleAllows(useSession().me?.roles, COMPLIANCE_PACK_WRITE_ROLES);
+  // Each control is offered unless identity is known and holds none of ITS roles (`roleAllows`).
+  const roles = useSession().me?.roles;
+  const mayGenerate = roleAllows(roles, COMPLIANCE_PACK_GENERATE_ROLES);
+  const mayDownload = roleAllows(roles, COMPLIANCE_PACK_DOWNLOAD_ROLES);
 
   const [form, setForm] = useState(INITIAL_FORM);
   const [generating, setGenerating] = useState(false);
@@ -260,7 +269,7 @@ export function ComplianceScreen() {
 
       <article className="cplx__panel">
         <h2 className="cplx__h2">Generate pack</h2>
-        {mayWrite ? (
+        {mayGenerate ? (
           <form onSubmit={(e) => void submitGenerate(e)}>
             <div className="cplx__grid">
               <Field label="Framework">
@@ -303,8 +312,10 @@ export function ComplianceScreen() {
           </form>
         ) : (
           <p className="cplx__lede">
-            Generating a pack and downloading its evidence need the ComplianceOfficer, DataSteward
-            or PlatformAdmin role. Your roles can list the packs below.
+            Generating a pack needs the DataSteward or PlatformAdmin role, and yours holds neither.
+            {mayDownload
+              ? "Your roles can list the packs below and download their evidence."
+              : "Your roles can list the packs below."}
           </p>
         )}
         {generateStatus ? (
@@ -341,7 +352,7 @@ export function ComplianceScreen() {
                     pack={pack}
                     evidence={evidenceById[pack.id]}
                     onToggle={() => void toggleEvidence(pack)}
-                    mayDownload={mayWrite}
+                    mayDownload={mayDownload}
                   />
                 ))}
               </tbody>

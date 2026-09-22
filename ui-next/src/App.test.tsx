@@ -124,6 +124,8 @@ describe("App shell persona gating", () => {
     expect(within(section).getAllByRole("button").map((button) => button.textContent)).toEqual([
       "Ask Atlas",
       "Catalog",
+      // R11-AUD08: the API's global search over table and column names.
+      "Search",
       "Semantic layer",
       "Tool registry",
       "Tool plans",

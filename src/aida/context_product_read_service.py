@@ -88,7 +88,6 @@ __all__ = [
 COMPILER_ROLES: tuple[str, ...] = (
     "PlatformAdmin",
     "MetadataAdmin",
-    "DataProductOwner",
     "DataSteward",
     "AgentDeveloper",
     "Analyst",
@@ -97,7 +96,7 @@ COMPILER_ROLES: tuple[str, ...] = (
 #: Who the compile route lets read a version whatever its status, purpose or quality -- its
 #: own set, not the version read's `CONTEXT_PRODUCT_LIFECYCLE_READERS`.
 COMPILER_LIFECYCLE_READERS: frozenset[str] = frozenset(
-    {"PlatformAdmin", "MetadataAdmin", "DataProductOwner", "DataSteward"}
+    {"PlatformAdmin", "MetadataAdmin", "DataSteward"}
 )
 
 _VERSION_NOT_FOUND = "context product version not found"

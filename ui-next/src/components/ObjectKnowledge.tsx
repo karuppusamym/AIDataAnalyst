@@ -41,7 +41,6 @@ import "./Knowledge.css";
 const KNOWLEDGE_READ_ROLES = [
   "AgentDeveloper",
   "Analyst",
-  "DataProductOwner",
   "DataSteward",
   "MetadataAdmin",
   "PlatformAdmin",

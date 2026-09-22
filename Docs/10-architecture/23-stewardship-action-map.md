@@ -91,7 +91,7 @@ Contextual links: the steward, lineage and quality agent consoles
 
 | Action | API | API roles | UI gate | Design home |
 |---|---|---|---|---|
-| Read agent state, tier, kill switch, outcomes | `GET /v1/organizations/{organization_id}/{kind}-agent` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, ModelRiskManager, Operations, PlatformAdmin, Reviewer, SemanticAdmin | none | own destination |
+| Read agent state, tier, kill switch, outcomes | `GET /v1/organizations/{organization_id}/{kind}-agent` | AgentDeveloper, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, Operations, PlatformAdmin, Reviewer, SemanticAdmin | none | own destination |
 | Run / preview (`dry_run`) the steward agent | `POST …/steward-agent/run` | STEW | disabled while unregistered or blocked | own destination |
 | Run / preview the lineage agent | `POST …/lineage-agent/run` | BULK | same | own destination |
 | Run / preview the quality agent | `POST …/quality-agent/run` | DataAdmin, DataSteward, Operations, PlatformAdmin | same | own destination |
@@ -103,7 +103,7 @@ configuration. For that reason it has an entry point from Automation, and it was
 
 | Action | API | API roles | UI gate | Design home |
 |---|---|---|---|---|
-| Browse / filter rejected assertions | `GET /v1/negative-knowledge/search` | DataEngineer, DataSteward, PlatformAdmin, Viewer | none | contextual evidence view + advanced Work queue filter |
+| Browse / filter rejected assertions | `GET /v1/negative-knowledge/search` | DataSteward, PlatformAdmin, Viewer | none | contextual evidence view + advanced Work queue filter |
 | Assertions for one subject | `GET /v1/negative-knowledge/{subject_id}` | same | none | same |
 | Lift a suppression (confirm dialog) | `POST /v1/negative-knowledge/{assertion_id}/lift-suppression` | DataSteward, PlatformAdmin | confirmation | same |
 
@@ -137,7 +137,7 @@ gets an unscoped link.
 | Action | API | API roles | UI gate |
 |---|---|---|---|
 | List domains | `GET /v1/organizations/{organization_id}/lines-of-business` → `GET /v1/lines-of-business/{lob_id}/data-domains` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer. The org-wide `GET /v1/organizations/{organization_id}/data-domains` also admits DataSteward and MetadataReviewer since R11-C15, but the screen does not call it | none |
-| List sources | `GET /v1/organizations/{organization_id}/datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | none |
+| List sources | `GET /v1/organizations/{organization_id}/datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, Viewer | none |
 | Discover cross-source relationships | `POST /v1/data-domains/{domain_id}/relationship-candidates/discover-cross-source` | DISCOVER | a 403 on a cross-domain scan becomes the grant request |
 | Discover same-object tables | `POST /v1/data-domains/{domain_id}/cross-source-object-resolution-candidates/discover` | DISCOVER | same |
 | List same-object candidates | `GET /v1/datasources/{datasource_id}/cross-source-object-resolution-candidates` | CAND-LIST | none |
@@ -160,19 +160,18 @@ merges the queues.
 | Review queue | `#/reviewer/governance?queue=` (retired: `#/parsed-lineage-review`) | Independent; no Stewardship shortcut approves anything it owns |
 | Catalog row selection | `#/analyst/catalog?asset=` | Its checked-row controller offers description drafts (`POST …/asset-description-drafts/generate`, STEW) and a disabled "Certify…" stub; see section 9 |
 
-## 6. Stewardship server surfaces with no `ui-next` caller
+## 6. Stewardship server surfaces and their `ui-next` callers
 
-A path search of `ui-next/src` on 2026-09-19 found no caller for any of the surfaces below.
-Nothing was removed from the UI, so none of them is a lost capability. They are listed so that
-a later slice does not mistake them for one.
+A path search of `ui-next/src` on 2026-09-19 found no caller for any of the surfaces below. On 2026-09-21 (tracker R11-AUD08) most gained one. Nothing was removed from the UI in either state, so none of them is a lost capability.
 
-| Surface | Write roles | Plausible home |
+| Surface | Write roles | `ui-next` caller (2026-09-21) |
 |---|---|---|
-| `GET` / `POST /v1/organizations/{organization_id}/stewardship/bulk-operations` | STEW | Bulk actions. Needs a decision first (see below). |
-| Ownership rules: `GET` / `POST …/ownership-rules`, `POST /v1/ownership-rules/{rule_id}/apply` | STEW | Work queue |
-| Coverage: `GET …/stewardship/coverage`, `GET` / `POST …/coverage/snapshots` | STEW | Work queue |
-| `POST …/stewardship/leaver-reassignment` | STEW | Work queue |
-| Glossary categories, conflicts (detect, resolution) and link proposals (generate, submit) | STEW | Business Meaning |
+| `GET` / `POST /v1/organizations/{organization_id}/stewardship/bulk-operations` | STEW | `GET` only: the Ownership screen's Requests list. Creating one directly has no caller. Needs a decision first (see below). |
+| Ownership rules: `GET` / `POST …/ownership-rules`, `POST /v1/ownership-rules/{rule_id}/apply` | STEW | Ownership → Rules (`#/steward/ownership?view=rules`). Apply takes no body, has no preview, takes at most 500 tables and opens a review. |
+| Coverage: `GET …/stewardship/coverage`, `GET` / `POST …/coverage/snapshots` | STEW | Stewardship → Coverage (`#/steward/stewardship?view=coverage`). Organization and datasource scope only. |
+| `POST …/stewardship/leaver-reassignment` | STEW | Ownership → Leaver reassignment. The response reports no counts; they exist only after a reviewer decides. |
+| Glossary conflicts (detect, raise, resolve) and link proposals (generate, submit) | STEW | Glossary review (`#/steward/glossary-review`). Resolving proposes a resolution for another reviewer. |
+| Glossary categories: `GET` / `POST …/glossary-categories` | STEW | none |
 
 Playbook runs already use two write paths, and the match count decides which one
 (`aida.playbooks.evaluate_and_run_playbook`):

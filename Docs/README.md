@@ -108,7 +108,7 @@ Docs/
 | [21 GraphQL, OKF and workspace design](10-architecture/21-graphql-okf-and-workspace-design.md) | Design and delivery review for items 13–17: what GraphQL queries and how data executes, OKF object documents and bundles, navigation and answer-first layouts, and stewardship merge workflows. The tracker remains the status authority |
 | [22 Context enrichment and review workspace](10-architecture/22-context-enrichment-and-review-workspace.md) | **Assessment, 2026-09-17:** all 22 requests mapped to their current foundation, proposed change and delivery owner; profiling evidence, provenance and ontology, the shared SQL workspace, and review at estate scale. Proposes acceptance criteria; claims nothing shipped |
 | [23 Stewardship action map](10-architecture/23-stewardship-action-map.md) | **Dated evidence, 2026-09-19:** every action the UI offers on the six stewardship destinations mapped to its API route, API roles, UI gate and design home, plus the deep links before and after the slice, so that consolidating screens does not silently drop one. Not a queue |
-| [ADR register](10-architecture/adr/README.md) | 30 records as of 2026-09-20: 22 accepted, 7 proposed (0023, 0025–0030), one superseded (0017 → 0018) |
+| [ADR register](10-architecture/adr/README.md) | 30 records as of 2026-09-21: 23 accepted, 6 proposed (0023, 0025–0029), one superseded (0017 → 0018) |
 
 ### 20-modules — The bounded contexts
 

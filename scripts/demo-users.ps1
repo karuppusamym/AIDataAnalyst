@@ -41,7 +41,7 @@ $stateFile = Join-Path $env:TEMP "atlas-demo-users.json"
 # `atlas-steward` bundle in compose.oidc.yaml: a working user holds Analyst and Viewer as well.
 $roster = @(
     @{ Name = "alex.operator";  Port = 5181; Persona = "Operator";
-       Roles = "PlatformAdmin,OrganizationAdmin,MetadataAdmin,DataAdmin,SemanticAdmin,DataSteward,Reviewer,MetadataReviewer,Auditor,Operations,Analyst,Viewer,ToolDeveloper,ToolConsumer,AgentDeveloper" },
+       Roles = "PlatformAdmin,OrganizationAdmin,MetadataAdmin,DataAdmin,SemanticAdmin,DataSteward,Reviewer,MetadataReviewer,Auditor,Operations,Analyst,Viewer,ToolDeveloper,ToolConsumer,AgentDeveloper,MetadataIngestor" },
     @{ Name = "dana.steward";   Port = 5182; Persona = "Steward";
        Roles = "DataSteward,MetadataReviewer,Analyst,Viewer" },
     @{ Name = "riya.reviewer";  Port = 5183; Persona = "Reviewer";

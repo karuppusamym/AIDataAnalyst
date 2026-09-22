@@ -84,7 +84,7 @@ class SlaStatusResponse(ApiModel):
 async def evaluate_data_contract(
     contract_id: UUID,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> EvaluationResponse:
@@ -199,7 +199,7 @@ async def list_contract_violations(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -238,7 +238,7 @@ async def get_sla_status(
     contract_id: UUID,
     period_days: int = Query(default=30, ge=1, le=365),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> SlaStatusResponse:

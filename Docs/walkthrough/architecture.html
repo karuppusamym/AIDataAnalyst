@@ -183,7 +183,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <text x="154" y="130" class="t-b">api · aida.main · one FastAPI app, a modular monolith</text>
 <rect class="box" x="154" y="146" width="170" height="78" rx="6"/>
 <text x="239" y="168" text-anchor="middle" class="t-b">Identity · tenancy</text>
-<text x="239" y="186" text-anchor="middle" class="t-mute">15 platform roles</text>
+<text x="239" y="186" text-anchor="middle" class="t-mute">16 platform roles</text>
 <text x="239" y="202" text-anchor="middle" class="t-mute">organization boundary</text>
 <rect class="box" x="336" y="146" width="170" height="78" rx="6"/>
 <text x="421" y="168" text-anchor="middle" class="t-b">Policy · governance</text>
@@ -256,7 +256,7 @@ footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-si
 <text x="792" y="524" text-anchor="middle" class="t-mute">compose profiles, off by default</text>
 </svg>
 </div>
-<figcaption>The default <code>docker compose up</code> starts ten services, including three of the five processes: <code>outbox-publisher</code> needs the <code>events</code> or <code>graph</code> profile and <code>graph-projector</code> needs <code>graph</code>. Redpanda, Neo4j, Redis, MinIO and Prometheus are profiles too, and <code>--profile full</code> starts 19 of the 20 services. The scheduler box is amber because its leader election (a PostgreSQL advisory lock, R11-AUD04) has been run against a real database but never drilled across replicas. Source scans use the connectors' structured discovery calls, not caller-supplied SQL, which is why they sit outside the query gateway.</figcaption>
+<figcaption>The default <code>docker compose up</code> starts ten services, including three of the five processes: <code>outbox-publisher</code> needs the <code>events</code> or <code>graph</code> profile and <code>graph-projector</code> needs <code>graph</code>. Redpanda, Neo4j, Redis, MinIO and Prometheus are profiles too, and <code>--profile full</code> starts 19 of the 20 services. The scheduler box is amber because its leader election (a PostgreSQL advisory lock, R11-AUD04) has been run against a real database and drilled once across two replicas (a killed leader was replaced in about 4 seconds); a leader that vanishes without closing its connection has not been drilled. Source scans use the connectors' structured discovery calls, not caller-supplied SQL, which is why they sit outside the query gateway.</figcaption>
 </figure>
 
 <h2 id="processes">Five processes</h2>

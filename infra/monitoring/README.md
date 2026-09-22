@@ -15,6 +15,17 @@ and the footprint and projection gauges are still unreachable because
 not get to take. So "nothing has ever fired" is no longer accurate; "no alert
 has fired on a threshold anyone chose" is.
 
+**Updated 2026-09-21 (R11-AUD03, R11-AUD04).** Three alerts and four series were
+added for the two operability signals the tracker still listed as open: the
+scheduler's leader election (`AtlasSchedulerNoLeader`,
+`AtlasSchedulerLeadershipFlapping`) and the newly-created-table drafter's Kafka
+consumer (`AtlasNewlyCreatedTableDrafterConsumerDown`). The drafter's series are
+published by the Temporal worker, which **had no metrics listener and no series
+at all before this** -- so it now calls `serve_worker_metrics`, has a scrape job
+(`atlas-metadata-worker`) and a PodMonitor, and `compose.yaml` passes it
+`AIDA_WORKER_METRICS_PORT`. Nothing here was scraped by a running Prometheus;
+"What was verified, and what was not" ends with exactly what was checked.
+
 ## The finding that came out of writing this
 
 There were 19 Prometheus series across four modules before this change, and
@@ -28,6 +39,8 @@ There were 19 Prometheus series across four modules before this change, and
 | `aida_retrieval_*` (8) | `aida.retrieval_metrics` | `api` (request path) | yes |
 | `aida_footprint_*` (3) | `aida.footprint_metrics` | **`fleet-scheduler`** | **no** |
 | `aida_graph_projection_*` (10) | `aida.projection_metrics` | **`graph-projector`** | **no** |
+| `aida_scheduler_*` (2, added 2026-09-21) | `aida.scheduler_leadership` | **`fleet-scheduler`** | **no**, until the port is set |
+| `aida_newly_created_table_drafter_*` (2, added 2026-09-21) | `aida.newly_created_table_drafter` | **`metadata-worker`** | **no**, until the port is set |
 
 So "no deployment scrapes these gauges" was not only a missing scrape config.
 Thirteen of the nineteen series had nothing at the other end of a scrape at all.
@@ -39,9 +52,12 @@ whoever configures the scrape — and it never takes the process down if the bin
 fails, because a crash-looping scheduler is a worse outcome than an unscrapeable
 one. `AtlasTargetDown` reports the dead target.
 
-`metadata-worker` and `outbox-publisher` publish no Prometheus series at all
-today, so they have no job here. Adding one would create a permanently-down
-target that means nothing.
+`outbox-publisher` publishes no Prometheus series at all today, so it has no job
+here. Adding one would create a permanently-down target that means nothing.
+`metadata-worker` was in the same position until R11-AUD03: the drafter
+consumer's two series are the first it has published, and it got a listener, a
+job and a PodMonitor in the same change -- which is what this paragraph said to
+do, and `tests/test_monitoring_rules.py` now checks instead of trusting.
 
 ## What is in here
 
@@ -50,18 +66,18 @@ infra/monitoring/
   README.md                              # this file
   prometheus/
     prometheus.yml                       # plain-Prometheus scrape config, for the compose stack
-    rules/atlas.rules.yml                # 4 recording rules, 20 alerts -- THE SOURCE OF TRUTH
+    rules/atlas.rules.yml                # 4 recording rules, 23 alerts -- THE SOURCE OF TRUTH
   k8s/
     kustomization.yaml                   # kustomize base (needs Prometheus Operator CRDs)
     servicemonitor.yaml                  # scrapes the existing aida-api Service
-    podmonitor.yaml                      # pre-wired for the two worker Deployments that do not exist yet
+    podmonitor.yaml                      # pre-wired for the three worker Deployments that do not exist yet
     prometheusrule.yaml                  # GENERATED from atlas.rules.yml
 ```
 
 `prometheusrule.yaml` is rendered by `scripts/generate_prometheus_rule.py` and
 checked by `tests/test_monitoring_rules.py`. Edit `atlas.rules.yml` and
-regenerate; never edit the generated copy. Two hand-maintained copies of twenty
-alerts drift, and the drift is silent in the worst way — the alert fires in one
+regenerate; never edit the generated copy. Two hand-maintained copies of
+twenty-three alerts drift, and the drift is silent in the worst way — the alert fires in one
 environment and not the other, and nobody finds out until the incident it was
 written for.
 
@@ -84,23 +100,31 @@ follows is what an operator still has to *decide*, not what they have to write.
    ```
 
 2. **`AIDA_WORKER_METRICS_PORT` is plumbed per-service but defaults to 0.**
-   `compose.yaml` passes `${AIDA_WORKER_METRICS_PORT:-0}` to `fleet-scheduler`
-   and `graph-projector` individually (not through the shared
-   `*app-environment` anchor, which would also set it on the API, where it is
-   unused and misleading). 0 means "listen on nothing", and it is the default
-   because opening a port changes the deployment's network surface and is the
-   operator's decision, not this file's.
+   `compose.yaml` passes `${AIDA_WORKER_METRICS_PORT:-0}` to `fleet-scheduler`,
+   `graph-projector` and (since 2026-09-21) `metadata-worker` individually (not
+   through the shared `*app-environment` anchor, which would also set it on the
+   API, where it is unused and misleading). 0 means "listen on nothing", and it
+   is the default because opening a port changes the deployment's network
+   surface and is the operator's decision, not this file's. Compose publishes no
+   host port for any of the three: the listener is reachable only from the
+   compose network, which is where Prometheus is.
 
-   **The one action still outstanding**, and the reason 13 of the 19 series are
-   unreachable: set `AIDA_WORKER_METRICS_PORT=9108` in the environment those two
-   services read, then recreate just those two containers:
+   **The one action still outstanding**, and the reason the series in the
+   scheduler, projector and worker are unreachable: set
+   `AIDA_WORKER_METRICS_PORT=9108` in the environment those services read, then
+   recreate just those containers:
 
    ```
-   AIDA_WORKER_METRICS_PORT=9108 docker compose up -d fleet-scheduler graph-projector
+   AIDA_WORKER_METRICS_PORT=9108 docker compose up -d fleet-scheduler graph-projector metadata-worker
    ```
 
-   Until then `atlas-fleet-scheduler` and `atlas-graph-projector` report DOWN,
-   `AtlasTargetDown` fires for both, `AtlasFootprintMetricsAbsent` fires, and
+   Anywhere that variable reaches the worker's environment through a shared env
+   file or ConfigMap, the worker now listens too; before 2026-09-21 it read the
+   setting and ignored it.
+
+   Until then `atlas-fleet-scheduler`, `atlas-graph-projector` and
+   `atlas-metadata-worker` report DOWN, `AtlasTargetDown` fires for all three,
+   `AtlasFootprintMetricsAbsent` fires, and
    every other footprint and projection rule evaluates against an empty vector.
    That is the honest reading and not a defect: the scheduler logs
    `worker_metrics_disabled` with "this process publishes no scrapeable
@@ -127,13 +151,17 @@ Three things to know before that command does anything useful:
   that Prometheus selects everything. The files ship
   `REPLACE_ME_PROMETHEUS_RELEASE_LABEL`.
 - **`podmonitor.yaml` selects pods that do not exist.** `infra/k8s/base/README.md`
-  records that four of the six application processes have no manifest, and two of
-  those four are the ones that publish the footprint and projection series. The
-  PodMonitors are committed pre-wired so that whoever writes those Deployments
-  does not have to rediscover the metrics-listener problem; applied today they
-  reconcile to zero targets. Each needs a Deployment carrying the matching
-  `app.kubernetes.io/name` label and a container port named `metrics`, plus
-  `AIDA_WORKER_METRICS_PORT` in its environment.
+  records that four of the six application processes have no manifest, and three
+  of those four are the ones that publish the footprint, projection,
+  leader-election and drafter-consumer series. The PodMonitors are committed
+  pre-wired so that whoever writes those Deployments does not have to rediscover
+  the metrics-listener problem; applied today they reconcile to zero targets.
+  Each needs a Deployment carrying the matching `app.kubernetes.io/name` label
+  and a container port named `metrics`, plus `AIDA_WORKER_METRICS_PORT` in its
+  environment. A scheduler Deployment with more than one replica is what the
+  leader-election series are for, and every replica has to be a scraped target
+  (a PodMonitor selects pods, so it does); `sum(aida_scheduler_is_leader)` is
+  the number of leaders only over all of them.
 
 ## Thresholds: what is measured, and what is still an operator's number
 
@@ -146,8 +174,8 @@ and a firing instance says so in its own labels so the person paged can tell "th
 estate broke its objective" from "nobody has set this yet".
 
 No load test of this platform has ever been run against a real deployment, so
-**no latency or backlog magnitude in these rules is a measurement.** Six of the
-twenty alerts are placeholders:
+**no latency or backlog magnitude in these rules is a measurement.** Seven of the
+twenty-three alerts are placeholders:
 
 | Alert | Placeholder | How to replace it |
 |---|---|---|
@@ -157,8 +185,9 @@ twenty alerts are placeholders:
 | `AtlasRetrievalLatencyHigh` | `5s` p95 | The steady-state `aida_retrieval_duration_seconds` p95 an estate observes under its own load. **Not** what `scripts/scale_harness/fp17_change_burst_latency.py` reports, which this row used to claim: that harness times `footprint_gaps` and `list_tables` against a change burst and never touches the retrieval path, so its baseline is not this input. It was run for the first time on 2026-09-17 (see that script's docstring), and it still leaves this number unset. |
 | `AtlasHttpServerErrorRateHigh` | `0.05` | The complement of the estate's availability objective. There is no agreed one for this platform. |
 | `AtlasHttpLatencyHigh` | `3s` p95 | Same as the retrieval ceiling, over the whole API surface — or split per route template once the estate knows which routes are interactive and which are reports. |
+| `AtlasSchedulerLeadershipFlapping` | `3` involuntary losses in `1h` | A number above the estate's own steady-state rate of `lost` transitions (`increase(aida_scheduler_leadership_transitions_total{transition="lost"}[1h])` on a healthy week). No failover drill has been run and nobody has measured how often a healthy leader's lock connection fails, so three is where a second loss from the same incident stops being the explanation, not an observation. |
 
-The other fourteen are structural and can be trusted as shipped:
+The other sixteen are structural and can be trusted as shipped:
 
 | Group | Alerts |
 |---|---|
@@ -167,6 +196,39 @@ The other fourteen are structural and can be trusted as shipped:
 | `atlas.projection` | `AtlasProjectionStalled`, `AtlasProjectionBacklogGrowing` |
 | `atlas.retrieval` | `AtlasRetrievalChannelProviderUnavailable` |
 | `atlas.cost-and-quota` | `AtlasModelSpendEntirelyEstimated`, `AtlasUsageQuotaRefusals`, `AtlasParserFailures` |
+| `atlas.scheduler` | `AtlasSchedulerNoLeader` (the placeholder above is its group-mate) |
+| `atlas.drafter` | `AtlasNewlyCreatedTableDrafterConsumerDown` |
+
+Two of the three added on 2026-09-21 need a sentence each, because their `for`
+is a decision and it is easy to change one without the other:
+
+* **`AtlasSchedulerNoLeader` waits five minutes** because a failover with the
+  keepalive settings `Docs/40-engineering/07-local-runbook.md` (section 9c)
+  recommends takes about two minutes (60 s idle, then 6 probes 10 s apart, plus
+  the standby's 5 s retry). It fires on the operating system's defaults, where a
+  vanished leader holds the lock for about 2 h 11 min, and stays firing until
+  PostgreSQL lets go. `tests/test_monitoring_rules.py` reads the runbook's numbers
+  and fails if the window stops outlasting them. It does **not** fire where no
+  replica reports the gauge (an empty `sum`), on purpose: that is
+  `AtlasTargetDown`'s reading, and claiming "no leader" about a scheduler that
+  never opened its port would be a guess.
+* **`AtlasNewlyCreatedTableDrafterConsumerDown` waits fifteen minutes** and
+  **fires on the default stack by design**: `auto_enqueue_on_ingest` defaults to
+  true, the default stack has no broker, and the gauge is 0. The annotation says
+  so where the person paged reads it. It can only fire where the worker
+  publishes the gauge -- the series does not exist until the drafter supervisor
+  starts -- so an estate that turned the feature off, or never opened the port,
+  is silent. What it cannot see is a consumer killed by the same message over and
+  over: the gauge is 1 for the moment each attempt starts, so a scrape can land
+  on it and restart the alert's clock. `aida_newly_created_table_drafter_failures_total`
+  rising is the unambiguous reading, and no alert reads it.
+
+There is deliberately no alert for **more than one leader**. The gauge shows it
+(`sum(aida_scheduler_is_leader) > 1`), but a deposed leader keeps reading 1
+until the pass it is running ends, and nobody has measured how long that is, so a
+fixed window would either page on a normal handover or wait out a real fault.
+A leader count that stays above one is the sign of a lock that excludes nobody,
+most likely a transaction-mode pooler in front of PostgreSQL.
 
 Most of the footprint and projection alerts use `deriv(...) > 0` over a window
 rather than a magnitude comparison. That is not a trick to avoid choosing a
@@ -269,8 +331,10 @@ What that Prometheus (v3.5.0) reports about itself:
   several processes. `AtlasParserFailures` and `AtlasModelSpendEntirelyEstimated`
   therefore see only the share of that activity that happens inside
   `aida.main`. This is the same per-process-registry cause as the footprint
-  gauges, and it is not fixed by the same setting: the metadata worker has no
-  metrics listener and no scrape job at all.
+  gauges, and it is not fixed by the same setting: the metadata worker had no
+  metrics listener and no scrape job at all. *(Since 2026-09-21 it has both, off
+  by default, so a parser or model call made inside the worker is visible to a
+  scrape once `AIDA_WORKER_METRICS_PORT` is set there.)*
 - **No cluster.** `kubectl kustomize` renders manifests without an API server;
   it does not validate them against real resource schemas. `kubeconform` is not
   installed here either. `kubectl apply --dry-run=server` against a cluster with
@@ -282,3 +346,44 @@ What that Prometheus (v3.5.0) reports about itself:
   above. `scripts/scale_harness/fp17_change_burst_latency.py` exists to produce
   the latency inputs and **has not been run** — it needs a live stack, and this
   change started nothing.
+
+### Added 2026-09-21 (R11-AUD03, R11-AUD04): what was checked, and what was not
+
+Checked, against a working tree with no running stack:
+
+- `python scripts/generate_prometheus_rule.py --check` is current, and the rule
+  file has 4 recording rules and 23 alerts (`tests/test_monitoring_rules.py`,
+  13 tests).
+- The series exist under the names the rules read. A real HTTP scrape of
+  `prometheus_client`'s exporter on an ephemeral loopback port, in a throwaway
+  script, returned `aida_scheduler_is_leader`,
+  `aida_scheduler_leadership_transitions_total{transition="acquired"|"lost"}`
+  (both label values at `0.0` before any event) and
+  `aida_newly_created_table_drafter_failures_total`; and returned
+  `aida_newly_created_table_drafter_consumer_up{consumer_group=...}` **only after
+  the supervisor had run** -- before it, a `# TYPE` line and no sample, which is
+  what keeps the drafter alert silent where the feature is off.
+- Behaviour, with a fake lock and a stub consumer:
+  `tests/test_scheduler_leadership.py` (45 passed, 1 skipped -- the real
+  PostgreSQL test, which needs a scratch database) and
+  `tests/test_newly_created_table_drafter_supervisor.py` (28 passed). Each
+  behaviour added was mutation-checked: with the line undone, the matching test
+  fails.
+- Every process that calls `serve_worker_metrics` has a scrape job, a PodMonitor
+  and, in compose, the port variable (`tests/test_monitoring_rules.py`).
+
+**Not checked, and not claimed:**
+
+- **No Prometheus evaluated any of these three rules.** `promtool` is not on this
+  machine and no PromQL parser is installed, so the expressions have been read,
+  not parsed. They are short, but a syntax or semantics error would show only
+  when Prometheus loads the file.
+- **`aida_scheduler_is_leader` has never been scraped from a real scheduler, and
+  no failover has ever been run.** The `for` of `AtlasSchedulerNoLeader` is
+  derived from the keepalive numbers in the runbook; neither has been measured.
+- **The worker's listener has never been started against a real Prometheus**, and
+  `compose.yaml` was not brought up. `serve_worker_metrics` is unchanged; only its
+  third caller is new.
+- **Recovery against a real Redpanda coming up** is still stub-only.
+- **A consumer killed by the same message repeatedly** is not reliably caught by
+  the gauge alert (see its annotation); no alert reads the failures counter.

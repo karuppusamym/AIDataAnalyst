@@ -51,10 +51,37 @@ the old session is gone. If the leader's process dies, the operating system clos
 and PostgreSQL sees that at once. If its host or network vanishes without closing anything,
 PostgreSQL finds out only through TCP keepalives, which default to the operating system's
 value (about two hours on Linux); set `tcp_keepalives_idle`, `tcp_keepalives_interval` and
-`tcp_keepalives_count` on the server, or on the scheduler's role, to shorten that. The
+`tcp_keepalives_count` on the server, or on the scheduler's role, to shorten that (the values
+this design assumes, and why, are in `Docs/40-engineering/07-local-runbook.md`). The
 direction of the failure is safe -- the isolated leader's own liveness check times out and it
 stops -- but there is then no scheduler until the lock is released. No failover drill has been
 run.
+
+**Watching it from outside (R11-AUD04).** The process that runs the election publishes two
+series, and a scrape reaches them only when that process has opened its metrics listener --
+`run_scheduler` starts it through `aida.worker_metrics`, and it stays closed unless an operator
+sets `worker_metrics_port`:
+
+* `aida_scheduler_is_leader` is 1 while this replica holds the lock *as of its last
+  `confirm()`* and 0 while it stands by. It has no label, on purpose: the registry is per
+  process, so this is one series per replica, and the scrape's own `instance` names the replica.
+  A second copy of that name inside the exposition would be one more place for the two to
+  disagree (the reasoning `aida.worker_metrics` gives for `process`). The sum of the series is
+  then how many replicas believe they lead: 1 is healthy, 0 is the leaderless stretch the
+  failover paragraph above describes. It is only as fresh as the last `confirm()`, so a leader
+  that lost its session in the middle of an iteration still reads 1 until that iteration ends and
+  the next check fails -- a bound of one iteration, the same one the overlap has.
+* `aida_scheduler_leadership_transitions_total{transition="acquired"|"lost"}` counts this
+  process's changes. `lost` is the involuntary one -- a leader whose verification failed -- and
+  it is what a flapping election shows. A clean `release()` is not counted (the process is
+  exiting and takes its registry with it) and neither is a standby's refused attempt. Both label
+  values exist from import, so a scrape reads 0 rather than nothing and `increase()` does not
+  lose the first event.
+
+What neither can see: a replica whose process or host is gone takes its series with it. That
+reads as a vanished target (`AtlasTargetDown`) and, if a standby is being scraped, as
+`AtlasSchedulerNoLeader`, never as a `lost` -- so a `lost` is a leader that was alive to notice.
+Both alerts are in `infra/monitoring/prometheus/rules/atlas.rules.yml`.
 
 **What it does not do.** The passes' cadence trackers are per-process, so a standby that takes
 over starts with empty ones and runs each rate-limited pass once immediately. The footprint
@@ -90,12 +117,40 @@ import socket
 from typing import Protocol
 
 import structlog
+from prometheus_client import Counter, Gauge
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 _log = structlog.get_logger(__name__)
+
+SCHEDULER_IS_LEADER = Gauge(
+    "aida_scheduler_is_leader",
+    (
+        "1 while this scheduler replica holds the leadership lock, as of its last "
+        "verification, and 0 while it stands by. One series per process: the scrape's instance "
+        "label names the replica, so sum() is how many replicas believe they lead (1 is healthy, "
+        "0 means no scheduler is running the periodic passes)."
+    ),
+)
+SCHEDULER_LEADERSHIP_TRANSITIONS = Counter(
+    "aida_scheduler_leadership_transitions_total",
+    (
+        "Changes in this scheduler process's leadership: acquired when it took the lock, lost "
+        "when a leader's verification failed. A clean shutdown is not counted; the process and "
+        "its counters end with it."
+    ),
+    labelnames=("transition",),
+)
+
+#: The two `transition` label values. Created at import, not on first use: a series that only
+#: appears with its first event makes `increase()` skip that event, and makes a quiet election
+#: look the same as a scrape that failed.
+TRANSITION_ACQUIRED = "acquired"
+TRANSITION_LOST = "lost"
+for _transition in (TRANSITION_ACQUIRED, TRANSITION_LOST):
+    SCHEDULER_LEADERSHIP_TRANSITIONS.labels(transition=_transition)
 
 #: The advisory-lock key every scheduler replica contends for: the eight bytes `atlasfsc`
 #: ("atlas fleet-scheduler") read as one big-endian integer. It is a fixed constant because two
@@ -305,6 +360,11 @@ class SchedulerLeadership:
     stretch of standing by (not once per retry), `scheduler_became_leader` on acquiring, and
     `scheduler_lost_leadership` when a leader's check fails. After a loss the replica is a
     standby again and says so.
+
+    The same two changes move `SCHEDULER_IS_LEADER` and count into
+    `SCHEDULER_LEADERSHIP_TRANSITIONS`. Those are process-wide, because a scrape reads one
+    registry per process, and a process runs one election: two of these objects in one process
+    (only a test does that) share a gauge, and whichever last changed state wins it.
     """
 
     def __init__(self, provider: LeaderLockProvider, *, replica: str | None = None) -> None:
@@ -330,10 +390,14 @@ class SchedulerLeadership:
                 return True
             self._leader = False
             self._standby_announced = False
+            SCHEDULER_IS_LEADER.set(0)
+            SCHEDULER_LEADERSHIP_TRANSITIONS.labels(transition=TRANSITION_LOST).inc()
             _log.warning("scheduler_lost_leadership", replica=self._replica)
         if await self._try_acquire():
             self._leader = True
             self._standby_announced = False
+            SCHEDULER_IS_LEADER.set(1)
+            SCHEDULER_LEADERSHIP_TRANSITIONS.labels(transition=TRANSITION_ACQUIRED).inc()
             _log.info("scheduler_became_leader", replica=self._replica)
             return True
         if not self._standby_announced:
@@ -344,6 +408,9 @@ class SchedulerLeadership:
     async def release(self) -> None:
         """Give the lock up on the way out. Idempotent, and never raises."""
         was_leader, self._leader = self._leader, False
+        # Before the provider is asked: from here this replica runs no pass, and giving the lock
+        # up can take a few timeouts, during which the gauge must not still say it leads.
+        SCHEDULER_IS_LEADER.set(0)
         try:
             await self._provider.release()
         except Exception as exc:  # noqa: BLE001 -- shutdown must finish; the session dies anyway

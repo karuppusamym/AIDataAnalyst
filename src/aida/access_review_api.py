@@ -43,7 +43,7 @@ router = APIRouter(prefix="/v1", tags=["access-review"])
 
 # Roles allowed to pull an entitlement report for a *different* principal.
 # Self-service (no principal_id given) needs none of these -- see module docstring.
-_ON_BEHALF_OF_ROLES = frozenset({"PlatformAdmin", "DataAdmin", "ComplianceOfficer"})
+_ON_BEHALF_OF_ROLES = frozenset({"PlatformAdmin", "DataAdmin"})
 
 
 def _to_read(record: AccessReviewReportRecord) -> EntitlementReportRead:

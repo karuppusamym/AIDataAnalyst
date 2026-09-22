@@ -58,10 +58,10 @@ spec:
         threshold_status: structural
       annotations:
         summary: Atlas target {{ $labels.job }} is not answering scrapes
-        description: 'Prometheus has failed to scrape this target for five minutes. For atlas-fleet-scheduler
-          and atlas-graph-projector the first thing to check is not the process but the configuration:
-          those two expose no HTTP surface unless AIDA_WORKER_METRICS_PORT is set, so a target that has
-          never come up is far more likely unset than down.'
+        description: 'Prometheus has failed to scrape this target for five minutes. For atlas-fleet-scheduler,
+          atlas-graph-projector and atlas-metadata-worker the first thing to check is not the process
+          but the configuration: those three expose no HTTP surface unless AIDA_WORKER_METRICS_PORT is
+          set, so a target that has never come up is far more likely unset than down.'
         runbook: infra/monitoring/README.md
     - alert: AtlasFootprintMetricsAbsent
       expr: absent(aida_footprint_metrics_organizations)
@@ -328,4 +328,66 @@ spec:
         description: Distinct from a definition the parser cannot read, which is counted as UNPARSEABLE
           and is normal. FAILED means sqlglot is unavailable or the parse raised, so lineage is silently
           not being extracted at all.
+        runbook: infra/monitoring/README.md
+  - name: atlas.scheduler
+    rules:
+    - alert: AtlasSchedulerNoLeader
+      expr: sum(aida_scheduler_is_leader) == 0
+      for: 5m
+      labels:
+        severity: critical
+        threshold_status: structural
+      annotations:
+        summary: No scheduler replica has held the leadership lock for five minutes
+        description: 'Every scraped scheduler replica reports standing by, so nothing is running the periodic
+          passes: no scan is admitted, and the reaper, expiry, vector-index, footprint and delivery passes
+          are stopped. The usual cause is a leader whose host or network vanished without closing its
+          connection: PostgreSQL keeps the advisory lock until it notices, which on the operating system''s
+          keepalive defaults is about 2 h 11 min. Set tcp_keepalives_idle, tcp_keepalives_interval and
+          tcp_keepalives_count on the server -- section 9c of Docs/40-engineering/07-local-runbook.md
+          gives 60 / 10 / 6, a two-minute detection -- and a failover finishes well inside this rule''s
+          window. Other causes are an unreachable database (a scheduler_leader_lock_error line per attempt)
+          and an AIDA_DATABASE_URL that points at a transaction-mode pooler, where the lock means nothing.
+          This rule speaks only for replicas that are scraped: a running replica nobody scrapes may hold
+          the lock unseen, and the pg_locks query in src/aida/scheduler_leadership.py names the real holder.'
+        runbook: infra/monitoring/README.md
+    - alert: AtlasSchedulerLeadershipFlapping
+      expr: |
+        sum(increase(aida_scheduler_leadership_transitions_total{transition="lost"}[1h])) >= 3
+      labels:
+        severity: warning
+        threshold_status: placeholder
+      annotations:
+        summary: Scheduler leadership was lost three or more times in the last hour
+        description: 'A leader whose lock verification failed stops starting passes and goes back to retrying:
+          scheduler_lost_leadership in the logs, with the error class in the scheduler_leader_lock_error
+          line before it. One loss is failover working. Repeated losses mean the link between the scheduler
+          and PostgreSQL is unstable, and each costs a scheduling gap of up to the keepalive detection
+          time. The three in the expression is a documented placeholder, not a measured rate -- see the
+          comment above this rule -- so treat a firing instance as "nobody has set this yet" until an
+          estate has replaced it. It counts losses a living process noticed: a leader whose process or
+          host disappeared reports none, and shows as AtlasTargetDown instead.'
+        runbook: infra/monitoring/README.md
+  - name: atlas.drafter
+    rules:
+    - alert: AtlasNewlyCreatedTableDrafterConsumerDown
+      expr: aida_newly_created_table_drafter_consumer_up == 0
+      for: 15m
+      labels:
+        severity: warning
+        threshold_status: structural
+      annotations:
+        summary: The newly-created-table drafter has not been consuming for fifteen minutes
+        description: 'Descriptions and enrichment proposals are not being drafted automatically for newly
+          created tables. THIS IS EXPECTED on the default stack: auto_enqueue_on_ingest defaults to true
+          and the default ten-service stack has no broker, so once the worker''s metrics port is set and
+          Prometheus scrapes it, this fires until --profile events is started (or AIDA_AUTO_ENQUEUE_ON_INGEST=false
+          turns the feature off, which removes the series). It cannot fire where the worker does not publish
+          the gauge. Nothing is lost while it is down: offsets are committed only after a message is handled,
+          PostgreSQL stays authoritative and the outbox accumulates, so drafting catches up by itself
+          once a consumer starts; the newly_created_table_drafter_unavailable log line names the broker
+          and the error. One case reads differently: a message that fails on every delivery keeps the
+          gauge at 0 except for the moment each attempt starts, so a scrape can land on 1 and restart
+          this rule''s fifteen minutes -- aida_newly_created_table_drafter_failures_total rising is the
+          unambiguous sign of that loop.'
         runbook: infra/monitoring/README.md

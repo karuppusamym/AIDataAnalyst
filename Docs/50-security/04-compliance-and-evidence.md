@@ -47,7 +47,7 @@ Reproducible bundles generated from runtime evidence for a named period, WORM-ar
 
 Each pack is reproducible: same period, same inputs, same output.
 
-> **Implementation status (2026-09-20).** Five of the six packs are generated (`MODEL_RISK`, `BCBS_239`, `ACCESS_REVIEW`, `AI_USAGE`, `CHANGE_CONTROL`; `src/aida/compliance_packs.py`, served by `src/aida/compliance_api.py`); there is no Data protection pack. A pack is stored as a checksummed database row and is not handed to the WORM archive provider, so "WORM-archived on generation" is the target, not the behaviour. Generating or downloading one needs `PlatformAdmin`, `ComplianceOfficer` or `DataSteward`; `ComplianceOfficer` cannot be granted under OIDC and `Auditor` is refused (`00-product/02-personas-and-jobs.md` §2.6).
+> **Implementation status (2026-09-20).** Five of the six packs are generated (`MODEL_RISK`, `BCBS_239`, `ACCESS_REVIEW`, `AI_USAGE`, `CHANGE_CONTROL`; `src/aida/compliance_packs.py`, served by `src/aida/compliance_api.py`); there is no Data protection pack. A pack is stored as a checksummed database row and is not handed to the WORM archive provider, so "WORM-archived on generation" is the target, not the behaviour. Generating one needs `PlatformAdmin` or `DataSteward`; downloading also admits `Auditor`, and listing and reading also admit `Viewer` (R11-AUD01, 2026-09-21: these routes used to name `ComplianceOfficer`, which no OIDC token can carry, and refused `Auditor`; `00-product/02-personas-and-jobs.md` §2.6).
 
 ## 4. Regulatory mapping
 
@@ -92,7 +92,7 @@ For a self-hosted deployment inside a bank, the bank's own certification perimet
 | SIEM routing | Implemented (webhook and syslog) but verified only against loopback stubs; the shipped endpoint is a placeholder and the delivery worker is off by default, so security events do not reach the SOC | P0 |
 | Retention enforcement | Policy exists; enforcement does not | P0 |
 | Compliance pack generation | Five of six packs are generated (`src/aida/compliance_packs.py`); no Data protection pack, and packs are not WORM-archived (see the status note in section 3) | P1 |
-| Access review reporting | Implemented: a self-service entitlement report (`src/aida/access_review_api.py`); a report for another principal needs `PlatformAdmin`, `DataAdmin` or `ComplianceOfficer`, and the last cannot be granted under OIDC | P1 |
+| Access review reporting | Implemented: a self-service entitlement report (`src/aida/access_review_api.py`); a report for another principal needs `PlatformAdmin` or `DataAdmin` | P1 |
 | Policy decision logging | Partial — auditors need complete inputs | P0 |
 | Privileged-access monitoring | Operators are audited but not monitored | P1 |
 | Legal hold | The archive can place and release a hold (`apply_legal_hold` and `release_legal_hold` in `src/aida/worm_archive.py`, exercised against a local Object Lock service); no API route or operator workflow calls them | P1 |

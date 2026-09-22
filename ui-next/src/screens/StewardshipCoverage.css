@@ -1,0 +1,46 @@
+/* Stewardship -> Coverage (R11-AUD08). Layout comes from `StewardshipScreen.css`
+   (`.stew`, `.stew__panel`, ...), which this view shares with the Work queue and
+   Bulk actions; only what the scorecard adds is here. */
+
+.stewcov__controls{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.stewcov__controls .field{min-width:220px}
+
+.stewcov__overall{margin:0;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--ink-2)}
+.stewcov__score{font-size:30px;font-weight:600;letter-spacing:-.02em;color:var(--ink);font-variant-numeric:tabular-nums}
+
+/* The dimension table and the snapshot table share one grammar: text left,
+   numbers right and tabular, a hairline between rows. */
+.stewcov__dims,.stewcov__table{width:100%;border-collapse:collapse;font-size:12.5px}
+.stewcov__dims th,.stewcov__dims td,.stewcov__table th,.stewcov__table td{padding:8px 10px;border-bottom:1px solid var(--line-soft);text-align:left;vertical-align:top}
+.stewcov__dims thead th,.stewcov__table thead th{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--ink-3);border-bottom:1px solid var(--line)}
+.stewcov__dims tbody th,.stewcov__table tbody th{font-weight:500;color:var(--ink)}
+/* Numbers do not break in a cell, but a COLUMN HEADER may wrap ("Semantically
+   mapped"): held on one line it made a ten-column history wider than the panel
+   it sits in, so it scrolled sideways by a few pixels at ordinary desktop widths. */
+.stewcov__num{text-align:right !important;font-variant-numeric:tabular-nums}
+.stewcov__dims tbody .stewcov__num,.stewcov__table tbody .stewcov__num{white-space:nowrap}
+
+.stewcov__dimname{display:block;font-weight:600}
+.stewcov__def{display:block;margin-top:2px;font-size:11.5px;font-weight:400;color:var(--ink-3);max-width:58ch}
+
+.stewcov__barcell{display:flex;align-items:center;gap:10px;min-width:170px}
+.stewcov__bar{flex:1;height:8px;border-radius:4px;background:var(--sunk);border:1px solid var(--line);overflow:hidden;min-width:90px}
+.stewcov__bar i{display:block;height:100%;background:var(--accent)}
+.stewcov__pct{font-variant-numeric:tabular-nums;min-width:58px;text-align:right;color:var(--ink)}
+
+.stewcov__history{display:flex;flex-direction:column;gap:12px}
+.stewcov__scroll{overflow-x:auto;border:1px solid var(--line-soft);border-radius:var(--radius-sm)}
+.stewcov__scroll:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.stewcov__table{min-width:720px}
+.stewcov__table tbody tr:last-child th,.stewcov__table tbody tr:last-child td{border-bottom:0}
+
+.stewcov__trend{margin:0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.stewcov__trend figcaption{font-size:11.5px;color:var(--ink-3);max-width:44ch}
+.stewcov__trendbase{stroke:var(--line);stroke-width:1}
+.stewcov__trendline{fill:none;stroke:var(--accent);stroke-width:1.5;stroke-linejoin:round}
+.stewcov__trenddot{fill:var(--accent)}
+
+@media (max-width:560px){
+  .stewcov__controls .field{min-width:0;flex:1}
+  .stewcov__score{font-size:24px}
+}

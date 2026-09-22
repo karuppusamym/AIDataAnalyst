@@ -153,7 +153,6 @@ async def list_organization_data_domains(
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
-            "ProjectAdmin",
             "DataAdmin",
             "Operations",
             "Viewer",
@@ -200,7 +199,6 @@ async def list_organization_projects(
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
-            "ProjectAdmin",
             "DataAdmin",
             "Operations",
             "Viewer",
@@ -246,7 +244,6 @@ async def get_project(
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
-            "ProjectAdmin",
             "DataAdmin",
             "Operations",
             "Viewer",
@@ -281,7 +278,6 @@ async def list_organization_datasources(
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
-            "ProjectAdmin",
             "MetadataAdmin",
             "DataAdmin",
             "Operations",
@@ -331,7 +327,6 @@ async def get_datasource(
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
-            "ProjectAdmin",
             "MetadataAdmin",
             "DataAdmin",
             "Operations",
@@ -370,7 +365,6 @@ async def get_datasource_health(
         require_roles(
             "PlatformAdmin",
             "OrganizationAdmin",
-            "ProjectAdmin",
             "MetadataAdmin",
             "DataAdmin",
             "Operations",

@@ -149,6 +149,7 @@ from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     MAX_AUDITED_SECTIONS,
     SOURCE_BUNDLE_CHANNELS,
+    OkfStoredContext,
     OkfStoredSourceContext,
     load_document,
     read_okf_context,
@@ -574,7 +575,6 @@ def _context_product_role_eligible(roles: frozenset[str], allowed_roles: Sequenc
 CATALOG_RESOURCE_READER_ROLES: frozenset[str] = frozenset({
     "PlatformAdmin",
     "OrganizationAdmin",
-    "ProjectAdmin",
     "MetadataAdmin",
     "DataAdmin",
     "SemanticAdmin",
@@ -1008,6 +1008,34 @@ async def _handle_native_knowledge_tool_call(
         )
     except HTTPException:
         return inaccessible
+    withheld = [
+        (path, anchor)
+        for path, anchor, text in section_texts(found.context)
+        if not is_eligible_for_model_context(
+            screen_text(text, content_origin=f"okf_product_context:{version_id}").status
+        )
+    ]
+    found = OkfStoredContext(
+        stored=found.stored, context=without_sections(found.context, withheld)
+    )
+    if withheld:
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.okf_context_egress_quarantined",
+            resource_type="context_product_version",
+            resource_id=str(version_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "publication_id": str(found.stored.publication.id),
+                "withheld_count": len(withheld),
+                "withheld_sections": [
+                    f"{path}#{anchor}" for path, anchor in withheld[:MAX_AUDITED_SECTIONS]
+                ],
+                "screening_version": SCREENING_VERSION,
+            },
+        )
     record_okf_read(
         session,
         context,
@@ -1019,6 +1047,10 @@ async def _handle_native_knowledge_tool_call(
     read = context_read(found)
     await session.commit()
     structured = read.model_dump(mode="json", exclude={"markdown"})
+    structured["egress"] = {
+        "screening_version": SCREENING_VERSION,
+        "withheld_sections": len(withheld),
+    }
     return {
         "content": [
             {"type": "text", "text": read.markdown},

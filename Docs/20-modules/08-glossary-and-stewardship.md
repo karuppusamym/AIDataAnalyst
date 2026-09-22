@@ -26,7 +26,7 @@ S1, S2 (conflicts), S3 (bulk ownership), S5 (coverage), R1, R3, and B2 (is this 
 - Deterministic, evidence-scored table description drafting, reviewed through the common governance queue.
 - A responsive Stewardship Control Center integrated with the Business Meaning and asset-intelligence workbenches.
 
-> **Implementation status (2026-09-20).** The responsibilities above are API and service behaviour; the UI covers part of them. In ui-next, Business meaning creates, submits and links glossary terms (`ui-next/src/screens/BusinessMeaningScreen.tsx`), the Documentation workspace generates, lists and submits description drafts, and the Stewardship workspace (`#/steward/stewardship`) runs the catalog bulk actions (tag, classify, own, certify) and the unowned-asset backlog. These have API routes and no ui-next caller (`ui-next/src/lib/api/` names none of them): the coverage scorecard and snapshots, glossary conflicts, term-link proposals, ownership rules, the reviewed bulk operations of section 7, and leaver reassignment. No screen is named Stewardship Control Center; the Stewardship workspace is the nearest. The design intent stands; these are not yet reachable without API credentials. Tracker row R11-C12 defers the semantic conflict UX.
+> **Implementation status (2026-09-21).** The responsibilities above are API and service behaviour; the UI covers most of them. In ui-next, Business meaning creates, submits and links glossary terms (`ui-next/src/screens/BusinessMeaningScreen.tsx`); the Documentation workspace generates, lists and submits description drafts; the Stewardship workspace (`#/steward/stewardship`) runs the catalog bulk actions (tag, classify, own, certify), the unowned-asset backlog and, since R11-AUD08, a Coverage view; Glossary review (`#/steward/glossary-review`) lists glossary conflicts and proposes a resolution, and generates and submits term-link proposals; and Ownership (`#/steward/ownership`) lists assignments, creates and applies ownership rules, and files a leaver reassignment. A write that needs a second person (a conflict resolution, a link proposal, a rule application, a leaver reassignment) opens a review and changes nothing until a different reviewer approves it; approving a conflict resolution marks the conflict resolved and edits neither term. Still without a ui-next caller: the route that creates a reviewed bulk operation directly (`POST .../stewardship/bulk-operations`; the Ownership screen only lists the operations), glossary categories (`GET` / `POST .../glossary-categories`), editing or retiring an ownership rule (no route exists), and coverage at domain or line-of-business scope. These screens were tested with mocked transport and in the demo build; the dev database holds no rows for them, so none has been run against the running API with data. No screen is named Stewardship Control Center; the Stewardship workspace is the nearest. Tracker row R11-C12 defers the semantic conflict UX.
 
 ## 4. Not responsibilities
 
@@ -93,7 +93,7 @@ All bulk operations are capped at 500 subjects and require independent review. R
 
 The API computes a simple percentage for each dimension and their arithmetic mean. It supports organization-wide, data-source, domain, and line-of-business scopes, validates every scope against the tenant, can persist time-stamped snapshots, and returns up to 500 unowned table IDs for action. Field-completion percentage is deliberately excluded because it measures typing rather than trust.
 
-> **Implementation status (2026-09-20).** The coverage scorecard is API-only: `/v1/organizations/{organization_id}/stewardship/coverage` and its snapshots route have no ui-next caller. The Home screen's documented and trusted percentages are computed from a sample of catalog rows, not from this score, and the Stewardship workspace shows the unowned backlog, not the six-dimension score.
+> **Implementation status (2026-09-21).** The coverage scorecard has a screen: the Stewardship workspace's Coverage view (`ui-next/src/screens/StewardshipCoverage.tsx`) shows the API's six dimensions and overall score for the organization or one datasource, with a snapshot history table and, from two snapshots, a trend line. Taking a snapshot needs DataSteward, MetadataAdmin, PlatformAdmin or SemanticAdmin and a confirmation (a snapshot is stored and audited and cannot be removed there). Domain and line-of-business scopes and the raw unowned-table list are not surfaced. The Home screen's documented and trusted percentages are computed from a sample of catalog rows, not from this score.
 
 ## 9. Public interface
 
@@ -131,7 +131,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 |---|---|---|
 | Term lifecycle | Implemented vertical slice | Category edit/archive; scheduled lifecycle policy |
 | Term-asset linkage | Manual, reviewed bulk, and reviewed exact inferred links | Fuzzy/model-assisted ranking and bank corpus calibration |
-| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk, reviewed leaver reassignment (GL-7; API only, no ui-next caller) | Inheritance; a screen for the rule, bulk and leaver workflows |
+| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk, reviewed leaver reassignment (GL-7; the Ownership screen covers rules and leavers since R11-AUD08) | Inheritance; a screen that creates reviewed bulk operations directly |
 | Conflicts | Manual and synonym detection with reviewed retained resolution | Definition-source precedence learning and richer impact preview |
 | Certification | Reviewed bulk table certification with expiry | Automatic expiry state/event worker; additional asset types |
 | Coverage | Six dimensions, four scopes, snapshots/history, unowned IDs | Scheduled trend computation, routing/escalation, bank-scale benchmarks |
@@ -149,7 +149,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 | GL-4 | Scoped coverage scoring, dashboard, and history | DONE | P0 |
 | GL-5 | Reviewed bulk table certification with expiry | DONE | P1 |
 | GL-6 | Unowned-asset backlog with routing | DONE - bounded backlog, automated owner routing, and two-tier escalation | P1 |
-| GL-7 | Dedicated leaver reassignment and ownership vacate workflow | DONE on the API (2026-08-31); no ui-next caller | P2 |
+| GL-7 | Dedicated leaver reassignment and ownership vacate workflow | DONE on the API (2026-08-31); the Ownership screen files the request (R11-AUD08, 2026-09-21) | P2 |
 | GL-8 | Review-confirmed term-link inference from approved annotations | DONE | P1 |
 | GL-9 | Evidence-scored table description drafting, routed through review | DONE | P1 |
 | AG-12 | Steward agent: GL-8/GL-9 proposals under a contracted agent identity ([ADR-0029](../10-architecture/adr/ADR-0029-steward-agent.md)) | DONE - on demand, or scheduled once its interval is set (off by default) | P1 |

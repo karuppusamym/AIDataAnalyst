@@ -56,7 +56,6 @@ __all__ = [
 OKF_ROLES = (
     "PlatformAdmin",
     "MetadataAdmin",
-    "DataProductOwner",
     "DataSteward",
     "AgentDeveloper",
     "Analyst",

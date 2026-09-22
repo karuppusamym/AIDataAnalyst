@@ -35,6 +35,7 @@ export const SCREEN_IDS = [
   "inbox",
   "analyst",
   "catalog",
+  "search",
   "semantics",
   "tools",
   "tool-plans",
@@ -44,10 +45,12 @@ export const SCREEN_IDS = [
   "developer",
   "portfolio-analytics",
   "stewardship",
+  "ownership",
   "worklist",
   "task-agents",
   "negative-knowledge",
   "meaning",
+  "glossary-review",
   "relationships",
   "cross-source",
   "transformations",
@@ -122,6 +125,7 @@ export const SCREEN_JOURNEY: Record<ScreenId, Journey> = {
   inbox: "inbox",
   analyst: "analyst",
   catalog: "analyst",
+  search: "analyst",
   semantics: "analyst",
   tools: "analyst",
   "tool-plans": "analyst",
@@ -131,10 +135,12 @@ export const SCREEN_JOURNEY: Record<ScreenId, Journey> = {
   context: "developer",
   developer: "developer",
   stewardship: "steward",
+  ownership: "steward",
   worklist: "steward",
   "task-agents": "steward",
   "negative-knowledge": "steward",
   meaning: "steward",
+  "glossary-review": "steward",
   relationships: "steward",
   "cross-source": "steward",
   transformations: "steward",
@@ -275,6 +281,11 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
      `CONTEXT_FIELDS`' own comment exists to prevent. */
   analyst: ["ds", "product", "run"],
   catalog: ["asset", "cert", "ds", "q", "type"],
+  /* R11-AUD08: global search. `q` is the query, `type` narrows to tables or
+     columns, `offset` is the API's own paging. `ds` is deliberately NOT declared:
+     it is estate context that would otherwise be inherited from whichever source
+     you were looking at and silently narrow a search that says it is global. */
+  search: ["offset", "q", "type"],
   semantics: ["metric", "model", "project"],
   tools: ["project", "status", "tool"],
   "tool-plans": ["plan"],
@@ -316,6 +327,11 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
      undeclared field is dropped from the link before Bulk actions ever sees
      it. */
   stewardship: ["action", "ds", "field", "ids", "pattern", "view"],
+  /* R11-AUD08 (part 2): `view` chooses Assignments, Rules or Leaver reassignment.
+     `subject_type`/`subject_id` are the Assignments filter -- the two the list
+     route accepts -- and are declared here or `normalizeLocation` drops them from
+     the pasted link that carried them. */
+  ownership: ["subject_id", "subject_type", "view"],
   /* R11-S13 (M3): the documentation workspace's three tabs, and the union of
      every field the three screens declared. `view` is the tab discriminator;
      `ranking`/`zero` are Priorities', `focus`/`type` are Drafts', `document`
@@ -333,6 +349,10 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   "task-agents": ["agent"],
   "negative-knowledge": ["assertion_type", "subject", "suppression"],
   meaning: ["asset", "ds", "node", "q", "view"],
+  /* R11-AUD08: `view` chooses Conflicts or Link proposals, and `status` is the
+     filter of whichever is in front (the two do not share a vocabulary, so the
+     tab bar drops it on a switch). */
+  "glossary-review": ["status", "view"],
   /* R11-S13 (M3): `description-drafts` and `data-dictionaries` used to declare
      their fields here. They are tabs of `worklist` now, which declares all of
      them -- see its entry above. */

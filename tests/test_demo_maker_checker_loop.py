@@ -20,8 +20,9 @@ What is proven, and what the page's own text is held to:
 * The 'Refused here' cells of `roles-and-users.html#users` that fall on the loop's routes are
   asserted as written: riya cannot propose a term or decide a relationship, ravi and ana cannot
   decide a review, ana and dana cannot read the ledger, ana is refused another tenant's path,
-  and alex cannot approve his own proposal holding all fifteen roles. So are the Act 4 and
-  Act 5 refusals of `demo-script.html`, including the sentence both pages quote verbatim.
+  and alex cannot approve his own proposal holding fifteen of the sixteen roles (all but the
+  push-only MetadataIngestor). So are the Act 4 and Act 5 refusals of `demo-script.html`,
+  including the sentence both pages quote verbatim.
 
 **One claim on the page was not true, and this test is what found it.** The page said step 5
 "lists the events with three different principals". The ledger for this loop holds four events
@@ -821,11 +822,12 @@ async def test_the_users_page_refusals_on_the_loops_routes_are_403_on_the_role(
     assert response.json()["detail"].startswith("one of these roles")
 
 
-async def test_alex_cannot_approve_his_own_proposal_holding_every_role(
+async def test_alex_cannot_approve_his_own_proposal_holding_fifteen_roles(
     http: httpx.AsyncClient,
 ) -> None:
     """The users page, alex.operator: 'Approve his own proposal. The server answers 409: maker
-    is not checker, and PlatformAdmin is not exempt.' All fifteen roles, one principal."""
+    is not checker, and PlatformAdmin is not exempt.' Fifteen of the sixteen roles, one
+    principal."""
     script = Script(http)
     _, _, review = await propose(script, maker=ALEX)
 

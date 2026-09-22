@@ -44,7 +44,6 @@ from atlas.platform.config import Settings
 TASK_AGENT_READERS = (
     "PlatformAdmin",
     "AgentDeveloper",
-    "ModelRiskManager",
     "Reviewer",
     "MetadataReviewer",
     "Auditor",

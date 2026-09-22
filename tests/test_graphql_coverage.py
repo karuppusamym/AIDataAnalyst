@@ -714,7 +714,7 @@ def _assert_same_entries(rest: list[dict[str, Any]], graphql: list[dict[str, Any
 
 @pytest.mark.parametrize(
     "roles",
-    ["Analyst", "DataSteward", "MetadataAdmin", "DataProductOwner", "PlatformAdmin"],
+    ["Analyst", "DataSteward", "MetadataAdmin", "PlatformAdmin"],
 )
 async def test_coverage_is_the_compiled_coverage_for_every_reader(
     http: httpx.AsyncClient, estate: Estate, roles: str

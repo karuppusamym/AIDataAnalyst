@@ -23,7 +23,7 @@ All personas — this module is how every job is reached.
 - Accessibility.
 - Export and sharing of permission-aware views.
 
-> **Implementation status (2026-09-20).** The command palette is a page palette: Ctrl+K opens a filter over the shell's own screens (`ui-next/src/App.tsx`) and jumps to one; it does not search assets, terms or tools. Global search (`/v1/search`, `/v1/organizations/{organization_id}/global-search`) and the audit ledger export (`/v1/organizations/{organization_id}/audit-events/export.jsonl`) have API routes and no ui-next caller. Tracker row R11-X5 gives global search an owner and a date.
+> **Implementation status (2026-09-21).** The command palette (Ctrl+K) filters the shell's own screens (`ui-next/src/App.tsx`) and, since R11-AUD08, lists matching catalog tables under the page list with a "Search all" entry that opens the Search screen (`#/analyst/search`, over `GET /v1/search` and `GET /v1/search/suggest`: lexical, table and column names only, so a column hit cannot open its table). It does not search terms or tools. The fused `GET /v1/organizations/{organization_id}/global-search` route has no ui-next caller. The audit ledger export (`/v1/organizations/{organization_id}/audit-events/export.jsonl`) has an "Export JSONL" action on the Audit ledger.
 
 ## 4. Not responsibilities
 
@@ -97,7 +97,7 @@ Non-negotiable. Automated checks exist (section 9); human acceptance is still op
 |---|---|---|
 | Coverage | Atlas portal covers the user-facing API workflows in the current slice: onboarding, analyst, catalog/impact, dbt, business meaning, semantics, tools, graph explorer, quality, model routes, fleet, query memory, outbox, audit, governance queue. Not all of them: some API workflows still have no screen (tracker row R11-X5 lists clusters with owners and dates; the [product surface catalog](../00-product/06-product-surface-catalog.md) notes several of them) | Retained |
 | Persona navigation | Derived from OIDC groups (UX-1); the dropdown is development-only and changes presentation, not identity | Retained |
-| Global search / command palette | Ctrl+K page palette that jumps between screens; global search is API only, no ui-next caller | Global search (entry-ticket gap) |
+| Global search / command palette | Ctrl+K palette that jumps between screens and lists matching tables; a Search screen over the lexical `/v1/search` routes (R11-AUD08); the fused `global-search` route has no caller | Fused lexical, vector and graph search in the UI; a column hit that opens its table |
 | Virtualization | `VirtualList` (`ui-next/src/components/VirtualList.tsx`), used in 17 files as of 2026-09-20 | Retained |
 | Bulk operations | Stewardship Bulk actions (tag, classify, own, certify) and a Review batch queue | Background execution with progress and cancellation (section 6) |
 | Accessibility | Automated: a jsdom axe sweep of every navigation screen, plus 27 Playwright cases in a real browser (axe with contrast in the light and dark themes, and 320 px reflow) as of 2026-09-20. Human acceptance is open (R11-C2) | Human acceptance: screen reader, contrast, zoom, multi-screen |
@@ -111,7 +111,7 @@ Non-negotiable. Automated checks exist (section 9); human acceptance is still op
 | ID | Item | Priority | Status |
 |---|---|---|---|
 | UX-1 | Bind persona navigation to the approved OIDC group contract | P0 | DONE |
-| UX-2 | Global search and command palette | P0 | Palette DONE; global search has no ui-next caller (R11-X5) |
+| UX-2 | Global search and command palette | P0 | Palette DONE; lexical Search screen delivered (R11-AUD08); the fused route has no caller |
 | UX-3 | List virtualization | P1 | DONE |
 | UX-4 | Bulk selection and background bulk execution | P1 | DONE for selection and the Stewardship and Review batch surfaces; a bulk request answers synchronously with a per-item result, with no progress or cancellation |
 | UX-5 | Accessibility audit and remediation | P1 | Automated half DONE; human acceptance open (R11-C2, PARTIAL) |

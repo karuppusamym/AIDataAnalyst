@@ -19,6 +19,13 @@ This module is the other end. One helper, called once at the top of each of
 those two processes' entry points, which starts `prometheus_client`'s own WSGI
 exporter on a thread and returns the port it bound.
 
+R11-AUD03 and R11-AUD04 made it three callers. The fleet scheduler's listener now also
+carries the leader-election series (`aida.scheduler_leadership`), and the Temporal
+worker (`aida.workflows.worker`) calls it too, for the newly-created-table drafter
+consumer's series (`aida.newly_created_table_drafter`) -- until then that process
+published no series and had no listener, which is why `infra/monitoring/` had no job for
+it. It is the same setting for all three, read from each process's own environment.
+
 **Off unless a port is set.** `worker_metrics_port` defaults to 0, which means
 "do not listen". A process that opens a port nobody asked for is a change to a
 deployment's network surface, and this one should be a deliberate act by whoever

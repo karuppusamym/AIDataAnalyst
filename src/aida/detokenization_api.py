@@ -48,7 +48,7 @@ router = APIRouter(prefix="/v1", tags=["query-gateway"])
 # reversing a token is a compliance/fraud-investigation action, not a general
 # read, so "can see masked results" (any authenticated role) is deliberately
 # not enough.
-DETOKENIZE_ROLES = ("PlatformAdmin", "OrganizationAdmin", "ComplianceOfficer", "DataSteward")
+DETOKENIZE_ROLES = ("PlatformAdmin", "OrganizationAdmin", "DataSteward")
 
 
 class DetokenizeRequest(ApiModel):

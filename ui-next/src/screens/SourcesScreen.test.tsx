@@ -538,7 +538,7 @@ describe("registering a source is reachable from the fleet console", () => {
     listOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
     sessionMe = {
       principal_id: "p1", principal_type: "USER", organization_id: "org1",
-      roles: ["DataConsumer"], persona: null, identity_provider: "development",
+      roles: ["Viewer"], persona: null, identity_provider: "development",
     };
     const SourcesScreen = await loadScreen();
     render(<SourcesScreen />);

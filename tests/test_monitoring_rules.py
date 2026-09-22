@@ -129,12 +129,13 @@ def _resolve(name: str, declared: dict[str, frozenset[str]]) -> str | None:
 
 
 def test_the_rule_file_parses_and_declares_the_documented_number_of_rules() -> None:
-    """24 rules: the README says "4 recording rules, 20 alerts"."""
+    """27 rules: the README says "4 recording rules, 23 alerts" (20 from R11-FP17, and the
+    leader-election and drafter-consumer alerts of R11-AUD04 and R11-AUD03)."""
     rules = _rules()
     alerts = [rule for _, _, rule in rules if "alert" in rule]
     records = [rule for _, _, rule in rules if "record" in rule]
     assert len(records) == 4, f"expected 4 recording rules, found {len(records)}"
-    assert len(alerts) == 20, f"expected 20 alerts, found {len(alerts)}"
+    assert len(alerts) == 23, f"expected 23 alerts, found {len(alerts)}"
 
 
 def test_every_metric_a_rule_reads_is_published_by_some_module() -> None:
@@ -246,3 +247,198 @@ def test_the_generated_prometheus_rule_matches_the_source_file() -> None:
     )
     # Not vacuous: the comparison is sensitive to a one-character change.
     assert actual != expected.replace("aida-platform", "aida-platfrom", 1)
+
+
+# --- R11-AUD03 / R11-AUD04: the leader-election and drafter-consumer alerts -------------------
+#
+# The checks above say every alert reads a metric something publishes. These say the three added
+# for the two operability signals are the alerts their comments claim: the windows still follow
+# from the numbers they were derived from, the drafter rule still cannot fire where its gauge is
+# not published, and every process that opens a listener is actually scraped.
+
+COMPOSE_PATH = REPO_ROOT / "compose.yaml"
+PROMETHEUS_CONFIG_PATH = REPO_ROOT / "infra/monitoring/prometheus/prometheus.yml"
+POD_MONITOR_PATH = REPO_ROOT / "infra/monitoring/k8s/podmonitor.yaml"
+RUNBOOK_PATH = REPO_ROOT / "Docs/40-engineering/07-local-runbook.md"
+LEADERSHIP_MODULE_PATH = SRC_ROOT / "aida/scheduler_leadership.py"
+
+_DURATION = re.compile(r"^(\d+)([smh])$")
+_LISTENER_CALL = re.compile(r'serve_worker_metrics\(\s*settings,\s*process="([a-z-]+)"')
+
+
+def _alert(name: str) -> dict[str, Any]:
+    for _group, alert_name, rule in _rules():
+        if alert_name == name:
+            return rule
+    raise AssertionError(f"no alert named {name!r} in {RULES_PATH.name}")
+
+
+def _duration_seconds(text: str) -> int:
+    match = _DURATION.match(text)
+    assert match, f"a duration this test cannot read: {text!r}"
+    return int(match.group(1)) * {"s": 1, "m": 60, "h": 3600}[match.group(2)]
+
+
+def test_the_no_leader_window_outlasts_the_failover_the_runbook_recommends() -> None:
+    """The `for` is derived, not measured -- the rule's own comment says so -- and the
+    derivation has inputs that live elsewhere: the keepalive settings the runbook tells an
+    operator to set, the standby's retry, and the scrape and evaluation intervals. Change one of
+    them without this rule and either a failover that works pages, or one that does not is
+    waited out by an alert that fires too early to mean anything."""
+    runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+    keepalives: dict[str, int] = {}
+    for name in ("idle", "interval", "count"):
+        found = re.search(rf"tcp_keepalives_{name}\s*=\s*(\d+)", runbook)
+        assert found, f"the runbook no longer gives a value for tcp_keepalives_{name}"
+        keepalives[name] = int(found.group(1))
+    # PostgreSQL drops the session after `idle` seconds of silence and `count` unanswered
+    # probes, `interval` apart.
+    detection = keepalives["idle"] + keepalives["interval"] * keepalives["count"]
+    retry = re.search(
+        r"^STANDBY_RETRY_SECONDS\s*=\s*([0-9.]+)",
+        LEADERSHIP_MODULE_PATH.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert retry, "STANDBY_RETRY_SECONDS is no longer a plain constant this test can read"
+    prometheus = yaml.safe_load(PROMETHEUS_CONFIG_PATH.read_text(encoding="utf-8"))["global"]
+    scrape_and_evaluation = _duration_seconds(prometheus["scrape_interval"]) + _duration_seconds(
+        prometheus["evaluation_interval"]
+    )
+
+    window = _duration_seconds(_alert("AtlasSchedulerNoLeader")["for"])
+
+    needed = detection + float(retry.group(1)) + scrape_and_evaluation
+    assert window > needed, (
+        f"AtlasSchedulerNoLeader waits {window}s but a failover with the runbook's keepalives "
+        f"takes {needed}s ({detection}s detection + retry + one scrape and one evaluation)"
+    )
+
+
+def _runbook_section() -> str:
+    """Section 9c of the local runbook: the text an operator reads about these signals."""
+    runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = runbook.index("## 9c.")
+    return runbook[start : runbook.index("\n## 10.", start)]
+
+
+def test_every_series_the_runbook_names_is_one_the_code_declares() -> None:
+    """Section 9c tells an operator which series to read and what their labels mean. A series
+    renamed in the code and not in the runbook is a query that quietly returns nothing."""
+    declared = _declared_metrics()
+    named = set(re.findall(r"\baida_[a-z0-9_]+", _runbook_section()))
+    assert len(named) >= 4, f"section 9c names {sorted(named)}; is the test reading the right text?"
+
+    unknown = sorted(name for name in named if _resolve(name, declared) is None)
+    assert unknown == [], f"the runbook names series no module publishes: {unknown}"
+    # The labels the runbook documents are the labels the code declares.
+    assert "transition" in declared["aida_scheduler_leadership_transitions_total"]
+    assert "consumer_group" in declared["aida_newly_created_table_drafter_consumer_up"]
+
+
+_ALERT_NAME = re.compile(r"\bAtlas[A-Z][A-Za-z]+\b")
+
+
+def test_every_alert_the_documents_name_exists() -> None:
+    """The runbook, the monitoring README and the workers note name alerts by hand, and the rule
+    file names them in each other's annotations. One renamed in the rule file and not there is a
+    page that points an operator at nothing."""
+    alerts = {name for _group, name, rule in _rules() if "alert" in rule}
+    documents = {
+        "runbook section 9c": _runbook_section(),
+        "monitoring README": (REPO_ROOT / "infra/monitoring/README.md").read_text(encoding="utf-8"),
+        "workers and workflows": (
+            REPO_ROOT / "Docs/10-architecture/08-workers-and-workflows.md"
+        ).read_text(encoding="utf-8"),
+        "the rule file": RULES_PATH.read_text(encoding="utf-8"),
+    }
+    missing = [
+        f"{where} names {name}"
+        for where, text in documents.items()
+        for name in sorted(set(_ALERT_NAME.findall(text)))
+        if name not in alerts
+    ]
+    assert missing == [], "; ".join(missing)
+
+
+def test_the_summaries_state_the_window_the_rule_waits() -> None:
+    """The page says "for five minutes"; the rule must wait five. The two live in one file and
+    are edited separately."""
+    words = {5: "five", 15: "fifteen"}
+    for name in ("AtlasSchedulerNoLeader", "AtlasNewlyCreatedTableDrafterConsumerDown"):
+        rule = _alert(name)
+        minutes = _duration_seconds(rule["for"]) // 60
+        assert minutes in words, f"{name} waits {rule['for']}: add it to this test's words"
+        assert f"{words[minutes]} minutes" in rule["annotations"]["summary"], name
+
+
+def test_the_no_leader_alert_speaks_only_for_replicas_that_report() -> None:
+    """`or absent(...)` would make it claim "no leader" about a scheduler that simply never
+    opened its metrics port, which `AtlasTargetDown` already reports as what it is."""
+    expr = _alert("AtlasSchedulerNoLeader")["expr"]
+    assert "aida_scheduler_is_leader" in expr
+    assert "absent" not in expr and "vector(" not in expr
+
+
+def test_the_flapping_alert_counts_only_lost_leadership() -> None:
+    """Every deploy and every restart acquires leadership. Only a loss is trouble."""
+    expr = _alert("AtlasSchedulerLeadershipFlapping")["expr"]
+    assert 'transition="lost"' in expr
+    assert "acquired" not in expr
+
+
+def test_the_drafter_alert_can_only_fire_where_the_worker_publishes_the_gauge() -> None:
+    """A missing series means the feature is off or the port is unset, and neither is an outage.
+    So the rule reads the gauge and nothing that would turn its absence into a value."""
+    rule = _alert("AtlasNewlyCreatedTableDrafterConsumerDown")
+    expr = " ".join(rule["expr"].split())
+    assert expr == "aida_newly_created_table_drafter_consumer_up == 0", expr
+
+
+def test_the_drafter_alert_says_a_missing_broker_is_expected_on_the_default_stack() -> None:
+    """Where an operator reads it: the annotation, not a YAML comment the Kubernetes copy loses.
+    `auto_enqueue_on_ingest` defaults to true and the default stack has no broker."""
+    description = " ".join(
+        _alert("AtlasNewlyCreatedTableDrafterConsumerDown")["annotations"]["description"].split()
+    ).lower()
+    for phrase in ("expected on the default stack", "no broker", "auto_enqueue_on_ingest"):
+        assert phrase in description, f"the drafter alert no longer says {phrase!r}"
+
+
+def test_every_process_that_opens_a_metrics_listener_is_scraped_and_gets_the_port() -> None:
+    """The rule `prometheus.yml` used to state -- a job is added at the same time as the first
+    series its process publishes, not before -- as a check instead of a sentence.
+
+    Three things make a listener reachable: a scrape job (or PodMonitor) that names the process,
+    and, in the compose stack, the port variable reaching that service. Miss any of them and the
+    series are published into a process nothing can read, which is the R11-FP17 finding again."""
+    processes: set[str] = set()
+    for path in SRC_ROOT.rglob("*.py"):
+        processes.update(_LISTENER_CALL.findall(path.read_text(encoding="utf-8")))
+    assert {"fleet-scheduler", "graph-projector", "metadata-worker"} <= processes, processes
+
+    jobs = {
+        job["job_name"]: job
+        for job in yaml.safe_load(PROMETHEUS_CONFIG_PATH.read_text(encoding="utf-8"))[
+            "scrape_configs"
+        ]
+    }
+    monitors = {
+        document["metadata"]["name"]
+        for document in yaml.safe_load_all(POD_MONITOR_PATH.read_text(encoding="utf-8"))
+        if document
+    }
+    services = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))["services"]
+
+    problems: list[str] = []
+    for process in sorted(processes):
+        job = jobs.get(f"atlas-{process}")
+        if job is None:
+            problems.append(f"{process}: no scrape job atlas-{process}")
+        elif job["static_configs"][0]["targets"] != [f"{process}:9108"]:
+            problems.append(f"{process}: job atlas-{process} does not scrape {process}:9108")
+        if f"aida-{process}" not in monitors:
+            problems.append(f"{process}: no PodMonitor aida-{process}")
+        environment = (services.get(process) or {}).get("environment") or {}
+        if "AIDA_WORKER_METRICS_PORT" not in environment:
+            problems.append(f"{process}: compose does not pass AIDA_WORKER_METRICS_PORT")
+    assert problems == [], "; ".join(problems)

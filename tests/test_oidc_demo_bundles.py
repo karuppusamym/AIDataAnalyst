@@ -99,6 +99,7 @@ BUNDLES: dict[str, frozenset[str]] = {
             "ToolDeveloper",
             "ToolConsumer",
             "AgentDeveloper",
+            "MetadataIngestor",
         }
     ),
     "atlas-steward": frozenset({"DataSteward", "MetadataReviewer", "Analyst", "Viewer"}),
@@ -109,7 +110,14 @@ BUNDLES: dict[str, frozenset[str]] = {
     "atlas-operations": frozenset({"Operations", "Viewer"}),
     "atlas-dataadmin": frozenset({"DataAdmin", "Viewer"}),
     "atlas-agentdev": frozenset({"AgentDeveloper", "ToolDeveloper", "Analyst", "Viewer"}),
+    # R11-AUD01: the push-only service identity (an Airflow DAG, a connector) that the ingestion
+    # routes always named and no token could carry. No demo user holds it.
+    "atlas-ingestor": frozenset({"MetadataIngestor"}),
 }
+
+#: Bundles that are NOT a person's working seat, so they do not carry the `Viewer` read baseline: a
+#: service identity that pushes metadata reads nothing (least privilege).
+_SERVICE_BUNDLES = frozenset({"atlas-ingestor"})
 
 
 @dataclass(frozen=True)
@@ -349,7 +357,7 @@ def test_each_bundle_grants_exactly_its_documented_roles(overlay: Overlay, bundl
 
 
 def test_the_admin_bundle_is_the_whole_catalog(overlay: Overlay) -> None:
-    """alex.operator holds all fifteen roles, so a role added to the catalog and not to the
+    """alex.operator holds every role in the catalog, so a role added to it and not to the
     overlay (or the roster) shows up here."""
     assert frozenset(overlay.role_mappings["atlas-admin"]) == PLATFORM_ROLES
 
@@ -367,7 +375,11 @@ def test_only_the_admin_bundle_grants_platform_or_organization_admin(overlay: Ov
 def test_every_bundle_carries_the_viewer_read_baseline(overlay: Overlay) -> None:
     """Roles are additive, not a hierarchy: `Analyst` does not imply `Viewer`, so each working
     bundle names `Viewer` itself (the overlay's comment says so)."""
-    assert [b for b, roles in overlay.role_mappings.items() if "Viewer" not in roles] == []
+    assert [
+        b
+        for b, roles in overlay.role_mappings.items()
+        if "Viewer" not in roles and b not in _SERVICE_BUNDLES
+    ] == []
 
 
 # ---------------------------------------------------------------------------

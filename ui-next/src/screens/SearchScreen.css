@@ -1,0 +1,39 @@
+/* Search (R11-AUD08). The shell scrolls this screen (`.sview{overflow:auto}`), so
+   the root takes its natural height rather than the fixed one the workspaces
+   with their own scroll regions use. */
+
+.srch{display:flex;flex-direction:column;gap:14px;padding:22px 24px;max-width:1128px}
+.srch__head{flex:none}
+.srch__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.srch__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:70ch}
+
+.srch__form{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.srch__form .field:first-child{flex:1;min-width:260px}
+.srch__form .field:nth-child(3){width:190px}
+
+.srch__panel{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.srch__note{margin:0;font-size:12.5px;color:var(--ink-3)}
+.srch__summary{margin:0;font-size:13px;color:var(--ink-2)}
+
+.srch__group{display:flex;flex-direction:column;gap:6px}
+.srch__grouphead{margin:0;display:flex;align-items:baseline;gap:8px;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.srch__groupcount{font-weight:500;letter-spacing:0;text-transform:none;font-variant-numeric:tabular-nums}
+
+.srch__hits{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.srch__hit{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--line-soft)}
+.srch__hit:first-child{border-top:0}
+.srch__hitname{all:unset;font-size:13.5px;font-weight:600;color:var(--accent);cursor:pointer;border-radius:3px}
+.srch__hitname:hover{text-decoration:underline}
+.srch__hitname:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.srch__hitname--plain{color:var(--ink);cursor:default}
+.srch__hitname--plain:hover{text-decoration:none}
+.srch__hitmeta{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-3)}
+.srch__hitmeta code{font-family:var(--mono);font-size:11px;color:var(--ink-2);overflow-wrap:anywhere}
+
+.srch__pager{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px;font-size:12.5px;color:var(--ink-2)}
+.srch__pager [role="status"]{margin-right:auto;font-variant-numeric:tabular-nums}
+
+@media (max-width:900px){
+  .srch{padding:16px 14px}
+  .srch__form .field:nth-child(3){width:100%}
+}

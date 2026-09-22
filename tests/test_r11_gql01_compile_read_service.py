@@ -198,7 +198,7 @@ def test_the_decisions_one_reader_set_is_the_compile_routes() -> None:
     """The set a lifecycle reader is drawn from is the route's, member for member: it is what
     lets a steward read a draft's coverage over both surfaces."""
     assert context_product_read_service.COMPILER_LIFECYCLE_READERS == frozenset(
-        {"PlatformAdmin", "MetadataAdmin", "DataProductOwner", "DataSteward"}
+        {"PlatformAdmin", "MetadataAdmin", "DataSteward"}
     )
     assert set(context_product_read_service.COMPILER_LIFECYCLE_READERS) <= set(
         context_product_read_service.COMPILER_ROLES

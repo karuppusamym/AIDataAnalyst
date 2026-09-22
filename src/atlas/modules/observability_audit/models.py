@@ -344,7 +344,7 @@ class AccessReviewReportRecord(Base, TimestampMixin):
     subject_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
     subject_principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
     # True when the subject generated their own report; False when an elevated
-    # role (PlatformAdmin/DataAdmin/ComplianceOfficer) pulled it on their behalf --
+    # role (PlatformAdmin/DataAdmin) pulled it on their behalf --
     # always audited via `requested_by` either way.
     is_self_service: Mapped[bool] = mapped_column(Boolean, nullable=False)
     requested_by: Mapped[str] = mapped_column(String(255), nullable=False)

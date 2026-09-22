@@ -1,6 +1,11 @@
 # ADR-0030 — API Conventions: Adopt the Shipped Contract, Not the Documented Target
 
-**Status:** Proposed | **Date:** 2026-09-20 | **Owner:** Architecture + Product
+**Status:** Accepted | **Date:** 2026-09-21 | **Owner:** Architecture + Product
+
+> **Accepted 2026-09-21**, on the product owner's instruction to proceed with the open R11 rows (tracker R11-AUD06). It was
+> drafted as Proposed on 2026-09-20; the Context, Decision and Revisit sections below are unchanged. Nothing in the code
+> changes: this records the contract the API already has. It is reversed the way the register says, by an ADR that
+> supersedes it, and the three revisit triggers below are what makes writing one correct.
 
 ## Context
 

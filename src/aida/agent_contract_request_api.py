@@ -51,7 +51,7 @@ The flow:
 
 Scope, stated honestly: this does not create a new, narrower "external
 agent" role. It reuses `CONTRACT_AUTHORS`
-(`PlatformAdmin`/`AgentDeveloper`/`ModelRiskManager`) for who may submit --
+(`PlatformAdmin`/`AgentDeveloper`) for who may submit --
 the same set that could already write a contract directly. What changes is
 that submission no longer *is* activation: even a trusted submitter's
 request is reviewed by a different principal and blocked on a live

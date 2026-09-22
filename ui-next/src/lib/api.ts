@@ -46,6 +46,7 @@ export * from "./api/columnDocumentation";
 export { decideRelationshipCandidate } from "./api/governance";
 
 export * from "./api/catalog";
+export * from "./api/ownership";
 export * from "./api/governance";
 export * from "./api/quality";
 export * from "./api/agents";
@@ -61,3 +62,6 @@ export * from "./api/transformations";
 export * from "./api/documents";
 export * from "./api/reviewBatches";
 export * from "./api/graphql";
+export * from "./api/glossaryReview";
+export * from "./api/coverage";
+export * from "./api/search";

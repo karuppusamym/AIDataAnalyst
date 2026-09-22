@@ -206,6 +206,8 @@ async def create_change_set(
         correlation_id=get_correlation_id(),
         details={"name": body.name},
     )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return StudioChangeSetRead.model_validate(cs)
 
@@ -305,6 +307,8 @@ async def add_item(
             "operation": body.operation,
         },
     )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return StudioChangeItemRead.model_validate(item)
 
@@ -360,6 +364,8 @@ async def remove_item(
         correlation_id=get_correlation_id(),
         details={"change_set_id": str(cs.id)},
     )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +515,8 @@ async def run_tests(
                 "failed_question_ids": [str(c.question.id) for c in eval_failed],
             },
         )
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return test_result
 
@@ -742,7 +750,8 @@ async def detect_conflicts_endpoint(
         outcome=cs.conflict_status,
         correlation_id=get_correlation_id(),
     )
-    await session.flush()
+    # R11-AUD08: keep the write; the request's session is rolled back when it closes.
+    await session.commit()
 
     return [
         StudioConflict(

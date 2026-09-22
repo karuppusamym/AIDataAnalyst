@@ -59,6 +59,8 @@ const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["inbox", "Agent inbox"],
   ["analyst", "Ask Atlas"],
   ["catalog", "Catalog"],
+  // R11-AUD08: global search, swept in its prompt state (no query, so no request).
+  ["search", "Search"],
   ["semantics", "Semantic layer"],
   ["tools", "Tool registry"],
   ["tool-plans", "Tool plans"],
@@ -79,6 +81,17 @@ const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["stewardship", "Stewardship"],
   ["stewardship", "Stewardship", "?view=bulk"],
   ["stewardship", "Stewardship", "?view=automation"],
+  /* R11-AUD08 (part 2): Assignments, Rules and Leaver reassignment are three
+     views of one screen, swept as three rows so none of them drops out of the
+     suite. Under the sweep's identity (`/v1/me` never answers) the write controls
+     are deliberately absent -- the forms and their confirmations are held to the
+     same axe run in `OwnershipRules.test.tsx`, `OwnershipAssignments.test.tsx`
+     and `OwnershipLeaver.test.tsx`, where a role is set. */
+  ["ownership", "Ownership"],
+  ["ownership", "Ownership", "?view=rules"],
+  ["ownership", "Ownership", "?view=leaver"],
+  // R11-AUD08: the coverage scorecard, swept populated from the demo estate.
+  ["stewardship", "Stewardship", "?view=coverage"],
   /* R11-S13 (M3): the worklist, the description drafts and the dictionary
      imports are three tabs of one workspace. They were three routes; they are
      three rows here, and are swept exactly as before -- which is the property
@@ -91,6 +104,10 @@ const SCREENS: ReadonlyArray<readonly [string, string, string?]> = [
   ["task-agents", "Task agents", "?agent=quality"],
   ["negative-knowledge", "Negative knowledge"],
   ["meaning", "Business meaning"],
+  /* R11-AUD08: Conflicts and Link proposals are two tabs of one destination,
+     so both are swept -- the second is the one a default visit never opens. */
+  ["glossary-review", "Glossary review"],
+  ["glossary-review", "Glossary review", "?view=proposals"],
   ["relationships", "Relationships"],
   ["cross-source", "Cross-source"],
   ["transformations", "Transformations"],

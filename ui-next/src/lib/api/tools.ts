@@ -230,8 +230,7 @@ export function executeToolPlan(
 }
 
 /** `POST /v1/tool-plans/{plan_id}/cancel` -- no body, narrower roles than
- *  the rest of this file (`PlatformAdmin`/`ToolDeveloper` only, no
- *  `DataEngineer`). 409s when the plan is already `COMPLETED`/`CANCELLED`;
+ *  the rest of this file (`PlatformAdmin`/`ToolDeveloper` only). 409s when the plan is already `COMPLETED`/`CANCELLED`;
  *  matches legacy's `plan-cancel` button. */
 export function cancelToolPlan(
   planId: string,

@@ -106,7 +106,7 @@ def test_no_identity_is_an_administrator() -> None:
     rule in the matrix, so an identity holding one would make the browser
     journey pass regardless of whether the application authorized anything.
     """
-    forbidden = {"PlatformAdmin", "OrganizationAdmin", "ProjectAdmin"}
+    forbidden = {"PlatformAdmin", "OrganizationAdmin"}
     offenders = {
         name: sorted(roles & forbidden) for name, roles in IDENTITIES.items() if roles & forbidden
     }

@@ -7,9 +7,12 @@ from uuid import UUID
 
 import httpx
 import jwt
+import structlog
 
 from aida.config import Settings
 from aida.security_types import SecurityContext
+
+_log = structlog.get_logger(__name__)
 
 PLATFORM_ROLES = frozenset(
     {
@@ -18,6 +21,7 @@ PLATFORM_ROLES = frozenset(
         "MetadataAdmin",
         "DataAdmin",
         "SemanticAdmin",
+        "MetadataIngestor",
         "DataSteward",
         "ToolDeveloper",
         "ToolConsumer",
@@ -63,6 +67,63 @@ MAX_JWKS_KEYS = 100
 #: publishes the new key at least `oidc_jwks_cache_seconds` before it starts signing with it never
 #: meets the window at all, because the ordinary cache refresh has already picked the key up.
 JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS = 30.0
+
+#: The shortest gap, in seconds, between one attempt to load the issuer's key set that FAILED and
+#: the next attempt, whatever the reason for loading it (R11-AUD10).
+#:
+#: R11-AUD09 limited the fetch an unknown `kid` could cause and left the ordinary one alone. Once
+#: the cached set had outlived `oidc_jwks_cache_seconds` the next request refreshed it; if the
+#: provider did not answer, the request after that tried again, and the one after that. Each attempt
+#: is bounded by a 5 second timeout and the lock lines them up, but nothing reduced how many there
+#: were, so an outage of the identity provider became a request-rate amplifier aimed at the service
+#: that was already struggling -- and this one needs no unknown `kid` and no attacker: every
+#: authenticated request is enough.
+#:
+#: After a failed attempt -- the cold load, a cache-expiry refresh or an unknown-`kid` refetch alike
+#: -- no further attempt is made until this long after the failed one ENDED (a 5 second timeout must
+#: not eat the window). Inside it a request is answered from the last good key set while that set
+#: may still be served (`JWKS_STALE_KEY_SET_GRACE_SECONDS`), and otherwise refused with the failure
+#: the last attempt met. So a worker asks a dead provider at most twice a minute, however many
+#: requests arrive. The window is fixed rather than growing: it is also the longest a provider that
+#: has recovered goes unnoticed, and a window short enough to wait out is already gentle enough for
+#: the provider.
+#:
+#: A constant, not a `Settings` field, like the unknown-key cooldown above: it protects the
+#: provider from this service, not a deployment choice, and the deployment surface (and the
+#: configuration inventory generated from it) should not grow for a limit with one sensible value.
+JWKS_REFRESH_FAILURE_BACKOFF_SECONDS = 30.0
+
+#: How long past its cache expiry, in seconds, a key set that could not be refreshed may still be
+#: used to verify tokens (R11-AUD10).
+#:
+#: Serving the last good key set while the provider is unreachable keeps every signed-in user
+#: working through the outages that last minutes -- a restart, a failover, a network fault --
+#: instead of turning each one into a platform-wide 401. The price is a security one, and this
+#: constant is its bound: a signing key the issuer has WITHDRAWN because it was compromised goes on
+#: verifying tokens for as long as this process cannot reach the issuer to learn that. Nothing else
+#: ends that. A token's `exp` is chosen by whoever holds the key, and revocation
+#: (`aida.token_revocation`) is per token, not per key. So the stale service has to end on its own.
+#:
+#: With a reachable provider a withdrawn key stops verifying after at most `oidc_jwks_cache_seconds`
+#: -- exposure the deployment already accepted. With an unreachable one it is at most that PLUS this
+#: constant: 15 minutes at the shipped 300 second cache, and never more, because past it the key
+#: set is not served at all. A request is then refused exactly as when no key set could ever be
+#: loaded ("OIDC JWKS endpoint is unavailable"), which is INV-4: an identity that cannot be checked
+#: is not trusted.
+#:
+#: Ten minutes is a judgement, not a measurement: long enough for a routine restart or failover of
+#: an identity provider, short enough that the extra exposure is small beside the cache lifetime's
+#: own. A constant for the same reason as the backoff above; shortening it (or reaching zero, which
+#: makes expiry fail closed at once) is a code change on purpose. Pinned keys (`oidc_jwks_json`)
+#: have no network behind them and a document that parsed once parses again, so once loaded their
+#: refresh cannot fail and none of this applies to them.
+JWKS_STALE_KEY_SET_GRACE_SECONDS = 600.0
+
+#: The refusal for a key set that could not be loaded. One string in one place: it is what
+#: `_fetch_jwks` raises when the endpoint does not answer, and what a request is refused with while
+#: nothing may be served and the last attempt failed for a reason that is not itself a refusal
+#: (an unexpected exception carries no message worth repeating).
+_JWKS_UNAVAILABLE = "OIDC JWKS endpoint is unavailable"
 
 
 class OidcVerificationError(RuntimeError):
@@ -214,11 +275,10 @@ def token_identifier(claims: dict[str, Any]) -> str:
 class OidcVerifier:
     """Asynchronous JWKS verifier with bounded caching and mandatory issuer/audience checks.
 
-    The issuer's key set is loaded again for one of two reasons, and only one of them is
-    limited here:
+    The issuer's key set is loaded again for one of two reasons, and each is limited:
 
     * The cached set has outlived `oidc_jwks_cache_seconds`. The next token refreshes it, as it
-      always has. That path is not limited by anything in this class.
+      always has -- unless a refresh has just FAILED (below).
     * A token names a `kid` the cached set does not hold -- normally a rotation the cache has not
       seen yet. This forced refetch happens at most once per
       `JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS` (R11-AUD09), measured from the end of the last
@@ -228,9 +288,36 @@ class OidcVerifier:
     The price of that limit is a bounded delay for a legitimate rotation: a token signed with a
     new key is refused until the first unknown-`kid` token that arrives once the cooldown has
     elapsed since the last fetch, and that token's own request performs the fetch. Worst-case
-    pickup delay is the cooldown. Why the limit exists is written on the constant. The window is
-    per verifier -- one per worker process and issuer configuration -- so N workers can each make
-    one fetch per window.
+    pickup delay is the cooldown. Why the limit exists is written on the constant.
+
+    **When a load fails (R11-AUD10).** Either kind of load can fail because the provider is down.
+    The failed attempt starts a backoff, `JWKS_REFRESH_FAILURE_BACKOFF_SECONDS`, during which no
+    load of either kind is attempted, so a dead provider is asked at most twice a minute however
+    many requests arrive. What a request gets in the meantime depends on what this verifier holds:
+
+    * A key set that is within `JWKS_STALE_KEY_SET_GRACE_SECONDS` of its cache expiry is served,
+      stale. Tokens signed with its keys keep verifying, and one that names a key it does not hold
+      is refused as unknown, exactly as inside the unknown-`kid` cooldown.
+    * Otherwise -- nothing was ever loaded, or the grace has run out -- the request is refused with
+      the reason the last attempt failed for ("OIDC JWKS endpoint is unavailable" for a provider
+      that does not answer): the same refusal a verifier with no key set gives. This is the
+      fail-closed end of the bound.
+
+    A load that succeeds replaces the key set, restarts its expiry, and ends the backoff.
+
+    The security trade-off is the whole reason the stale service is bounded, and it is written on
+    `JWKS_STALE_KEY_SET_GRACE_SECONDS`: while the provider is unreachable a withdrawn key keeps
+    verifying for up to `oidc_jwks_cache_seconds` plus the grace, and not one second longer. A
+    provider that recovers is noticed at the next attempt after the backoff, so up to
+    `JWKS_REFRESH_FAILURE_BACKOFF_SECONDS` late.
+
+    Pinned keys (`oidc_jwks_json`) take the same path with no network behind it. Their document
+    parses the same way every time, so once loaded a refresh cannot fail: no backoff starts and no
+    key set ever goes stale.
+
+    Every window here is per verifier -- one per worker process and identity-provider
+    configuration, shared by everything in the process that verifies a token (see
+    `aida.security.shared_oidc_verifier`) -- so N workers can each make one attempt per window.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -243,24 +330,56 @@ class OidcVerifier:
         # expiry (that would either extend a stale set or discard a good one), but it must still
         # start the cooldown.
         self._last_fetch_at: float | None = None
+        # R11-AUD10. While the last attempt FAILED and this moment has not come, no attempt is
+        # made. `None` when the last attempt succeeded, and before the first. A cancelled attempt
+        # sets neither field: the caller going away says nothing about the provider.
+        self._retry_after: float | None = None
+        # Why that attempt failed, so a request refused inside the window is refused for the same
+        # reason and not for a vaguer one. Always one of this module's fixed messages -- never
+        # text taken from the provider's answer.
+        self._failure_reason: str | None = None
         self._lock = asyncio.Lock()
+
+    def _servable_stale(self, now: float) -> dict[str, Any] | None:
+        """The key set held, if it is still within `JWKS_STALE_KEY_SET_GRACE_SECONDS` of expiry.
+
+        A key set that has not expired is trivially inside its grace, so this is also what "the
+        held set may be used" means during a backoff that began before the set expired.
+        """
+        held = self._jwks
+        if held is not None and now < self._expires_at + JWKS_STALE_KEY_SET_GRACE_SECONDS:
+            return held
+        return None
 
     def _current_key_set(self, *, force: bool) -> dict[str, Any] | None:
         """The key set this call can answer from without a fetch, or `None` when one is due.
 
-        A normal call is due once the cache has expired -- unchanged. A forced call (unknown
-        `kid`) is due only once the cooldown has elapsed since the last attempt; until then the
-        cached set stands in for the fetch. With nothing cached there is nothing to stand in, so a
-        fetch is always due.
+        A normal call is due once the cache has expired. A forced call (unknown `kid`) is due only
+        once the cooldown has elapsed since the last attempt; until then the cached set stands in
+        for the fetch. With nothing cached there is nothing to stand in, so a fetch is due.
+
+        A fetch that would be due is still not made while a failed attempt is backing off: the
+        set is served if it may still be (`_servable_stale`), and otherwise this raises the
+        refusal the failed attempt met. Raising here, not returning `None`, is what keeps a
+        caller from fetching in spite of the backoff; a forced call needs the cooldown AND the
+        backoff to be over before a fetch is due.
         """
-        if self._jwks is None:
-            return None
         now = monotonic()
-        if not force:
-            return self._jwks if now < self._expires_at else None
-        last = self._last_fetch_at
-        if last is not None and now - last < JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS:
-            return self._jwks
+        held = self._jwks
+        if held is not None:
+            if not force:
+                if now < self._expires_at:
+                    return held
+            else:
+                last = self._last_fetch_at
+                if last is not None and now - last < JWKS_UNKNOWN_KID_REFETCH_COOLDOWN_SECONDS:
+                    return held
+        retry_after = self._retry_after
+        if retry_after is not None and now < retry_after:
+            stale = self._servable_stale(now)
+            if stale is not None:
+                return stale
+            raise OidcVerificationError(self._failure_reason or _JWKS_UNAVAILABLE)
         return None
 
     async def _load_jwks(self, *, force: bool = False) -> dict[str, Any]:
@@ -271,24 +390,84 @@ class OidcVerifier:
             # Looked at again under the lock, not just before it. The window is measured from the
             # END of the last attempt, so a caller that passed the check above while a fetch was
             # in flight was looking at the attempt before that one. Once the lock is released it
-            # must see the fetch that just finished -- its key set and its timestamp -- or a burst
-            # that arrives during one fetch would fetch one after another, the exact
-            # amplification the cooldown exists to end.
+            # must see the fetch that just finished -- its key set and its timestamp, or the
+            # backoff it started -- or a burst that arrives during one fetch would fetch one after
+            # another, the exact amplification the cooldown and the backoff exist to end.
             cached = self._current_key_set(force=force)
             if cached is not None:
                 return cached
-            try:
-                jwks = await self._fetch_jwks()
-            finally:
-                # Stamped when the attempt ends, and stamped on failure too: a provider that is
-                # down must not be asked again by every unknown-`kid` request that follows, and
-                # nothing below runs on failure, so `_jwks` and `_expires_at` keep describing the
-                # last good key set. Also stamped if the caller is cancelled mid-fetch -- a client
-                # that hangs up must not buy the next caller a fetch it would not otherwise get.
-                self._last_fetch_at = monotonic()
-            self._jwks = jwks
-            self._expires_at = monotonic() + self.settings.oidc_jwks_cache_seconds
+            return await self._refresh(force=force)
+
+    async def _refresh(self, *, force: bool) -> dict[str, Any]:
+        """One attempt to load the key set, and what its outcome does to the state above.
+
+        Called with the lock held and a load due. What the attempt learned is recorded before the
+        lock is released, whatever the outcome, so the caller queued behind this one sees it.
+        """
+        try:
+            jwks = await self._fetch_jwks()
+        except Exception as exc:
+            self._note_failure(exc)
+            # An expiry-driven refresh that fails is answered from the last good set if it may
+            # still be served: the request that paid for the failed attempt must not be the one
+            # in each window that is refused while every other is not. A forced (unknown-`kid`)
+            # refetch is different -- the set held is by definition missing the key the token
+            # names, so there is nothing stale to serve it with, and the caller is told what it
+            # would want to know (the provider could not be asked) rather than that the key is
+            # unknown, as before.
+            stale = None if force else self._servable_stale(monotonic())
+            if stale is None:
+                raise
+            return stale
+        else:
+            self._note_success(jwks)
             return jwks
+        finally:
+            # Stamped when the attempt ends, and stamped on failure too: a provider that is down
+            # must not be asked again by every unknown-`kid` request that follows. Also stamped if
+            # the caller is cancelled mid-fetch (which `except Exception` does not see, so no
+            # backoff starts and nothing is recorded as a failure) -- a client that hangs up must
+            # not buy the next caller a fetch it would not otherwise get.
+            self._last_fetch_at = monotonic()
+
+    def _note_success(self, jwks: dict[str, Any]) -> None:
+        recovered = self._retry_after is not None
+        self._jwks = jwks
+        self._expires_at = monotonic() + self.settings.oidc_jwks_cache_seconds
+        self._retry_after = None
+        self._failure_reason = None
+        if recovered:
+            _log.info("oidc_jwks_refresh_recovered", key_count=len(jwks["keys"]))
+
+    def _note_failure(self, exc: Exception) -> None:
+        """Start the backoff. `_jwks` and `_expires_at` are left describing the last good key set.
+
+        Every `Exception` counts, not only this module's own: the backoff exists so that nothing
+        the provider (or the network) does can make this process retry on every request, and an
+        exception class this code did not foresee is exactly that.
+        """
+        now = monotonic()
+        reason = str(exc) if isinstance(exc, OidcVerificationError) else _JWKS_UNAVAILABLE
+        self._retry_after = now + JWKS_REFRESH_FAILURE_BACKOFF_SECONDS
+        self._failure_reason = reason
+        held = self._jwks
+        # One line per failed attempt, so at most one per backoff window per process: an operator
+        # learns that the provider is unreachable and how long the stale key set has left, rather
+        # than a quiet stretch of successful requests. The cause's type (`ConnectError`,
+        # `ReadTimeout`, `HTTPStatusError`) says how it failed; nothing from the provider's answer
+        # is logged.
+        _log.warning(
+            "oidc_jwks_refresh_failed",
+            reason=reason,
+            error_type=type(exc.__cause__ or exc).__name__,
+            key_set_held=held is not None,
+            stale_seconds_remaining=(
+                round(max(0.0, self._expires_at + JWKS_STALE_KEY_SET_GRACE_SECONDS - now), 1)
+                if held is not None
+                else None
+            ),
+            retry_in_seconds=JWKS_REFRESH_FAILURE_BACKOFF_SECONDS,
+        )
 
     async def _fetch_jwks(self) -> dict[str, Any]:
         """Read and validate the key set from wherever this deployment keeps it.
@@ -309,7 +488,7 @@ class OidcVerifier:
                         raise OidcVerificationError("OIDC JWKS document exceeds the size limit")
                     jwks = response.json()
             except (httpx.HTTPError, ValueError) as exc:
-                raise OidcVerificationError("OIDC JWKS endpoint is unavailable") from exc
+                raise OidcVerificationError(_JWKS_UNAVAILABLE) from exc
         else:
             raise OidcVerificationError("OIDC JWKS is not configured")
         if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):

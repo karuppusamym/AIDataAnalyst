@@ -19,15 +19,17 @@
 # made deliberately rather than oversights to paper over here:
 #
 #   1. Only `aida.main` (the `api` service) serves `/metrics` over HTTP. The
-#      fleet scheduler publishes the footprint gauges and the graph projector
-#      publishes the projection gauges, and until `worker_metrics_port` is set
-#      those processes expose no HTTP surface at all, so the gauges they
-#      publish exist inside a process nothing can reach. The
-#      `atlas-fleet-scheduler` and `atlas-graph-projector` jobs below scrape
-#      the listener `aida.worker_metrics.serve_worker_metrics` starts when
-#      that setting is non-zero; with the default of 0 they will report the
-#      target as down, which is the honest reading -- there is nothing there.
-#   2. `AIDA_WORKER_METRICS_PORT` has to be set for those two services for
+#      fleet scheduler publishes the footprint gauges and the leader-election
+#      series, the graph projector publishes the projection gauges, and the
+#      Temporal worker publishes the newly-created-table drafter's consumer
+#      series, and until `worker_metrics_port` is set those processes expose no
+#      HTTP surface at all, so the series they publish exist inside a process
+#      nothing can reach. The `atlas-fleet-scheduler`, `atlas-graph-projector`
+#      and `atlas-metadata-worker` jobs below scrape the listener
+#      `aida.worker_metrics.serve_worker_metrics` starts when that setting is
+#      non-zero; with the default of 0 they will report the target as down,
+#      which is the honest reading -- there is nothing there.
+#   2. `AIDA_WORKER_METRICS_PORT` has to be set for those three services for
 #      their jobs to have anything to scrape. ../README.md says where.
 
 global:
@@ -65,8 +67,14 @@ scrape_configs:
   # The fleet scheduler: `run_footprint_metrics_pass`
   # (workflows/scheduler.py) sets `aida_footprint_gaps`,
   # `aida_footprint_oldest_pending_change_signal_seconds` and
-  # `aida_footprint_metrics_organizations` here, not in the API. Requires
-  # `AIDA_WORKER_METRICS_PORT=9108` on the `fleet-scheduler` service.
+  # `aida_footprint_metrics_organizations` here, not in the API, and the leader
+  # election (`aida.scheduler_leadership`) sets `aida_scheduler_is_leader` and
+  # `aida_scheduler_leadership_transitions_total`. Requires
+  # `AIDA_WORKER_METRICS_PORT=9108` on the `fleet-scheduler` service. With more
+  # than one replica every replica has to be scraped, each as its own target --
+  # the gauge is one series per replica and `sum()` over them is the number of
+  # leaders -- which one `fleet-scheduler:9108` name cannot promise (the compose
+  # stack runs a single replica, where it does).
   - job_name: atlas-fleet-scheduler
     metrics_path: /metrics
     static_configs:
@@ -84,9 +92,24 @@ scrape_configs:
         labels:
           atlas_process: graph-projector
 
-  # Deliberately absent: `metadata-worker` and `outbox-publisher`. Neither
-  # publishes a Prometheus series today (grep for `prometheus_client` under
-  # `src/aida/workflows/worker.py` and `src/aida/projectors/
-  # outbox_publisher.py` returns nothing), so a job for them would create a
-  # permanently-down target that means nothing. Add them to this file at the
-  # same time as the first metric either process publishes -- not before.
+  # The Temporal worker (`metadata-worker`): the newly-created-table drafter's
+  # supervisor sets `aida_newly_created_table_drafter_consumer_up` and counts
+  # `aida_newly_created_table_drafter_failures_total` here (R11-AUD03). This job
+  # is here because that is the first series this process publishes -- the rule
+  # this file used to state for leaving it out. Requires
+  # `AIDA_WORKER_METRICS_PORT=9108` on the `metadata-worker` service, which
+  # `compose.yaml` now passes through. The gauge exists only while
+  # `auto_enqueue_on_ingest` is on, so an estate that turned the feature off
+  # scrapes this target and finds no consumer series, which is correct.
+  - job_name: atlas-metadata-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["metadata-worker:9108"]
+        labels:
+          atlas_process: metadata-worker
+
+  # Deliberately absent: `outbox-publisher`. It publishes no Prometheus series
+  # today (grep for `prometheus_client` under `src/aida/projectors/
+  # outbox_publisher.py` returns nothing), so a job for it would create a
+  # permanently-down target that means nothing. Add it to this file at the same
+  # time as the first metric that process publishes -- not before.

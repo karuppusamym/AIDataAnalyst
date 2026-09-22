@@ -118,14 +118,21 @@ The scheduler decides *which source gets capacity next*. At thousands of sources
 > safe to run. On a non-PostgreSQL dialect (the SQLite tests) a replica is the sole leader and logs
 > `scheduler_leadership_not_enforced`.
 >
+> Leadership is also a metric (2026-09-21): `aida_scheduler_is_leader` (1 while this replica holds the
+> lock, one series per replica) and `aida_scheduler_leadership_transitions_total` on the scheduler's
+> metrics port, which is off unless `AIDA_WORKER_METRICS_PORT` is set. `AtlasSchedulerNoLeader` and
+> `AtlasSchedulerLeadershipFlapping` read them; `infra/monitoring/README.md` has the windows.
+>
 > What this does not give you:
 >
 > * **Failover time** is the 5-second retry plus however long PostgreSQL takes to drop the old
 >   session. When the leader's process dies the operating system closes its socket and PostgreSQL
 >   drops the session at once. When its host or network disappears without closing anything,
 >   PostgreSQL learns of it only through TCP keepalives, whose default is the operating system's
->   (about two hours on Linux); set `tcp_keepalives_idle`, `tcp_keepalives_interval` and
->   `tcp_keepalives_count` on the server to shorten it. The isolated leader stops itself on its next
+>   (about two hours on Linux: 7200 s + 9 probes x 75 s); set `tcp_keepalives_idle`,
+>   `tcp_keepalives_interval` and `tcp_keepalives_count` on the server to shorten it -- the values
+>   this design assumes (60, 10 and 6, a two-minute detection) and why are in
+>   `40-engineering/07-local-runbook.md`, section 9c. The isolated leader stops itself on its next
 >   check, so this is a scheduling gap, not a double run.
 > * **It is exclusion, not fencing.** A pass already running when leadership is lost is allowed to
 >   finish, so a new leader can overlap the old one by at most one iteration. Scan admission has its
@@ -150,6 +157,13 @@ The scheduler decides *which source gets capacity next*. At thousands of sources
 > reconciliation, roll-up and vector-index rebuilds, quality freshness, change signals, expiry
 > sweeps, delivery workers and others) before it admits due scan policies, so treat it as the
 > platform's general maintenance loop.
+>
+> Each of those passes, and the choice of due scan policies, runs under `_isolated` (R11-VAL04,
+> 2026-09-21). An exception is logged as `scheduler_pass_failed` with the pass's name, counted in
+> `aida_scheduler_pass_failures_total{scheduler_pass}`, and the rest of the iteration and the loop
+> carry on; cancellation still propagates. Before that an exception out of any one pass ended the
+> loop and released leadership. Nothing shows a failing pass on the Operations screen yet, and no
+> alert reads the counter.
 
 **The bulkhead property is the most important one.** In a bank estate, some sources are always broken — a credential expired, a firewall changed, a database is in maintenance. A design in which those failures consume the shared worker pool degrades everything. Per-source isolation plus admission control keeps a broken source a *local* problem.
 

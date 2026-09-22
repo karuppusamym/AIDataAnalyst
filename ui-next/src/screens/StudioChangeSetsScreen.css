@@ -1,5 +1,7 @@
 .csscreen{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px}
 .csscreen__head{flex:none}
+.csscreen__head--row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.csscreen__actions{display:flex;gap:8px;flex:none}
 .csscreen__h1{margin:0;font-size:22px;letter-spacing:-.015em}
 .csscreen__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch}
 
@@ -19,6 +21,43 @@
 .cs__pre{font-family:var(--mono);font-size:10.5px;background:var(--sunk);border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:8px;overflow-x:auto;max-height:220px;overflow-y:auto;margin:0}
 .cs__none{font-size:12px;color:var(--ink-3);margin:0}
 .cs__submiterr{width:100%;color:var(--bad);font-size:12px}
+
+/* Authoring (R11-AUD08): the actions bar, per-item actions, the test / conflict / eval results and the forms. */
+.cs__actions{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.cs__locked{margin-bottom:12px}
+.cs__itemactions{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:6px}
+
+.cs__result{margin-top:14px}
+.cs__result__head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.cs__result__when{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.cs__kv{margin:0 0 8px;display:flex;flex-direction:column;gap:2px}
+.cs__kv__row{display:flex;gap:8px;font-family:var(--mono);font-size:11px}
+.cs__kv dt{color:var(--ink-3);flex:none}
+.cs__kv dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
+.cs__inlineerr{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--bad)}
+
+.cs__conflicts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.cs__conflicts li{border-left:2px solid var(--bad);padding:1px 0 1px 11px;font-size:12.5px;color:var(--ink)}
+.cs__conflicts__obj{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.cs__conflicts__vals{display:flex;flex-direction:column;gap:2px;margin-top:2px}
+.cs__conflicts code,.cschk code{font-family:var(--mono);font-size:11.5px;overflow-wrap:anywhere}
+
+.cschk{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.cschk__verdict{display:flex;align-items:center;gap:8px}
+.cschk__what{font-size:12px;color:var(--ink-2)}
+.cschk__errors{margin:0;padding-left:18px;font-size:12.5px;color:var(--bad)}
+.cschk__errors li{overflow-wrap:anywhere}
+.cschk__item{display:flex;flex-direction:column;align-items:flex-start;gap:6px;min-width:0;max-width:100%}
+.cschk__defs summary{cursor:pointer;font-size:12px;color:var(--ink-2)}
+
+.cs__mine{display:flex;flex-direction:column;align-items:flex-start;gap:8px}
+.csform__row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.csform__json{width:100%;box-sizing:border-box;font:11.5px/1.5 var(--mono);padding:8px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--sunk);color:var(--ink);resize:vertical}
+.csform__keys{margin:0;padding-left:18px;font-size:12px;color:var(--ink-2)}
+.csform__keys code{font-family:var(--mono);font-size:11.5px}
+@media (max-width:640px){
+  .csform__row{grid-template-columns:minmax(0,1fr)}
+}
 
 @media (max-width:1100px){
   .csscreen{height:auto;min-height:100%}

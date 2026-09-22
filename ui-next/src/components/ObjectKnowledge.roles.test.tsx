@@ -73,7 +73,7 @@ describe("ObjectKnowledge: who is offered the section", () => {
     },
   );
 
-  it.each(["AgentDeveloper", "Analyst", "DataProductOwner", "DataSteward", "MetadataAdmin", "PlatformAdmin"])(
+  it.each(["AgentDeveloper", "Analyst", "DataSteward", "MetadataAdmin", "PlatformAdmin"])(
     "is offered to %s and reads on open",
     async (role) => {
       sessionMe = asRoles(role);

@@ -185,7 +185,7 @@ async def _deny_unless_entitled(
 async def create_tool_plan(
     body: ToolPlanCreate,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
+        require_roles("PlatformAdmin", "ToolDeveloper")
     ),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -244,7 +244,7 @@ async def list_tool_plans(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "ToolDeveloper", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -277,7 +277,7 @@ class PlanRecommendationRequest(ApiModel):
 async def recommend_tool_plan(
     body: PlanRecommendationRequest,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
+        require_roles("PlatformAdmin", "ToolDeveloper")
     ),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -383,7 +383,7 @@ async def recommend_tool_plan(
 async def get_tool_plan(
     plan_id: UUID,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "ToolDeveloper", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> ToolPlanDetailRead:
@@ -425,7 +425,7 @@ async def get_tool_plan(
 async def validate_tool_plan(
     plan_id: UUID,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
+        require_roles("PlatformAdmin", "ToolDeveloper")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> ValidationResponse:
@@ -505,7 +505,7 @@ async def validate_tool_plan(
 async def execute_tool_plan(
     plan_id: UUID,
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
+        require_roles("PlatformAdmin", "ToolDeveloper")
     ),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -711,7 +711,7 @@ async def get_plan_evidence(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "ToolDeveloper", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:

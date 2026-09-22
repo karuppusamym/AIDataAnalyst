@@ -544,7 +544,7 @@ test, and a token whose roles claim merely contained the string
 
 **Running several users at once.** The shipped UI on http://localhost:3001 has
 one development identity baked in at build time: `local-ui-admin`, holding all
-17 roles as of 2026-09-20 (`ui-next/src/lib/appConfig.ts`), so it cannot show
+16 roles as of 2026-09-21, exactly the platform catalog (`ui-next/src/lib/appConfig.ts`), so it cannot show
 two different users. `scripts/demo-users.ps1` starts one Vite dev server per
 demo user instead, on ports 5181 to 5188, each sending that user's
 `X-Principal-Id` and `X-Roles`, so the backend decides what each may do and

@@ -261,7 +261,9 @@ async def parse_deep_procedure_lineage_endpoint(
             "member_fallback_reason": result.member_fallback_reason,
         },
     )
-    await session.flush()
+    # R11-AUD08: keep the edges, the coverage row and the audit row; the request's session is
+    # rolled back when it closes.
+    await session.commit()
 
     return DeepProcedureLineageParseResponse(
         edges=[_edge_read(edge) for edge in result.edges],

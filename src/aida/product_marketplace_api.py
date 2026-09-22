@@ -69,17 +69,19 @@ from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["data-products-marketplace"])
 
-PRODUCT_AUTHORS = ("PlatformAdmin", "DataProductOwner", "DataSteward", "MetadataAdmin")
+PRODUCT_AUTHORS = ("PlatformAdmin", "DataSteward", "MetadataAdmin")
 PRODUCT_READERS = (*PRODUCT_AUTHORS, "Reviewer", "Auditor", "Analyst", "Viewer")
-MARKETPLACE_USERS = ("PlatformAdmin", "Analyst", "Viewer", "DataConsumer", "DataScientist")
+MARKETPLACE_USERS = ("PlatformAdmin", "Analyst", "Viewer")
 ANALYTICS_READERS = (*PRODUCT_READERS, "Operations")
 
 # CX-9: the two marketplace-consumer role groups from the existing MARKETPLACE_USERS
 # taxonomy (00-product/02-personas-and-jobs.md §2.1/§2.2) that get a role-shaped
 # ranking boost. PlatformAdmin is deliberately excluded from both -- an operator's
 # default view stays neutral rather than impersonating either persona.
-MARKETPLACE_TECHNICAL_ROLES = frozenset({"Analyst", "DataScientist"})
-MARKETPLACE_BUSINESS_ROLES = frozenset({"Viewer", "DataConsumer"})
+# R11-AUD01: `DataScientist` and `DataConsumer` were in these two sets, but no token can carry
+# them, so the boost could only ever reach the catalog roles that remain.
+MARKETPLACE_TECHNICAL_ROLES = frozenset({"Analyst"})
+MARKETPLACE_BUSINESS_ROLES = frozenset({"Viewer"})
 
 # CX-9: how much each affinity signal moves a product up the requester's default
 # ordering. Domain ownership dominates role affinity (a requester should never see
@@ -408,9 +410,9 @@ def score_marketplace_product(
       reached from the GL-2 ``OwnershipAssignment`` rows a bulk-ownership operation
       or the Studio owner picker writes -- see ``_owned_domain_names``). This is
       Atlan's "ranked by what you own" behavior.
-    - **Role affinity**: an Analyst/DataScientist-shaped requester gets a boost for
+    - **Role affinity**: an Analyst-shaped requester gets a boost for
       a technical, table-heavy product (more OUTPUT ports of ``asset_type="TABLE"``
-      than curated ones); a Viewer/DataConsumer-shaped requester gets the boost the
+      than curated ones); a Viewer-shaped requester gets the boost the
       other way, toward curated semantic-model/context-product ports -- the
       Analyst-vs-Business-Consumer split ``00-product/02-personas-and-jobs.md``
       already draws. A requester in neither role group (e.g. PlatformAdmin) gets no

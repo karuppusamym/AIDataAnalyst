@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-420 Python modules under `src/`, 2623 intra-`src` import edges.
+421 Python modules under `src/`, 2626 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 75 |
-| aida domain modules | everything else flat in `aida.*` | 279 |
+| aida domain modules | everything else flat in `aida.*` | 280 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>75 modules"]
-  domain["aida domain modules<br/>279 modules"]
+  domain["aida domain modules<br/>280 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -60,10 +60,10 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|637| domain
+  routers -->|639| domain
   app -->|74| routers
   domain -->|68| platform
-  workflows -->|57| domain
+  workflows -->|58| domain
   domain -->|28| connectors
   routers -->|20| platform
   ctx_catalog -->|19| domain
@@ -145,13 +145,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 389 |
-| `aida.workflows.worker` | Temporal worker | 128 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 390 |
+| `aida.workflows.worker` | Temporal worker | 129 |
 | `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 198 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 89 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 414 of 420 modules.
+Union of all five: 415 of 421 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -160,7 +160,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 75 | 0 | 3 | 1 | 0 | 75 |
-| aida domain modules | 258 | 80 | 146 | 44 | 6 | 279 |
+| aida domain modules | 259 | 81 | 146 | 44 | 6 | 280 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -179,13 +179,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>389 reached"])
-  aida_workflows_worker(["aida.workflows.worker<br/>128 reached"])
+  aida_main(["aida.main<br/>390 reached"])
+  aida_workflows_worker(["aida.workflows.worker<br/>129 reached"])
   aida_workflows_scheduler(["aida.workflows.scheduler<br/>198 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>89 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>199 modules"]
+  only_aida_main["only this process<br/>200 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]

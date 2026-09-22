@@ -61,12 +61,14 @@ flowchart TB
 | Control | Implementation |
 |---|---|
 | Token verification | Signature, issuer, audience, expiry, algorithm, subject |
-| JWKS | Cached with TTL, refreshed on unknown `kid` at most once per 30-second cooldown (`src/aida/oidc.py`), so a rotated signing key is picked up by the first unknown-`kid` token after the cooldown; pinned keys supported |
+| JWKS | Cached with TTL, refreshed on unknown `kid` at most once per 30-second cooldown (`src/aida/oidc.py`), so a rotated signing key is picked up by the first unknown-`kid` token after the cooldown. A failed refresh backs off 30 seconds and serves the last good key set for at most 10 minutes past its expiry, then fails closed; one shared verifier per process; pinned keys supported |
 | Claim mapping | Configurable paths → organization, roles, groups |
 | Failure | Denies with a generic 401. Expiry is the one reason named (`OidcTokenExpired`); signature, audience, issuer and revocation stay generic |
 | Development provider | Explicit headers, **refused in production** |
 | Workload identity | Required for connector agents and MCP consumers — **implemented for MCP**: outside development the endpoint admits only `AGENT` and `SERVICE_ACCOUNT` principal types (`mcp_require_workload_identity`, default on; `src/aida/mcp_server.py`). No connector agents exist |
 | Revocation and replay | **Implemented** (`src/aida/token_revocation.py`) — a revoked token is refused on its next use, and a lookup that cannot be answered denies. Bank certification remains |
+
+> **Implementation status (2026-09-21).** While the identity provider is unreachable, the JWKS cache no longer retries it on every request (R11-AUD10). After a failed attempt, a worker makes no further attempt for 30 seconds (`JWKS_REFRESH_FAILURE_BACKOFF_SECONDS`) and answers from the last good key set while that set is within 10 minutes of its cache expiry (`JWKS_STALE_KEY_SET_GRACE_SECONDS`, `src/aida/oidc.py`); past that, or when nothing was ever loaded, a request is refused with "OIDC JWKS endpoint is unavailable" (INV-4). The trade-off is that a signing key the issuer withdrew for compromise keeps verifying while this process cannot reach the issuer, for at most `oidc_jwks_cache_seconds` plus those 10 minutes (15 minutes at the shipped 300-second cache) and no longer; with a reachable provider it stops after `oidc_jwks_cache_seconds`. Both numbers are code constants, not settings. A provider that has recovered is noticed at the next attempt after the backoff, up to 30 seconds late. Each failed attempt writes one `oidc_jwks_refresh_failed` warning and the recovery one `oidc_jwks_refresh_recovered` line, so a stale key set is never silent. Pinned keys have no network and are unaffected. The token revocation route now verifies through the same per-process verifier as every other request (`shared_oidc_verifier`, `src/aida/security.py`) instead of building a new one per call, which had an empty cache and so fetched the key set on every revocation. Covered by `tests/test_oidc.py` and `tests/test_token_revocation.py`.
 
 ## 5. Authorization
 

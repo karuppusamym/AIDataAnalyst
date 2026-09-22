@@ -235,7 +235,7 @@ wait for an operator to raise one. Each has a named refusal and a test in
 
 | Limit | Value | Refusal |
 |---|---|---|
-| Archive size | 32 MiB (also checked on the declared request length) | `ARCHIVE_TOO_LARGE` (413) |
+| Archive size | 32 MiB, checked on the declared request length before any of the body is read and, for a chunked body that declares none, as it arrives (`aida.request_body`) | `ARCHIVE_TOO_LARGE` (413) |
 | Members, counted by walking the central directory before it is parsed | 22,000 | `ARCHIVE_TOO_MANY_MEMBERS` |
 | One document, uncompressed | 256 KiB, the export's own limit | `MEMBER_TOO_LARGE` |
 | The manifest, uncompressed | 16 MiB | `MEMBER_TOO_LARGE` |
@@ -249,6 +249,8 @@ wait for an operator to raise one. Each has a named refusal and a test in
 | Rows in one schema table | 1,000 | `SCHEMA_ROW_MALFORMED` |
 | Changed documents, and edits, in one import | 5,000 each | `IMPORT_TOO_MANY_CHANGES` |
 | Proposed text | 16,000 characters; a concept definition 4,000; an alias 200 | `TEXT_TOO_LONG` |
+
+> **Implementation status (2026-09-21).** A chunked upload, which declares no length, used to be read whole into memory before its size was checked (R11-AUD11), so on the API's own port the archive limit bounded nothing for that case. The body is now read chunk by chunk and refused at the first chunk that would take it past 32 MiB, so an over-limit upload is never held beyond the limit plus one chunk; a body of exactly 32 MiB is accepted and one byte more is refused. The workbook import (`POST /v1/datasources/{datasource_id}/model/import`, also 32 MiB) reads its body the same way. Covered by `tests/test_request_body_limits.py`.
 
 Refused before anything is decompressed, over every member: a name that climbs out of the
 bundle (`PATH_TRAVERSAL`), an absolute or drive-lettered name (`PATH_ABSOLUTE`), a backslash,

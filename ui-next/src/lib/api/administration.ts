@@ -153,8 +153,8 @@ export function createLineOfBusiness(
  *  `create_project`'s own `resolve_domain` falls back to the line of
  *  business's default domain when it is omitted (`api.py:922`), and this
  *  screen has no data-domain picker of its own (a stated scope cut, see
- *  `AdministrationScreen`'s file-top comment). Requires `PlatformAdmin` or
- *  `ProjectAdmin`. */
+ *  `AdministrationScreen`'s file-top comment). Requires `PlatformAdmin`
+ *  (R11-AUD01 removed `ProjectAdmin`, a role no token can carry). */
 export function createProject(
   lobId: string,
   body: ProjectCreate,

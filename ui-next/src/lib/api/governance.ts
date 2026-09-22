@@ -509,8 +509,8 @@ export interface CompliancePackQuery {
 }
 
 /** `GET /v1/compliance/packs` (`list_compliance_packs`, `compliance_api.py:119`).
- *  Gated server-side behind `PlatformAdmin`/`ComplianceOfficer`/`DataSteward`/
- *  `Viewer` -- a Viewer can see the list (name/framework/status/generated_at)
+ *  Gated server-side behind `PlatformAdmin`/`DataSteward`/`Auditor`/`Viewer`
+ *  (`PACK_READERS`) -- a Viewer can see the list (name/framework/status/generated_at)
  *  but not a pack's evidence body, see `downloadCompliancePack` below. */
 export function fetchCompliancePacks(
   query: CompliancePackQuery = {},
@@ -529,8 +529,8 @@ export function fetchCompliancePacks(
 }
 
 /** `POST /v1/compliance/packs/generate` (`generate_compliance_pack`,
- *  `compliance_api.py:62`) -- gated behind `PlatformAdmin`/`ComplianceOfficer`/
- *  `DataSteward` (no `Viewer`). The route itself 422s when `period_end` is
+ *  `PACK_GENERATORS` in `compliance_api.py`) -- gated behind `PlatformAdmin`/
+ *  `DataSteward` only (no `Viewer`, no `Auditor`: generating writes a record). The route itself 422s when `period_end` is
  *  not after `period_start`; that detail string is surfaced as-is, not
  *  re-validated client-side. */
 export function generateCompliancePack(
@@ -549,7 +549,7 @@ export function generateCompliancePack(
  *  `compliance_api.py:174`) -- the pack's structured evidence body
  *  (`response_model=dict[str, Any]`, no dedicated Pydantic model on the
  *  wire, hence the plain `Record` return type here). Gated behind
- *  `PlatformAdmin`/`ComplianceOfficer`/`DataSteward` ONLY -- deliberately
+ *  `PlatformAdmin`/`DataSteward`/`Auditor` ONLY (`PACK_DOWNLOADERS`) -- deliberately
  *  narrower than the list/get-by-id routes above, which also allow
  *  `Viewer`. A Viewer's 403 here is the route working as designed (they can
  *  see a pack exists, not its evidence body), not a bug to route around --

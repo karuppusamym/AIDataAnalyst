@@ -34,7 +34,10 @@ carries on. Run with `--profile events` and it starts working, with no restart
 of `metadata-worker`, once Redpanda is reachable
 (`newly_created_table_drafter_started`), or set
 `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to turn the feature off explicitly, which
-also stops the retries and the log lines.
+also stops the retries and the log lines. The same state is a metric,
+`aida_newly_created_table_drafter_consumer_up`, which is 0 for as long as the
+consumer is being retried once `metadata-worker` has opened its metrics port
+(section 9c).
 
 | Profile | Services | Capability that is **off** without it | Turn it on |
 |---|---|---|---|
@@ -239,6 +242,126 @@ Whatever the client, the governance path is identical to the REST path and canno
 through MCP: prompt-risk screening before retrieval (ADR-0013), SQL AST validation and cost
 gating in the query gateway (INV-2), classification-based masking, an immutable `QueryExecution`
 and `AgentRun` record (INV-7), and a `query.execution.completed.v1` outbox event.
+
+## 9c. The scheduler's leader and the table drafter: what to scrape, and the keepalive settings
+
+> **Implementation status (2026-09-21).** R11-AUD03 and R11-AUD04 remainders. The series and the
+> three alerts below exist and are unit-tested (`tests/test_scheduler_leadership.py`,
+> `tests/test_newly_created_table_drafter_supervisor.py`, `tests/test_monitoring_rules.py`), against
+> a fake lock and a stub consumer. They have **not** been scraped by a running Prometheus, the alert
+> expressions have not been through `promtool`, and **no failover drill has been run**, so every
+> number in the keepalive table is arithmetic, not a measurement.
+
+**What is published, and by which process.** Each is in that process's own registry, so it is
+reachable only when that process has opened its metrics listener (`aida.worker_metrics`), which it
+does only when `AIDA_WORKER_METRICS_PORT` is non-zero in its own environment. The default is 0.
+
+| Series | Process (compose service) | Reads as |
+|---|---|---|
+| `aida_scheduler_is_leader` | `fleet-scheduler` | 1 while this replica holds the leadership lock as of its last check, 0 while it stands by. One series per replica; the scrape's `instance` names the replica. |
+| `aida_scheduler_leadership_transitions_total` (`transition` is `acquired` or `lost`) | `fleet-scheduler` | Changes this process saw. `lost` is a leader whose check failed; a clean shutdown is not counted. |
+| `aida_newly_created_table_drafter_consumer_up` (`consumer_group`) | `metadata-worker` | 1 while the drafter's Kafka consumer has started and is consuming, 0 while it is not. **No series at all** when `auto_enqueue_on_ingest` is off or the process has no listener. |
+| `aida_newly_created_table_drafter_failures_total` | `metadata-worker` | Attempts that ended without a stop having been asked for; the supervisor restarts the consumer after each. |
+
+Turn it on for the compose stack (the listener is inside each container's network; compose
+publishes no host port for it):
+
+```powershell
+$env:AIDA_WORKER_METRICS_PORT="9108"; docker compose --profile monitoring up -d fleet-scheduler metadata-worker prometheus
+```
+
+With the default of 0, `http://localhost:9090/targets` shows `atlas-fleet-scheduler` and
+`atlas-metadata-worker` as DOWN, which is the honest reading: nothing is listening.
+
+**Reading them.**
+
+* Which replica leads: `aida_scheduler_is_leader == 1`. How many do: `sum(aida_scheduler_is_leader)` --
+  1 is healthy. 0 for five minutes is `AtlasSchedulerNoLeader`. More than 1 is visible but has no
+  alert: a deposed leader keeps reading 1 until the iteration it is running ends, and how long that
+  is has not been measured, so a fixed window would either page on a normal handover or wait out a
+  real fault. More than 1 that persists is the sign of a lock that is not excluding anyone, most
+  likely `AIDA_DATABASE_URL` pointing at a transaction-mode pooler.
+* Leadership flapping: `sum(increase(aida_scheduler_leadership_transitions_total{transition="lost"}[1h]))`;
+  `AtlasSchedulerLeadershipFlapping` fires at three, a placeholder.
+* The drafter: on the **default stack this is 0, and that is expected** -- `auto_enqueue_on_ingest`
+  defaults to true and the stack has no broker. `AtlasNewlyCreatedTableDrafterConsumerDown` fires
+  after 15 minutes there. Start `--profile events` and it goes to 1 without restarting the worker,
+  or set `AIDA_AUTO_ENQUEUE_ON_INGEST=false`, which removes the series and silences the alert.
+  A message that fails on every delivery keeps the gauge at 0 except for the moment each attempt
+  starts, so a scrape can land on 1; `aida_newly_created_table_drafter_failures_total` rising is the
+  unambiguous view of that loop.
+
+**Failover time, and the keepalive settings that decide it.** The leadership lock is held by a
+PostgreSQL backend. When the leader's process dies the operating system closes its socket and
+PostgreSQL releases the lock at once. When its host or network vanishes without closing anything,
+PostgreSQL releases it only when it decides the connection is dead, and that is TCP keepalive's
+decision. `tcp_keepalives_idle`, `tcp_keepalives_interval` and `tcp_keepalives_count` default to 0,
+which PostgreSQL documents as "the operating system's default"; nothing in this repository's compose
+file, `infra/postgres/init.sql` or code sets them. Linux's defaults are 7200 s, 75 s and 9 probes
+(kernel `ip-sysctl` documentation), so the dead peer is noticed after 7200 + 9 x 75 = 7875 s, which is
+2 h 11 min 15 s. The isolated leader stops itself at its next check (a 5 s timeout, made before every
+iteration), so this is not a double run -- it is **no scheduler at all** for that long.
+
+| Setting | Linux default | Recommended | Notes |
+|---|---|---|---|
+| `tcp_keepalives_idle` | 7200 s | 60 | Silence before the first probe. |
+| `tcp_keepalives_interval` | 75 s | 10 | Between unanswered probes. |
+| `tcp_keepalives_count` | 9 | 6 | Unanswered probes before the server gives up. |
+| Dead peer noticed after | 7875 s | **120 s** | idle + interval x count |
+
+Add the standby's 5 s retry and the failover is about two minutes. `AtlasSchedulerNoLeader` waits five
+minutes because of exactly that: long enough that a failover that works does not page, short enough
+that one that does not is reported in minutes rather than hours. Change these numbers and that
+window has to be revisited; `tests/test_monitoring_rules.py` reads the values below and fails if the
+window no longer outlasts them.
+
+Why these and not lower or higher. A healthy peer answers a probe, so a short idle time costs a few
+packets per idle connection per minute, and a live leader's connection is quiet only while a pass is
+running; the probes can also keep a flow alive through a NAT or load balancer that drops idle ones.
+It is the count that decides how much silence a session survives: 6 probes 10 s apart is a minute of
+total silence before the server ends it, which rides out a brief route flap. Lower it and a leader
+that was only briefly unreachable loses its session for no gain, because it has already stopped
+itself. Raise it and every added minute is a minute without a scheduler. These are starting values
+from the arithmetic above, not from a drill.
+
+Set them in `postgresql.conf` (or a managed service's parameter group) and reload:
+
+```
+tcp_keepalives_idle = 60
+tcp_keepalives_interval = 10
+tcp_keepalives_count = 6
+```
+
+or for one role, if only some sessions should carry them. The shipped configuration has a single
+role (`aida`) for every Atlas process, so today that is all of them, including the API's pooled
+connections. A role of the scheduler's own is a deployment decision this repository does not make:
+
+```sql
+ALTER ROLE aida SET tcp_keepalives_idle = 60;
+ALTER ROLE aida SET tcp_keepalives_interval = 10;
+ALTER ROLE aida SET tcp_keepalives_count = 6;
+```
+
+All three are user-settable parameters (they are `PGC_USERSET` in PostgreSQL 17's `guc_tables.c`),
+which is why a role can carry them. A role or reload change reaches sessions opened after it; the
+leader's lock connection is long-lived, so restart the scheduler to be sure it has them.
+
+Check with `SHOW tcp_keepalives_idle;` **over TCP** -- PostgreSQL ignores these settings for sessions
+on a Unix-domain socket and reads them as 0 there, so a `psql` run inside the container with no
+`-h` reports 0 whatever is set (`docker compose exec postgres psql -h 127.0.0.1 -U aida -d aida`).
+The `pg_locks` query in `src/aida/scheduler_leadership.py` names the leader's backend.
+
+PostgreSQL also has `tcp_user_timeout` (milliseconds; the local stack's PostgreSQL 17 has it). It
+bounds a case keepalives do not: a peer that vanishes while the server still has unacknowledged data
+in flight, which the TCP retransmission timer governs (about 925 s on Linux by default, per the
+kernel documentation) rather than keepalive. The lock session is idle between checks, so keepalives
+are the path that matters for it, and no value is recommended here: how it interacts with keepalives
+is operating-system specific and has not been measured on this platform.
+
+**The first drill.** Isolate the leader from PostgreSQL without closing its connection (drop its
+packets; do not stop the container), and time the gap from `scheduler_lost_leadership` on the
+isolated replica to `scheduler_became_leader` on the standby. Compare it with the two minutes
+computed here and record the result in this section.
 
 ## 10. Production substitutions
 

@@ -50,6 +50,7 @@ from aida.models import (
     ModelImportBatch,
     ModelImportChange,
 )
+from aida.request_body import read_body_within
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
 
@@ -254,17 +255,15 @@ async def upload_model_workbook(
     """
     datasource = await _authorized_datasource(datasource_id, context, session, settings)
 
-    declared_length = request.headers.get("content-length")
-    if declared_length is not None and declared_length.isdigit():
-        # Refuse on the declared size before reading the body into memory --
-        # `parse_and_diff_workbook` checks the real length too, but only after
-        # it already holds the bytes.
-        if int(declared_length) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"workbook exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
-            )
-    content = await request.body()
+    # Refuse an over-limit upload before it is held in memory -- `parse_and_diff_workbook` checks
+    # the real length too, but only after it already holds the bytes. On the declared length when
+    # there is one, and otherwise (a chunked body declares none) as soon as what has arrived passes
+    # the limit, so this never buffers more than the limit plus one chunk (R11-AUD11).
+    content = await read_body_within(
+        request,
+        MAX_UPLOAD_BYTES,
+        detail=f"workbook exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)}MB upload limit",
+    )
     if not content:
         raise HTTPException(status_code=422, detail="the request body is empty")
 

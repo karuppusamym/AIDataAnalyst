@@ -311,7 +311,7 @@ export function createNotificationRule(
 
 /** `POST /v1/data-contracts/{contract_id}/evaluate`
  *  (`runtime_contracts_api.py::evaluate_data_contract`, roles PlatformAdmin/
- *  DataSteward/DataEngineer/Viewer) -- no request body, just the path id.
+ *  DataSteward/Viewer) -- no request body, just the path id.
  *  Evaluates the contract against current schema/quality/freshness state,
  *  persists any violations found, and returns the same evaluation the
  *  enforcement path itself acts on (`allowed`/`enforcement_action`). */

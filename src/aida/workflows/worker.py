@@ -17,6 +17,7 @@ from aida.logging import configure_logging
 from aida.newly_created_table_drafter import (
     supervise_newly_created_table_drafter,
 )
+from aida.worker_metrics import serve_worker_metrics
 from aida.workflows.activities import (
     discover_datasource,
     finalize_profile_tasks,
@@ -52,6 +53,15 @@ async def run_worker() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     logger = structlog.get_logger(__name__)
+    # R11-AUD03: the drafter supervisor below publishes `aida_newly_created_table_drafter_*`
+    # into *this* process's registry, and nothing else serves it -- only `aida.main` serves
+    # `/metrics`. Before this the Temporal worker published no series and had no listener, and
+    # `infra/monitoring/prometheus/prometheus.yml` said so in as many words. First, ahead of the
+    # Temporal connection that can block: a worker that cannot reach Temporal is exactly when the
+    # target should still be up. A no-op unless `worker_metrics_port` is set, and never fatal --
+    # see `aida.worker_metrics`. Anywhere that setting reaches the worker's environment (a shared
+    # env file, a ConfigMap every process reads) it now takes effect here too.
+    serve_worker_metrics(settings, process="metadata-worker")
     client = await Client.connect(
         settings.temporal_address,
         namespace=settings.temporal_namespace,

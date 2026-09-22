@@ -1,9 +1,10 @@
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
+from prometheus_client import Counter
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client, WorkflowExecutionStatus
@@ -860,13 +861,79 @@ async def run_context_rebuild_pass(settings: Settings, *, now: datetime | None =
     return swept
 
 
+#: Every step of `run_scheduler_iteration` that `_isolated` guards, by the label its failures carry.
+#: `tests/test_scheduler_pass_isolation.py` holds this tuple to the calls the iteration makes.
+SCHEDULER_PASS_NAMES = (
+    "cancellation_reconcile",
+    "priority_rebalance",
+    "owner_routing",
+    "custom_rule_packs",
+    "graph_reconciliation",
+    "rollup_rebuild",
+    "vector_index_rebuild",
+    "model_route_reachability",
+    "classification_propagation",
+    "freshness_evaluation",
+    "change_signal_processing",
+    "context_rebuild",
+    "footprint_metrics",
+    "due_playbooks",
+    "task_agent_schedule",
+    "value_profile_purge",
+    "reaper",
+    "certification_expiry_warning",
+    "ownership_expiry",
+    "principal_reconciliation",
+    "review_notification",
+    "delivery_worker",
+    "entitlement_fulfilment",
+    "scan_policy_selection",
+)
+
+SCHEDULER_PASS_FAILURES = Counter(
+    "aida_scheduler_pass_failures_total",
+    (
+        "Maintenance passes of the scheduler iteration that raised, by pass. The loop carries on "
+        "with the next pass and the next iteration, so a pass that fails every time shows here "
+        "and in the `scheduler_pass_failed` log line, and nowhere else."
+    ),
+    labelnames=("scheduler_pass",),
+)
+# Created at import, not on the first failure: a series that appears with its first event makes
+# `increase()` skip that event.
+for _pass_name in SCHEDULER_PASS_NAMES:
+    SCHEDULER_PASS_FAILURES.labels(scheduler_pass=_pass_name)
+
+
+def _record_pass_failure(name: str) -> None:
+    """Log the exception being handled and count it. Call from inside an `except` block."""
+    logger.exception("scheduler_pass_failed", scheduler_pass=name)
+    SCHEDULER_PASS_FAILURES.labels(scheduler_pass=name).inc()
+
+
+async def _isolated(name: str, step: Awaitable[object]) -> None:
+    """Run one pass and contain its failure (R11-VAL04).
+
+    An exception out of any one pass used to leave `run_scheduler_iteration`, and `run_scheduler`
+    with it: the loop ended, leadership was released, and every other pass stopped for a fault
+    in one. Now the failing pass is logged and counted and the rest of the iteration runs.
+    Cancellation is not an `Exception` and still propagates, so shutdown is unaffected.
+    """
+    try:
+        await step
+    except Exception:
+        _record_pass_failure(name)
+
+
 async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
-    await reconcile_cancellation_requests(client, settings)
+    await _isolated("cancellation_reconcile", reconcile_cancellation_requests(client, settings))
     now = datetime.now(UTC)
-    await rebalance_usage_weighted_priorities(settings, now=now)
-    await run_owner_routing_pass(settings, now=now)
-    await run_custom_rule_pack_pass(now=now)
-    await run_graph_reconciliation_scheduler_pass(settings, now=now)
+    await _isolated("priority_rebalance", rebalance_usage_weighted_priorities(settings, now=now))
+    await _isolated("owner_routing", run_owner_routing_pass(settings, now=now))
+    await _isolated("custom_rule_packs", run_custom_rule_pack_pass(now=now))
+    await _isolated(
+        "graph_reconciliation", run_graph_reconciliation_scheduler_pass(settings, now=now)
+    )
     # R11-D11: the writer for the ADR-0018 classification projections. Both
     # `business_node_closure` and `business_node_rollup` were built and measured
     # (ADR-0020: 3,147 ms to compute a subtree roll-up on read, 0.4 ms to read the
@@ -875,63 +942,71 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # rate-limited inside the pass by `business_rollup_rebuild_interval_seconds`,
     # so calling it every iteration is a no-op between windows -- the same shape as
     # the reaper and the two expiry sweeps below.
-    await run_rollup_rebuild_pass(settings, now=now)
+    await _isolated("rollup_rebuild", run_rollup_rebuild_pass(settings, now=now))
     # Same cadence shape, and here for the same reason: RT-1's persisted
     # vector index had no scheduled writer, so it went stale and retrieval
     # paid a provider call per candidate per query instead. A no-op when no
     # embedding provider is configured, which is the default.
-    await run_vector_index_rebuild_pass(settings, now=now)
+    await _isolated("vector_index_rebuild", run_vector_index_rebuild_pass(settings, now=now))
     # R11-B18: an approved model route whose model the provider has retired
     # looks entirely healthy and fails every generated answer. Listing models
     # is free; this never generates.
-    await run_model_route_reachability_pass(settings, now=now)
-    await run_classification_propagation_pass(settings, now=now)
+    await _isolated(
+        "model_route_reachability", run_model_route_reachability_pass(settings, now=now)
+    )
+    await _isolated(
+        "classification_propagation", run_classification_propagation_pass(settings, now=now)
+    )
     # R11-B8: DQ-2's watermark contracts, observed and evaluated on a cadence instead of
     # only when a screen asks. Off by default
     # (`freshness_evaluation_interval_minutes`), and the pass returns before
     # opening a session when off -- the same shape as the propagation pass
     # above. Violations and recoveries both land in the shared quality
     # incident sink, so nothing downstream of DQ-3 needed a second consumer.
-    await run_freshness_evaluation_pass(settings, now=now)
+    await _isolated("freshness_evaluation", run_freshness_evaluation_pass(settings, now=now))
     # R11-FP16: change signals into holds in the same incident sink. Off by default
     # (`change_signal_processing_interval_minutes`), and no session is opened when off.
-    await run_change_signal_processing_pass(settings, now=now)
+    await _isolated(
+        "change_signal_processing", run_change_signal_processing_pass(settings, now=now)
+    )
     # R11-FP16: carry those changes down the dependency chain into review queues, and release
     # a hold once nothing standing on the view is stale. Off by default, like the pass above.
-    await run_context_rebuild_pass(settings, now=now)
+    await _isolated("context_rebuild", run_context_rebuild_pass(settings, now=now))
     # R11-FP17: publish what those passes have left outstanding as gauges. On by default and
     # five-minutely: it reads the same register the Operations screen reads, exports totals by
     # gap kind with no tenant in a label, and is the only thing that notices a backlog growing
     # while every request still succeeds.
-    await run_footprint_metrics_pass(settings, now=now)
-    await run_due_playbooks_pass(now=now)
+    await _isolated("footprint_metrics", run_footprint_metrics_pass(settings, now=now))
+    await _isolated("due_playbooks", run_due_playbooks_pass(now=now))
     # ADR-0029: scheduled task-agent runs. Off by default -- every
     # `<key>_agent_interval_minutes` is 0 -- and the pass returns before opening
     # a session when nothing is scheduled. Each run is the governed run a person
     # would start: contract, kill switch, tier, bounds and ledger unchanged.
-    await run_task_agent_schedule_pass(settings, now=now)
+    await _isolated("task_agent_schedule", run_task_agent_schedule_pass(settings, now=now))
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.
-    await purge_expired_value_profile_artifacts(settings, now=now)
+    await _isolated("value_profile_purge", purge_expired_value_profile_artifacts(settings, now=now))
     # P2-06: generic reaper. Sweeps stale rows across artifact types (rejected
     # enrichment proposals past retention, orphan asset-term links whose glossary
     # term was deprecated, stale pending drafts, ...). Guarded by
     # `settings.reaper_enabled` and rate-limited to
     # `settings.reaper_sweep_interval_seconds` inside `run_reaper_scheduler_pass`,
     # so calling it every iteration here is cheap (a no-op between windows).
-    await run_reaper_scheduler_pass(settings, now=now)
+    await _isolated("reaper", run_reaper_scheduler_pass(settings, now=now))
     # P2-08: daily "your certification expires in N days" sweep, rate-limited
     # inside `run_certification_expiry_warning_pass` by
     # `settings.certification_expiry_warn_interval_seconds` (default 86_400),
     # so calling it every iteration is cheap (a no-op between windows -- the
     # exact same shape the reaper above uses).
-    await run_certification_expiry_warning_pass(settings, now=now)
+    await _isolated(
+        "certification_expiry_warning", run_certification_expiry_warning_pass(settings, now=now)
+    )
     # P2-07: daily "your ownership expires in N days" sweep + expire-lapsed
     # sweep. Rate-limited inside `run_ownership_expiry_pass` by
     # `settings.ownership_expiry_warn_interval_seconds` (default 86_400) with
     # the same in-process cadence tracker the cert pass above uses.
-    await run_ownership_expiry_pass(settings, now=now)
+    await _isolated("ownership_expiry", run_ownership_expiry_pass(settings, now=now))
     # F19: replay recent `identity.principal.deleted/merged.v1` outbox rows
     # through the ownership-lifecycle handlers, so a leaver's ownership is
     # reconciled by a process that actually runs rather than by a caller that
@@ -940,13 +1015,15 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # for every deployment that has not opted in -- the same shape as the
     # reaper and certification passes above. Replaying an already-reconciled
     # event changes nothing (see `aida.principal_reconciliation`).
-    await run_principal_reconciliation_pass(settings, now=now)
+    await _isolated(
+        "principal_reconciliation", run_principal_reconciliation_pass(settings, now=now)
+    )
     # NT-1: relay REVIEW_REQUESTED. Review creation has 27 call sites and no
     # shared funnel, so this is a sweep over a watermark column rather than a
     # hook -- see `governance_review_relay`'s module docstring for why that is
     # the better shape here and not just the cheaper one. Returns immediately
     # when governance notifications are off, which is the default.
-    await run_review_notification_pass(settings, now=now)
+    await _isolated("review_notification", run_review_notification_pass(settings, now=now))
     # F04/F12: drain durable delivery intents -- SIEM security events and
     # governance notifications share one ledger and one worker
     # (`aida.delivery_intents`). This is the *only* place in the platform that
@@ -955,15 +1032,23 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # (`delivery_worker_enabled`); when off the pass returns before touching
     # the database, and everything queued stays queued for whenever it is
     # turned on -- the same shape as the reaper and certification passes above.
-    await run_delivery_worker_pass(settings, now=now)
+    await _isolated("delivery_worker", run_delivery_worker_pass(settings, now=now))
     # Entitlement deliveries drain on the same tick and then settle: a
     # `webhook`-provider grant stays PENDING -- and therefore still denies
     # queries -- until its destination acknowledges. A no-op under the default
     # `outbox` provider, which has nothing to deliver because this platform is
     # itself the entitlement authority.
-    await run_entitlement_fulfilment_pass(settings, now=now)
-    async with session_factory() as session:
-        policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
+    await _isolated("entitlement_fulfilment", run_entitlement_fulfilment_pass(settings, now=now))
+    # The one step that is not a pass: choosing the scan policies that are due. Its failure is
+    # contained and counted like a pass's, and the iteration admits nothing this time round.
+    try:
+        async with session_factory() as session:
+            policy_ids = (
+                await session.scalars(due_scan_policies_statement(settings, now))
+            ).all()
+    except Exception:
+        _record_pass_failure("scan_policy_selection")
+        policy_ids = []
     admitted = 0
     for policy_id in policy_ids:
         try:

@@ -171,10 +171,10 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "audit_archive_filesystem_root": (SUPPLIED, "only for a filesystem archive destination"),
     "worker_metrics_port": (
         OPT_IN,
-        "R11-FP17: the fleet scheduler and graph projector publish their gauges into their "
-        "own process registry, which only this port exposes; 0 opens no port, because "
-        "opening one changes a deployment's network surface and belongs with whoever "
-        "configures the scrape (`infra/monitoring/README.md`)",
+        "R11-FP17: the fleet scheduler, graph projector and Temporal worker publish their "
+        "series into their own process registry, which only this port exposes; 0 opens no "
+        "port, because opening one changes a deployment's network surface and belongs with "
+        "whoever configures the scrape (`infra/monitoring/README.md`)",
     ),
     # R11-FP17. Every quota below is Supplied rather than Opt-in, and the
     # distinction is the whole point: there is no capability here for an estate

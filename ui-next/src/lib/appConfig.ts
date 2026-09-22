@@ -70,7 +70,7 @@ export interface OidcClientConfig {
 }
 
 const DEFAULT_DEV_ROLES =
-  "PlatformAdmin,OrganizationAdmin,ProjectAdmin,MetadataAdmin,MetadataIngestor,DataAdmin," +
+  "PlatformAdmin,OrganizationAdmin,MetadataAdmin,MetadataIngestor,DataAdmin," +
   "SemanticAdmin,DataSteward,ToolDeveloper,ToolConsumer,AgentDeveloper,Reviewer," +
   "MetadataReviewer,Auditor,Operations,Analyst,Viewer";
 

@@ -8,9 +8,10 @@ import { StewardshipWorkspace, stewardshipViewFrom } from "./StewardshipWorkspac
 /* ---------------------------------------------------------------------------
    R11-S13 (items 15/17) — the stewardship workspace SHELL.
 
-   The three views are components that already existed and keep their own
-   tests (`StewardshipScreen.test.tsx`, `PlaybooksScreen.test.tsx`). What is
-   only true of the workspace is here:
+   The views are components that already existed and keep their own tests
+   (`StewardshipScreen.test.tsx`, `PlaybooksScreen.test.tsx`), plus the Coverage
+   scorecard R11-AUD08 added as the fourth (`StewardshipCoverage.test.tsx`).
+   What is only true of the workspace is here:
 
      * the view axis is the URL, so a view is linkable and survives a reload;
      * every link that opened the old page still opens what it showed --
@@ -21,8 +22,8 @@ import { StewardshipWorkspace, stewardshipViewFrom } from "./StewardshipWorkspac
      * the contextual links go to the destinations that stayed separate,
        without absorbing them.
 
-   The views are stubbed, because a test about the shell that mounts three
-   real screens is a test about three screens' mocks.
+   The views are stubbed, because a test about the shell that mounts four
+   real screens is a test about four screens' mocks.
 --------------------------------------------------------------------------- */
 
 /** Stands in for `StewardshipBulkActions` holding an edited, unrun action:
@@ -39,6 +40,10 @@ vi.mock("./StewardshipScreen", () => ({
 
 vi.mock("./PlaybooksScreen", () => ({
   PlaybooksScreen: () => <p>playbooks content</p>,
+}));
+
+vi.mock("./StewardshipCoverage", () => ({
+  StewardshipCoverage: () => <p>coverage content</p>,
 }));
 
 /* Imported statically, and `vi.resetModules()` is deliberately NOT called:
@@ -72,11 +77,13 @@ describe("the stewardship workspace view axis", () => {
     expect(await screen.findByText("queue content")).toBeInTheDocument();
     expect(tab("Work queue")).toHaveAttribute("aria-selected", "true");
     expect(viewParam()).toBeNull();
-    // The three views, in the order design 21 §17 leads with.
+    // The three views, in the order design 21 §17 leads with, and the scorecard after them: R11-AUD08
+    // added it LAST so the positions a steward already knows did not move.
     expect(screen.getAllByRole("tab").map((element) => element.textContent)).toEqual([
       "Work queue",
       "Bulk actions",
       "Automation",
+      "Coverage",
     ]);
     // The panel is named by the tab in front of it.
     expect(screen.getByRole("tabpanel", { name: "Work queue" })).toBeInTheDocument();
@@ -93,6 +100,10 @@ describe("the stewardship workspace view axis", () => {
     fireEvent.click(tab("Bulk actions"));
     await waitFor(() => expect(viewParam()).toBe("bulk"));
     expect(await screen.findByText("bulk content")).toBeInTheDocument();
+
+    fireEvent.click(tab("Coverage"));
+    await waitFor(() => expect(viewParam()).toBe("coverage"));
+    expect(await screen.findByText("coverage content")).toBeInTheDocument();
 
     // Back to the default drops the field rather than writing `?view=queue`,
     // so one view does not have two spellings.
@@ -222,6 +233,7 @@ describe("the view tabs from the keyboard", () => {
     expect(tab("Bulk actions")).toHaveAttribute("tabindex", "0");
     expect(tab("Work queue")).toHaveAttribute("tabindex", "-1");
     expect(tab("Automation")).toHaveAttribute("tabindex", "-1");
+    expect(tab("Coverage")).toHaveAttribute("tabindex", "-1");
   });
 
   it("moves with the arrow keys, wrapping at both ends, and focus follows", async () => {
@@ -237,15 +249,19 @@ describe("the view tabs from the keyboard", () => {
     await waitFor(() => expect(viewParam()).toBe("automation"));
     expect(tab("Automation")).toHaveFocus();
 
-    // Past the last tab: back to the first.
     fireEvent.keyDown(tab("Automation"), { key: "ArrowRight" });
+    await waitFor(() => expect(viewParam()).toBe("coverage"));
+    expect(tab("Coverage")).toHaveFocus();
+
+    // Past the last tab: back to the first.
+    fireEvent.keyDown(tab("Coverage"), { key: "ArrowRight" });
     await waitFor(() => expect(viewParam()).toBeNull());
     expect(tab("Work queue")).toHaveFocus();
 
     // Before the first tab: round to the last.
     fireEvent.keyDown(tab("Work queue"), { key: "ArrowLeft" });
-    await waitFor(() => expect(viewParam()).toBe("automation"));
-    expect(tab("Automation")).toHaveFocus();
+    await waitFor(() => expect(viewParam()).toBe("coverage"));
+    expect(tab("Coverage")).toHaveFocus();
   });
 
   it("jumps to the ends with Home and End", async () => {
@@ -253,10 +269,10 @@ describe("the view tabs from the keyboard", () => {
     await screen.findByText("bulk content");
 
     fireEvent.keyDown(tab("Bulk actions"), { key: "End" });
-    await waitFor(() => expect(viewParam()).toBe("automation"));
-    expect(tab("Automation")).toHaveFocus();
+    await waitFor(() => expect(viewParam()).toBe("coverage"));
+    expect(tab("Coverage")).toHaveFocus();
 
-    fireEvent.keyDown(tab("Automation"), { key: "Home" });
+    fireEvent.keyDown(tab("Coverage"), { key: "Home" });
     await waitFor(() => expect(viewParam()).toBeNull());
     expect(tab("Work queue")).toHaveFocus();
   });
@@ -302,6 +318,17 @@ describe("the destinations that stayed separate are one link away", () => {
     await waitFor(() => expect(location.hash).toBe("#/steward/worklist"));
   });
 
+  it("links the Work queue to Ownership, where an unowned table's rule and a leaver's reassignment live", async () => {
+    mount();
+    await screen.findByText("queue content");
+
+    const related = within(screen.getByRole("navigation", { name: "Related work" }));
+    fireEvent.click(related.getByRole("button", { name: /Ownership rules and reassignment/ }));
+
+    // R11-AUD08 (part 2): a destination of its own, opened rather than nested under a fourth tab.
+    await waitFor(() => expect(location.hash).toBe("#/steward/ownership"));
+  });
+
   it("links Automation to the task-agent console with the agent selected", async () => {
     mount("/?view=automation#/steward/stewardship");
     await screen.findByText("playbooks content");
@@ -325,5 +352,86 @@ describe("the destinations that stayed separate are one link away", () => {
     await screen.findByText("bulk content");
 
     expect(screen.queryByRole("navigation")).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+   R11-AUD08 — the Coverage view: what the shell adds around the scorecard.
+   The scorecard's own behaviour is `StewardshipCoverage.test.tsx`.
+--------------------------------------------------------------------------- */
+describe("the Coverage view", () => {
+  it("opens from its link, says which population it reads, and keeps its scope in the URL", async () => {
+    mount("/?view=coverage&ds=ds_1#/steward/stewardship");
+
+    expect(await screen.findByText("coverage content")).toBeInTheDocument();
+    expect(tab("Coverage")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel", { name: "Coverage" })).toBeInTheDocument();
+    // `ds` is estate context, not a bulk field: it does not turn this into the bulk form.
+    expect(new URLSearchParams(location.search).get("ds")).toBe("ds_1");
+    expect(
+      screen.getByText(/or one datasource you choose — how much of its active tables stewardship has reached/),
+    ).toBeInTheDocument();
+  });
+
+  it("is a view a bulk filter in the URL does not take over", () => {
+    expect(stewardshipViewFrom(new URLSearchParams("view=coverage"))).toBe("coverage");
+    expect(stewardshipViewFrom(new URLSearchParams("view=coverage&action=tag&pattern=raw_%25"))).toBe("coverage");
+  });
+
+  it("returns to the default view by dropping ?view=, as every other view does", async () => {
+    mount("/?view=coverage#/steward/stewardship");
+    await screen.findByText("coverage content");
+
+    fireEvent.click(tab("Work queue"));
+
+    await waitFor(() => expect(viewParam()).toBeNull());
+    expect(await screen.findByText("queue content")).toBeInTheDocument();
+  });
+
+  it("links each dimension to where the gap is closed, on the screen that owns it", async () => {
+    mount("/?view=coverage#/steward/stewardship");
+    await screen.findByText("coverage content");
+
+    const gaps = within(screen.getByRole("navigation", { name: "Close the gaps" }));
+    expect(gaps.getAllByRole("button").map((element) => element.textContent)).toEqual([
+      "Documentation priorities →",
+      "Unowned assets →",
+      "Classify in bulk →",
+      "Certify in bulk →",
+      "Data quality →",
+      "Business meaning →",
+    ]);
+
+    fireEvent.click(gaps.getByRole("button", { name: /Documentation priorities/ }));
+    await waitFor(() => expect(location.hash).toBe("#/steward/worklist"));
+  });
+
+  it("opens Bulk actions with the action already chosen from the classify and certify links", async () => {
+    mount("/?view=coverage#/steward/stewardship");
+    await screen.findByText("coverage content");
+
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Close the gaps" })).getByRole("button", {
+        name: /Classify in bulk/,
+      }),
+    );
+
+    await waitFor(() => expect(viewParam()).toBe("bulk"));
+    expect(new URLSearchParams(location.search).get("action")).toBe("classify");
+    expect(await screen.findByText("bulk content")).toBeInTheDocument();
+  });
+
+  it("opens the Work queue, spelled out, from the unowned-assets link", async () => {
+    mount("/?view=coverage#/steward/stewardship");
+    await screen.findByText("coverage content");
+
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Close the gaps" })).getByRole("button", {
+        name: /Unowned assets/,
+      }),
+    );
+
+    await waitFor(() => expect(viewParam()).toBe("queue"));
+    expect(await screen.findByText("queue content")).toBeInTheDocument();
   });
 });

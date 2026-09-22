@@ -188,7 +188,6 @@ __all__ = [
 DATASOURCE_READ_ROLES: tuple[str, ...] = (
     "PlatformAdmin",
     "OrganizationAdmin",
-    "ProjectAdmin",
     "MetadataAdmin",
     "DataAdmin",
     "Operations",

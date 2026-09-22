@@ -127,7 +127,16 @@ from aida.workspace_service import (
 router = APIRouter(prefix="/v1", tags=["workspaces"])
 
 _ADMIN = ("PlatformAdmin", "OrganizationAdmin", "DataAdmin")
-_ANY_MEMBER = ("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Steward", "Analyst", "Reviewer")
+# R11-AUD01: this said `Steward`, the persona's name, which is not a role: no token can carry it, so
+# a DataSteward was refused workspaces and business nodes while the ungrantable name was admitted.
+_ANY_MEMBER = (
+    "PlatformAdmin",
+    "OrganizationAdmin",
+    "DataAdmin",
+    "DataSteward",
+    "Analyst",
+    "Reviewer",
+)
 
 # F15: the picker search parameter's contract, stated once so both routes in
 # this file that take it describe it identically in `openapi.json`.
@@ -515,7 +524,7 @@ async def list_source_bindings(
 async def create_business_node(
     organization_id: UUID,
     body: BusinessNodeCreate,
-    context: SecurityContext = Depends(require_roles(*_ADMIN, "Steward")),
+    context: SecurityContext = Depends(require_roles(*_ADMIN, "DataSteward")),
     session: AsyncSession = Depends(get_session),
     correlation_id: str = Depends(get_correlation_id),
 ) -> BusinessNode:
@@ -590,7 +599,7 @@ async def get_business_tree(
 async def create_business_assignment(
     organization_id: UUID,
     body: BusinessAssignmentCreate,
-    context: SecurityContext = Depends(require_roles(*_ADMIN, "Steward")),
+    context: SecurityContext = Depends(require_roles(*_ADMIN, "DataSteward")),
     session: AsyncSession = Depends(get_session),
     correlation_id: str = Depends(get_correlation_id),
 ) -> BusinessAssignment:
@@ -1486,7 +1495,7 @@ async def request_cross_boundary_grant(
 async def create_project(
     lob_id: UUID,
     body: ProjectCreate,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "ProjectAdmin")),
+    context: SecurityContext = Depends(require_roles("PlatformAdmin")),
     session: AsyncSession = Depends(get_session),
 ) -> Project:
     lob = await session.get(LineOfBusiness, lob_id)

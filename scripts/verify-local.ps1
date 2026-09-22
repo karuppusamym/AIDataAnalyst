@@ -805,7 +805,7 @@ $dataProduct = Invoke-AidaJson `
         lineage_coverage = 80
         context_product_version_id = $contextRead.id
         discoverable_roles = @("Analyst")
-        consumer_roles = @("DataConsumer")
+        consumer_roles = @("Viewer")
         ports = @(
             @{
                 port_key = "customer_table"
@@ -849,7 +849,7 @@ $dataContract = Invoke-AidaJson `
         freshness_sla_minutes = 1440
         availability_sla_percent = 99.0
         producer_principal = "customer-data-owner"
-        consumer_roles = @("DataConsumer")
+        consumer_roles = @("Viewer")
     }
 $dataContractReview = Invoke-AidaJson `
     -Uri "$BaseUrl/v1/data-contract-versions/$($dataContract.id)/submit" `

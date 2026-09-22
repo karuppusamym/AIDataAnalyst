@@ -101,7 +101,7 @@ router = APIRouter(prefix="/v1", tags=["agent-workforce"])
 #: organization. `_require_agent_steward` binds a direct write to the agent
 #: version's registered owner, and `contract_widening` sends every widening
 #: edit to the reviewed path instead. See `_require_agent_steward`.
-CONTRACT_AUTHORS = ("PlatformAdmin", "AgentDeveloper", "ModelRiskManager")
+CONTRACT_AUTHORS = ("PlatformAdmin", "AgentDeveloper")
 
 #: The break-glass role for the two controls below, and the only role that
 #: may act on an agent it does not own. Deliberately *not* the whole of
@@ -112,7 +112,6 @@ CONTRACT_READERS = (*CONTRACT_AUTHORS, "Reviewer", "Auditor", "DataSteward", "Op
 INBOX_READERS = (
     "PlatformAdmin",
     "AgentDeveloper",
-    "ModelRiskManager",
     "Reviewer",
     "MetadataReviewer",
     "Auditor",

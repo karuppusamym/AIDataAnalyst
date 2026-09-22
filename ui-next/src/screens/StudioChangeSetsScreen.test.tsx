@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import type { StudioChangeItemRead, StudioChangeSetRead, StudioDiffRead, StudioImpactPreview } from "../lib/types";
+import type { MeRead, StudioChangeItemRead, StudioChangeSetRead, StudioDiffRead, StudioImpactPreview } from "../lib/types";
+import type { Session } from "../lib/session";
 import { ApiError } from "../lib/api";
 
 /* ---------------------------------------------------------------------------
@@ -27,6 +28,28 @@ vi.mock("../lib/api", async (importOriginal) => {
   };
 });
 
+/* R11-AUD08: Submit is offered only to a session KNOWN to hold a Studio write role
+   (`roleHolds`, fail-closed), where it used to be offered to everyone. These tests are about
+   submitting, so they run as a DataSteward; who else sees the button is `StudioAuthoring.test.tsx`. */
+let sessionMe: MeRead | null = null;
+vi.mock("../lib/session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/session")>();
+  return {
+    ...actual,
+    useSession: (): Session => ({
+      state: "connected",
+      me: sessionMe,
+      lapsed: false,
+      lastSuccessAt: null,
+      error: null,
+      dataMode: "live",
+      authMode: "development",
+      authModeInferred: false,
+      reload: () => undefined,
+    }),
+  };
+});
+
 const CHANGE_SET: StudioChangeSetRead = {
   id: "cs_1", organization_id: "org1", name: "Exclude intercompany transfers", author: "priya",
   status: "TESTING", base_version_hash: "0".repeat(64), conflict_status: "CLEAN",
@@ -39,6 +62,10 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
+  sessionMe = {
+    principal_id: "priya", principal_type: "USER", organization_id: null, roles: ["DataSteward"],
+    persona: null, identity_provider: "DEVELOPMENT",
+  };
   fetchStudioChangeSets.mockReset();
   fetchStudioChangeSetItems.mockReset();
   fetchStudioDiff.mockReset();

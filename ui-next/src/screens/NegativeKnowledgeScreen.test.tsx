@@ -226,7 +226,7 @@ describe("NegativeKnowledgeScreen against the real EE.3 endpoints", () => {
 
   it("surfaces a fetch error with a retry action", async () => {
     searchNegativeKnowledge.mockRejectedValue(
-      new ApiError(403, "requires PlatformAdmin, DataSteward, DataEngineer or Viewer"),
+      new ApiError(403, "requires PlatformAdmin, DataSteward or Viewer"),
     );
     const NegativeKnowledgeScreen = await loadScreen();
 

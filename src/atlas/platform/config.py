@@ -30,6 +30,14 @@ def _running_under_pytest() -> bool:
     return "PYTEST_VERSION" in os.environ or "pytest" in sys.modules
 
 
+#: `AIDA_*` names the platform's own scripts read from the environment or `.env` and that no
+#: `Settings` field binds. Without this list the typo detector below takes one for a misspelling of
+#: a setting (`AIDA_BASE_URL` is 0.867 similar to `AIDA_DATABASE_URL`, over its 0.84 cutoff), and
+#: every app container refuses to start with it in `.env` (R11-VAL03). `tests/test_config.py` holds
+#: the list to names the repository's scripts and manifests use and no field binds.
+_SCRIPT_ONLY_ENV_NAMES = frozenset({"AIDA_BASE_URL"})
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AIDA_",
@@ -845,8 +853,9 @@ class Settings(BaseSettings):
     # Five minutes: fast enough to alert on, far too slow to cost anything.
     footprint_metrics_enabled: bool = True
     footprint_metrics_interval_seconds: int = Field(default=300, ge=60, le=86_400)
-    # R11-FP17: the port the fleet scheduler and graph projector expose their own
-    # Prometheus registry on (`aida.worker_metrics.serve_worker_metrics`).
+    # R11-FP17: the port the fleet scheduler, the graph projector and (R11-AUD03) the
+    # Temporal worker expose their own Prometheus registry on
+    # (`aida.worker_metrics.serve_worker_metrics`).
     # `prometheus_client`'s registry is per process and only `aida.main` serves
     # `/metrics`, so every gauge the two passes above publish previously landed in a
     # process nothing could reach -- the real reason no deployment scraped them.
@@ -1263,7 +1272,7 @@ class Settings(BaseSettings):
         suspects: list[str] = []
         for raw_name in os.environ:
             name = raw_name.upper()
-            if not name.startswith("AIDA_") or name in known:
+            if not name.startswith("AIDA_") or name in known or name in _SCRIPT_ONLY_ENV_NAMES:
                 continue
             match = difflib.get_close_matches(name, known, n=1, cutoff=0.84)
             if match:
@@ -1423,7 +1432,9 @@ class _CredentialReferenceTolerantDotEnv(PydanticBaseSettingsSource):
                 continue
             # Not a field. Keep it only if it looks like a typo of one, so
             # `extra="forbid"` can say so; otherwise it is a credential
-            # reference and belongs to nobody but the operator.
+            # reference (or a name a script reads) and belongs to nobody but the operator.
+            if name in _SCRIPT_ONLY_ENV_NAMES:
+                continue
             if difflib.get_close_matches(name, known, n=1, cutoff=0.84):
                 kept[key] = value
         return kept

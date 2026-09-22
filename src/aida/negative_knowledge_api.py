@@ -67,7 +67,7 @@ async def get_subject_assertions(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -92,7 +92,7 @@ async def search_negative_assertions(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
+        require_roles("PlatformAdmin", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
