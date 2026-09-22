@@ -5676,10 +5676,9 @@ export async function makeFixtureRouteUnownedAssetBacklog(
 }
 
 /** `GET .../stewardship/documentation-worklist` (AT-5/SW-1) -- ranked by
- *  `score = usage x impact x deficit`, descending, matching
- *  `stewardship_worklist.compute_worklist`'s own deterministic tie-break
- *  (score desc, then id) so the fixture ordering matches what a real
- *  organization would actually see. */
+ *  `score = usage x impact x deficit` (or by query volume), descending, as
+ *  `documentation_worklist` ranks a real organization. The API breaks a tie
+ *  by table name, then id; this fixture sorts on the score alone. */
 export async function makeFixtureDocumentationWorklist(
   organizationId: string,
   query: DocumentationWorklistQuery,

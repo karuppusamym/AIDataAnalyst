@@ -144,7 +144,7 @@ caller today.
 
 ### aida.schemas
 
-- **File** — `src/aida/schemas.py` (4695 lines)
+- **File** — `src/aida/schemas.py` (4697 lines)
 - **Replacement path** *(hand-written)* — Each re-exported DTO has moved to the `schemas` module of the bounded context that owns it. The shared `ApiModel` lives independently in `atlas.platform.schemas`; this file preserves its identity alias. The rest of the file has not moved.
 - **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md
