@@ -396,10 +396,16 @@ async def test_a_pass_skipped_by_its_backoff_leaves_no_unawaited_coroutine(
 ) -> None:
     import gc
 
+    # A coroutine another test leaked is reported whenever the collector reaches it, which can
+    # be inside this test: collect first, and count only this file's stubs (`stub_for`).
+    gc.collect()
+    recwarn.clear()
     _stub_every_pass(monkeypatch, failing={"reaper"})
     await _iterate()
     await _iterate()
     gc.collect()
 
-    assert not [w for w in recwarn if "was never awaited" in str(w.message)]
+    assert not [
+        w for w in recwarn if "was never awaited" in str(w.message) and "stub_for" in str(w.message)
+    ]
 

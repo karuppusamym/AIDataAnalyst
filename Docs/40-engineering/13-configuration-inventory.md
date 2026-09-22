@@ -188,7 +188,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_token_daily_quota_per_datasource` | `int | None` | `None` | 1 |
 | `parser_statement_daily_quota_per_organization` | `int | None` | `None` | 1 |
 | `parser_statement_daily_quota_per_datasource` | `int | None` | `None` | 1 |
-| `scheduler_poll_seconds` | `int` | `10` | 2 |
+| `scheduler_poll_seconds` | `int` | `10` | 4 |
 | `scheduler_batch_size` | `int` | `100` | 3 |
 | `outbox_max_attempts` | `int` | `10` | 1 |
 | `outbox_max_backoff_seconds` | `int` | `300` | 1 |
