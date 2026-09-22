@@ -64,6 +64,11 @@ _TENANT_FREE_ROUTES: dict[str, str] = {
     "GET /v1/connectors/capability-matrix": (
         "the connector registry's own definitions; process-global, not per-tenant"
     ),
+    "GET /v1/operations/scheduler-passes": (
+        "the fleet scheduler's last outcome per maintenance pass (pass names, times, counts, "
+        "exception class names; R11-VAL04); passes run across every tenant and the rows hold no "
+        "organization's data"
+    ),
     "GET /v1/procedure-lineage/capability-matrix": (
         "AT-22: derived purely from the parser modules' own dispatch code via AST "
         "introspection (aida.procedure_capability_matrix.build_capability_matrix) -- "

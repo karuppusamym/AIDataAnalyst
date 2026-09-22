@@ -406,6 +406,14 @@ class OidcVerifier:
         cached = self._current_key_set(force=force)
         if cached is not None:
             return cached
+        if not force and self._lock.locked():
+            # A refresh is already in flight. While the provider is slow or down that attempt can
+            # take the whole fetch timeout, and every request queued on the lock would wait with
+            # it; one that may be answered from the held set is answered now instead. A forced
+            # (unknown-`kid`) load still waits: the held set cannot answer it.
+            stale = self._servable_stale(monotonic())
+            if stale is not None:
+                return stale
         async with self._lock:
             # Looked at again under the lock, not just before it. The window is measured from the
             # END of the last attempt, so a caller that passed the check above while a fetch was

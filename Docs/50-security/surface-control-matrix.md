@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **554**
-- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 29, MCP 9, REST 459, SDK 1
+- Surfaces covered: **555**
+- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 459, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -124,6 +124,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/agent-runs` | JOB | `aida.api.list_agent_runs` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/analysis-runs` | JOB | `aida.api.list_analysis_runs` | DataAdmin, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/semantic-inference-runs` | JOB | `aida.semantic_intelligence_api.list_semantic_inference_runs` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/operations/scheduler-passes` | JOB | `aida.operational_api.scheduler_pass_status` | Operations, PlatformAdmin | no | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/analysis-runs` | JOB | `aida.operational_api.list_organization_analysis_runs` | DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/tools/{tool_id}/certification-runs` | JOB | `aida.tool_api.list_tool_certification_runs` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Reviewer, SemanticAdmin, ToolDeveloper, Viewer | yes | no | read | no | not cancellable |
 | `POST /v1/agent-runs/{run_id}/tool-blueprint` | JOB | `aida.tool_api.prepare_analysis_tool` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |

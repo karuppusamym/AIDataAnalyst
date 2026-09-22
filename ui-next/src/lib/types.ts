@@ -5224,6 +5224,26 @@ export interface ScanPolicyUpsert {
   start_at?: string | null;
 }
 
+export interface SchedulerPassStatusListRead {
+  generated_at: string;
+  stale_after_seconds: number;
+  failing: number;
+  stale: number;
+  never_run: number;
+  items: SchedulerPassStatusRead[];
+}
+
+/** One fleet-scheduler pass as it last ran (R11-VAL04). */
+export interface SchedulerPassStatusRead {
+  pass_name: string;
+  state: "OK" | "FAILING" | "STALE" | "NEVER_RUN";
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error_class: string | null;
+  consecutive_failures: number;
+}
+
 /** Typeahead suggestion for command palette. */
 export interface SearchSuggestion {
   text: string;

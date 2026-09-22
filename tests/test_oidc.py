@@ -1090,3 +1090,29 @@ def test_the_verifier_identity_names_every_setting_the_verifier_reads() -> None:
 
     assert read, "the scan found nothing: the check has stopped looking at the right thing"
     assert read <= named, f"the verifier reads {sorted(read - named)} but its identity omits them"
+
+
+@pytest.mark.asyncio
+async def test_a_request_arriving_during_a_slow_refresh_is_answered_from_the_held_set(
+    rig: _Rig,
+) -> None:
+    """While the one refresh attempt hangs on a provider that is down, other requests do not
+    queue behind it for the whole fetch timeout."""
+    await rig.verifier.verify(rig.token("bank-key-1"))
+    rig.clock.advance(_cache_seconds(rig) + 1)
+    rig.idp.hold = asyncio.Event()
+
+    first = asyncio.ensure_future(rig.verifier.verify(rig.token("bank-key-1")))
+    for _ in range(100):
+        if rig.idp.fetches == 2:
+            break
+        await asyncio.sleep(0)
+    assert rig.idp.fetches == 2, "the refresh should be in flight"
+
+    claims = await asyncio.wait_for(rig.verifier.verify(rig.token("bank-key-1")), timeout=1)
+    assert claims["sub"] == "bank-user-123"
+    assert rig.idp.fetches == 2, "the second request must not have started a fetch of its own"
+
+    rig.idp.hold.set()
+    assert (await first)["sub"] == "bank-user-123"
+

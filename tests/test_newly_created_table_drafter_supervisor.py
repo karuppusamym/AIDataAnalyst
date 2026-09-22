@@ -951,3 +951,77 @@ async def test_the_worker_opens_its_metrics_listener_first_as_the_metadata_worke
     await worker_module.run_worker()
 
     assert order == ["metrics listener: metadata-worker", "temporal connect"]
+
+
+# --- a broker that drops after the start (found reviewing round 12, 2026-09-21) -------------
+
+
+class _MetadataConsumer:
+    """`topics()` takes one scripted answer per probe, so the test steps the probe one at a time."""
+
+    def __init__(self) -> None:
+        self.answers: asyncio.Queue[BaseException | None] = asyncio.Queue()
+        self.answered = 0
+
+    async def topics(self) -> set[str]:
+        answer = await self.answers.get()
+        self.answered += 1
+        if answer is not None:
+            raise answer
+        return {"aida.platform.events.v1"}
+
+
+async def _step(consumer: _MetadataConsumer, answer: BaseException | None) -> float | None:
+    """Let the probe take one answer, then read the gauge it left."""
+    before = consumer.answered
+    consumer.answers.put_nowait(answer)
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if consumer.answered > before:
+            break
+    for _ in range(5):
+        await asyncio.sleep(0)
+    return _up()
+
+
+async def test_a_broker_that_stops_answering_after_the_start_takes_the_gauge_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(drafter, "DRAFTER_BROKER_PROBE_SECONDS", 0)
+    drafter._set_consumer_up(1)
+    consumer = _MetadataConsumer()
+
+    with capture_logs() as logs:
+        task = asyncio.ensure_future(drafter._probe_broker(consumer))
+        seen = [
+            await _step(consumer, KafkaConnectionError("gone")),
+            await _step(consumer, KafkaConnectionError("still gone")),
+            await _step(consumer, None),
+        ]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert seen == [0, 0, 1]
+    events = [entry["event"] for entry in logs]
+    assert events.count("newly_created_table_drafter_broker_unreachable") == 1
+    assert events.count("newly_created_table_drafter_broker_reachable_again") == 1
+
+
+async def test_a_probe_that_hangs_is_a_failed_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(drafter, "DRAFTER_BROKER_PROBE_SECONDS", 0)
+    monkeypatch.setattr(drafter, "DRAFTER_BROKER_PROBE_TIMEOUT_SECONDS", 0.01)
+    drafter._set_consumer_up(1)
+
+    class _Hangs:
+        async def topics(self) -> set[str]:
+            await asyncio.sleep(10)
+            return set()
+
+    task = asyncio.ensure_future(drafter._probe_broker(_Hangs()))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _up() == 0

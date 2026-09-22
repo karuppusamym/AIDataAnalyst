@@ -31070,6 +31070,131 @@
         "title": "ScanPolicyUpsert",
         "type": "object"
       },
+      "SchedulerPassStatusListRead": {
+        "additionalProperties": false,
+        "properties": {
+          "failing": {
+            "title": "Failing",
+            "type": "integer"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SchedulerPassStatusRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "never_run": {
+            "title": "Never Run",
+            "type": "integer"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "integer"
+          },
+          "stale_after_seconds": {
+            "title": "Stale After Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generated_at",
+          "stale_after_seconds",
+          "failing",
+          "stale",
+          "never_run",
+          "items"
+        ],
+        "title": "SchedulerPassStatusListRead",
+        "type": "object"
+      },
+      "SchedulerPassStatusRead": {
+        "additionalProperties": false,
+        "description": "One fleet-scheduler pass as it last ran (R11-VAL04).",
+        "properties": {
+          "consecutive_failures": {
+            "title": "Consecutive Failures",
+            "type": "integer"
+          },
+          "last_attempt_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Attempt At"
+          },
+          "last_error_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error Class"
+          },
+          "last_failure_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Failure At"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "pass_name": {
+            "title": "Pass Name",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "OK",
+              "FAILING",
+              "STALE",
+              "NEVER_RUN"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pass_name",
+          "state",
+          "last_attempt_at",
+          "last_success_at",
+          "last_failure_at",
+          "last_error_class",
+          "consecutive_failures"
+        ],
+        "title": "SchedulerPassStatusRead",
+        "type": "object"
+      },
       "SearchSuggestion": {
         "additionalProperties": false,
         "description": "Typeahead suggestion for command palette.",
@@ -74541,6 +74666,125 @@
         "summary": "Get Openlineage Run Event",
         "tags": [
           "openlineage"
+        ]
+      }
+    },
+    "/v1/operations/scheduler-passes": {
+      "get": {
+        "description": "R11-VAL04: every fleet-scheduler pass with its last outcome, failing ones first.\n\nA pass that raises no longer stops the scheduler (it is logged as `scheduler_pass_failed`\nand counted in `aida_scheduler_pass_failures_total`), but both of those live in the\nscheduler process. This reads what the leading replica persists once per iteration\n(`aida.scheduler_pass_status`), so the Operations screen can show a pass failing on every\niteration, or a scheduler that has stopped attempting anything (STALE), without log access.\nPlatform-wide and tenant-free: rows carry pass names, times, counts and exception class\nnames, never an organization's data.",
+        "operationId": "scheduler_pass_status_v1_operations_scheduler_passes_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulerPassStatusListRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Scheduler Pass Status",
+        "tags": [
+          "operations"
         ]
       }
     },

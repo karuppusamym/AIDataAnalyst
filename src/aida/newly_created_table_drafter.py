@@ -184,8 +184,10 @@ DRAFTER_CONSUMER_GROUP = "aida-newly-created-table-drafter-v1"
 DRAFTER_CONSUMER_UP = Gauge(
     "aida_newly_created_table_drafter_consumer_up",
     (
-        "1 while the newly-created-table drafter's Kafka consumer has started and is consuming, "
-        "0 while it is not (before its first start, while it is being retried). Absent when the "
+        "1 while the newly-created-table drafter's Kafka consumer has started and the broker "
+        "answered its last metadata probe, 0 while it has not started, is being retried, or the "
+        "broker stopped answering after the start (aiokafka retries a dropped connection "
+        "internally and never raises it into the loop, so only the probe notices). Absent when the "
         "supervisor never ran, e.g. auto_enqueue_on_ingest is off. 0 is expected on the default "
         "stack, which has no broker."
     ),
@@ -200,6 +202,40 @@ DRAFTER_CONSUMER_FAILURES = Counter(
         "delivery shows here even when the up gauge is caught at 1."
     ),
 )
+
+
+#: How often the running consumer asks the broker for cluster metadata, and how long it waits. A
+#: broker that drops after `start()` is retried inside aiokafka and never raised into the message
+#: loop, so without this the up gauge stayed 1 and `AtlasNewlyCreatedTableDrafterConsumerDown`
+#: could not fire (found reviewing round 12, 2026-09-21).
+DRAFTER_BROKER_PROBE_SECONDS = 30.0
+DRAFTER_BROKER_PROBE_TIMEOUT_SECONDS = 10.0
+
+
+async def _probe_broker(consumer: Any) -> None:
+    """Keep the up gauge true to the broker while the consumer runs. Cancelled with the consumer.
+
+    `consumer.topics()` fetches cluster metadata and raises when no known broker answers
+    (aiokafka 0.14 `AIOKafkaClient.fetch_all_metadata`). One log line per change of state, not per
+    probe, so an hour-long outage is two lines.
+    """
+    reachable = True
+    while True:
+        await asyncio.sleep(DRAFTER_BROKER_PROBE_SECONDS)
+        try:
+            await asyncio.wait_for(consumer.topics(), timeout=DRAFTER_BROKER_PROBE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            if reachable:
+                logger.warning(
+                    "newly_created_table_drafter_broker_unreachable", error_type=type(exc).__name__
+                )
+            reachable = False
+            _set_consumer_up(0)
+        else:
+            if not reachable:
+                logger.info("newly_created_table_drafter_broker_reachable_again")
+            reachable = True
+            _set_consumer_up(1)
 
 
 def _set_consumer_up(value: int) -> None:
@@ -852,6 +888,7 @@ async def run_newly_created_table_drafter_consumer(
         auto_offset_reset="earliest",
     )
     started = False
+    probe: asyncio.Task[None] | None = None
     try:
         # Inside the `try` so that a `start()` that fails still reaches the
         # `finally`: it can die after the client has opened connections and its
@@ -862,6 +899,7 @@ async def run_newly_created_table_drafter_consumer(
         started = True
         state.started_at = time.monotonic()
         _set_consumer_up(1)
+        probe = asyncio.create_task(_probe_broker(consumer))
         logger.info(
             "newly_created_table_drafter_started",
             bootstrap_servers=settings.kafka_bootstrap_servers,
@@ -893,6 +931,10 @@ async def run_newly_created_table_drafter_consumer(
         # First, before the awaits below: from here on nothing is consuming -- whether the loop
         # ended, a message failed, `start()` never succeeded or this was cancelled -- and
         # `stop()` against a broker that is gone can take a while to give up.
+        if probe is not None:
+            probe.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await probe
         _set_consumer_up(0)
         try:
             await consumer.stop()

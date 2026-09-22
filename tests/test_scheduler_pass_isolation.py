@@ -13,6 +13,7 @@ later is covered without an edit here) and make chosen ones raise.
 from __future__ import annotations
 
 import ast
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,25 @@ def _fresh_logger(monkeypatch: pytest.MonkeyPatch) -> None:
     The drafter-supervisor tests failed the same way in the whole suite, because the
     application turns on `cache_logger_on_first_use`."""
     monkeypatch.setattr(scheduler, "logger", structlog.get_logger(scheduler.__name__))
+
+
+class _Clock:
+    """What `scheduler._now` reads: moves only when a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 9, 21, 22, 0, tzinfo=UTC)
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """A fixed clock, and no failure backoff carried in from another test."""
+    fixed = _Clock()
+    monkeypatch.setattr(scheduler, "_now", lambda: fixed.now)
+    monkeypatch.setattr(scheduler, "_pass_backoff", {})
+    return fixed
 
 
 @pytest.fixture(autouse=True)
@@ -169,12 +189,13 @@ async def test_an_iteration_in_which_every_pass_fails_still_returns(
 
 
 async def test_each_failure_is_counted_under_its_own_pass(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
 ) -> None:
     _stub_every_pass(monkeypatch, failing={"reaper"})
     reaper, delivery = _failures("reaper"), _failures("delivery_worker")
 
     await _iterate()
+    clock.advance(scheduler.PASS_FAILURE_BACKOFF_BASE_SECONDS)
     await _iterate()
 
     assert _failures("reaper") == reaper + 2
@@ -312,4 +333,73 @@ async def test_a_scan_policy_that_fails_to_be_admitted_is_counted_and_reported(
     assert admitted == ["policy-2"]
     assert _failures("scan_policy_processing") == before + 1
     assert _saved_outcomes[-1]["scan_policy_processing"] == "_Boom"
+
+
+# --- a failing pass backs off instead of failing on every poll ------------------------------
+
+
+async def test_a_failing_pass_is_skipped_until_its_backoff_has_passed(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    ran = _stub_every_pass(monkeypatch, failing={"reaper"})
+    before = _failures("reaper")
+
+    await _iterate()
+    clock.advance(scheduler.PASS_FAILURE_BACKOFF_BASE_SECONDS - 1)
+    await _iterate()
+
+    assert ran.count("reaper") == 1, "the reaper ran again inside its backoff"
+    assert ran.count("delivery_worker") == 2, "a healthy pass must not be held back"
+    assert _failures("reaper") == before + 1
+
+    clock.advance(1)
+    await _iterate()
+    assert ran.count("reaper") == 2
+
+
+async def test_the_backoff_doubles_and_is_capped_under_the_stale_bound(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    ran = _stub_every_pass(monkeypatch, failing={"reaper"})
+    waits: list[float] = []
+    for _ in range(6):
+        await _iterate()
+        failures, retry_at = scheduler._pass_backoff["reaper"]
+        waits.append((retry_at - clock.now).total_seconds())
+        clock.advance(waits[-1])
+
+    assert waits == [30, 60, 120, 240, 240, 240]
+    assert ran.count("reaper") == 6
+    from aida.scheduler_pass_status import stale_after
+
+    assert timedelta(seconds=scheduler.PASS_FAILURE_BACKOFF_MAX_SECONDS) < stale_after(10)
+
+
+async def test_a_pass_that_succeeds_again_loses_its_backoff(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    failing = {"reaper"}
+    ran = _stub_every_pass(monkeypatch, failing=failing)
+    await _iterate()
+    failing.clear()
+    clock.advance(scheduler.PASS_FAILURE_BACKOFF_BASE_SECONDS)
+
+    await _iterate()
+    await _iterate()
+
+    assert "reaper" not in scheduler._pass_backoff
+    assert ran.count("reaper") == 3
+
+
+async def test_a_pass_skipped_by_its_backoff_leaves_no_unawaited_coroutine(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock, recwarn: pytest.WarningsRecorder
+) -> None:
+    import gc
+
+    _stub_every_pass(monkeypatch, failing={"reaper"})
+    await _iterate()
+    await _iterate()
+    gc.collect()
+
+    assert not [w for w in recwarn if "was never awaited" in str(w.message)]
 
