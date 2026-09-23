@@ -13,6 +13,11 @@ import {
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import { LoadingPanel, useAsyncResource } from "../components/screenState";
 import type { StatusChannel } from "../components/screenState";
+import {
+  ChangedSincePublishedPill,
+  changedSincePublishedText,
+  useChangesSincePublished,
+} from "./ContextProductFreshness";
 
 /* ---------------------------------------------------------------------------
    Rollout -- the AT-7(b) consumer-binding registry.
@@ -126,6 +131,9 @@ export function RolloutPanel({
 }) {
   const [consumer, setConsumer] = useState("");
   const [versionId, setVersionId] = useState("");
+  /* R11-FP12: every version of this product, counted once: a consumer pinned to an older
+     version may be standing on more that has moved than the published one is. */
+  const changes = useChangesSincePublished(product.project_id, product.id);
 
   // Default the version picker to the published version -- the one a new
   // consumer would resolve to anyway -- so the common case is one field.
@@ -176,11 +184,15 @@ export function RolloutPanel({
             </Field>
             <Field label="Bound version">
               <select value={versionId} onChange={(e) => setVersionId(e.target.value)}>
-                {versions.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    v{v.version} · {v.status.toLowerCase().replace(/_/g, " ")}
-                  </option>
-                ))}
+                {versions.map((v) => {
+                  const moved = changedSincePublishedText(changes.byVersion.get(v.id));
+                  return (
+                    <option key={v.id} value={v.id}>
+                      v{v.version} · {v.status.toLowerCase().replace(/_/g, " ")}
+                      {moved ? ` · ${moved}` : ""}
+                    </option>
+                  );
+                })}
               </select>
             </Field>
             <Button type="submit" variant="primary" disabled={busyConsumer !== null || versions.length === 0}>
@@ -215,7 +227,8 @@ export function RolloutPanel({
                       <code>{b.consumer_principal_id}</code>
                     </td>
                     <td>
-                      <Pill tone="info">v{b.bound_version_number}</Pill>
+                      <Pill tone="info">v{b.bound_version_number}</Pill>{" "}
+                      <ChangedSincePublishedPill count={changes.byVersion.get(b.bound_version_id)} />
                     </td>
                     <td>{new Date(b.updated_at).toLocaleDateString()}</td>
                     <td className="cprollout__rowaction">

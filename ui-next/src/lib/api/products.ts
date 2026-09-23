@@ -20,6 +20,7 @@ import { requestBlob } from "../http";
 import type {
   ConsumptionRecordPage,
   ContextCompilationRead,
+  ContextProductChangesSummaryListRead,
   ContextProductConsumerBindingRead,
   ContextProductCreate,
   ContextProductRead,
@@ -366,8 +367,11 @@ export function compileContextProductVersion(
    NO LIST OR READ SHAPE CARRIES IT. `ContextProductRead` / `ContextProductVersionRead`
    are the version's own definition, and a version's definition never changes -- what
    moves is what it *stands on* (a covered view's or routine's definition, an approved
-   description). The server answers that in exactly two places, both computed on demand
-   from `load_coverage_changes`: the compiled artifact's `context.coverage`
+   description). HOW MANY moved is one request per screen since 2026-09-22
+   (`fetchContextProductChangesSummary` below, a count per version in a fixed number of
+   queries, for the coverage roles only); WHICH moved is still per version, computed on
+   demand from `load_coverage_changes` in exactly two places: the compiled artifact's
+   `context.coverage`
    (`changed_since_published`, Atlas-native targets only, inside an opaque `content`
    string), and GraphQL's `contextProductCoverage`, which renders the same section as a
    typed connection and is the read used here -- target-independent, nothing parsed out
@@ -487,6 +491,62 @@ export function fetchContextProductChangesSincePublished(
           signal,
         ),
       ),
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   The same reading as a count, for a whole list (R11-FP12, 2026-09-22).
+
+   `GET /v1/projects/{project_id}/context-products/changes-since-published` answers, in one
+   request, how many covered subjects moved since each product's latest version was published
+   -- or, with `productId`, since each of one product's versions was. It is the count of the
+   entries `fetchContextProductChangesSincePublished` would list for that version, computed in
+   a fixed number of queries on the server, so a list can show it without anyone pressing a
+   button per row.
+
+   WHO MAY ASK. `COMPILER_ROLES`, the roles every coverage door admits -- not the product
+   list's readers, which include Viewer, Auditor, Reviewer and SemanticAdmin. So a screen asks
+   only under `readDecision` on `CONTEXT_PRODUCT_COVERAGE_ROLES`, and a session outside them sees
+   no badge rather than a 403.
+
+   `null` IS NOT 0. `changed_subjects` is null for a version never published (no baseline to be
+   stale against) and 0 when it was published and nothing it covers has moved. Demo mode has no
+   source scans to move under a version and answers with no rows, as the per-version read
+   answers empty.
+--------------------------------------------------------------------------- */
+
+/** The roles `GET .../context-products/changes-since-published` admits, from the
+ *  surface-control matrix row for `list_context_product_changes_since_published`
+ *  (`COMPILER_ROLES` in `context_product_read_service.py`). */
+export const CONTEXT_PRODUCT_COVERAGE_ROLES: readonly string[] = [
+  "AgentDeveloper",
+  "Analyst",
+  "DataSteward",
+  "MetadataAdmin",
+  "PlatformAdmin",
+];
+
+export function fetchContextProductChangesSummary(
+  projectId: string,
+  options: { productId?: string | null } = {},
+  signal?: AbortSignal,
+): Promise<ContextProductChangesSummaryListRead> {
+  return demoOr(
+    async () => ({
+      project_id: projectId,
+      generated_at: new Date().toISOString(),
+      truncated: false,
+      items: [],
+    }),
+    async () => {
+      const params = new URLSearchParams();
+      params.set("limit", "200");
+      if (options.productId) params.set("product_id", options.productId);
+      return get<ContextProductChangesSummaryListRead>(
+        `/v1/projects/${projectId}/context-products/changes-since-published?${params}`,
+        signal,
+      );
+    },
   );
 }
 

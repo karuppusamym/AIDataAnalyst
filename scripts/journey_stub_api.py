@@ -299,6 +299,15 @@ ROUTE_RULES: list[Rule] = [
         ),
         "GET /v1/projects/{project_id}/context-products",
     ),
+    # R11-FP12 (2026-09-22): the count of what moved under each product since publication,
+    # asked once by the Context products, agent gateway and Ask screens. Its roles are the
+    # coverage doors', not the product list's.
+    Rule(
+        "GET",
+        rf"^/v1/projects/{_SEG}/context-products/changes-since-published/?$",
+        ("AgentDeveloper", "Analyst", "DataSteward", "MetadataAdmin", "PlatformAdmin"),
+        "GET /v1/projects/{project_id}/context-products/changes-since-published",
+    ),
     # R11-S13: the Stewardship work queue's backlog. Without a pinned body the generic
     # synthesiser answered this route with `"items": [""]` -- a placeholder string where rows
     # belong -- and the screen (which expects row objects, as the real API always sends) fell into
@@ -984,6 +993,17 @@ def _overrides(method: str, path: str, identity: str, body: Any) -> Any | None:
             },
             "unowned_table_ids": [TABLE_ID],
             "computed_at": NOW,
+        }
+    if method == "GET" and re.fullmatch(
+        rf"/v1/projects/{_SEG}/context-products/changes-since-published/?", path
+    ):
+        # Nothing has moved under the stub's product: an answer with no count, which the
+        # screens show as no badge.
+        return {
+            "project_id": PROJECT_ID,
+            "generated_at": NOW,
+            "truncated": False,
+            "items": [],
         }
     if method == "GET" and re.fullmatch(rf"/v1/projects/{_SEG}/context-products/?", path):
         # One published product, so the picker has something to select. The real

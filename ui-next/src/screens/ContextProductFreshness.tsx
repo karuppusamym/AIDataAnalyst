@@ -1,21 +1,30 @@
-import { useCallback, useRef, useState } from "react";
-import { fetchContextProductChangesSincePublished } from "../lib/api";
+import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  CONTEXT_PRODUCT_COVERAGE_ROLES,
+  fetchContextProductChangesSincePublished,
+  fetchContextProductChangesSummary,
+} from "../lib/api";
 import type { ContextProductCoverageChange } from "../lib/api";
+import { readDecision } from "../lib/roles";
+import { useSession } from "../lib/session";
 import { Pill } from "../components/primitives";
-import { failureText } from "../components/screenState";
+import { failureText, useAsyncResource } from "../components/screenState";
 import type { StatusChannel } from "../components/screenState";
 
 /* ---------------------------------------------------------------------------
    Staleness of a published version (R11-FP12): what it covers that moved after
    it was published, asked for on demand and shown on the registry row.
 
-   WHY THE ROW CANNOT JUST SHOW IT. A version's own definition never changes, so
-   `ContextProductRead` has nothing to show: what moves is what it stands on -- a
-   covered view's or routine's definition, an approved description -- and the
-   server answers that per version, on request, from `contextProductCoverage`
-   (see `fetchContextProductChangesSincePublished` for the two routes that can and
-   the cost). Each such read is recorded as a consumption of the version, so this
-   asks only about a row a person asked about. Nothing is requested on load.
+   TWO READINGS. A version's own definition never changes, so `ContextProductRead`
+   has nothing to show: what moves is what it stands on -- a covered view's or
+   routine's definition, an approved description. HOW MANY moved comes for the whole
+   list in one request when the screen opens (`useChangesSincePublished`, since
+   2026-09-22), and the row, the agent gateway's exposure list, Ask's picker and the
+   rollout version list all show it with no click. WHICH moved is still per version,
+   on request, from `contextProductCoverage` (see
+   `fetchContextProductChangesSincePublished` for its cost: each such read is recorded
+   as a consumption of the version), so the detail is asked for only about a row a
+   person asked about.
 
    THREE ANSWERS, NEVER TWO. "Stale" needs a reason a steward can act on, so it
    lists what moved. "Nothing changed" is its own answer and says what was looked
@@ -178,4 +187,54 @@ export function FreshnessNote({ state, version }: { state: VersionFreshness | un
       {hidden > 0 ? <p className="cprow__freshmore">and {hidden} more.</p> : null}
     </div>
   );
+}
+
+/* ---------------------------------------------------------------------------
+   The passive reading: how many covered subjects moved since publication, for every
+   row at once (R11-FP12, 2026-09-22). Asked only by a session known to hold the
+   coverage roles (`readDecision`): the product list admits roles the coverage doors
+   refuse, and a badge is not worth a 403 per screen for them.
+--------------------------------------------------------------------------- */
+
+/** Count per version id: a number for a published version (0 is "nothing moved"), `null`
+ *  for one never published. A version the answer does not name is absent: no reading. */
+export type ChangesSincePublished = ReadonlyMap<string, number | null>;
+
+const NO_READING: ChangesSincePublished = new Map();
+
+/** One request for the project -- or, with `productId`, for every version of one product --
+ *  when the screen opens. A failed or refused read leaves every row without a badge, which
+ *  is "no reading", never "nothing moved". */
+export function useChangesSincePublished(
+  projectId: string | null | undefined,
+  productId?: string | null,
+): { byVersion: ChangesSincePublished; error: string | null } {
+  const session = useSession();
+  const decision = readDecision(session, CONTEXT_PRODUCT_COVERAGE_ROLES);
+  const summary = useAsyncResource(
+    (signal) => fetchContextProductChangesSummary(projectId!, { productId }, signal),
+    [projectId, productId],
+    { enabled: Boolean(projectId) && decision === "ask" },
+  );
+  const byVersion = useMemo<ChangesSincePublished>(
+    () =>
+      summary.data
+        ? new Map(summary.data.items.map((item) => [item.version_id, item.changed_subjects]))
+        : NO_READING,
+    [summary.data],
+  );
+  return { byVersion, error: summary.error };
+}
+
+/** The words for a count, or `null` when there is nothing to say (never published, nothing
+ *  moved, or no reading). For a `<select>` option, where a pill cannot go. */
+export function changedSincePublishedText(count: number | null | undefined): string | null {
+  if (!count) return null;
+  return count === 1 ? "1 change since published" : `${count} changes since published`;
+}
+
+/** The passive badge: text, not colour alone, and only when something moved. */
+export function ChangedSincePublishedPill({ count }: { count: number | null | undefined }) {
+  const text = changedSincePublishedText(count);
+  return text ? <Pill tone="warn">{text}</Pill> : null;
 }

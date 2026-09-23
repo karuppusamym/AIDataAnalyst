@@ -25,6 +25,7 @@ import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { ConnectTab } from "./AgentGatewayConnect";
+import { ChangedSincePublishedPill, useChangesSincePublished } from "./ContextProductFreshness";
 import "./AgentGatewayScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -97,6 +98,10 @@ function ExposureTab({
     (p) => p.latest_version.status === "PUBLISHED" || p.latest_version.status === "SUPPORTED",
   );
   const unpublished = products.length - published.length;
+  /* R11-FP12: an agent is served exactly these versions, so a version whose coverage moved
+     since publication is the one worth flagging here. One read for the project, and only by
+     a session the coverage roles admit. */
+  const changes = useChangesSincePublished(hasProject ? projectId : null);
 
   if (!hasProject) {
     return (
@@ -142,6 +147,7 @@ function ExposureTab({
                   </div>
                   <div className="aglist__meta">
                     <Pill tone={v.status === "PUBLISHED" ? "ok" : "info"}>{v.status.toLowerCase()}</Pill>
+                    <ChangedSincePublishedPill count={changes.byVersion.get(v.id)} />
                     <span className="aglist__roles">{v.allowed_consumer_roles.join(", ") || "no roles"}</span>
                   </div>
                 </li>

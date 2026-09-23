@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import type { ContextCompilationRead, ContextProductCreate, ContextProductRead, GovernanceReviewRead, MeRead, ProjectRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import type { ContextProductChangesSincePublished } from "../lib/api";
+import type { ContextProductChangesSummaryListRead } from "../lib/types";
 import { ApiError } from "../lib/api";
 import type { Session, SessionState } from "../lib/session";
 import { expectNoAxeViolations, unnamedFocusableElements } from "../test/a11y";
@@ -85,6 +86,14 @@ const removeContextProductBinding = vi.fn();
    `lib/api/products.test.ts`. */
 const fetchContextProductChangesSincePublished =
   vi.fn<(versionId: string, signal?: AbortSignal) => Promise<ContextProductChangesSincePublished>>();
+/* R11-FP12 (2026-09-22): the passive count, one read for the project. */
+const fetchContextProductChangesSummary = vi.fn<
+  (
+    projectId: string,
+    options?: { productId?: string | null },
+    signal?: AbortSignal,
+  ) => Promise<ContextProductChangesSummaryListRead>
+>();
 
 vi.mock("../lib/_api_append", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/_api_append")>();
@@ -105,6 +114,11 @@ vi.mock("../lib/api", async (importOriginal) => {
     removeContextProductBinding: (...args: unknown[]) => removeContextProductBinding(...args),
     fetchContextProductChangesSincePublished: (versionId: string, signal?: AbortSignal) =>
       fetchContextProductChangesSincePublished(versionId, signal),
+    fetchContextProductChangesSummary: (
+      projectId: string,
+      options?: { productId?: string | null },
+      signal?: AbortSignal,
+    ) => fetchContextProductChangesSummary(projectId, options, signal),
     listOrgDatasources: (...args: unknown[]) => listOrgDatasources(...args),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
     fetchContextProducts: (projectId: string, query: unknown, signal?: AbortSignal) =>
@@ -178,6 +192,8 @@ beforeEach(() => {
   requestContextProductDeprecation.mockReset();
   compileContextProductVersion.mockReset();
   fetchContextProductChangesSincePublished.mockReset();
+  fetchContextProductChangesSummary.mockReset();
+  fetchContextProductChangesSummary.mockResolvedValue(summaryOf({}));
   for (const fn of [
     fetchCatalogRows, fetchSemanticModelVersions, fetchTools, listGlossaryTerms,
     fetchContextProductRoutineOptions, listOntologyVersions,
@@ -674,6 +690,124 @@ async function openRegistry(items: ContextProductRead[]) {
 }
 
 const rowOf = (name: string) => screen.getByRole("article", { name });
+
+/** The project summary, as the server answers it: a count per version id. */
+function summaryOf(counts: Record<string, number | null>): ContextProductChangesSummaryListRead {
+  return {
+    project_id: "proj_core",
+    generated_at: "2026-09-22T00:00:00Z",
+    truncated: false,
+    items: Object.entries(counts).map(([versionId, changed]) => ({
+      product_id: "cp",
+      version_id: versionId,
+      version: 1,
+      status: "PUBLISHED",
+      changed_subjects: changed,
+    })),
+  };
+}
+
+describe("ContextProductsScreen: the count that needs no click (R11-FP12, 2026-09-22)", () => {
+  it("shows how many covered subjects moved on each row, from one read for the whole project", async () => {
+    sessionMe = asRoles("DataSteward");
+    fetchContextProductChangesSummary.mockResolvedValue(summaryOf({ cpv_1: 3, cpv_9: 0 }));
+    await openRegistry([PUBLISHED_PRODUCT, PAYMENTS_PRODUCT]);
+
+    expect(await within(rowOf("Consumer risk analysis")).findByText("3 changes since published")).toBeInTheDocument();
+    // 0 is "published, and nothing it covers moved": no badge, and not the word "stale" either.
+    expect(within(rowOf("Payments context")).queryByText(/since published/)).not.toBeInTheDocument();
+    expect(fetchContextProductChangesSummary).toHaveBeenCalledTimes(1);
+    expect(fetchContextProductChangesSummary).toHaveBeenCalledWith(
+      "proj_core",
+      { productId: undefined },
+      expect.any(AbortSignal),
+    );
+    // The detail is still asked for only when a person asks: it is recorded as a consumption.
+    expect(fetchContextProductChangesSincePublished).not.toHaveBeenCalled();
+  });
+
+  it("gives way to the on-demand check once a person runs it, which says which subjects moved", async () => {
+    sessionMe = asRoles("DataSteward");
+    fetchContextProductChangesSummary.mockResolvedValue(summaryOf({ cpv_1: 2 }));
+    fetchContextProductChangesSincePublished.mockResolvedValue(STALE_ANSWER);
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+    expect(await within(row).findByText("2 changes since published")).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    expect(await within(row).findByText("stale")).toBeInTheDocument();
+    expect(within(row).queryByText("2 changes since published")).not.toBeInTheDocument();
+  });
+
+  it("asks a session outside the coverage roles nothing, and shows it no count", async () => {
+    sessionMe = asRoles("Viewer");
+    sessionState = "connected";
+    fetchContextProductChangesSummary.mockResolvedValue(summaryOf({ cpv_1: 3 }));
+    await openRegistry([PUBLISHED_PRODUCT]);
+
+    expect(fetchContextProductChangesSummary).not.toHaveBeenCalled();
+    expect(screen.queryByText(/since published/)).not.toBeInTheDocument();
+  });
+
+  it("counts every version of a product in the rollout panel: the version list and the pinned rows", async () => {
+    sessionMe = asRoles("DataSteward");
+    const published = PUBLISHED_PRODUCT.latest_version;
+    const draft = { ...published, id: "cpv_draft", version: published.version + 1, status: "DRAFT" };
+    fetchContextProductVersions.mockResolvedValue({
+      items: [draft, PUBLISHED_PRODUCT.latest_version],
+      limit: 200,
+      offset: 0,
+      total: 2,
+    });
+    fetchContextProductBindings.mockResolvedValue({
+      items: [
+        {
+          id: "b1", organization_id: "org1", product_id: "cp_1",
+          consumer_principal_id: "risk-copilot@agents.tenant.example",
+          bound_version_id: "cpv_1", bound_version_number: published.version, created_by: "steward-1",
+          created_at: "2026-09-20T00:00:00Z", updated_at: "2026-09-20T00:00:00Z",
+        },
+      ],
+      limit: 200,
+      offset: 0,
+      total: 1,
+    });
+    // The product-scoped read answers for the product's versions; the project read for none.
+    fetchContextProductChangesSummary.mockImplementation(async (_projectId, options) =>
+      options?.productId === "cp_1" ? summaryOf({ cpv_1: 4, cpv_draft: null }) : summaryOf({}),
+    );
+    await openRegistry([PUBLISHED_PRODUCT]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Rollout" }));
+
+    const panel = await screen.findByRole("article", { name: "Rollout for consumer-risk-context" });
+    expect(
+      await within(panel).findByRole("option", {
+        name: `v${published.version} · published · 4 changes since published`,
+      }),
+    ).toBeInTheDocument();
+    // Never published: no baseline, so no count -- not "0 changes".
+    expect(within(panel).getByRole("option", { name: `v${draft.version} · draft` })).toBeInTheDocument();
+    expect(within(within(panel).getByRole("table")).getByText("4 changes since published")).toBeInTheDocument();
+    expect(fetchContextProductChangesSummary).toHaveBeenCalledWith(
+      "proj_core",
+      { productId: "cp_1" },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("shows no count when the summary could not be read, rather than reading as current", async () => {
+    sessionMe = asRoles("DataSteward");
+    fetchContextProductChangesSummary.mockRejectedValue(new ApiError(503, "database unavailable"));
+    await openRegistry([PUBLISHED_PRODUCT]);
+
+    await waitFor(() => expect(fetchContextProductChangesSummary).toHaveBeenCalled());
+    expect(screen.queryByText(/since published/)).not.toBeInTheDocument();
+    // The on-demand check stays available, which is how a person still finds out.
+    expect(within(rowOf("Consumer risk analysis")).getByRole("button", { name: "Check for changes" })).toBeInTheDocument();
+  });
+});
 
 describe("ContextProductsScreen: changed since publication (R11-FP12)", () => {
   it("reads nothing on load and shows neither stale nor current until a person asks", async () => {

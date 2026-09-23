@@ -30,6 +30,8 @@ import {
   FreshnessPill,
   canCheckFreshness,
   useVersionFreshness,
+  ChangedSincePublishedPill,
+  useChangesSincePublished,
 } from "./ContextProductFreshness";
 import type { VersionFreshness } from "./ContextProductFreshness";
 import "./ContextProductsScreen.css";
@@ -93,6 +95,7 @@ function ProductRow({
   newVersionOpen,
   freshness,
   onCheckFreshness,
+  changedSincePublished,
 }: {
   product: ContextProductRead;
   busy: string | null;
@@ -114,6 +117,9 @@ function ProductRow({
    *  version -- `undefined` until it was asked, which shows nothing (never "fresh"). */
   freshness: VersionFreshness | undefined;
   onCheckFreshness: () => void;
+  /** R11-FP12: how many covered subjects moved since this version was published, from the
+   *  one project-wide read made when the screen opens; `undefined` is no reading. */
+  changedSincePublished: number | null | undefined;
 }) {
   const v = product.latest_version;
   const isBusy = busy === v.id;
@@ -122,7 +128,13 @@ function ProductRow({
       <div className="cprow__main">
         <div className="cprow__badges">
           <Pill tone={versionStatusTone(v.status)}>{v.status.toLowerCase().replace(/_/g, " ")}</Pill>
-          <FreshnessPill state={freshness} />
+          {/* The on-demand check, once someone ran it, says more (which subjects), so it
+              replaces the passive count rather than sitting beside it. */}
+          {freshness ? (
+            <FreshnessPill state={freshness} />
+          ) : (
+            <ChangedSincePublishedPill count={changedSincePublished} />
+          )}
         </div>
         <h3 className="cprow__title">{v.name}</h3>
         <div className="cprow__key">
@@ -243,6 +255,9 @@ export function ContextProductsScreen() {
   /* R11-FP12: which versions were asked whether what they cover has moved since
      publication, and the answer. Empty until a person asks; never filled on load. */
   const freshness = useVersionFreshness(channel);
+  /* R11-FP12 (2026-09-22): the count for every row, asked once when the list opens and only
+     by a session the coverage roles admit. The badge needs no click; the detail still does. */
+  const changes = useChangesSincePublished(projectId);
 
   /* R11-FP12 (F08): Ask is scoped to a DATASOURCE and resolves its product list
      from that datasource's project, so "ask through this product" has to hand it
@@ -372,6 +387,7 @@ export function ContextProductsScreen() {
                     onNewVersion={() => setVersionProduct((current) => (current?.id === p.id ? null : p))}
                     newVersionOpen={versionProduct?.id === p.id}
                     freshness={freshness.byVersion[p.latest_version.id]}
+                    changedSincePublished={changes.byVersion.get(p.latest_version.id)}
                     onCheckFreshness={() =>
                       void freshness.check(
                         p.latest_version.id,

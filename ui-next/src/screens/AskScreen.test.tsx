@@ -33,10 +33,14 @@ const fetchQueryExecutionLineage =
 const fetchContextProducts =
   vi.fn<(projectId: string, query?: unknown, signal?: AbortSignal) => Promise<PageOf<ContextProductRead>>>();
 
+/* R11-FP12: the project's count of what moved under each product since publication. */
+const fetchContextProductChangesSummary = vi.fn();
+
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
+    fetchContextProductChangesSummary: (...args: unknown[]) => fetchContextProductChangesSummary(...args),
     listOrgDatasources: (organizationId: string, signal?: AbortSignal) =>
       listOrgDatasources(organizationId, signal),
     runAgentAnalysis: (datasourceId: string, body: unknown, signal?: AbortSignal) =>
@@ -188,6 +192,10 @@ beforeEach(() => {
   fetchContextProducts.mockReset();
   fetchQueryExecutionLineage.mockReset();
   fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+  fetchContextProductChangesSummary.mockReset();
+  fetchContextProductChangesSummary.mockResolvedValue({
+    project_id: "proj1", generated_at: "2026-09-22T00:00:00Z", truncated: false, items: [],
+  });
   listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
   vi.resetModules();
@@ -526,6 +534,38 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show history" }));
     expect(screen.getByRole("button", { name: "Hide history" })).toHaveAttribute("aria-expanded", "true");
     expect(runAgentAnalysis).toHaveBeenCalledTimes(2);
+  });
+
+  it("says in the picker, and again once chosen, that a product's coverage moved since it was published (R11-FP12)", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [PUBLISHED_PRODUCT], limit: 200, offset: 0, total: 1 });
+    fetchContextProductChangesSummary.mockResolvedValue({
+      project_id: "proj1", generated_at: "2026-09-22T00:00:00Z", truncated: false,
+      items: [
+        { product_id: "cp_1", version_id: "cpv_1", version: 2, status: "PUBLISHED", changed_subjects: 1 },
+      ],
+    });
+
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    const picker = await screen.findByLabelText("Context product");
+    await waitFor(() =>
+      expect(
+        within(picker).getByRole("option", { name: "Customer revenue (1 change since published)" }),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.change(picker, { target: { value: "customer-revenue" } });
+
+    expect(
+      await screen.findByText(/Some of what this product covers has changed since it was published/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Answers still use the published version/)).toBeInTheDocument();
+    expect(fetchContextProductChangesSummary).toHaveBeenCalledWith(
+      "proj1",
+      { productId: undefined },
+      expect.any(AbortSignal),
+    );
   });
 
   it("asks through the selected published context product, and keeps asking through it when a clarification is answered (R11-FP12)", async () => {

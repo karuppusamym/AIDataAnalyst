@@ -15,12 +15,14 @@ import { ApiError } from "../http";
 --------------------------------------------------------------------------- */
 
 const postJson = vi.fn();
+const get = vi.fn();
 
 vi.mock("./transport", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./transport")>();
   return {
     ...actual,
     postJson: (...args: unknown[]) => postJson(...args),
+    get: (...args: unknown[]) => get(...args),
     // Pinned to the live arm: the request is the one a deployed client sends.
     demoOr: (_demo: unknown, live: () => Promise<unknown>) => live(),
   };
@@ -34,6 +36,7 @@ const answer = (page: unknown) => ({ data: { contextProductCoverage: { changedSi
 
 beforeEach(() => {
   postJson.mockReset();
+  get.mockReset();
   vi.resetModules();
 });
 
@@ -167,5 +170,35 @@ describe("fetchContextProductChangesSincePublished", () => {
       status: 502,
       detail: "Bad Gateway",
     });
+  });
+});
+
+describe("fetchContextProductChangesSummary (R11-FP12)", () => {
+  it("asks once for the whole project, and for one product's every version when named", async () => {
+    get.mockResolvedValue({ project_id: "proj-1", generated_at: "x", truncated: false, items: [] });
+    const { fetchContextProductChangesSummary } = await load();
+
+    await fetchContextProductChangesSummary("proj-1");
+    await fetchContextProductChangesSummary("proj-1", { productId: "cp-9" });
+
+    expect(get.mock.calls[0]![0]).toBe(
+      "/v1/projects/proj-1/context-products/changes-since-published?limit=200",
+    );
+    expect(get.mock.calls[1]![0]).toBe(
+      "/v1/projects/proj-1/context-products/changes-since-published?limit=200&product_id=cp-9",
+    );
+  });
+
+  it("names the coverage roles, which the product list's readers are not", async () => {
+    const { CONTEXT_PRODUCT_COVERAGE_ROLES } = await load();
+
+    expect([...CONTEXT_PRODUCT_COVERAGE_ROLES]).toEqual([
+      "AgentDeveloper",
+      "Analyst",
+      "DataSteward",
+      "MetadataAdmin",
+      "PlatformAdmin",
+    ]);
+    expect(CONTEXT_PRODUCT_COVERAGE_ROLES).not.toContain("Viewer");
   });
 });

@@ -29,6 +29,7 @@ import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../compo
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./AskScreen.css";
+import { changedSincePublishedText, useChangesSincePublished } from "./ContextProductFreshness";
 
 /* ---------------------------------------------------------------------------
    Ask -- UX-15/UX-16, tracker rows UX-15/UX-16.
@@ -1001,6 +1002,9 @@ export function AskScreen() {
   // same product rather than silently widening back to the whole datasource.
   const productKey = params.get("product");
   const projectId = datasources.find((d) => d.id === dsId)?.project_id ?? null;
+  /* R11-FP12: whether what a product covers moved since it was published. An answer asked
+     through it still uses the published version, so the asker is told rather than guessing. */
+  const changes = useChangesSincePublished(projectId);
   const [offer, setOffer] = useState<ProductOffer>(NO_PROJECT);
 
   useEffect(() => {
@@ -1345,16 +1349,31 @@ export function AskScreen() {
                     ? "No published product you can ask through"
                     : "Everything this datasource governs"}
             </option>
-            {products.map((p) => (
-              <option key={p.id} value={p.product_key}>
-                {p.latest_version?.name ?? p.product_key}
-              </option>
-            ))}
+            {products.map((p) => {
+              const moved = changedSincePublishedText(
+                p.latest_version ? changes.byVersion.get(p.latest_version.id) : undefined,
+              );
+              const name = p.latest_version?.name ?? p.product_key;
+              return (
+                <option key={p.id} value={p.product_key}>
+                  {moved ? `${name} (${moved})` : name}
+                </option>
+              );
+            })}
           </select>
           {offer.state === "error" ? (
             <p className="askscreen__pickerr" role="alert">
               This project's context products could not be listed ({offer.detail}), so none can be
               offered — this is not the same as there being none. Asking without one still works.
+            </p>
+          ) : null}
+          {selectedProduct?.latest_version &&
+          changedSincePublishedText(changes.byVersion.get(selectedProduct.latest_version.id)) ? (
+            <p className="askscreen__hint">
+              Some of what this product covers has changed since it was published (
+              {changedSincePublishedText(changes.byVersion.get(selectedProduct.latest_version.id))}).
+              Answers still use the published version; its steward can see what moved on the
+              Context products screen.
             </p>
           ) : null}
           <p className="askscreen__hint">
