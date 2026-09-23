@@ -78,6 +78,23 @@ with a conditional `UPDATE` of it, which PostgreSQL holds until that chunk commi
 second caller waits and then continues with whatever is still undecided (each member is
 decided once) -- `tests/test_review_batches_postgres.py` races it on a real server.
 
+**A member that fails the same way every time.** The interruption design above assumes the
+failure is transient -- a crash, a dropped connection -- so it always simply retries. A
+member whose *target* is broken (an adapter bug, a row a decision can never actually apply
+to) fails identically on every resume, at the same member, forever: nothing distinguishes
+that from an ordinary interruption, and a caller that keeps resuming keeps hitting the same
+opaque failure with no signal that retrying again will not help. `_last_unhandled_failure`
+remembers, per batch and in this process only, which member last failed unhandled; a second
+consecutive failure at that *same* member is raised as `REVIEW_BATCH_STUCK_AT_MEMBER` instead
+of the raw failure re-raised unchanged, so a caller can tell "this member is stuck" from an
+ordinary interruption. It does not skip the member or block the retry -- the decision is
+attempted again exactly as before, so a transient condition, or an operator fixing the
+underlying data, still resolves on the next call and clears the marker; only an *identical*
+repeat is relabelled. This is process-local and best-effort (a worker restart or a different
+replica forgets it, and it is not a substitute for a persisted per-member attempt count,
+which would need a schema change this pass does not make); it still turns an indistinguishable
+repeat crash into an actionable, coded refusal on the very next resume.
+
 **Value-free (INV-6).** Fingerprints are hashes; reason codes are codes. The only free text
 that reaches the database is the reviewer's own rationale, on `governance_review.
 decision_reason`, exactly where every other decision path puts it.
@@ -1293,6 +1310,12 @@ _CODE_SHAPED = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 #: second decider of the same batch waits at most one chunk for the hold.
 DECISION_CHUNK_SIZE: Final = 100
 
+#: batch id -> the `ReviewBatchItem.id` in flight the last time this batch's decision raised
+#: an exception this module does not itself handle. See "A member that fails the same way
+#: every time" above: process-local, best-effort, cleared the moment that batch next makes
+#: progress (a chunk commits) or closes. Never read or written outside `decide_review_batch`.
+_last_unhandled_failure: dict[UUID, UUID] = {}
+
 
 @dataclass(slots=True)
 class MemberOutcome:
@@ -1461,8 +1484,15 @@ async def _decide_chunk(
     items: Sequence[ReviewBatchItem],
     now: datetime,
     details: dict[UUID, str],
+    in_flight: list[UUID | None],
 ) -> set[UUID]:
-    """Re-check and decide one chunk of pending eligible members; the ids recorded."""
+    """Re-check and decide one chunk of pending eligible members; the ids recorded.
+
+    `in_flight[0]` names the member whose decision is being attempted, for the caller to read
+    if this raises: set right before the one call that can fail unhandled, cleared once that
+    member is fully handled either way. Left non-`None` only when this function exits via an
+    exception the caller does not itself handle -- see `_last_unhandled_failure` above.
+    """
     # Plain values captured up front: nothing below reads a batch-item attribute after a
     # member's savepoint has opened, so an expiry can never force a lazy load mid-loop.
     frozen = [(item.id, item.review_id, item.evidence_fingerprint) for item in items]
@@ -1514,6 +1544,7 @@ async def _decide_chunk(
         unclaimed = claimable_columns(review)
         code: str
         detail: str
+        in_flight[0] = item_id
         try:
             async with session.begin_nested():
                 effect = await decide_review(
@@ -1556,6 +1587,7 @@ async def _decide_chunk(
             # of what a nested rollback restores).
             for column, value in unclaimed.items():
                 set_committed_value(review, column, value)
+            in_flight[0] = None
             continue
         except GovernanceDecisionRefused as refused:
             code, detail = _permission_code(refused), refused.detail
@@ -1564,7 +1596,9 @@ async def _decide_chunk(
             code = detail if _CODE_SHAPED.match(detail) else "TARGET_REFUSED"
         else:
             recorded.add(item_id)
+            in_flight[0] = None
             continue
+        in_flight[0] = None
         if await _record_member(
             session,
             item_id,
@@ -1685,6 +1719,7 @@ async def decide_review_batch(
     decided: set[UUID] = set()
     closed_here = False
     size = max(1, chunk_size)
+    in_flight: list[UUID | None] = [None]
     while True:
         if not held and not await _hold_batch(session, batch, decision, now, claim=False):
             # A concurrent caller of this same batch recorded its last member and closed it
@@ -1718,19 +1753,34 @@ async def decide_review_batch(
             )
             await session.commit()
             closed_here = True
+            _last_unhandled_failure.pop(batch.id, None)
             break
-        decided |= await _decide_chunk(
-            session,
-            context=context,
-            batch=batch,
-            decision=decision,
-            reason=reason,
-            rationale_by_review_id=rationale_by_review_id,
-            items=pending,
-            now=now,
-            details=details,
-        )
+        try:
+            decided |= await _decide_chunk(
+                session,
+                context=context,
+                batch=batch,
+                decision=decision,
+                reason=reason,
+                rationale_by_review_id=rationale_by_review_id,
+                items=pending,
+                now=now,
+                details=details,
+                in_flight=in_flight,
+            )
+        except Exception as exc:
+            stuck_item_id = in_flight[0]
+            if stuck_item_id is not None:
+                previously_stuck_at = _last_unhandled_failure.get(batch.id)
+                _last_unhandled_failure[batch.id] = stuck_item_id
+                if previously_stuck_at == stuck_item_id:
+                    # The same member failed unhandled on the immediately preceding call too:
+                    # not a fresh interruption, the same one recurring. See "A member that
+                    # fails the same way every time" above.
+                    raise ReviewBatchError("REVIEW_BATCH_STUCK_AT_MEMBER", 409) from exc
+            raise
         await session.commit()
+        _last_unhandled_failure.pop(batch.id, None)
 
     await session.refresh(batch)
     items = (

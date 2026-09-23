@@ -72,14 +72,16 @@ class _ScalarResult:
 
 class _RetrievalSession:
     """Answers hybrid_retrieve's sequential fetches in call order: three
-    `scalars()` calls (tables, columns, dbt project ids) and seven `execute()`
+    `scalars()` calls (tables, columns, dbt project ids) and eight `execute()`
     calls (R11-FP11 view definitions, governed tool versions, business
     annotations, SM-2 semantic-metric term bindings, SM-2 glossary-term semantic
-    bindings, R11-FP11 routines, R11-FP09 published ontology versions). Leaving
+    bindings, R11-FP11 routines, R11-FP01 SQL Server/Oracle triggers, R11-FP09
+    published ontology versions). Leaving
     dbt_project_ids empty (the default) short-circuits the dbt-resource branch,
     which otherwise issues two further fetches; leaving routine_rows empty skips
     the routine parameter and
-    lineage fetches the same way, and ontology_rows empty skips the mapping
+    lineage fetches the same way; leaving trigger_rows empty skips the firing-table
+    bulk lookup it would otherwise issue; and ontology_rows empty skips the mapping
     target fetches.
     """
 
@@ -95,6 +97,7 @@ class _RetrievalSession:
         metric_term_rows: list[tuple[object, ...]] | None = None,
         term_binding_rows: list[tuple[object, ...]] | None = None,
         routine_rows: list[tuple[object, ...]] | None = None,
+        trigger_rows: list[tuple[object, ...]] | None = None,
         ontology_rows: list[tuple[object, ...]] | None = None,
     ) -> None:
         self._scalars_queue: list[list[object]] = [
@@ -109,6 +112,7 @@ class _RetrievalSession:
             metric_term_rows or [],
             term_binding_rows or [],
             routine_rows or [],
+            trigger_rows or [],
             ontology_rows or [],
         ]
 

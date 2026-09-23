@@ -317,6 +317,110 @@ def test_a_two_level_pending_chain_converges_in_more_than_one_reconciliation_pas
     assert {e.via_routine for e in a_edges} == {"chain_pkg.b_member"}
 
 
+_REMOTE_PACKAGE_CALLEE = """PACKAGE BODY remote_pkg AS
+  PROCEDURE remote_writer IS
+  BEGIN
+    INSERT INTO ops.remote_written (id) SELECT s.id FROM ops.remote_src s;
+    remote_util(1);
+  END remote_writer;
+  PROCEDURE remote_entry IS
+  BEGIN
+    remote_writer;
+  END remote_entry;
+END remote_pkg;
+"""
+
+_REMOTE_UTIL_BODY = (
+    "PROCEDURE remote_util(p_id NUMBER) IS BEGIN "
+    "INSERT INTO ops.remote_log (id) SELECT t.id FROM ops.remote_trace t; END remote_util;"
+)
+
+
+def test_a_callee_reached_via_descent_that_is_itself_a_package_is_reconciled() -> None:
+    """The module's own docstring names this gap as unclosed: `_descend`'s recursive
+    step parses a whole external callee fresh (`parse_procedure_lineage`, since the
+    resolver hands back only a `body`, not a pre-sliced `parsed`) -- and that callee
+    can itself be a package carrying its own `pending_member_calls`, exactly like the
+    root package in the sibling-call-ordering tests above. Before this fix, `_descend`
+    checked `child.is_fully_parsed` without ever running `_reconcile_pending_member_calls`
+    on `child`, so `remote_entry` -- reached only through descent, never as the root --
+    stayed CALLEE_NOT_FULLY_PARSED even though ordinary descent, in that same recursive
+    step, had already resolved the one external call (`remote_util`) blocking
+    `remote_writer`, which is all `remote_entry`'s own deferred sibling call needed."""
+    root = parse_procedure_lineage(
+        "PROCEDURE root_proc IS BEGIN remote_entry(1); END root_proc;", dialect="oracle"
+    )
+    assert not root.pending_member_calls, "root itself is a standalone routine, not a package"
+
+    result = descend_nested_calls(
+        root,
+        dialect="oracle",
+        resolve=_external_resolver(
+            {"remote_entry": _REMOTE_PACKAGE_CALLEE, "remote_util": _REMOTE_UTIL_BODY}
+        ),
+        root_key="root_proc",
+    )
+
+    assert _gaps(result) == []
+    assert result.is_fully_parsed
+    assert {(e.source_table, e.target_table) for e in _real(result)} == {
+        ("ops.remote_src", "ops.remote_written"),
+        ("ops.remote_trace", "ops.remote_log"),
+    }
+
+
+_SHARED_CALLEE_PACKAGE = """PACKAGE BODY multi_pkg AS
+  PROCEDURE member_a IS
+  BEGIN
+    INSERT INTO ops.shared_out (id) SELECT r.id FROM TABLE(billing.shared_fn(1)) r;
+  END member_a;
+  PROCEDURE member_b IS
+  BEGIN
+    INSERT INTO ops.shared_out (id) SELECT r.id FROM TABLE(billing.shared_fn(2)) r;
+  END member_b;
+END multi_pkg;
+"""
+
+_SHARED_FN_BODY = (
+    "FUNCTION shared_fn(p_id NUMBER) RETURN billing.rate_tab IS\n"
+    "BEGIN\n"
+    "  SELECT r.id FROM billing.rate_source r;\n"
+    "END;"
+)
+
+
+def test_a_second_members_table_function_hop_is_not_dropped_by_the_first(
+) -> None:
+    """Pinning the row's remaining bullet: `member_a` and `member_b` both read the
+    same external table function, and both end up writing the same target
+    (`ops.shared_out`) -- so the transitive hop `billing.rate_source ->
+    ops.shared_out` is stated identically by both. Before this fix,
+    `descend_nested_calls` ran `propagate_intermediate_hops` once over every
+    member's edges combined; that pass' own de-duplication (`source_table,
+    source_column, target_table, target_column`, nothing to tell members apart)
+    silently dropped whichever member's copy came second -- so a real reader of
+    `member_b` alone would never see that it depends on `billing.rate_source`."""
+    root = parse_procedure_lineage(_SHARED_CALLEE_PACKAGE, dialect="oracle")
+
+    result = descend_nested_calls(
+        root,
+        dialect="oracle",
+        resolve=_external_resolver({"billing.shared_fn": _SHARED_FN_BODY}),
+        root_key="multi_pkg",
+    )
+
+    assert result.is_fully_parsed
+    facts = {
+        (e.package_member, e.source_table, e.target_table)
+        for e in _real(result)
+        if e.source_table == "billing.rate_source" and e.target_table == "ops.shared_out"
+    }
+    assert facts == {
+        ("member_a", "billing.rate_source", "ops.shared_out"),
+        ("member_b", "billing.rate_source", "ops.shared_out"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 3. Cross-package calls.
 # ---------------------------------------------------------------------------

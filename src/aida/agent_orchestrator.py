@@ -539,7 +539,7 @@ class ContextProductScope:
         return hit.object_id in self.table_ids
 
     def _owning_table(self, hit: RetrievalHit) -> bool:
-        """COLUMN, BUSINESS_ANNOTATION, DBT_RESOURCE: the table the hit belongs to.
+        """COLUMN, BUSINESS_ANNOTATION, DBT_RESOURCE, TRIGGER: the table the hit belongs to.
 
         A column is part of its table, an annotation describes one, and a dbt resource is a
         relation Atlas matched to one; each is evidence exactly when that table is. One that
@@ -551,6 +551,13 @@ class ContextProductScope:
         node names nothing the product governs; it also puts no table into the model's context;
         and a relation that failed to match is an unresolved reference, which F01's boundary
         refuses rather than admits.
+
+        A SQL Server or Oracle trigger (R11-FP01) fires on exactly one table -- unlike a
+        routine, which may be called from anywhere and so needs its own `routine_ids`
+        reference group -- so its firing table is the one reference group it has, and no new
+        field or migration was needed to decide it. A trigger whose firing table retrieval
+        could not resolve in this datasource's catalog is `table_id: None`, the same unresolved
+        reference a dbt resource is when nothing matched it.
         """
         table_id = hit.metadata.get("table_id")
         return table_id is not None and str(table_id) in self.table_ids
@@ -593,6 +600,7 @@ class ContextProductScope:
                 "COLUMN": _owning_table,
                 "BUSINESS_ANNOTATION": _owning_table,
                 "DBT_RESOURCE": _owning_table,
+                "TRIGGER": _owning_table,
                 "ROUTINE": _referenced_routine,
                 "ONTOLOGY_CONCEPT": _pinned_ontology,
                 "GLOSSARY_TERM": _pinned_glossary,

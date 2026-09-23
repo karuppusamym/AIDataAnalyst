@@ -1745,20 +1745,123 @@ def _resolve_owners(
     resolve_column_owners(node, aliases=aliases, declared=names)
 
 
+def _relation_tables(relation: object) -> list[exp.Table]:
+    """The `exp.Table`s a single FROM/JOIN item contributes at its own level --
+    mirrors `procedure_column_owners._Resolver._relation_items`'s walk (a
+    parenthesised join unwraps; a derived table, UNNEST, LATERAL or VALUES
+    contributes none, since none of those is a `Table` a bare alias can be
+    resolved through) without that class's per-column bookkeeping, which this
+    alias map does not need."""
+    if not isinstance(relation, exp.Expression):
+        return []
+    if isinstance(relation, exp.Table):
+        tables = [relation]
+    elif isinstance(relation, exp.Subquery) and not isinstance(relation.this, exp.Query):
+        tables = _relation_tables(relation.this)  # a parenthesised join, not a query
+    else:
+        tables = []
+    for join in relation.args.get("joins") or []:
+        if isinstance(join, exp.Join):
+            tables.extend(_relation_tables(join.this))
+    return tables
+
+
+def _query_scope_tables(query: object) -> list[exp.Table]:
+    """The tables visible at `query`'s own top level: its FROM/JOIN items, and
+    -- recursively -- both arms of a set operation. Never a derived table's,
+    a CTE's, or a WHERE/SET/branch subquery's own body: each of those opens a
+    scope of its own, invisible outside itself, exactly as
+    `procedure_column_owners._Resolver._levels` already treats it when it
+    resolves a column one statement over. `_statement_scope_tables` is the
+    entry point; this only recurses into a set operation's arms, which are
+    siblings of the same top-level scope, not a nested one."""
+    if isinstance(query, exp.Select):
+        tables: list[exp.Table] = []
+        from_ = query.args.get("from_")
+        if isinstance(from_, exp.From):
+            tables.extend(_relation_tables(from_.this))
+        for join in query.args.get("joins") or []:
+            if isinstance(join, exp.Join):
+                tables.extend(_relation_tables(join.this))
+        return tables
+    if isinstance(query, exp.SetOperation):
+        return _query_scope_tables(query.this) + _query_scope_tables(query.expression)
+    return []
+
+
+def _statement_scope_tables(statement: exp.Expression) -> list[exp.Table]:
+    """Every `exp.Table` in `statement`'s own FROM-scope -- what a reference
+    written directly in it (not inside a nested query) can name by alias or
+    by table name.
+
+    Never crosses into a nested query's own body. A WHERE/SET's `IN`,
+    `EXISTS`, `ANY`/`ALL` or scalar subquery, a MERGE branch's own source
+    and a CTE's definition each bind their own aliases, which the engine
+    -- and `resolve_column_owners`'s scope walk -- never lets leak to the
+    statement around them. Before this, `_collect_table_aliases_with_temp`
+    walked the *entire* statement with one `find_all(exp.Table)`, so a
+    subquery reusing the target's alias for a different table overwrote it
+    in this one flat map (found alongside R11-FP07's Oracle collection-source
+    fix, 2026-09-20): `UPDATE t SET t.total = t.qty * 2 FROM dbo.totals t
+    WHERE EXISTS (SELECT 1 FROM dbo.other t WHERE t.flag = 1)` resolved both
+    the target and `t.qty` to `dbo.other`, a table the statement never
+    writes and reads only inside its own EXISTS. Scoping this map the same
+    way the resolver already scopes columns closes that."""
+    if isinstance(statement, exp.Update | exp.Delete | exp.Merge):
+        tables: list[exp.Table] = list(_relation_tables(statement.this))
+        from_ = statement.args.get("from_")
+        if isinstance(from_, exp.From):
+            tables.extend(_relation_tables(from_.this))
+        for join in statement.args.get("joins") or []:
+            if isinstance(join, exp.Join):
+                tables.extend(_relation_tables(join.this))
+        using = statement.args.get("using")
+        for relation in using if isinstance(using, list) else [using]:
+            tables.extend(_relation_tables(relation))
+        for table in statement.args.get("tables") or []:  # T-SQL `DELETE alias FROM ...`
+            if isinstance(table, exp.Table):
+                tables.append(table)
+        return tables
+    if isinstance(statement, exp.Insert):
+        target = statement.this
+        table = target.this if isinstance(target, exp.Schema) else target
+        tables = [table] if isinstance(table, exp.Table) else []
+        tables.extend(_query_scope_tables(statement.expression))
+        return tables
+    if isinstance(statement, exp.Create):
+        # `CREATE [TEMP] TABLE t (...)`/`CREATE TABLE t AS SELECT ...`: `t` is a
+        # target, like an INSERT's, and its own `AS SELECT` (if any) is this
+        # statement's top-level query, like an INSERT's source.
+        this = statement.this
+        table = this.this if isinstance(this, exp.Schema) else this
+        tables = [table] if isinstance(table, exp.Table) else []
+        expression = statement.args.get("expression")
+        if isinstance(expression, exp.Expression):
+            tables.extend(_query_scope_tables(expression))
+        return tables
+    if isinstance(statement, exp.Select):
+        # T-SQL `SELECT ... INTO target FROM ...`: `target` is this statement's
+        # own write target, in scope for it exactly as an UPDATE's or MERGE's is.
+        into = statement.args.get("into")
+        if isinstance(into, exp.Into) and isinstance(into.this, exp.Table):
+            return [into.this, *_query_scope_tables(statement)]
+    return _query_scope_tables(statement)
+
+
 def _collect_table_aliases_with_temp(
     statement: object, subject: Mapping[str, str] | None = None
 ) -> tuple[dict[str, str], set[str]]:
-    """Mirrors `sql_lineage_parser._collect_table_aliases`'s exact walk
-    order (so alias resolution stays consistent) while additionally
-    recording which resolved names are temp tables/variables.
+    """The statement's own alias map: each FROM/target item in its own
+    FROM-scope (`_statement_scope_tables`), keyed by alias, by table name and
+    by fully-qualified name, plus which of those are temp tables/variables.
 
     `subject` is a trigger's firing-row binding (`trigger_subject_aliases`);
-    `None` -- every routine-body caller -- leaves the walk exactly as it was."""
+    `None` -- every routine-body caller -- leaves the map as just that."""
     aliases: dict[str, str] = {}
     temp: set[str] = set()
     if not _SQLGLOT_AVAILABLE or not isinstance(statement, exp.Expression):
         return aliases, temp
-    for table in statement.find_all(exp.Table):
+    for table in _statement_scope_tables(statement):
         function = _table_function_name(table)
         fqn = function or _resolve_table_name(table)
         if not fqn:

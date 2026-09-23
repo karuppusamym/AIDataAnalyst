@@ -73,6 +73,7 @@ from aida.models import (
     MetadataEnrichmentProposal,
     RevokedToken,
 )
+from aida.review_batch_models import PlaybookDryRunRecord
 from aida.security import SecurityContext
 
 logger = structlog.get_logger(__name__)
@@ -286,6 +287,31 @@ def _expired_token_revocations_stmt(
     return select(RevokedToken.id).where(RevokedToken.token_expires_at < cutoff)
 
 
+def _stale_playbook_dry_runs_stmt(
+    now: datetime, retention: timedelta
+) -> Select[tuple[UUID]]:
+    """R11-REV01: stored playbook dry-runs (`PlaybookDryRunRecord`), past retention.
+
+    A stored preview exists so a run can be bound to it "soon after" previewing
+    (`aida.playbook_dry_run.run_bound_to_dry_run`); once its retention window has passed it is
+    no longer useful for that, bound or not. Deleted rather than status-flipped: the docstring
+    on `PlaybookDryRunRecord` calls it value-free (ids, codes, counts, SHA-256 digests -- no
+    tag values, owners or classifications), and both `store_dry_run` and `run_bound_to_dry_run`
+    already write their own durable `AuditEvent` (`playbook.dry_run_store`, `playbook.
+    bound_run`) carrying the digests, counts and -- once bound -- the binding outcome and which
+    run it bound; deleting the row loses only the enumerated per-subject version list, not
+    whether or what a bound run did. Anchored on `created_at`, not `bound_at`: an unbound
+    preview has no `bound_at` to anchor on, and a preview's own age is what makes it stale
+    either way.
+    """
+    cutoff = now - retention
+    return (
+        select(PlaybookDryRunRecord.id)
+        .where(PlaybookDryRunRecord.created_at < cutoff)
+        .order_by(PlaybookDryRunRecord.created_at)
+    )
+
+
 RULES: list[ReaperRule] = [
     ReaperRule(
         name="expired_token_revocations",
@@ -349,6 +375,17 @@ RULES: list[ReaperRule] = [
         action="STATUS_FLIP",
         new_status="EXPIRED",
         candidates_stmt=_stale_pending_description_drafts_stmt,
+    ),
+    ReaperRule(
+        name="stale_playbook_dry_runs",
+        model=PlaybookDryRunRecord,
+        resource_type="playbook_dry_run",
+        audit_action="REAP_STALE_PLAYBOOK_DRY_RUN",
+        # Matches rejected_enrichment_proposals: a recorded-but-no-longer-actionable
+        # artifact whose durable audit trail lives in AuditEvent, not in this row.
+        retention=timedelta(days=90),
+        action="DELETE",
+        candidates_stmt=_stale_playbook_dry_runs_stmt,
     ),
 ]
 

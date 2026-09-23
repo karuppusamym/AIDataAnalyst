@@ -6,15 +6,16 @@
 work status. The [capability register](20-capability-register.md) keeps implementation separate from
 configuration and real-environment verification, and each row carries the date it was measured.
 This page is a dated summary of both; where they disagree, they win. The evidence for this
-confirmation is the [2026-09-23 FP12 closure](33-fp12-closure-2026-09-23.md) and the
+confirmation is the [six-real-code-rows addendum](34-six-real-code-rows-2026-09-23.md), on top of the
+[2026-09-23 FP12 closure](33-fp12-closure-2026-09-23.md) and the
 [2026-09-22 FP08/FP14/FP15 closure](32-fp08-fp14-fp15-closure-2026-09-22.md), on
 top of the [2026-09-22 addendum](31-last-open-items-2026-09-22.md), the
 [2026-09-21 evening session log](30-round-12-review-and-demo-finalization-2026-09-21.md), and the
 morning's [validation log](28-demo-readiness-validation-2026-09-21.md).
 
-Most scheduled implementation has landed: **97 DONE, 22 PARTIAL, 7 BLOCKED, 0 TODO, 22 DEFERRED,
+Most scheduled implementation has landed: **98 DONE, 21 PARTIAL, 7 BLOCKED, 0 TODO, 22 DEFERRED,
 2 CANCELLED** across 150 unique work packages. Of the 126 that are neither deferred nor cancelled,
-97 are complete; 29 still need implementation, verification or prerequisites. **32 of the 33
+98 are complete; 28 still need implementation, verification or prerequisites. **32 of the 33
 defects (D-series) are DONE**; D17 keeps a parity run in the target environment. The audit rows
 R11-AUD01 to AUD15 are all closed: AUD11's last item, the upload read timeout, was measured and
 set on 2026-09-22. So are the six validation rows: VAL01 to VAL05 (the eight secret-scan findings
@@ -25,7 +26,10 @@ with no code change: FP08, FP14, FP15 and S13 each had nothing left to build —
 cross-reference the code had already resolved (FP08, S13), or a decision against building already
 recorded elsewhere (FP14, FP15). FP12 closed on 2026-09-23 with code: a context product whose
 coverage or pinned meaning moved since publication is flagged on four screens with no click,
-from one batched read the coverage roles alone may make.
+from one batched read the coverage roles alone may make. R11-FP09 closed the same day, the same
+stale-cross-reference way FP08 did. Five further PARTIAL rows (FP01, FP03, FP07, OKF02, REV01)
+each got real, verified fixes for part of their remaining scope and stay PARTIAL with a shorter
+list.
 
 Decisions taken on the product owner's instruction to proceed, each reversible by editing its row
 and worth confirming: the sixteen-role catalog and the compliance-pack roles (AUD01), the acceptance

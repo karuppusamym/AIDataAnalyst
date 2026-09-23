@@ -295,6 +295,15 @@ def _descend(
                 depth=depth + 1,
                 budget=budget,
             )
+            if child.pending_member_calls:
+                # R11-FP03: `child` can itself be a package whose own in-package pass
+                # deferred a sibling call (`PendingMemberCall`) because the reached
+                # member still had its own external call -- exactly the root's own
+                # shape in `descend_nested_calls`, just reached one level down. Without
+                # this, a callee package was read as CALLEE_NOT_FULLY_PARSED forever,
+                # even after this same recursive step resolved the external call that
+                # was the only thing blocking it.
+                child = _reconcile_pending_member_calls(child)
             edges.extend(
                 _at_call_site(
                     child_edge,
@@ -439,11 +448,12 @@ def _reconcile_pending_member_calls(result: ProcedureParseResult) -> ProcedurePa
     package (each pass resolves at least one more link, since a chain longer than
     the pass count would mean nothing changed and the loop already stopped) to
     settle in the order their own blockers clear, not the order they were written
-    in. What it does **not** reach: a *callee* that is itself a package with its
-    own unresolved sibling-call ordering issue -- `_descend`'s recursive call into
-    such a callee never runs this reconciliation on the callee's own parse, so the
-    callee is conservatively read as not fully parsed, the same as today, rather
-    than potentially resolving further.
+    in. `_descend` calls this on `child` at every depth it recurses to (not only
+    at the root), so a *callee* reached via descent that is itself a package with
+    its own unresolved sibling-call ordering is reconciled there too, against that
+    package's own edges after ordinary descent has resolved whatever external call
+    was blocking it -- rather than being conservatively read as not fully parsed
+    only because this pass had never been run on it (R11-FP03).
     """
     pending = result.pending_member_calls
     if not pending:
@@ -473,8 +483,43 @@ def descend_nested_calls(
     reconciled = _reconcile_pending_member_calls(descended)
     # A table function's rows arrive as an intermediate, so the hops through it are the
     # caller's own end-to-end lineage.
-    spliced = [*reconciled.edges, *propagate_intermediate_hops(reconciled.edges)]
+    spliced = [*reconciled.edges, *_propagate_hops_per_member(reconciled.edges)]
     return _summarised(reconciled, _deduplicated(spliced))
+
+
+def _propagate_hops_per_member(
+    edges: list[ProcedureLineageEdgeRecord],
+) -> list[ProcedureLineageEdgeRecord]:
+    """`propagate_intermediate_hops`, run once per package member rather than once
+    over every member's edges together.
+
+    `procedure_lineage.parse_procedure_lineage` already keeps this scoped per member
+    ("a split package runs it per member") because an intermediate -- a temp variable,
+    a loop record, a callee's spliced-in result -- is never shared between siblings.
+    `descend_nested_calls` re-runs the same pass after splicing, since a splice can
+    make a caller's statement newly read a callee's result as an intermediate -- but
+    calling it once over every member's edges together broke that invariant: the
+    pass' own `known_keys` dedup (`source_table, source_column, target_table,
+    target_column`, with nothing to tell members apart) silently dropped a member's
+    own transitive fact whenever another member's fact through a *shared* callee
+    happened to state the identical (source, target) pair (R11-FP03: this is what
+    the row's remaining text called descent's package-wide hop pass, and it was
+    still live after the Oracle `TABLE(...)` fix -- that fix made such a shared
+    callee resolvable at all, which is what exposed the collision, not what caused
+    it). Grouping by `package_member` before propagating restores the per-member
+    scoping a single (non-package) routine already had for free, since it is all
+    one group."""
+    groups: dict[str | None, list[ProcedureLineageEdgeRecord]] = {}
+    order: list[str | None] = []
+    for edge in edges:
+        if edge.package_member not in groups:
+            groups[edge.package_member] = []
+            order.append(edge.package_member)
+        groups[edge.package_member].append(edge)
+    synthesized: list[ProcedureLineageEdgeRecord] = []
+    for member in order:
+        synthesized.extend(propagate_intermediate_hops(groups[member]))
+    return synthesized
 
 
 def _split_name(name: str) -> list[str]:

@@ -260,6 +260,73 @@ async def test_resuming_with_the_other_decision_is_refused(
     assert again.value.code == "REVIEW_BATCH_ALREADY_DECIDED"
 
 
+async def test_a_member_that_fails_the_same_way_every_time_is_reported_stuck_not_repeated(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first failure at a member is an ordinary, unlabelled interruption -- indistinguishable
+    from a crash, exactly as `test_an_interrupted_decision_keeps_its_committed_chunks_and_resumes`
+    pins. But a *second* resume that fails unhandled at that *same* member (the target is
+    genuinely broken, not merely a one-off crash) is reported as `REVIEW_BATCH_STUCK_AT_MEMBER`
+    instead of the same raw failure repeated with no way to tell it apart from the first -- and
+    once the underlying problem is fixed, the very next resume decides the batch normally, so the
+    label never blocks a real retry from succeeding.
+    """
+    estate = await build_estate(session)
+    reviews = await add_table_draft_reviews(session, estate, await add_tables(session, estate, 4))
+    review_ids = [review.id for review in reviews]
+    context = reviewer(estate.organization_id)
+    batch = await freeze_review_batch(
+        session, context=context, selections=[Selection(rid) for rid in review_ids], filt=None
+    )
+    batch_id = batch.id
+    await session.commit()
+
+    # Every attempt dies at the same member: a permanently broken target, not a one-off crash.
+    monkeypatch.setattr(review_batches_module, "decide_review", _dies_at(review_ids[2]))
+
+    with pytest.raises(_WorkerDied):
+        await decide_review_batch(
+            session, context=context, batch_id=batch_id, decision="APPROVE", reason=None,
+            chunk_size=2,
+        )
+    await session.rollback()
+    assert await _statuses(session, review_ids) == ["APPROVED"] * 2 + ["PENDING"] * 2
+
+    # Resuming hits the identical failure again -- reported distinctly, not repeated raw, and
+    # nothing new is recorded (the attempt still failed, just labelled differently).
+    with pytest.raises(ReviewBatchError) as stuck:
+        await decide_review_batch(
+            session, context=context, batch_id=batch_id, decision="APPROVE", reason=None,
+            chunk_size=2,
+        )
+    assert (stuck.value.code, stuck.value.http_status) == ("REVIEW_BATCH_STUCK_AT_MEMBER", 409)
+    await session.rollback()
+    assert await _statuses(session, review_ids) == ["APPROVED"] * 2 + ["PENDING"] * 2
+    still_stuck = await read_review_batch(batch_id, context=context, session=session)
+    assert (still_stuck.status, still_stuck.resumable) == ("FROZEN", True)
+
+    # A second consecutive stuck report, still without ever attempting a third identical crash
+    # being any different -- the label persists while the failure keeps recurring.
+    with pytest.raises(ReviewBatchError) as still_stuck_error:
+        await decide_review_batch(
+            session, context=context, batch_id=batch_id, decision="APPROVE", reason=None,
+            chunk_size=2,
+        )
+    assert still_stuck_error.value.code == "REVIEW_BATCH_STUCK_AT_MEMBER"
+    await session.rollback()
+
+    # The underlying problem is fixed: the very next resume decides the batch normally, proving
+    # the label never blocks a real retry from succeeding once the cause is gone.
+    monkeypatch.setattr(review_batches_module, "decide_review", real_decide_review)
+    healed = await decide_review_batch(
+        session, context=context, batch_id=batch_id, decision="APPROVE", reason=None,
+        chunk_size=2,
+    )
+    assert healed.applied_count == 4
+    assert healed.batch.status == "DECIDED"
+    assert await _statuses(session, review_ids) == ["APPROVED"] * 4
+
+
 async def test_an_interruption_before_the_close_resumes_to_a_close_that_decides_nothing(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -40,7 +40,7 @@ import pytest
 import pytest_asyncio
 import yaml
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, event, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -48,6 +48,7 @@ from sqlalchemy.pool import StaticPool
 import aida.okf_store as okf_store
 from aida.change_signal_models import MetadataChangeSignal
 from aida.config import Settings
+from aida.connectors.base import DiscoveredTable
 from aida.db import Base
 from aida.envelope_models import MetadataViewDefinition
 from aida.models import (
@@ -91,6 +92,7 @@ from aida.okf_store import (
 from aida.okf_store_models import OkfBundleDocument, OkfBundleHead, OkfBundlePublication
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.schemas import OkfContextRequest
+from aida.workflows.activities import ChangeTracker, _get_or_create_table
 from aida.workspace_service import approve_binding, create_workspace, request_binding
 from tests.support.app_surface import reaches_call, references_name
 from tests.test_inv6_value_freedom import _persisted_values
@@ -727,6 +729,108 @@ async def test_a_discovered_table_moves_only_the_documents_that_list_it(
         if row.subject_key and path != refunds:
             assert row.sha256 == before[path].sha256, path
     assert second.publication.manifest["counts"]["tables"] == 2
+
+
+async def test_a_no_op_rescan_reassignment_never_moves_metadata_table_updated_at(
+    session: AsyncSession, settings: Settings
+) -> None:
+    """R11-OKF02's own remaining text asked: 'whether a scan touching `metadata_table.updated_at`
+    forces a (no-op) re-freeze is unconfirmed.' Only a *source* scope's marks read that column at
+    all (`_scope_marks`'s `catalog_of` branch, used by `source_change_marks`); a product's marks
+    never do. `_get_or_create_table` (aida/workflows/activities.py) is the only writer, and its
+    `else` branch -- an existing row, found again -- reassigns `status`, `deprecated_at`,
+    `object_type`, `source_description` and `fingerprint` unconditionally, never gated on whether
+    any of them actually differ from what is already stored. This calls that real function twice
+    with the identical `DiscoveredTable`, exactly as two rescans finding nothing new would, and
+    proves SQLAlchemy's flush-time history comparison already treats the second call's
+    reassignment as no change: no `UPDATE` is issued at all, so `updated_at` does not move and no
+    mark, let alone a re-freeze, is ever forced by a genuinely no-op rescan.
+    """
+    estate = await _estate(session)
+    datasource, _catalog, schema = estate["datasources"]["warehouse"]
+    discovered = DiscoveredTable(
+        name="rescan_probe",
+        object_type="BASE_TABLE",
+        columns=(),
+        source_description="a source comment",
+    )
+    table = await _get_or_create_table(session, datasource, schema, discovered, ChangeTracker())
+    await session.flush()
+    # `updated_at` has a client-side `onupdate=utc_now` (`TimestampMixin`), which SQLAlchemy
+    # evaluates and writes into the in-memory attribute directly on flush -- no reload needed,
+    # and no `session.expire_all()` either: that would also expire `datasource` and `schema`,
+    # and the second `_get_or_create_table` call below reads their attributes synchronously
+    # while building its `SELECT`, outside the greenlet bridge that makes an implicit lazy-load
+    # on an expired attribute safe from a plain `await`.
+    before = table.updated_at
+
+    executed_updates: list[str] = []
+    engine = session.get_bind().engine
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _capture(conn: Any, cursor: Any, statement: str, *_args: Any, **_kwargs: Any) -> None:
+        if statement.strip().upper().startswith("UPDATE METADATA_TABLE"):
+            executed_updates.append(statement)
+
+    try:
+        # The identical rescan finding the identical table again: `_get_or_create_table`'s own
+        # `SELECT` (a fresh query, not reuse of the `table` reference above) followed by its own
+        # unconditional reassignment.
+        second = await _get_or_create_table(
+            session, datasource, schema, discovered, ChangeTracker()
+        )
+        await session.flush()
+
+        assert executed_updates == [], (
+            "an identical rescan of the same table must not issue an UPDATE "
+            f"(got {executed_updates!r})"
+        )
+        assert second.id == table.id
+        assert second.updated_at == before, "a no-op rescan must not move updated_at"
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+
+async def test_metadata_table_updated_at_moving_alone_still_publishes_nothing(
+    session: AsyncSession, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same question: a source scope's marks watch `updated_at` directly,
+    so *if* it ever moves without any content actually changing -- not proven possible by the
+    current reconciliation code (see the sibling test above), but not excluded for a future one,
+    a manual correction, or any other writer -- the reread it forces must still land on OKF-C's
+    no-op rule and publish nothing. Moving it directly (nothing else) is the cleanest way to
+    isolate exactly that reader-side guarantee from the writer-side question above. A no-op reread
+    still serves the *old* stored publication rather than writing a new one, so that row's own
+    `trigger` column stays whatever it was when it was first written (`INITIAL` here) -- it is not
+    a record of what the latest read saw, which is why this wraps `freeze_source_snapshot` itself
+    to prove the mark really was read and a re-freeze really was attempted, rather than trusting
+    the served row's own stale trigger label.
+    """
+    estate = await _estate(session)
+    first = await _read(session, settings, estate)
+    assert first.published_now
+    table_id = estate["tables"]["warehouse.orders"].id
+    later = datetime.now(UTC) + timedelta(seconds=1)
+    await session.execute(
+        update(MetadataTable).where(MetadataTable.id == table_id).values(updated_at=later)
+    )
+    await session.commit()
+
+    calls = 0
+    real_freeze = okf_store.freeze_source_snapshot
+
+    async def _counting_freeze(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return await real_freeze(*args, **kwargs)
+
+    monkeypatch.setattr(okf_store, "freeze_source_snapshot", _counting_freeze)
+
+    second = await _read(session, settings, estate, now=later + timedelta(minutes=1))
+    assert calls == 1, "the updated_at move should have been read as a mark and forced a re-freeze"
+    assert not second.published_now, "content did not change, so nothing should publish"
+    assert second.publication.id == first.publication.id
+    assert await _count(session, OkfBundlePublication) == 1
 
 
 async def test_a_capture_that_races_a_source_change_is_refused_not_published(

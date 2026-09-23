@@ -6,7 +6,11 @@ fallthrough that admitted any hit carrying no `table_id`, so the boundary was sa
 kinds someone had remembered to list. Review 2026-09-16 F02 was that default admitting ROUTINE
 hits from outside the product; the fix added a ROUTINE branch and left the default alone, so the
 next candidate kind would have walked through the same way -- the trigger-lineage work declined
-to add a TRIGGER candidate for exactly that reason.
+to add a TRIGGER candidate for exactly that reason. **2026-09-22:** TRIGGER is now one of the real
+emitted kinds (a SQL Server or Oracle trigger that carries its own body -- R11-FP01), decided on
+its one firing table (`_owning_table`), added in the same change as its rule; the tests below that
+used to demonstrate "an unrecognised kind" with `TRIGGER` now use `SEQUENCE`, a kind retrieval
+still does not emit, for the same demonstration.
 
 Three groups here:
 
@@ -291,18 +295,19 @@ def test_every_rule_names_a_type_retrieval_emits() -> None:
 
 
 def test_a_new_candidate_type_is_caught_by_the_scan() -> None:
-    """The case the trigger-lineage work avoided: a TRIGGER candidate added to the lexical stage."""
+    """The case the trigger-lineage work avoided until R11-FP01 added a real TRIGGER candidate:
+    a new emitted kind with no rule yet, caught here with a still-hypothetical `SEQUENCE` one."""
     source = textwrap.dedent(
         """
-        async def trigger_hits(rows):
+        async def sequence_hits(rows):
             return [
                 HybridRetrievalHit(
-                    object_type="TRIGGER",
+                    object_type="SEQUENCE",
                     object_id=str(row.id),
                     display_name=row.name,
                     score=1.0,
                     reason_codes=[],
-                    metadata={"trigger_id": str(row.id)},
+                    metadata={"sequence_id": str(row.id)},
                 )
                 for row in rows
             ]
@@ -311,8 +316,8 @@ def test_a_new_candidate_type_is_caught_by_the_scan() -> None:
 
     scan = _scan_sources([("synthetic/retrieval.py", source)])
 
-    assert set(scan.emitted) == {"TRIGGER"}
-    assert "TRIGGER" not in ContextProductScope.HIT_TYPE_RULES
+    assert set(scan.emitted) == {"SEQUENCE"}
+    assert "SEQUENCE" not in ContextProductScope.HIT_TYPE_RULES
 
 
 def test_the_scan_reads_loop_literals_and_refuses_computed_types() -> None:
@@ -381,10 +386,14 @@ def _hit(object_type: str, object_id: str, metadata: dict[str, Any]) -> Retrieva
 
 
 def test_an_unrecognised_hit_type_is_refused() -> None:
-    """The fallthrough, closed. It used to admit this because it carries no `table_id`."""
+    """The fallthrough, closed. It used to admit this because it carries no `table_id`.
+
+    `SEQUENCE` stands in for "a kind nobody decided" -- `TRIGGER` filled that role until
+    R11-FP01 gave it a real rule (`test_a_hit_that_belongs_to_a_table_is_decided_on_that_table`).
+    """
     scope = _scope(table_ids=[str(uuid4())])
 
-    assert not scope.admits(_hit("TRIGGER", str(uuid4()), {"trigger_id": str(uuid4())}))
+    assert not scope.admits(_hit("SEQUENCE", str(uuid4()), {"sequence_id": str(uuid4())}))
 
 
 def test_an_unrecognised_hit_type_is_refused_even_naming_a_product_table() -> None:
@@ -393,7 +402,7 @@ def test_an_unrecognised_hit_type_is_refused_even_naming_a_product_table() -> No
     table_id = str(uuid4())
     scope = _scope(table_ids=[table_id])
 
-    assert not scope.admits(_hit("TRIGGER", str(uuid4()), {"table_id": table_id}))
+    assert not scope.admits(_hit("SEQUENCE", str(uuid4()), {"table_id": table_id}))
 
 
 def test_the_retired_metric_alias_is_no_longer_a_rule() -> None:
@@ -405,7 +414,7 @@ def test_the_retired_metric_alias_is_no_longer_a_rule() -> None:
     assert scope.admits(_hit("SEMANTIC_METRIC", str(uuid4()), {}))
 
 
-@pytest.mark.parametrize("hit_type", ["COLUMN", "BUSINESS_ANNOTATION", "DBT_RESOURCE"])
+@pytest.mark.parametrize("hit_type", ["COLUMN", "BUSINESS_ANNOTATION", "DBT_RESOURCE", "TRIGGER"])
 def test_a_hit_that_belongs_to_a_table_is_decided_on_that_table(hit_type: str) -> None:
     inside, outside = str(uuid4()), str(uuid4())
     scope = _scope(table_ids=[inside])
@@ -442,6 +451,18 @@ def test_an_unmatched_dbt_resource_is_refused(resource_type: str) -> None:
             resource_id,
             {"dbt_resource_id": resource_id, "resource_type": resource_type, "table_id": None},
         )
+    )
+
+
+def test_a_trigger_whose_firing_table_did_not_resolve_is_refused() -> None:
+    """R11-FP01: retrieval stamps `table_id: None` when a trigger's firing table is not in this
+    datasource's catalog (out of the discovery selection, or not yet scanned) -- an unresolved
+    reference, the same shape an unmatched dbt resource is, not a guess and not the fallthrough."""
+    scope = _scope(table_ids=[str(uuid4())])
+    trigger_id = str(uuid4())
+
+    assert not scope.admits(
+        _hit("TRIGGER", trigger_id, {"trigger_id": trigger_id, "table_id": None})
     )
 
 
@@ -593,8 +614,13 @@ async def _publish(scenario: _Scenario, key: str) -> None:
 
 
 def _with_unrecognised_candidate(monkeypatch: pytest.MonkeyPatch) -> str:
-    """Retrieval as it is, plus one candidate of a kind `admits()` has never heard of."""
-    trigger_id = str(uuid4())
+    """Retrieval as it is, plus one candidate of a kind `admits()` has never heard of.
+
+    `SEQUENCE` (R11-FP01 modelled the object, discovery reads it, but nothing yet retrieves it)
+    stands in here; `TRIGGER` filled this role until R11-FP01 gave it a real rule, and using it
+    for "unrecognised" now would be testing the wrong thing.
+    """
+    sequence_id = str(uuid4())
     original = GovernedRetriever.score_candidates
 
     async def score_candidates(
@@ -604,17 +630,17 @@ def _with_unrecognised_candidate(monkeypatch: pytest.MonkeyPatch) -> str:
         return [
             *hits,
             RetrievalHit(
-                object_type="TRIGGER",
-                object_id=trigger_id,
-                display_name="orders_audit",
+                object_type="SEQUENCE",
+                object_id=sequence_id,
+                display_name="orders_seq",
                 score=0.5,
-                reason_codes=["BM25_TRIGGER_NAME"],
-                metadata={"trigger_id": trigger_id},
+                reason_codes=["BM25_SEQUENCE_NAME"],
+                metadata={"sequence_id": sequence_id},
             ),
         ]
 
     monkeypatch.setattr(GovernedRetriever, "score_candidates", score_candidates)
-    return trigger_id
+    return sequence_id
 
 
 async def _ask(scenario: _Scenario, *, product_key: str | None) -> AgentRun:
@@ -644,7 +670,7 @@ async def test_a_product_refuses_what_it_has_no_rule_for_and_keeps_what_it_names
     scenario: _Scenario, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resources = await _dbt_resources(scenario)
-    trigger_id = _with_unrecognised_candidate(monkeypatch)
+    sequence_id = _with_unrecognised_candidate(monkeypatch)
     await _publish(scenario, "orders-context")
 
     run = await _ask(scenario, product_key="orders-context")
@@ -656,7 +682,7 @@ async def test_a_product_refuses_what_it_has_no_rule_for_and_keeps_what_it_names
     assert ("GOVERNED_TOOL", str(scenario.tool_version.id)) in evidence
     assert ("DBT_RESOURCE", str(resources.matched.id)) in evidence
     # What it does not is not: the kind nobody decided, and the dbt model Atlas could not place.
-    assert ("TRIGGER", trigger_id) not in evidence
+    assert ("SEQUENCE", sequence_id) not in evidence
     assert ("DBT_RESOURCE", str(resources.unmatched.id)) not in evidence
 
 
@@ -665,7 +691,7 @@ async def test_a_product_free_run_never_consults_the_product_boundary(
 ) -> None:
     """`admits()` is only asked when a request carries a product; without one, nothing narrows."""
     resources = await _dbt_resources(scenario)
-    trigger_id = _with_unrecognised_candidate(monkeypatch)
+    sequence_id = _with_unrecognised_candidate(monkeypatch)
     await _publish(scenario, "orders-context")
 
     def consulted(self: ContextProductScope, hit: RetrievalHit) -> bool:
@@ -676,7 +702,7 @@ async def test_a_product_free_run_never_consults_the_product_boundary(
     run = await _ask(scenario, product_key=None)
 
     evidence = _evidence_ids(run)
-    assert ("TRIGGER", trigger_id) in evidence
+    assert ("SEQUENCE", sequence_id) in evidence
     assert ("DBT_RESOURCE", str(resources.unmatched.id)) in evidence
     assert ("DBT_RESOURCE", str(resources.matched.id)) in evidence
     assert ("TABLE", str(scenario.dim_customer.id)) in evidence

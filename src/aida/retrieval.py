@@ -13,7 +13,10 @@ Stage 1: Candidate fetch
   columns, tools, business annotations, dbt resources, published semantic
   metrics, glossary terms bound to a semantic object, -- R11-FP11 --
   stored procedures and functions, and -- R11-FP09 -- concepts of each
-  ontology's published version with a valid mapping here) using the existing
+  ontology's published version with a valid mapping here, and -- R11-FP01 -- a
+  SQL Server or Oracle trigger that carries its own body, found by its name and
+  its firing table's name, never a PostgreSQL trigger, whose body a ROUTINE
+  candidate already carries) using the existing
   org/datasource scope filters. SM-2: an ACTIVE glossary-term<->semantic-object
   binding folds the term's definition/synonyms into the metric's candidate
   text (and the metric's identity into the term's hit metadata), so the
@@ -1223,6 +1226,104 @@ async def hybrid_retrieve(
                 },
             )
         )
+
+    # 8b. SQL Server and Oracle triggers, R11-FP01. A PostgreSQL trigger keeps no body of
+    # its own -- `action_routine` names the function that carries it, and that function is
+    # already a ROUTINE candidate above (`triggers_by_routine`), the trigger's reviewed
+    # lineage folded into its reads/writes. An engine that gives the trigger its own body
+    # names no routine here, so nothing above ever reaches it: it was not a retrieval
+    # candidate at all until this. Found the same way a routine is -- by name, never by
+    # body -- and admitted through a context product on the one reference group a trigger
+    # actually has: it fires on exactly one table, so `ContextProductScope._owning_table`
+    # decides it (`agent_orchestrator.py`), the same rule COLUMN/BUSINESS_ANNOTATION/
+    # DBT_RESOURCE already use, with no new reference-group field and no migration. A
+    # trigger whose firing table this datasource's catalog does not hold (out of the
+    # discovery selection, or not yet scanned) is stamped `table_id: None`: an unresolved
+    # reference, refused by a product the same way an unmatched dbt resource is, not
+    # admitted by a fallthrough.
+    own_body_trigger_filters = [
+        func.lower(MetadataTrigger.name).contains(t) for t in query_tokens[:10]
+    ]
+    trigger_table_filters = [
+        func.lower(MetadataTrigger.table_name).contains(t) for t in query_tokens[:10]
+    ]
+    trigger_scope: Any = true()
+    if own_body_trigger_filters or trigger_table_filters:
+        trigger_scope = or_(*own_body_trigger_filters, *trigger_table_filters)
+    trigger_rows = (
+        await session.execute(
+            select(MetadataTrigger, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTrigger.schema_id)
+            .where(
+                MetadataTrigger.datasource_id == datasource.id,
+                MetadataTrigger.organization_id == datasource.organization_id,
+                MetadataTrigger.status == "ACTIVE",
+                or_(MetadataTrigger.action_routine.is_(None), MetadataTrigger.action_routine == ""),
+                trigger_scope,
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+    if trigger_rows:
+        # One bulk lookup for every firing table these candidates might need, folded to
+        # lower case: PostgreSQL folds unquoted identifiers to lower case, Oracle and
+        # Snowflake to upper, so an exact-case match would miss legitimately-cased rows
+        # the same way `DiscoverySelection` matching already accounts for (R11-FP01,
+        # landed 2026-09-15).
+        firing_table_rows = await session.execute(
+            select(MetadataSchema.name, MetadataTable.name, MetadataTable.id)
+            .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+            .where(
+                MetadataTable.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                MetadataTable.status == "ACTIVE",
+            )
+        )
+        firing_table_ids = {
+            (schema_name.casefold(), table_name.casefold()): table_id
+            for schema_name, table_name, table_id in firing_table_rows.all()
+        }
+        for trigger, own_schema_name in trigger_rows:
+            candidate_text = f"{trigger.name} {trigger.table_name}"
+            bm25 = _bm25_score(query_tokens, candidate_text)
+            score = round(min(1.0, bm25 + _exact_phrase_bonus(question, candidate_text)), 4)
+            if score <= 0:
+                continue
+            hit_id = f"TRIGGER:{trigger.id}"
+            if hit_id in seen_ids:
+                continue
+            seen_ids.add(hit_id)
+            firing_schema_name = trigger.table_schema_name or own_schema_name
+            table_id = firing_table_ids.get(
+                (firing_schema_name.casefold(), trigger.table_name.casefold())
+            )
+            trigger_reason_codes = ["BM25_TRIGGER_NAME"] if bm25 > 0 else []
+            hits.append(
+                HybridRetrievalHit(
+                    object_type="TRIGGER",
+                    object_id=str(trigger.id),
+                    display_name=f"{own_schema_name}.{trigger.table_name}.{trigger.name}",
+                    score=score,
+                    reason_codes=trigger_reason_codes,
+                    metadata={
+                        "trigger_id": str(trigger.id),
+                        "datasource_id": str(datasource.id),
+                        # The one reference group `_owning_table` reads; `None` when the
+                        # firing table is not in this datasource's catalog, so the hit is
+                        # an unresolved reference rather than a guess.
+                        "table_id": str(table_id) if table_id is not None else None,
+                        "timing": trigger.timing,
+                        "events": trigger.events,
+                        # Whether MCP `get_transformation_detail` would release the body:
+                        # the same three-part gate a routine body uses.
+                        "body_available": (
+                            trigger.availability == AVAILABLE
+                            and trigger.redaction_status in VALUE_FREE_REDACTION_STATUSES
+                            and is_eligible_for_model_context(trigger.screening_status)
+                        ),
+                    },
+                )
+            )
 
     # 9. Ontology concepts (R11-FP09) -- see `_ontology_concept_hits`.
     for concept_hit in await _ontology_concept_hits(

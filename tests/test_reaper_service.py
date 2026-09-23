@@ -31,6 +31,7 @@ from aida.models import (
     LineOfBusiness,
     MetadataCatalog,
     MetadataEnrichmentProposal,
+    MetadataPlaybook,
     MetadataSchema,
     MetadataTable,
     Organization,
@@ -43,6 +44,7 @@ from aida.reaper_service import (
     parse_retention_overrides,
     run_reaper_pass,
 )
+from aida.review_batch_models import PlaybookDryRunRecord
 
 pytestmark = pytest.mark.asyncio
 
@@ -309,6 +311,63 @@ async def _seed_deprecated_term_with_links(
     return term, links
 
 
+async def _seed_playbook_dry_run(
+    session: AsyncSession,
+    *,
+    org: Organization,
+    datasource: DataSource,
+    created_at: datetime,
+    bound_at: datetime | None = None,
+) -> PlaybookDryRunRecord:
+    """One stored dry-run, at the given age. `bound_at` set seeds a dry-run that already
+    bound a run -- the reaper's retention rule reaps both bound and unbound rows the same
+    way (see `_stale_playbook_dry_runs_stmt`)."""
+    playbook = MetadataPlaybook(
+        id=uuid4(),
+        organization_id=org.id,
+        name=f"playbook-{uuid4().hex[:8]}",
+        action="TAG",
+        datasource_id=datasource.id,
+        match_field="TABLE_NAME",
+        match_pattern="orders_*",
+        action_parameters={"tag_key": "pii-review", "tag_value": "pending"},
+        schedule_interval_minutes=60,
+        auto_apply_max_items=20,
+        enabled=True,
+        created_by="test-suite",
+    )
+    session.add(playbook)
+    await session.flush()
+    record = PlaybookDryRunRecord(
+        id=uuid4(),
+        organization_id=org.id,
+        playbook_id=playbook.id,
+        action="TAG",
+        rule_version="rule-fp-" + uuid4().hex[:8],
+        match_digest="match-fp-" + uuid4().hex[:8],
+        evidence_digest="evidence-fp-" + uuid4().hex[:8],
+        matched_count=1,
+        tables_truncated=False,
+        columns_truncated=False,
+        auto_apply_max_items=20,
+        predicted_disposition="AUTOMATIC",
+        change_counts={"CREATE": 1},
+        subject_versions=[],
+        evaluated_by="test-suite",
+        evaluated_at=created_at,
+        bound_at=bound_at,
+        bound_by="test-suite" if bound_at else None,
+        bound_binding_status="MATCHES" if bound_at else None,
+        bound_run_outcome="AUTO_APPLIED" if bound_at else None,
+    )
+    session.add(record)
+    await session.flush()
+    record.created_at = created_at
+    record.updated_at = created_at
+    await session.commit()
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Rule: rejected_enrichment_proposals
 # ---------------------------------------------------------------------------
@@ -499,6 +558,70 @@ async def test_rejected_description_drafts_soft_flag_preserves_row(session) -> N
 
 
 # ---------------------------------------------------------------------------
+# Rule: stale_playbook_dry_runs (R11-REV01 -- stored dry runs had no retention)
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_playbook_dry_runs_reaped_bound_and_unbound(session) -> None:
+    """Both an unbound preview nobody acted on and a bound one whose run already happened
+    are reaped past retention -- the row is value-free and the durable audit trail is the
+    `AuditEvent`s `store_dry_run`/`run_bound_to_dry_run` already wrote, not this row."""
+    org, datasource, _table = await _seed_org(session)
+    now = datetime.now(UTC)
+    old_unbound = await _seed_playbook_dry_run(
+        session, org=org, datasource=datasource, created_at=now - timedelta(days=100)
+    )
+    old_bound = await _seed_playbook_dry_run(
+        session,
+        org=org,
+        datasource=datasource,
+        created_at=now - timedelta(days=95),
+        bound_at=now - timedelta(days=94),
+    )
+    young_unbound = await _seed_playbook_dry_run(
+        session, org=org, datasource=datasource, created_at=now - timedelta(days=10)
+    )
+    young_bound = await _seed_playbook_dry_run(
+        session,
+        org=org,
+        datasource=datasource,
+        created_at=now - timedelta(days=5),
+        bound_at=now - timedelta(days=4),
+    )
+
+    report = await run_reaper_pass(session=session, now=now, settings=_settings())
+
+    remaining = {
+        row.id for row in (await session.scalars(select(PlaybookDryRunRecord))).all()
+    }
+    assert old_unbound.id not in remaining
+    assert old_bound.id not in remaining
+    assert young_unbound.id in remaining
+    assert young_bound.id in remaining
+    per_rule = {r.name: r for r in report.rules}
+    assert per_rule["stale_playbook_dry_runs"].reaped == 2
+
+
+async def test_stale_playbook_dry_runs_reap_emits_one_audit_event(session) -> None:
+    org, datasource, _table = await _seed_org(session)
+    now = datetime.now(UTC)
+    for _ in range(2):
+        await _seed_playbook_dry_run(
+            session, org=org, datasource=datasource, created_at=now - timedelta(days=200)
+        )
+
+    await run_reaper_pass(session=session, now=now, settings=_settings())
+
+    reap_audits = (
+        await session.scalars(
+            select(AuditEvent).where(AuditEvent.action == "REAP_STALE_PLAYBOOK_DRY_RUN")
+        )
+    ).all()
+    assert len(reap_audits) == 1
+    assert reap_audits[0].details["reaped_count"] == 2
+
+
+# ---------------------------------------------------------------------------
 # Global: disabled config = no-op
 # ---------------------------------------------------------------------------
 
@@ -671,6 +794,7 @@ def test_rules_registry_covers_expected_names() -> None:
         "rejected_description_drafts",
         "stale_pending_description_drafts",
         "expired_token_revocations",
+        "stale_playbook_dry_runs",
     }
 
 

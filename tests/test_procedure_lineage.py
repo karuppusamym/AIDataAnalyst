@@ -343,6 +343,43 @@ def test_tsql_update_from_resolves_the_alias_target_through_the_from_clause() ->
     assert any(e.source_table == "dbo.staging" and e.source_column == "ready" for e in filtered)
 
 
+def test_a_where_subquerys_alias_does_not_shadow_the_target() -> None:
+    # R11-FP07, "also noticed" 2026-09-20: `_collect_table_aliases_with_temp`
+    # used to walk the *entire* statement with one `find_all(exp.Table)`, so a
+    # WHERE subquery reusing the outer alias overwrote it in that one flat
+    # map. Here the EXISTS subquery's own `dbo.other t` silently became both
+    # the UPDATE's target and `t.qty`'s source, though the statement never
+    # writes `dbo.other` and reads it only inside its own EXISTS.
+    sql = (
+        "CREATE PROCEDURE dbo.usp_x AS BEGIN "
+        "UPDATE t SET t.total = t.qty * 2 "
+        "FROM dbo.totals t "
+        "WHERE t.id IN (SELECT s.id FROM dbo.staging s) "
+        "AND EXISTS (SELECT 1 FROM dbo.other t WHERE t.flag = 1); END"
+    )
+    result = parse_procedure_lineage(sql, dialect="tsql")
+    assert result.is_fully_parsed is True
+    edges = {
+        (e.source_table, e.source_column, e.target_table, e.target_column, e.transformation_type)
+        for e in result.edges
+    }
+    assert ("dbo.totals", "qty", "dbo.totals", "total", "DERIVED") in edges
+    # The EXISTS subquery's own alias stays local to it -- `t.flag` still
+    # reads `dbo.other`, the table it is actually declared against inside the
+    # subquery -- but every edge's target is the statement's real target.
+    filtered = {
+        (e.source_table, e.source_column)
+        for e in result.edges
+        if e.transformation_type == "FILTERED"
+    }
+    assert {("dbo.totals", "id"), ("dbo.staging", "id"), ("dbo.other", "flag")} <= filtered
+    assert all(
+        e.target_table == "dbo.totals"
+        for e in result.edges
+        if e.transformation_type == "FILTERED"
+    )
+
+
 def test_delete_is_a_write_even_with_no_column_level_edges() -> None:
     sql = "CREATE PROCEDURE dbo.usp_x AS BEGIN DELETE FROM dbo.stg WHERE loaded = 1; END"
     result = parse_procedure_lineage(sql, dialect="tsql")
