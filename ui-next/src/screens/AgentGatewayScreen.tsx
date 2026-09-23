@@ -25,7 +25,11 @@ import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { ConnectTab } from "./AgentGatewayConnect";
-import { ChangedSincePublishedPill, useChangesSincePublished } from "./ContextProductFreshness";
+import {
+  ChangedSincePublishedPill,
+  MeaningMovedPill,
+  useChangesSincePublished,
+} from "./ContextProductFreshness";
 import "./AgentGatewayScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -148,6 +152,7 @@ function ExposureTab({
                   <div className="aglist__meta">
                     <Pill tone={v.status === "PUBLISHED" ? "ok" : "info"}>{v.status.toLowerCase()}</Pill>
                     <ChangedSincePublishedPill count={changes.byVersion.get(v.id)} />
+                    <MeaningMovedPill count={changes.meaningByVersion.get(v.id)} />
                     <span className="aglist__roles">{v.allowed_consumer_roles.join(", ") || "no roles"}</span>
                   </div>
                 </li>

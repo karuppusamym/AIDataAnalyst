@@ -691,18 +691,23 @@ async function openRegistry(items: ContextProductRead[]) {
 
 const rowOf = (name: string) => screen.getByRole("article", { name });
 
-/** The project summary, as the server answers it: a count per version id. */
-function summaryOf(counts: Record<string, number | null>): ContextProductChangesSummaryListRead {
+/** The project summary, as the server answers it: counts per version id. */
+function summaryOf(
+  counts: Record<string, number | null>,
+  meaning: Record<string, number> = {},
+): ContextProductChangesSummaryListRead {
+  const versionIds = [...new Set([...Object.keys(counts), ...Object.keys(meaning)])];
   return {
     project_id: "proj_core",
     generated_at: "2026-09-22T00:00:00Z",
     truncated: false,
-    items: Object.entries(counts).map(([versionId, changed]) => ({
+    items: versionIds.map((versionId) => ({
       product_id: "cp",
       version_id: versionId,
       version: 1,
       status: "PUBLISHED",
-      changed_subjects: changed,
+      changed_subjects: versionId in counts ? counts[versionId]! : null,
+      meaning_moved: meaning[versionId] ?? 0,
     })),
   };
 }
@@ -738,6 +743,21 @@ describe("ContextProductsScreen: the count that needs no click (R11-FP12, 2026-0
 
     expect(await within(row).findByText("stale")).toBeInTheDocument();
     expect(within(row).queryByText("2 changes since published")).not.toBeInTheDocument();
+  });
+
+  it("says when meaning the version pins has moved on, and keeps saying so after the detailed check", async () => {
+    sessionMe = asRoles("DataSteward");
+    fetchContextProductChangesSummary.mockResolvedValue(summaryOf({ cpv_1: 0 }, { cpv_1: 2 }));
+    fetchContextProductChangesSincePublished.mockResolvedValue(NOTHING_MOVED);
+    await openRegistry([PUBLISHED_PRODUCT]);
+    const row = rowOf("Consumer risk analysis");
+
+    expect(await within(row).findByText("2 pinned meanings moved on")).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Check for changes" }));
+
+    // The detailed check covers the covered subjects, not the pins, so it replaces only the count.
+    await waitFor(() => expect(fetchContextProductChangesSincePublished).toHaveBeenCalled());
+    expect(within(row).getByText("2 pinned meanings moved on")).toBeInTheDocument();
   });
 
   it("asks a session outside the coverage roles nothing, and shows it no count", async () => {

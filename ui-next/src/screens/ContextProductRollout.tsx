@@ -15,7 +15,8 @@ import { LoadingPanel, useAsyncResource } from "../components/screenState";
 import type { StatusChannel } from "../components/screenState";
 import {
   ChangedSincePublishedPill,
-  changedSincePublishedText,
+  MeaningMovedPill,
+  stalenessText,
   useChangesSincePublished,
 } from "./ContextProductFreshness";
 
@@ -185,7 +186,10 @@ export function RolloutPanel({
             <Field label="Bound version">
               <select value={versionId} onChange={(e) => setVersionId(e.target.value)}>
                 {versions.map((v) => {
-                  const moved = changedSincePublishedText(changes.byVersion.get(v.id));
+                  const moved = stalenessText(
+                    changes.byVersion.get(v.id),
+                    changes.meaningByVersion.get(v.id),
+                  );
                   return (
                     <option key={v.id} value={v.id}>
                       v{v.version} · {v.status.toLowerCase().replace(/_/g, " ")}
@@ -228,7 +232,8 @@ export function RolloutPanel({
                     </td>
                     <td>
                       <Pill tone="info">v{b.bound_version_number}</Pill>{" "}
-                      <ChangedSincePublishedPill count={changes.byVersion.get(b.bound_version_id)} />
+                      <ChangedSincePublishedPill count={changes.byVersion.get(b.bound_version_id)} />{" "}
+                      <MeaningMovedPill count={changes.meaningByVersion.get(b.bound_version_id)} />
                     </td>
                     <td>{new Date(b.updated_at).toLocaleDateString()}</td>
                     <td className="cprollout__rowaction">

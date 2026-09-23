@@ -29,7 +29,7 @@ import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../compo
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./AskScreen.css";
-import { changedSincePublishedText, useChangesSincePublished } from "./ContextProductFreshness";
+import { stalenessText, useChangesSincePublished } from "./ContextProductFreshness";
 
 /* ---------------------------------------------------------------------------
    Ask -- UX-15/UX-16, tracker rows UX-15/UX-16.
@@ -1350,9 +1350,12 @@ export function AskScreen() {
                     : "Everything this datasource governs"}
             </option>
             {products.map((p) => {
-              const moved = changedSincePublishedText(
-                p.latest_version ? changes.byVersion.get(p.latest_version.id) : undefined,
-              );
+              const moved = p.latest_version
+                ? stalenessText(
+                    changes.byVersion.get(p.latest_version.id),
+                    changes.meaningByVersion.get(p.latest_version.id),
+                  )
+                : null;
               const name = p.latest_version?.name ?? p.product_key;
               return (
                 <option key={p.id} value={p.product_key}>
@@ -1368,11 +1371,17 @@ export function AskScreen() {
             </p>
           ) : null}
           {selectedProduct?.latest_version &&
-          changedSincePublishedText(changes.byVersion.get(selectedProduct.latest_version.id)) ? (
+          stalenessText(
+            changes.byVersion.get(selectedProduct.latest_version.id),
+            changes.meaningByVersion.get(selectedProduct.latest_version.id),
+          ) ? (
             <p className="askscreen__hint">
-              Some of what this product covers has changed since it was published (
-              {changedSincePublishedText(changes.byVersion.get(selectedProduct.latest_version.id))}).
-              Answers still use the published version; its steward can see what moved on the
+              Some of what this product stands on has changed since it was published (
+              {stalenessText(
+                changes.byVersion.get(selectedProduct.latest_version.id),
+                changes.meaningByVersion.get(selectedProduct.latest_version.id),
+              )}
+              ). Answers still use the published version; its steward can see what moved on the
               Context products screen.
             </p>
           ) : null}

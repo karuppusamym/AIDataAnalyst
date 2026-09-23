@@ -1496,6 +1496,7 @@ export interface ContextProductChangesSummaryRead {
   version: number;
   status: string;
   changed_subjects: number | null;
+  meaning_moved: number;
 }
 
 /** AT-7(b): pin `consumer_principal_id` (the path parameter) to this */

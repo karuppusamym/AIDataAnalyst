@@ -32,13 +32,22 @@ from aida.context_product_api import (
     list_context_product_changes_since_published,
 )
 from aida.context_product_coverage import (
+    PinnedScope,
     PublishedScope,
     load_changes_since_published_counts,
     load_coverage_changes,
+    load_pinned_meaning,
+    load_pinned_meaning_moved_counts,
     publication_time,
 )
 from aida.context_product_read_service import COMPILER_ROLES
-from aida.models import ColumnDocumentationVersion
+from aida.models import (
+    ColumnDocumentationVersion,
+    GlossaryTerm,
+    GlossaryTermVersion,
+    SemanticModelVersion,
+)
+from aida.ontology_models import OntologyHead, OntologyVersion
 from aida.routine_description_service import publish_routine_documentation_version
 from aida.schemas import ContextProductCreate
 from aida.security import SecurityContext
@@ -408,4 +417,124 @@ def test_the_route_admits_exactly_the_roles_the_coverage_doors_admit() -> None:
     declared = [role.strip() for role in row.split("|")[4].split(",")]
 
     assert declared == sorted(COMPILER_ROLES)
+
+# --- pinned meaning that no longer stands -------------------------------------------------
+
+
+async def _pinned_meaning(estate: Estate) -> dict[str, Any]:
+    """One of each kind of pin: an ontology version its ontology has moved past, and a semantic
+    model version and a glossary definition that still stand."""
+    session = estate.session
+    model = SemanticModelVersion(
+        organization_id=estate.org.id,
+        project_id=estate.project.id,
+        version=1,
+        name="Revenue model",
+        change_summary="First.",
+        status="PUBLISHED",
+        created_by="modeller",
+    )
+    term = GlossaryTerm(organization_id=estate.org.id, term_key="net_revenue")
+    session.add_all([model, term])
+    await session.flush()
+    definition = GlossaryTermVersion(
+        organization_id=estate.org.id,
+        term_id=term.id,
+        version=1,
+        status="APPROVED",
+        display_name="Net revenue",
+        definition="Revenue after discounts.",
+        created_by="steward-2",
+    )
+    head = OntologyHead(
+        organization_id=estate.org.id, ontology_key="commerce", last_version=2, published_version=2
+    )
+    session.add_all([definition, head])
+    await session.flush()
+    first = OntologyVersion(
+        organization_id=estate.org.id,
+        ontology_id=head.id,
+        version=1,
+        base_version=0,
+        status="APPROVED",
+        definition={"name": "Commerce", "concepts": [], "mappings": []},
+        created_by="author",
+    )
+    session.add(first)
+    await session.commit()
+    return {"model": model, "term": term, "definition": definition, "ontology": first}
+
+
+async def _per_version_moved(estate: Estate, pin: PinnedScope) -> int:
+    resolved = await load_pinned_meaning(
+        estate.session,
+        estate.org.id,
+        ontology_version_ids=pin.ontology_version_ids,
+        semantic_model_version_ids=pin.semantic_model_version_ids,
+        glossary_term_version_ids=pin.glossary_term_version_ids,
+        scope_table_ids=[],
+        scope_routine_ids=[],
+    )
+    return sum(1 for entry in resolved if not entry.current)
+
+
+async def test_the_batched_meaning_count_is_load_pinned_meanings_own_answer(
+    session: AsyncSession,
+) -> None:
+    estate = await _estate(session)
+    seeded = await _pinned_meaning(estate)
+    every_kind = PinnedScope(
+        version_id=UUID("00000000-0000-0000-0000-0000000000f1"),
+        ontology_version_ids=[str(seeded["ontology"].id)],
+        semantic_model_version_ids=[str(seeded["model"].id)],
+        # A pin that resolves to nothing in this organization is not counted either way.
+        glossary_term_version_ids=[str(seeded["definition"].id), str(uuid4())],
+    )
+    standing_only = PinnedScope(
+        version_id=UUID("00000000-0000-0000-0000-0000000000f2"),
+        ontology_version_ids=[],
+        semantic_model_version_ids=[str(seeded["model"].id)],
+        glossary_term_version_ids=[str(seeded["definition"].id)],
+    )
+    nothing_pinned = PinnedScope(
+        version_id=UUID("00000000-0000-0000-0000-0000000000f3"),
+        ontology_version_ids=[],
+        semantic_model_version_ids=[],
+        glossary_term_version_ids=[],
+    )
+    pins = [every_kind, standing_only, nothing_pinned]
+
+    before = await load_pinned_meaning_moved_counts(session, estate.org.id, pins)
+    seeded["model"].status = "SUPERSEDED"
+    seeded["term"].lifecycle_status = "DEPRECATED"
+    await session.commit()
+    after = await load_pinned_meaning_moved_counts(session, estate.org.id, pins)
+
+    ids = (every_kind.version_id, standing_only.version_id, nothing_pinned.version_id)
+    assert before == dict(zip(ids, (1, 0, 0), strict=True))
+    assert after == dict(zip(ids, (3, 2, 0), strict=True))
+    for pin in pins:
+        assert after[pin.version_id] == await _per_version_moved(estate, pin), pin.version_id
+    # Another organization's reader resolves none of these pins.
+    assert set((await load_pinned_meaning_moved_counts(session, uuid4(), pins)).values()) == {0}
+
+
+async def test_the_route_carries_the_meaning_count_for_every_version(session: AsyncSession) -> None:
+    estate = await _estate(session)
+    seeded = await _pinned_meaning(estate)
+    version = await _publish_product(
+        estate,
+        "commerce-context",
+        table_ids=[str(estate.orders.id)],
+        glossary_term_version_ids=[str(seeded["definition"].id)],
+    )
+    seeded["term"].lifecycle_status = "DEPRECATED"
+    await session.commit()
+
+    answer = await list_context_product_changes_since_published(
+        estate.project.id, limit=200, context=estate.steward, session=session
+    )
+
+    (item,) = [row for row in answer.items if row.version_id == version.id]
+    assert item.meaning_moved == 1
 

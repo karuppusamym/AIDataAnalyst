@@ -2868,6 +2868,10 @@ class ContextProductChangesSummaryRead(ApiModel):
     (`load_coverage_changes`): a covered view's or routine's definition move, and a covered
     table's, view's, column's or routine's retired description. `null` means the version was
     never published, so there is no baseline to be stale against -- not that nothing moved.
+
+    `meaning_moved` counts the meaning versions it pins (ontology, semantic model, glossary term)
+    that no longer stand -- the `current: false` entries of `load_pinned_meaning` -- whether or
+    not the version was ever published.
     """
 
     product_id: UUID
@@ -2875,6 +2879,7 @@ class ContextProductChangesSummaryRead(ApiModel):
     version: int
     status: str
     changed_subjects: int | None
+    meaning_moved: int
 
 
 class ContextProductChangesSummaryListRead(ApiModel):

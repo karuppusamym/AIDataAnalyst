@@ -15,8 +15,10 @@ from aida.context import get_correlation_id
 # The read decisions REST shares with GraphQL (R11-GQL01); re-imported so every existing
 # caller of these names is unchanged.
 from aida.context_product_coverage import (
+    PinnedScope,
     PublishedScope,
     load_changes_since_published_counts,
+    load_pinned_meaning_moved_counts,
     publication_time,
 )
 from aida.context_product_read_service import COMPILER_ROLES
@@ -479,11 +481,27 @@ async def list_context_product_changes_since_published(
         for _product, version in rows
         if version is not None
     ]
+    pins = [
+        PinnedScope(
+            version_id=version.id,
+            ontology_version_ids=version.ontology_version_ids or [],
+            semantic_model_version_ids=version.semantic_model_version_ids or [],
+            glossary_term_version_ids=version.glossary_term_version_ids or [],
+        )
+        for _product, version in rows
+        if version is not None
+    ]
     # The products' own organization: every row is from the one project the listing admitted,
     # and a platform-level caller's context need not name an organization at all.
+    organization_id = rows[0][0].organization_id if rows else None
     counts = (
-        await load_changes_since_published_counts(session, rows[0][0].organization_id, scopes)
-        if rows
+        await load_changes_since_published_counts(session, organization_id, scopes)
+        if organization_id is not None
+        else {}
+    )
+    meaning = (
+        await load_pinned_meaning_moved_counts(session, organization_id, pins)
+        if organization_id is not None
         else {}
     )
     return ContextProductChangesSummaryListRead(
@@ -497,6 +515,7 @@ async def list_context_product_changes_since_published(
                 version=version.version,
                 status=version.status,
                 changed_subjects=counts.get(version.id),
+                meaning_moved=meaning.get(version.id, 0),
             )
             for product, version in rows
             if version is not None

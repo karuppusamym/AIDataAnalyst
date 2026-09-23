@@ -31,6 +31,7 @@ import {
   canCheckFreshness,
   useVersionFreshness,
   ChangedSincePublishedPill,
+  MeaningMovedPill,
   useChangesSincePublished,
 } from "./ContextProductFreshness";
 import type { VersionFreshness } from "./ContextProductFreshness";
@@ -96,6 +97,7 @@ function ProductRow({
   freshness,
   onCheckFreshness,
   changedSincePublished,
+  meaningMoved,
 }: {
   product: ContextProductRead;
   busy: string | null;
@@ -120,6 +122,8 @@ function ProductRow({
   /** R11-FP12: how many covered subjects moved since this version was published, from the
    *  one project-wide read made when the screen opens; `undefined` is no reading. */
   changedSincePublished: number | null | undefined;
+  /** R11-FP12: how many of the meaning versions it pins no longer stand. */
+  meaningMoved: number | undefined;
 }) {
   const v = product.latest_version;
   const isBusy = busy === v.id;
@@ -135,6 +139,7 @@ function ProductRow({
           ) : (
             <ChangedSincePublishedPill count={changedSincePublished} />
           )}
+          <MeaningMovedPill count={meaningMoved} />
         </div>
         <h3 className="cprow__title">{v.name}</h3>
         <div className="cprow__key">
@@ -388,6 +393,7 @@ export function ContextProductsScreen() {
                     newVersionOpen={versionProduct?.id === p.id}
                     freshness={freshness.byVersion[p.latest_version.id]}
                     changedSincePublished={changes.byVersion.get(p.latest_version.id)}
+                    meaningMoved={changes.meaningByVersion.get(p.latest_version.id)}
                     onCheckFreshness={() =>
                       void freshness.check(
                         p.latest_version.id,

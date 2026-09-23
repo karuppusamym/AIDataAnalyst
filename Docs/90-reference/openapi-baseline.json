@@ -8878,7 +8878,7 @@
       },
       "ContextProductChangesSummaryRead": {
         "additionalProperties": false,
-        "description": "R11-FP12: how much of one version's coverage has moved since it was published.\n\n`changed_subjects` counts the entries the per-version coverage reading lists\n(`load_coverage_changes`): a covered view's or routine's definition move, and a covered\ntable's, view's, column's or routine's retired description. `null` means the version was\nnever published, so there is no baseline to be stale against -- not that nothing moved.",
+        "description": "R11-FP12: how much of one version's coverage has moved since it was published.\n\n`changed_subjects` counts the entries the per-version coverage reading lists\n(`load_coverage_changes`): a covered view's or routine's definition move, and a covered\ntable's, view's, column's or routine's retired description. `null` means the version was\nnever published, so there is no baseline to be stale against -- not that nothing moved.\n\n`meaning_moved` counts the meaning versions it pins (ontology, semantic model, glossary term)\nthat no longer stand -- the `current: false` entries of `load_pinned_meaning` -- whether or\nnot the version was ever published.",
         "properties": {
           "changed_subjects": {
             "anyOf": [
@@ -8890,6 +8890,10 @@
               }
             ],
             "title": "Changed Subjects"
+          },
+          "meaning_moved": {
+            "title": "Meaning Moved",
+            "type": "integer"
           },
           "product_id": {
             "format": "uuid",
@@ -8915,7 +8919,8 @@
           "version_id",
           "version",
           "status",
-          "changed_subjects"
+          "changed_subjects",
+          "meaning_moved"
         ],
         "title": "ContextProductChangesSummaryRead",
         "type": "object"

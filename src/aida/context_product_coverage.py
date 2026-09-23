@@ -1284,3 +1284,96 @@ async def load_changes_since_published_counts(
             lambda row: "ROUTINE",
         )
     return {version_id: len(entries) for version_id, entries in found.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedScope:
+    """One version's meaning pins, as it stores them."""
+
+    version_id: UUID
+    ontology_version_ids: Sequence[Any]
+    semantic_model_version_ids: Sequence[Any]
+    glossary_term_version_ids: Sequence[Any]
+
+
+async def load_pinned_meaning_moved_counts(
+    session: AsyncSession,
+    organization_id: UUID,
+    pins: Sequence[PinnedScope],
+) -> dict[UUID, int]:
+    """How many of each version's pinned meaning versions no longer stand.
+
+    The same `current` `load_pinned_meaning` gives each pin, for many versions at once and in at
+    most three queries (one per kind of pin): an ontology version stands while it is the one its
+    ontology has published and approved, a semantic model version while it is PUBLISHED, and a
+    glossary term version while it is APPROVED and its term ACTIVE. A pin that does not resolve
+    in this organization is not counted, as `load_pinned_meaning` resolves it to nothing (INV-5).
+    `tests/test_r11_fp12_changes_summary.py` holds the two to the same answer.
+
+    Independent of publication: a draft that pins a superseded glossary definition is pinned to
+    something that no longer stands whether or not it was ever published.
+    """
+    parsed = {
+        pin.version_id: (
+            _uuids(pin.ontology_version_ids),
+            _uuids(pin.semantic_model_version_ids),
+            _uuids(pin.glossary_term_version_ids),
+        )
+        for pin in pins
+    }
+    ontology_ids = sorted({value for ids in parsed.values() for value in ids[0]})
+    model_ids = sorted({value for ids in parsed.values() for value in ids[1]})
+    term_ids = sorted({value for ids in parsed.values() for value in ids[2]})
+    standing: dict[UUID, bool] = {}
+    if ontology_ids:
+        for version_id, number, status, published in (
+            await session.execute(
+                select(
+                    OntologyVersion.id,
+                    OntologyVersion.version,
+                    OntologyVersion.status,
+                    OntologyHead.published_version,
+                )
+                .join(OntologyHead, OntologyHead.id == OntologyVersion.ontology_id)
+                .where(
+                    OntologyVersion.id.in_(ontology_ids),
+                    OntologyVersion.organization_id == organization_id,
+                )
+            )
+        ).all():
+            standing[version_id] = status == "APPROVED" and published == number
+    if model_ids:
+        for version_id, status in (
+            await session.execute(
+                select(SemanticModelVersion.id, SemanticModelVersion.status).where(
+                    SemanticModelVersion.id.in_(model_ids),
+                    SemanticModelVersion.organization_id == organization_id,
+                )
+            )
+        ).all():
+            standing[version_id] = status == "PUBLISHED"
+    if term_ids:
+        for version_id, status, lifecycle in (
+            await session.execute(
+                select(
+                    GlossaryTermVersion.id,
+                    GlossaryTermVersion.status,
+                    GlossaryTerm.lifecycle_status,
+                )
+                .join(GlossaryTerm, GlossaryTerm.id == GlossaryTermVersion.term_id)
+                .where(
+                    GlossaryTermVersion.id.in_(term_ids),
+                    GlossaryTermVersion.organization_id == organization_id,
+                )
+            )
+        ).all():
+            standing[version_id] = status == "APPROVED" and lifecycle == "ACTIVE"
+    return {
+        version_id: sum(
+            1
+            for pinned in (*ontology, *models, *terms)
+            if pinned in standing and not standing[pinned]
+        )
+        for version_id, (ontology, models, terms) in parsed.items()
+    }
+

@@ -208,7 +208,12 @@ const NO_READING: ChangesSincePublished = new Map();
 export function useChangesSincePublished(
   projectId: string | null | undefined,
   productId?: string | null,
-): { byVersion: ChangesSincePublished; error: string | null } {
+): {
+  byVersion: ChangesSincePublished;
+  /** Per version: how many of the meaning versions it pins no longer stand (0 = none). */
+  meaningByVersion: ReadonlyMap<string, number>;
+  error: string | null;
+} {
   const session = useSession();
   const decision = readDecision(session, CONTEXT_PRODUCT_COVERAGE_ROLES);
   const summary = useAsyncResource(
@@ -223,7 +228,14 @@ export function useChangesSincePublished(
         : NO_READING,
     [summary.data],
   );
-  return { byVersion, error: summary.error };
+  const meaningByVersion = useMemo<ReadonlyMap<string, number>>(
+    () =>
+      summary.data
+        ? new Map(summary.data.items.map((item) => [item.version_id, item.meaning_moved]))
+        : new Map(),
+    [summary.data],
+  );
+  return { byVersion, meaningByVersion, error: summary.error };
 }
 
 /** The words for a count, or `null` when there is nothing to say (never published, nothing
@@ -231,6 +243,31 @@ export function useChangesSincePublished(
 export function changedSincePublishedText(count: number | null | undefined): string | null {
   if (!count) return null;
   return count === 1 ? "1 change since published" : `${count} changes since published`;
+}
+
+/** The words for pinned meaning that no longer stands -- an ontology, semantic model or
+ *  glossary term version the product pins that has been superseded or retired -- or `null`. */
+export function meaningMovedText(count: number | null | undefined): string | null {
+  if (!count) return null;
+  return count === 1 ? "pinned meaning moved on" : `${count} pinned meanings moved on`;
+}
+
+/** Both readings for one `<select>` option, or `null` when neither has anything to say. */
+export function stalenessText(
+  changed: number | null | undefined,
+  meaning: number | null | undefined,
+): string | null {
+  const parts = [changedSincePublishedText(changed), meaningMovedText(meaning)].filter(
+    (part): part is string => part !== null,
+  );
+  return parts.length ? parts.join("; ") : null;
+}
+
+/** The pinned-meaning badge. Shown beside the change count, never instead of it: the two move
+ *  for different reasons, and the on-demand check says nothing about meaning. */
+export function MeaningMovedPill({ count }: { count: number | null | undefined }) {
+  const text = meaningMovedText(count);
+  return text ? <Pill tone="warn">{text}</Pill> : null;
 }
 
 /** The passive badge: text, not colour alone, and only when something moved. */

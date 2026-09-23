@@ -558,7 +558,7 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     fireEvent.change(picker, { target: { value: "customer-revenue" } });
 
     expect(
-      await screen.findByText(/Some of what this product covers has changed since it was published/),
+      await screen.findByText(/Some of what this product stands on has changed since it was published/),
     ).toBeInTheDocument();
     expect(screen.getByText(/Answers still use the published version/)).toBeInTheDocument();
     expect(fetchContextProductChangesSummary).toHaveBeenCalledWith(
