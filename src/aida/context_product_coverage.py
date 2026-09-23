@@ -37,7 +37,8 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
 
@@ -950,6 +951,8 @@ def _retired_since(
     in_scope: ColumnElement[bool],
     organization_id: UUID,
     since: datetime,
+    *,
+    times: bool = False,
 ) -> Select[Any]:
     """The approved description in force at `since` that no approved text now repeats.
 
@@ -958,6 +961,13 @@ def _retired_since(
     same object now says the same thing. So text replaced and then restored reads as unchanged,
     a re-approval of identical text never counts, and a draft never does -- only a version a
     reader was given can be retired. `replaced` says whether other approved text stands now.
+
+    `times` is for the batched summary (`load_changes_since_published_counts`), which reads one
+    set of rows against many versions' own baselines: the rows then carry `approved_at` and
+    `updated_at`, and the `approved_at <= since` half -- the only one that differs per version --
+    is left to the caller. `since` stays the floor on `updated_at`, so the rows are still bounded
+    by the earliest baseline asked about, and everything else (scope, retired status, the
+    same-text check) is the query's, once, for every version.
     """
     current = aliased(version)
     same_text = exists().where(
@@ -970,19 +980,24 @@ def _retired_since(
         other.documentation_id == version.documentation_id,
         other.status == "APPROVED",
     )
-    return (
-        select(subject, replaced.label("replaced"))
+    selected = [subject, replaced.label("replaced")]
+    if times:
+        selected.extend([version.approved_at, version.updated_at])
+    statement = (
+        select(*selected)
         .select_from(version)
         .join(documentation, documentation.id == version.documentation_id)
         .where(
             version.organization_id == organization_id,
             in_scope,
             version.status.in_(RETIRED_STATUSES),
-            or_(version.approved_at.is_(None), version.approved_at <= since),
             version.updated_at > since,
             ~same_text,
         )
     )
+    if times:
+        return statement
+    return statement.where(or_(version.approved_at.is_(None), version.approved_at <= since))
 
 
 async def _description_changes(
@@ -1085,3 +1100,187 @@ async def load_coverage_changes(
         *await _description_changes(session, organization_id, tables, routines, since),
     ]
     return sorted(changes, key=lambda item: (item.subject_kind, item.subject_id, item.change))
+
+# --------------------------------------------------------------------------
+# R11-FP12: the same reading for a list of versions, in a fixed number of queries
+# --------------------------------------------------------------------------
+
+
+def _utc(moment: datetime | None) -> datetime | None:
+    """A stored moment as an aware UTC one.
+
+    The per-version reading compares dates in SQL, where the engine decides; this one compares
+    them in Python, where a naive value and an aware one cannot be compared at all. SQLite hands
+    back naive datetimes for these columns and PostgreSQL aware ones, so the same code would
+    raise on one engine and not the other. Stored moments are UTC (`DateTime(timezone=True)`,
+    written from `datetime.now(UTC)`), so a naive one is read as UTC rather than as local time.
+    """
+    if moment is None or moment.tzinfo is not None:
+        return moment
+    return moment.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedScope:
+    """One published version to count changes for: what it covers, and since when."""
+
+    version_id: UUID
+    #: As a version stores them (strings): parsed here, like every other resolver's scope.
+    table_ids: Sequence[Any]
+    routine_ids: Sequence[Any]
+    #: `publication_time(version)`. `None` -- never published -- has no baseline, so no count.
+    since: datetime | None
+
+
+async def load_changes_since_published_counts(
+    session: AsyncSession,
+    organization_id: UUID,
+    scopes: Sequence[PublishedScope],
+) -> dict[UUID, int]:
+    """How many covered subjects moved since each version was published.
+
+    The same reading as `load_coverage_changes`, for many versions at once and without a query
+    per version: a list of products would otherwise cost one round of queries per row, which is
+    why the screens had to ask about one version at a time and only when a person clicked.
+    `tests/test_r11_fp12_changes_summary.py` holds the two to the same answer on the same data,
+    which is what makes this safe to read as the badge.
+
+    Four queries, whatever the number of versions: one over the definition signals and one per
+    documentation store, each bounded by the union of every scope's ids and by the EARLIEST
+    baseline asked about. Attribution is then per version in Python, against that version's own
+    ids and its own `since`, so a version is never counted for something outside its own scope
+    or from before its own publication. Versions with no baseline are absent from the result.
+    """
+    counted = [scope for scope in scopes if scope.since is not None]
+    if not counted:
+        return {}
+    floor = min(scope.since for scope in counted if scope.since is not None)
+    scoped = {
+        scope.version_id: (_uuids(scope.table_ids), _uuids(scope.routine_ids)) for scope in counted
+    }
+    tables = sorted({table for tables_, _ in scoped.values() for table in tables_})
+    routines = sorted({routine for _, routines_ in scoped.values() for routine in routines_})
+    if not tables and not routines:
+        return {scope.version_id: 0 for scope in counted}
+
+    # Distinct entries per version, keyed exactly as `load_coverage_changes` keys them: a
+    # definition move per (kind, subject, signal), a retirement per (kind, subject).
+    found: dict[UUID, set[tuple[str, str, str]]] = {scope.version_id: set() for scope in counted}
+    table_scopes = [
+        (scope, {str(value) for value in scoped[scope.version_id][0]}) for scope in counted
+    ]
+    routine_scopes = [
+        (scope, {str(value) for value in scoped[scope.version_id][1]}) for scope in counted
+    ]
+
+    def attribute(kind: str, subject_id: Any, change: str, moment: datetime | None) -> None:
+        subject = str(subject_id)
+        at = _utc(moment)
+        for scope, ids in table_scopes if kind != "ROUTINE" else routine_scopes:
+            since = _utc(scope.since)
+            if subject not in ids or since is None:
+                continue
+            if at is not None and at <= since:
+                continue
+            found[scope.version_id].add((kind, subject, change))
+
+    covered: list[ColumnElement[bool]] = []
+    if tables:
+        covered.append(
+            and_(
+                MetadataChangeSignal.subject_kind == "VIEW",
+                MetadataChangeSignal.subject_id.in_(tables),
+            )
+        )
+    if routines:
+        covered.append(
+            and_(
+                MetadataChangeSignal.subject_kind == "ROUTINE",
+                MetadataChangeSignal.subject_id.in_(routines),
+            )
+        )
+    if covered:
+        rows = (
+            await session.execute(
+                select(
+                    MetadataChangeSignal.subject_kind,
+                    MetadataChangeSignal.subject_id,
+                    MetadataChangeSignal.signal_type,
+                    MetadataChangeSignal.detected_at,
+                )
+                .where(
+                    MetadataChangeSignal.organization_id == organization_id,
+                    MetadataChangeSignal.signal_type.in_(_DEFINITION_MOVES),
+                    MetadataChangeSignal.detected_at > floor,
+                    or_(*covered),
+                )
+            )
+        ).all()
+        for kind, subject_id, signal_type, detected_at in rows:
+            attribute(kind, subject_id, signal_type, detected_at)
+
+    async def retirements(statement: Select[Any], kind_of: Any, scoped_by: Any = None) -> None:
+        # Columns: the described object, whether other approved text stands, then the two dates
+        # the per-version test needs, then whatever the caller added. `scoped_by` is the id a
+        # version's scope is matched on when it is not the subject itself: a column's
+        # description belongs to a product through its TABLE, while the entry names the column.
+        for row in (await session.execute(statement)).all():
+            subject_id, approved_at, updated_at = row[0], row[2], row[3]
+            kind = kind_of(row)
+            in_scope_id = str(scoped_by(row) if scoped_by is not None else subject_id)
+            approved, updated = _utc(approved_at), _utc(updated_at)
+            for scope, ids in table_scopes if kind != "ROUTINE" else routine_scopes:
+                since = _utc(scope.since)
+                if in_scope_id not in ids or since is None:
+                    continue
+                if approved is not None and approved > since:
+                    continue
+                if updated is None or updated <= since:
+                    continue
+                found[scope.version_id].add((kind, str(subject_id), SIGNAL_MEANING_RETIRED))
+
+    if tables:
+        await retirements(
+            _retired_since(
+                AssetDocumentationVersion,
+                AssetDocumentation,
+                "readme",
+                AssetDocumentation.table_id,
+                AssetDocumentation.table_id.in_(tables),
+                organization_id,
+                floor,
+                times=True,
+            ).join(MetadataTable, MetadataTable.id == AssetDocumentation.table_id).add_columns(
+                MetadataTable.object_type
+            ),
+            lambda row: "TABLE" if table_kind(row[4]) == "TABLE" else "VIEW",
+        )
+        await retirements(
+            _retired_since(
+                ColumnDocumentationVersion,
+                ColumnDocumentation,
+                "description",
+                ColumnDocumentation.column_id,
+                ColumnDocumentation.table_id.in_(tables),
+                organization_id,
+                floor,
+                times=True,
+            ).add_columns(ColumnDocumentation.table_id),
+            lambda row: "COLUMN",
+            lambda row: row[4],
+        )
+    if routines:
+        await retirements(
+            _retired_since(
+                RoutineDocumentationVersion,
+                RoutineDocumentation,
+                "description",
+                RoutineDocumentation.routine_id,
+                RoutineDocumentation.routine_id.in_(routines),
+                organization_id,
+                floor,
+                times=True,
+            ),
+            lambda row: "ROUTINE",
+        )
+    return {version_id: len(entries) for version_id, entries in found.items()}

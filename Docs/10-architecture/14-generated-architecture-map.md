@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-424 Python modules under `src/`, 2641 intra-`src` import edges.
+424 Python modules under `src/`, 2643 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -60,7 +60,7 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>6 modules"]
-  routers -->|641| domain
+  routers -->|643| domain
   app -->|74| routers
   domain -->|70| platform
   workflows -->|59| domain
@@ -146,7 +146,7 @@ whether code can run in it at all — not whether it does.
 |---|---|---:|
 | `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 393 |
 | `aida.workflows.worker` | Temporal worker | 130 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 200 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 204 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 90 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
@@ -159,7 +159,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 75 | 0 | 3 | 1 | 0 | 75 |
-| aida domain modules | 261 | 81 | 147 | 44 | 6 | 282 |
+| aida domain modules | 261 | 81 | 151 | 44 | 6 | 282 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -180,11 +180,11 @@ graph LR
   shared["shared substrate<br/>25 modules"]
   aida_main(["aida.main<br/>393 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>130 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>200 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>204 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>90 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>201 modules"]
+  only_aida_main["only this process<br/>197 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]

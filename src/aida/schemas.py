@@ -2861,6 +2861,32 @@ class ContextProductRead(ApiModel):
     updated_at: datetime
 
 
+class ContextProductChangesSummaryRead(ApiModel):
+    """R11-FP12: how much of one version's coverage has moved since it was published.
+
+    `changed_subjects` counts the entries the per-version coverage reading lists
+    (`load_coverage_changes`): a covered view's or routine's definition move, and a covered
+    table's, view's, column's or routine's retired description. `null` means the version was
+    never published, so there is no baseline to be stale against -- not that nothing moved.
+    """
+
+    product_id: UUID
+    version_id: UUID
+    version: int
+    status: str
+    changed_subjects: int | None
+
+
+class ContextProductChangesSummaryListRead(ApiModel):
+    """The same reading for every product in a project, so a list can carry it without a click."""
+
+    project_id: UUID
+    generated_at: datetime
+    #: More products than `limit`: the rows not returned carry no reading either way.
+    truncated: bool
+    items: list[ContextProductChangesSummaryRead]
+
+
 class ContextProductScopeRead(ApiModel):
     """Both ADR-0017 SS9 axes for one context product version, composed for an
     agent or MCP client deciding what it may actually retrieve: `data_domain_ids`

@@ -1481,6 +1481,23 @@ export interface ContextCompilationValidationRead {
   findings: string[];
 }
 
+/** The same reading for every product in a project, so a list can carry it without a click. */
+export interface ContextProductChangesSummaryListRead {
+  project_id: string;
+  generated_at: string;
+  truncated: boolean;
+  items: ContextProductChangesSummaryRead[];
+}
+
+/** R11-FP12: how much of one version's coverage has moved since it was published. */
+export interface ContextProductChangesSummaryRead {
+  product_id: string;
+  version_id: string;
+  version: number;
+  status: string;
+  changed_subjects: number | null;
+}
+
 /** AT-7(b): pin `consumer_principal_id` (the path parameter) to this */
 export interface ContextProductConsumerBindingCreate {
   bound_version_id: string;

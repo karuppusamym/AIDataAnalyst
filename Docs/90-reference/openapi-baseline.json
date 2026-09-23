@@ -8841,6 +8841,85 @@
         "title": "ContextCompilationValidationRead",
         "type": "object"
       },
+      "ContextProductChangesSummaryListRead": {
+        "additionalProperties": false,
+        "description": "The same reading for every product in a project, so a list can carry it without a click.",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContextProductChangesSummaryRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "project_id": {
+            "format": "uuid",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project_id",
+          "generated_at",
+          "truncated",
+          "items"
+        ],
+        "title": "ContextProductChangesSummaryListRead",
+        "type": "object"
+      },
+      "ContextProductChangesSummaryRead": {
+        "additionalProperties": false,
+        "description": "R11-FP12: how much of one version's coverage has moved since it was published.\n\n`changed_subjects` counts the entries the per-version coverage reading lists\n(`load_coverage_changes`): a covered view's or routine's definition move, and a covered\ntable's, view's, column's or routine's retired description. `null` means the version was\nnever published, so there is no baseline to be stale against -- not that nothing moved.",
+        "properties": {
+          "changed_subjects": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changed Subjects"
+          },
+          "product_id": {
+            "format": "uuid",
+            "title": "Product Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "version_id": {
+            "format": "uuid",
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id",
+          "version_id",
+          "version",
+          "status",
+          "changed_subjects"
+        ],
+        "title": "ContextProductChangesSummaryRead",
+        "type": "object"
+      },
       "ContextProductConsumerBindingCreate": {
         "additionalProperties": false,
         "description": "AT-7(b): pin `consumer_principal_id` (the path parameter) to this\nversion. Deliberately a single explicit version reference, not a\npercentage/weight -- the tracker declines blind A/B splits.",
@@ -95405,6 +95484,164 @@
           }
         },
         "summary": "Create Context Product",
+        "tags": [
+          "context-products"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/context-products/changes-since-published": {
+      "get": {
+        "description": "R11-FP12: what has moved under each product's latest version, for a whole project.\n\nThe same reading `Query.contextProductCoverage` gives for one version, counted for every\nproduct a caller can see, in a fixed number of queries\n(`load_changes_since_published_counts`). It exists so a list can show a product as stale\nwithout a person pressing a button per row, and so the screens that only ever list products\n-- the agent gateway's exposure list, Ask's picker, the rollout version list -- can show the\nsame thing.\n\n**Why its own route, and not a field on the product list.** The product list admits\n`CONTEXT_PRODUCT_READERS` (Viewer and Auditor among them); a coverage reading admits\n`COMPILER_ROLES`, and the compile route and the GraphQL coverage field both refuse the\nothers. Carrying the reading on the list row would hand it to roles those doors refuse, so\nit is a separate read with the coverage roles, and a screen asks for it only when the\nsession holds them.\n\n`product_id` narrows it to one product and answers for EVERY version of it, newest first,\nrather than one row per product: what the rollout screen needs, where the choice is between a\nproduct's versions and an older one can have drifted further than the latest. The product is\nread through the same listing, so a product the caller may not list is not answered for.\n\nVisibility is the product list's own (`context_product_listing`), so a caller is told about\nexactly the products it may already list, in the same order, and a project in another\norganization is refused there, before any coverage is read.",
+        "operationId": "list_context_product_changes_since_published_v1_projects__project_id__context_products_changes_since_published_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "product_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Product Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextProductChangesSummaryListRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Context Product Changes Since Published",
         "tags": [
           "context-products"
         ]

@@ -1,6 +1,7 @@
 import hashlib
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -13,6 +14,12 @@ from aida.context import get_correlation_id
 
 # The read decisions REST shares with GraphQL (R11-GQL01); re-imported so every existing
 # caller of these names is unchanged.
+from aida.context_product_coverage import (
+    PublishedScope,
+    load_changes_since_published_counts,
+    publication_time,
+)
+from aida.context_product_read_service import COMPILER_ROLES
 from aida.context_product_reads import (
     CONTEXT_PRODUCT_AUTHORS,
     CONTEXT_PRODUCT_LIFECYCLE_READERS,
@@ -53,6 +60,8 @@ from aida.models import (
 from aida.ontology_models import OntologyVersion
 from aida.resource_scope import load_project_in_scope
 from aida.schemas import (
+    ContextProductChangesSummaryListRead,
+    ContextProductChangesSummaryRead,
     ContextProductConsumerBindingCreate,
     ContextProductConsumerBindingRead,
     ContextProductCreate,
@@ -388,6 +397,110 @@ async def list_context_products(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/context-products/changes-since-published",
+    response_model=ContextProductChangesSummaryListRead,
+)
+async def list_context_product_changes_since_published(
+    project_id: UUID,
+    product_id: UUID | None = None,
+    limit: int = Query(default=200, ge=1, le=500),
+    context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ContextProductChangesSummaryListRead:
+    """R11-FP12: what has moved under each product's latest version, for a whole project.
+
+    The same reading `Query.contextProductCoverage` gives for one version, counted for every
+    product a caller can see, in a fixed number of queries
+    (`load_changes_since_published_counts`). It exists so a list can show a product as stale
+    without a person pressing a button per row, and so the screens that only ever list products
+    -- the agent gateway's exposure list, Ask's picker, the rollout version list -- can show the
+    same thing.
+
+    **Why its own route, and not a field on the product list.** The product list admits
+    `CONTEXT_PRODUCT_READERS` (Viewer and Auditor among them); a coverage reading admits
+    `COMPILER_ROLES`, and the compile route and the GraphQL coverage field both refuse the
+    others. Carrying the reading on the list row would hand it to roles those doors refuse, so
+    it is a separate read with the coverage roles, and a screen asks for it only when the
+    session holds them.
+
+    `product_id` narrows it to one product and answers for EVERY version of it, newest first,
+    rather than one row per product: what the rollout screen needs, where the choice is between a
+    product's versions and an older one can have drifted further than the latest. The product is
+    read through the same listing, so a product the caller may not list is not answered for.
+
+    Visibility is the product list's own (`context_product_listing`), so a caller is told about
+    exactly the products it may already list, in the same order, and a project in another
+    organization is refused there, before any coverage is read.
+    """
+    listing = await context_product_listing(
+        session, context, project_id=project_id, askable=False
+    )
+    if product_id is not None:
+        product = await session.scalar(
+            listing.statement.with_only_columns(ContextProduct).where(
+                ContextProduct.id == product_id
+            )
+        )
+        if product is None:
+            raise HTTPException(status_code=404, detail="context product not found")
+        versions = (
+            await session.scalars(
+                select(ContextProductVersion)
+                .where(ContextProductVersion.product_id == product.id)
+                .order_by(ContextProductVersion.version.desc())
+                .limit(limit + 1)
+            )
+        ).all()
+        rows: list[tuple[ContextProduct, ContextProductVersion]] = [
+            (product, version) for version in versions
+        ]
+    else:
+        rows = [
+            (listed, version)
+            for listed, version in (
+                await session.execute(
+                    listing.statement.order_by(ContextProduct.product_key).limit(limit + 1)
+                )
+            ).all()
+        ]
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    scopes = [
+        PublishedScope(
+            version_id=version.id,
+            table_ids=version.table_ids or [],
+            routine_ids=version.routine_ids or [],
+            since=publication_time(version),
+        )
+        for _product, version in rows
+        if version is not None
+    ]
+    # The products' own organization: every row is from the one project the listing admitted,
+    # and a platform-level caller's context need not name an organization at all.
+    counts = (
+        await load_changes_since_published_counts(session, rows[0][0].organization_id, scopes)
+        if rows
+        else {}
+    )
+    return ContextProductChangesSummaryListRead(
+        project_id=project_id,
+        generated_at=datetime.now(UTC),
+        truncated=truncated,
+        items=[
+            ContextProductChangesSummaryRead(
+                product_id=product.id,
+                version_id=version.id,
+                version=version.version,
+                status=version.status,
+                changed_subjects=counts.get(version.id),
+            )
+            for product, version in rows
+            if version is not None
+        ],
     )
 
 
