@@ -1040,6 +1040,11 @@ class Settings(BaseSettings):
     # so every route approved before this setting existed is unaffected.
     model_endpoint_urls: dict[str, str] = Field(default_factory=dict)
     model_provider_max_attempts: int = Field(default=3, ge=1, le=5)
+    # R11-MP04: consecutive route failures (fallback-worthy status, timeout,
+    # network) after which the fallback loop skips that route for the cool-down.
+    # 0 turns the breaker off.
+    model_route_breaker_failure_threshold: int = Field(default=3, ge=0, le=20)
+    model_route_breaker_cooldown_seconds: int = Field(default=60, ge=5, le=3600)
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, validation_alias="GEMINI_API_KEY")
     anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")

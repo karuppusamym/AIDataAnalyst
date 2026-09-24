@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**296 settings.** 0 are read nowhere. 67 more ship switched off, empty or zero.
+**298 settings.** 0 are read nowhere. 67 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -365,6 +365,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `openrouter_require_pinned_provider` | `bool` | `True` | 2 |
 | `model_endpoint_urls` | `dict[str, str]` | `dict` | 3 |
 | `model_provider_max_attempts` | `int` | `3` | 6 |
+| `model_route_breaker_failure_threshold` | `int` | `3` | 1 |
+| `model_route_breaker_cooldown_seconds` | `int` | `60` | 1 |
 | `openai_api_key` | `SecretStr | None` | `None` | 3 |
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 |
 | `anthropic_api_key` | `SecretStr | None` | `None` | 2 |

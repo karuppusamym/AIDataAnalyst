@@ -86,6 +86,7 @@ from aida.model_gateway import (
     SqlGenerationOutput,
     estimate_payload_tokens,
 )
+from aida.model_route_breaker import ROUTE_BREAKER, is_route_failure
 from aida.models import (
     AgentRun,
     AnalysisRun,
@@ -645,6 +646,8 @@ class GovernedAgentOrchestrator:
         self.planner = GovernedPlanner(settings)
         self.prompt_risk_classifier = DeterministicPromptRiskClassifier()
         self.model_gateway = ProviderNeutralModelGateway(settings)
+        # R11-MP04: process-wide, because orchestrators are built per request.
+        self.route_breaker = ROUTE_BREAKER
 
     async def _approved_model_routes(
         self, session: AsyncSession, organization_id: UUID
@@ -729,6 +732,17 @@ class GovernedAgentOrchestrator:
         primary route here, and generation failed while a working OpenAI
         fallback was configured and never attempted.
 
+        A timeout or network failure (a plain `ModelGatewayError` with no
+        status) falls back too, for the same reason: it says this route is
+        not answering, and the next route is a different endpoint (R11-MP04).
+
+        R11-MP04: a route whose circuit breaker is open -- it failed
+        `model_route_breaker_failure_threshold` times in a row within the
+        cool-down -- is skipped without a call and recorded as
+        `SKIPPED_CIRCUIT_OPEN`, so an outage costs a few slow calls per
+        cool-down instead of one per question. The breaker only skips routes
+        this list already holds; it never adds one.
+
         `attempts` records every route tried (route_key, provider_type,
         attempt_ordinal, outcome, provider_status_code on failure) so the
         caller can attach it to `plan_evidence.model_call_attempts`
@@ -748,7 +762,26 @@ class GovernedAgentOrchestrator:
             raise ModelGatewayError(
                 "no approved model route is configured", provider_status_code=None
             )
+        breaker_threshold = self.settings.model_route_breaker_failure_threshold
+        breaker_cooldown = self.settings.model_route_breaker_cooldown_seconds
         for attempt_ordinal, approved_route in enumerate(approved_routes, start=1):
+            if breaker_threshold > 0:
+                wait = self.route_breaker.seconds_until_retry(
+                    organization_id,
+                    approved_route.route_key,
+                    cooldown_seconds=breaker_cooldown,
+                )
+                if wait is not None:
+                    attempts.append(
+                        {
+                            "route_key": approved_route.route_key,
+                            "provider_type": approved_route.provider_type,
+                            "attempt_ordinal": attempt_ordinal,
+                            "outcome": "SKIPPED_CIRCUIT_OPEN",
+                            "retry_in_seconds": round(wait, 1),
+                        }
+                    )
+                    continue
             try:
                 output, model_evidence = await self.model_gateway.structured_completion(
                     session=session,
@@ -769,8 +802,20 @@ class GovernedAgentOrchestrator:
                         "error_class": type(exc).__name__,
                     }
                 )
+                route_failed = is_route_failure(
+                    exc.provider_status_code,
+                    generic_gateway_error=type(exc) is ModelGatewayError,
+                )
+                if breaker_threshold > 0 and route_failed:
+                    if self.route_breaker.record_failure(
+                        organization_id,
+                        approved_route.route_key,
+                        failure_threshold=breaker_threshold,
+                    ):
+                        attempts[-1]["circuit_opened"] = True
                 may_fall_back = (
                     exc.provider_status_code in _FALLBACK_WORTHY_PROVIDER_STATUSES
+                    or (exc.provider_status_code is None and route_failed)
                 )
                 is_last_attempt = attempt_ordinal == len(approved_routes)
                 if not may_fall_back or is_last_attempt:
@@ -782,6 +827,8 @@ class GovernedAgentOrchestrator:
                     exc.model_call_attempts = attempts  # type: ignore[attr-defined]
                     raise
                 continue
+            if breaker_threshold > 0:
+                self.route_breaker.record_success(organization_id, approved_route.route_key)
             attempts.append(
                 {
                     "route_key": approved_route.route_key,
@@ -791,13 +838,15 @@ class GovernedAgentOrchestrator:
                 }
             )
             return output, model_evidence, attempts
-        # Loop exited without success or raise (shouldn't happen given the
-        # empty-routes guard above and the raise-on-last-attempt path, but
-        # defensive).
-        raise ModelGatewayError(
-            "model route iteration exhausted without producing a result",
-            provider_status_code=None,
+        # Reached when every remaining route was skipped with its breaker open
+        # (R11-MP04). A 503, like a provider outage, with the chain attached so
+        # the refusal record shows which routes were cooling down.
+        exhausted = ModelGatewayError(
+            "every approved model route is cooling down after repeated failures",
+            provider_status_code=503,
         )
+        exhausted.model_call_attempts = attempts  # type: ignore[attr-defined]
+        raise exhausted
 
     async def _approved_model_route(
         self, session: AsyncSession, organization_id: UUID
