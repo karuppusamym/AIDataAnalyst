@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from aida.config import Settings
+from aida.embedding_governance import governed_embedding_provider
 from aida.embedding_provider import (
     AsyncEmbeddingProvider,
     EmbeddingUnavailable,
@@ -499,8 +500,14 @@ async def run_vector_channel(
 
     embedding_provider: AsyncEmbeddingProvider
     try:
-        embedding_provider = resolve_embedding_provider(
-            request.settings, SecretResolver(request.settings)
+        # R11-MP15: the kill switch, the approved EMBEDDINGS route, the token
+        # quota and spend attribution, before anything is embedded.
+        embedding_provider = await governed_embedding_provider(
+            session,
+            request.settings,
+            organization_id=request.organization_id,
+            datasource_id=request.datasource.id,
+            inner=resolve_embedding_provider(request.settings, SecretResolver(request.settings)),
         )
     except EmbeddingUnavailable as exc:
         logger.info(
@@ -510,120 +517,133 @@ async def run_vector_channel(
         )
         return skipped(SkipReason.PROVIDER_UNAVAILABLE)
 
-    authorized = pool.authorized
-    freshness = await index_freshness(session, request.organization_id, settings=request.settings)
-    hit_by_key = {f"{hit.object_type}:{hit.object_id}": hit for hit in authorized}
-    vector_path = "PERSISTED_INDEX" if freshness.usable else "LIVE_EMBED"
-    logger.info(
-        "retrieval_vector_stage_path",
-        path=vector_path,
-        reason=freshness.reason,
-        indexed_entries=freshness.entries,
-        datasource_id=str(request.datasource.id),
-    )
+    # R11-MP15: a governed embedding call can be refused part way through the
+    # stage (a spent token quota). That drops the vector signal and says so, as
+    # an unavailable provider always has; it never fails the question.
+    try:
+        authorized = pool.authorized
+        freshness = await index_freshness(
+            session, request.organization_id, settings=request.settings
+        )
+        hit_by_key = {f"{hit.object_type}:{hit.object_id}": hit for hit in authorized}
+        vector_path = "PERSISTED_INDEX" if freshness.usable else "LIVE_EMBED"
+        logger.info(
+            "retrieval_vector_stage_path",
+            path=vector_path,
+            reason=freshness.reason,
+            indexed_entries=freshness.entries,
+            datasource_id=str(request.datasource.id),
+        )
 
-    scored: list[tuple[str, str, float]] = []
-    if freshness.usable:
-        # R11-FP08: which persisted entries still encode the text this stage would embed now.
-        # Composed by the builder's own function, so "the same text" is not a convention two
-        # call sites keep but one function's output compared with its stored fingerprint.
-        indexed = [hit for hit in authorized if hit.object_type in INDEXED_OWNER_TYPES]
-        current_texts = await compose_vector_texts(
-            session,
-            request.organization_id,
-            [(hit.object_type, str(hit.object_id), hit.display_name) for hit in indexed],
-        )
-        stale = await stale_index_entries(
-            session,
-            request.organization_id,
-            {
-                (hit.object_type, str(hit.object_id)): text_fingerprint(text)
-                for hit, text in zip(indexed, current_texts, strict=True)
-            },
-            settings=request.settings,
-        )
-        batch = await embedding_provider.embed([request.question])
-        query_emb = tuple(batch.vectors[0])
-        # A stale entry is left out of the persisted search entirely rather than scored and
-        # then overwritten: the search ranks top-`result_limit`, so a stale vector allowed in
-        # would still displace a fresh candidate from that window even if its own score were
-        # replaced afterwards.
-        refs = tuple(
-            EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
-            for hit in authorized
-            if (hit.object_type, str(hit.object_id)) not in stale
-        )
-        try:
-            scored = list(
-                await search_persisted_index(
-                    session,
-                    request.organization_id,
-                    query_emb,
-                    settings=request.settings,
-                    # `refs`, never `refs or None`: an empty authorized set is
-                    # the policy filter's answer, and `None` means "no candidate
-                    # filter" to `search_persisted_index`, which then ranks the
-                    # whole organization's index. Passing the empty tuple hits
-                    # its `if not candidates: return ()` guard instead, so a
-                    # caller authorized for nothing retrieves nothing.
-                    candidates=refs,
-                    limit=request.result_limit,
-                )
+        scored: list[tuple[str, str, float]] = []
+        if freshness.usable:
+            # R11-FP08: which persisted entries still encode the text this stage would embed now.
+            # Composed by the builder's own function, so "the same text" is not a convention two
+            # call sites keep but one function's output compared with its stored fingerprint.
+            indexed = [hit for hit in authorized if hit.object_type in INDEXED_OWNER_TYPES]
+            current_texts = await compose_vector_texts(
+                session,
+                request.organization_id,
+                [(hit.object_type, str(hit.object_id), hit.display_name) for hit in indexed],
             )
-        except VectorIndexUnavailable as exc:
-            # The index went away between the freshness check and the search.
-            # Fall back rather than losing the stage.
-            logger.info("retrieval_vector_index_unavailable", reason=str(exc))
-            vector_path = "LIVE_EMBED"
-            freshness = replace(freshness, usable=False)
-        else:
-            # The index covers `vector_index_service.INDEXED_OWNER_TYPES` only
-            # -- TABLE, COLUMN, ROUTINE and GLOSSARY_TERM. A candidate of any
-            # other type, and a TOOL is the one this platform actually
-            # retrieves, has no index entry, so the persisted search cannot
-            # score it and it silently left the stage with no vector signal
-            # at all. The live path embeds every candidate and scores all of
-            # them, which
-            # is why this module's own docstring claiming the fallback "is the
-            # same computation" was wrong: measured on the AG-8 corpus, using
-            # the index cost 6 points of recall-within-bound purely by
-            # dropping the tool candidates' vector score (R11-B2, 2026-09-12).
-            #
-            # So the uncovered candidates are embedded live and scored here.
-            # The index still carries the bulk -- tables and columns are the
-            # estate -- so the cost saving RT-1 exists for is kept, and the
-            # computation is complete either way. `vector_index_gap` reports
-            # how many needed it, because a stage that quietly scores a subset
-            # is the failure this fixes and it must stay visible if the
-            # covered set changes again.
-            #
-            # R11-FP08: a candidate whose entry is stale or missing (see above) is embedded
-            # live the same way, from its current text, and reported beside the uncovered
-            # types as `stale_entries` -- a count that stays high after a rebuild would mean the
-            # builder and this stage disagree about text again, which is the failure the shared
-            # composer exists to prevent.
-            uncovered = [
-                hit
+            stale = await stale_index_entries(
+                session,
+                request.organization_id,
+                {
+                    (hit.object_type, str(hit.object_id)): text_fingerprint(text)
+                    for hit, text in zip(indexed, current_texts, strict=True)
+                },
+                settings=request.settings,
+            )
+            batch = await embedding_provider.embed([request.question])
+            query_emb = tuple(batch.vectors[0])
+            # A stale entry is left out of the persisted search entirely rather than scored and
+            # then overwritten: the search ranks top-`result_limit`, so a stale vector allowed in
+            # would still displace a fresh candidate from that window even if its own score were
+            # replaced afterwards.
+            refs = tuple(
+                EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
                 for hit in authorized
-                if hit.object_type not in INDEXED_OWNER_TYPES
-                or (hit.object_type, str(hit.object_id)) in stale
-            ]
-            if uncovered:
-                logger.info(
-                    "retrieval_vector_index_gap",
-                    uncovered=len(uncovered),
-                    stale_entries=len(stale),
-                    object_types=sorted({hit.object_type for hit in uncovered}),
-                    datasource_id=str(request.datasource.id),
-                )
-                scored.extend(
-                    await _live_vector_scores(
-                        session, embedding_provider, request, uncovered, query_emb=query_emb
+                if (hit.object_type, str(hit.object_id)) not in stale
+            )
+            try:
+                scored = list(
+                    await search_persisted_index(
+                        session,
+                        request.organization_id,
+                        query_emb,
+                        settings=request.settings,
+                        # `refs`, never `refs or None`: an empty authorized set is
+                        # the policy filter's answer, and `None` means "no candidate
+                        # filter" to `search_persisted_index`, which then ranks the
+                        # whole organization's index. Passing the empty tuple hits
+                        # its `if not candidates: return ()` guard instead, so a
+                        # caller authorized for nothing retrieves nothing.
+                        candidates=refs,
+                        limit=request.result_limit,
                     )
                 )
+            except VectorIndexUnavailable as exc:
+                # The index went away between the freshness check and the search.
+                # Fall back rather than losing the stage.
+                logger.info("retrieval_vector_index_unavailable", reason=str(exc))
+                vector_path = "LIVE_EMBED"
+                freshness = replace(freshness, usable=False)
+            else:
+                # The index covers `vector_index_service.INDEXED_OWNER_TYPES` only
+                # -- TABLE, COLUMN, ROUTINE and GLOSSARY_TERM. A candidate of any
+                # other type, and a TOOL is the one this platform actually
+                # retrieves, has no index entry, so the persisted search cannot
+                # score it and it silently left the stage with no vector signal
+                # at all. The live path embeds every candidate and scores all of
+                # them, which
+                # is why this module's own docstring claiming the fallback "is the
+                # same computation" was wrong: measured on the AG-8 corpus, using
+                # the index cost 6 points of recall-within-bound purely by
+                # dropping the tool candidates' vector score (R11-B2, 2026-09-12).
+                #
+                # So the uncovered candidates are embedded live and scored here.
+                # The index still carries the bulk -- tables and columns are the
+                # estate -- so the cost saving RT-1 exists for is kept, and the
+                # computation is complete either way. `vector_index_gap` reports
+                # how many needed it, because a stage that quietly scores a subset
+                # is the failure this fixes and it must stay visible if the
+                # covered set changes again.
+                #
+                # R11-FP08: a candidate whose entry is stale or missing (see above) is embedded
+                # live the same way, from its current text, and reported beside the uncovered
+                # types as `stale_entries` -- a count that stays high after a rebuild would mean the
+                # builder and this stage disagree about text again, which is the failure the shared
+                # composer exists to prevent.
+                uncovered = [
+                    hit
+                    for hit in authorized
+                    if hit.object_type not in INDEXED_OWNER_TYPES
+                    or (hit.object_type, str(hit.object_id)) in stale
+                ]
+                if uncovered:
+                    logger.info(
+                        "retrieval_vector_index_gap",
+                        uncovered=len(uncovered),
+                        stale_entries=len(stale),
+                        object_types=sorted({hit.object_type for hit in uncovered}),
+                        datasource_id=str(request.datasource.id),
+                    )
+                    scored.extend(
+                        await _live_vector_scores(
+                            session, embedding_provider, request, uncovered, query_emb=query_emb
+                        )
+                    )
 
-    if not freshness.usable:
-        scored = await _live_vector_scores(session, embedding_provider, request, authorized)
+        if not freshness.usable:
+            scored = await _live_vector_scores(session, embedding_provider, request, authorized)
+    except EmbeddingUnavailable as exc:
+        logger.info(
+            "retrieval_vector_stage_skipped",
+            reason=str(exc),
+            datasource_id=str(request.datasource.id),
+        )
+        return skipped(SkipReason.PROVIDER_UNAVAILABLE)
 
     contributions = [
         SignalContribution(

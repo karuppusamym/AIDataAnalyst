@@ -851,6 +851,17 @@ class Settings(BaseSettings):
     # refuses rather than falling back to the deterministic hash double, because a
     # "vector similarity" score computed from a SHA-256 digest is noise wearing the name
     # of a signal (INV-4, INV-9).
+    # R11-MP15: embedding calls need an APPROVED model route with the EMBEDDINGS
+    # capability for the configured provider and model. Unset means "required in
+    # staging and production, not in development and test".
+    embedding_route_required: bool | None = None
+
+    @property
+    def embedding_route_requires_approval(self) -> bool:
+        if self.embedding_route_required is not None:
+            return self.embedding_route_required
+        return self.environment in {"staging", "production"}
+
     embedding_provider: Literal["unset", "openai", "gemini"] = "unset"
     # Resolved through the same path as every other model credential, so an embedding key
     # inherits the same rotation, the same registry and the same production refusal of

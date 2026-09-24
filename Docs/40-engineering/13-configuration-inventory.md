@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**306 settings.** 0 are read nowhere. 70 more ship switched off, empty or zero.
+**307 settings.** 0 are read nowhere. 71 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -91,6 +91,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `quality_certification_expiry_enabled` | `bool` | `False` | 1 | Opt-in: opens incidents at write time; a reviewed opt-in, not a behaviour change on upgrade |
 | `principal_reconciliation_enabled` | `bool` | `False` | 1 | Opt-in: useful only once an identity source emits principal lifecycle events |
 | `vector_index_url` | `str | None` | `None` | 2 | Supplied: the persisted vector index; the vector channel embeds live when unset (R11-B2) |
+| `embedding_route_required` | `bool | None` | `None` | 1 via `embedding_route_requires_approval` | Off by design: unset means required in staging and production and not in development or test |
 | `embedding_credential_reference` | `str` | `''` | 1 | Supplied: the embedding provider credential |
 | `worker_metrics_port` | `int` | `0` | 1 | Opt-in: R11-FP17: the fleet scheduler, graph projector and Temporal worker publish their series into their own process registry, which only this port exposes; 0 opens no port, because opening one changes a deployment's network surface and belongs with whoever configures the scrape (`infra/monitoring/README.md`) |
 | `entitlement_webhook_url` | `str | None` | `None` | 4 | Supplied: the entitlement fulfilment target |
@@ -325,7 +326,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `vector_index_collection` | `str` | `'atlas-metadata'` | 1 |
 | `vector_index_timeout_seconds` | `float` | `10.0` | 1 |
 | `vector_bruteforce_candidate_cap` | `int` | `5000` | 1 |
-| `embedding_provider` | `Literal['unset', 'openai', 'gemini']` | `'unset'` | 3 |
+| `embedding_route_required` | `bool | None` | `None` | 1 via `embedding_route_requires_approval` |
+| `embedding_provider` | `Literal['unset', 'openai', 'gemini']` | `'unset'` | 4 |
 | `embedding_credential_reference` | `str` | `''` | 1 |
 | `embedding_model_id` | `str` | `'unset'` | 2 |
 | `embedding_model_version` | `str` | `'unset'` | 2 |

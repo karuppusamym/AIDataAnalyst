@@ -162,6 +162,10 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "gemini_api_key": (SUPPLIED, "the provider credential"),
     "anthropic_api_key": (SUPPLIED, "the provider credential"),
     "openrouter_api_key": (SUPPLIED, "the provider credential"),
+    "embedding_route_required": (
+        OFF_BY_DESIGN,
+        "unset means required in staging and production and not in development or test",
+    ),
     "mcp_tool_certification_required": (
         OFF_BY_DESIGN,
         "unset means required in staging and production and not in development or test",

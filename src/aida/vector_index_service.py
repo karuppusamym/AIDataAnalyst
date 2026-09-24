@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
 from aida.context import get_correlation_id
+from aida.embedding_governance import governed_embedding_provider
 from aida.embedding_provider import (
     EmbeddingUnavailable,
     index_signature,
@@ -436,7 +437,15 @@ async def rebuild_vector_index(
     partial index is worse than a refusal, because retrieval would then serve
     confident answers from a fraction of the estate.
     """
-    provider = resolve_embedding_provider(settings, SecretResolver(settings))
+    # R11-MP15: governed per organization -- kill switch, approved EMBEDDINGS
+    # route, token quota and attribution.
+    provider = await governed_embedding_provider(
+        session,
+        settings,
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        inner=resolve_embedding_provider(settings, SecretResolver(settings)),
+    )
     index = await resolve_vector_index(settings, session)
     signature = index_signature(settings)
 

@@ -354,6 +354,11 @@ def test_hits_keep_their_public_shape() -> None:
     }
 
 
+async def _ungoverned(_session: object, _settings: object, **kwargs: object) -> object:
+    """The provider the call site resolved, with no governance around it."""
+    return kwargs["inner"]
+
+
 async def test_vector_channel_ranks_nothing_when_nothing_is_authorized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,6 +398,9 @@ async def test_vector_channel_ranks_nothing_when_nothing_is_authorized(
         return ()
 
     monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
+    # R11-MP15: this test is about ranking, not governance; the governed
+    # wrapper reads the database, which this session-less test has none of.
+    monkeypatch.setattr(stages, "governed_embedding_provider", _ungoverned)
     monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
     monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
 
@@ -477,6 +485,9 @@ async def test_a_candidate_the_index_does_not_cover_still_gets_a_vector_score(
         return set()
 
     monkeypatch.setattr(stages, "resolve_embedding_provider", lambda *a, **k: _Provider())
+    # R11-MP15: this test is about ranking, not governance; the governed
+    # wrapper reads the database, which this session-less test has none of.
+    monkeypatch.setattr(stages, "governed_embedding_provider", _ungoverned)
     monkeypatch.setattr(vector_index_service, "index_freshness", _fresh)
     monkeypatch.setattr(vector_index_service, "search_persisted_index", _search)
     monkeypatch.setattr(vector_index_service, "stale_index_entries", _nothing_stale)
