@@ -55,12 +55,12 @@ that still genuinely lives in the file is not use of the shim.
 
 ## Register
 
-14 shims, 1304 shim-to-caller-file relationships across 625 distinct files, 0 shim(s) with a measured caller count of zero.
+14 shims, 1305 shim-to-caller-file relationships across 626 distinct files, 0 shim(s) with a measured caller count of zero.
 
 | Shim | Kind | Replacement path | Owner area | Callers | Import stmts | String refs |
 |---|---|---|---|---:|---:|---:|
 | [`aida.db`](#aidadb) | python | `atlas.platform.db` | Platform infrastructure | 341 | 346 | 2 |
-| [`aida.config`](#aidaconfig) | python | `atlas.platform.config` | Platform infrastructure | 286 | 296 | 1 |
+| [`aida.config`](#aidaconfig) | python | `atlas.platform.config` | Platform infrastructure | 287 | 297 | 1 |
 | [`aida.context`](#aidacontext) | python | `atlas.platform.context` | Platform infrastructure | 74 | 74 | 0 |
 | [`aida.logging`](#aidalogging) | python | `atlas.platform.logging` | Platform infrastructure | 5 | 5 | 0 |
 | [`aida.models`](#aidamodels) | python-partial | `atlas.modules.<context>.models` (re-exported classes only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 489 | 610 | 2 |
@@ -101,8 +101,8 @@ caller today.
 - **Owner area** *(hand-written)* — Platform infrastructure
 - **Introduced by** — ST-04, Phase 1 of Docs/40-engineering/06-refactor-plan.md
 - **Re-exports** — 2 name(s) from `atlas.platform.config`
-- **Callers** — 286 file(s), 296 import statement(s)
-  - By source root: `migrations` 1, `scripts` 5, `src/aida` 100, `src/atlas` 4, `tests` 176
+- **Callers** — 287 file(s), 297 import statement(s)
+  - By source root: `migrations` 1, `scripts` 5, `src/aida` 100, `src/atlas` 4, `tests` 177
 - **String references** — 1 file(s): `scripts/generate_destination_inventory.py`
 - **Removal condition** *(hand-written)* — Import callers and string references both reach zero, **and** `migrations/env.py` reads settings from the canonical module. `Settings` is also the type annotation on FastAPI dependency callables, so a caller count here undercounts nothing only because those callers import the name.
 
