@@ -3348,7 +3348,9 @@ class AiAsset(Base, TimestampMixin):
         Index(
             "ix_ai_asset_org_kind_lifecycle", "organization_id", "asset_kind", "lifecycle_status"
         ),
-        CheckConstraint("asset_kind IN ('AI_USE_CASE', 'MODEL', 'AGENT')", name="ck_ai_asset_kind"),
+        CheckConstraint(
+            "asset_kind IN ('AI_USE_CASE', 'MODEL', 'AGENT', 'PROMPT')", name="ck_ai_asset_kind"
+        ),
         CheckConstraint("lifecycle_status IN ('ACTIVE', 'RETIRED')", name="ck_ai_asset_lifecycle"),
     )
 

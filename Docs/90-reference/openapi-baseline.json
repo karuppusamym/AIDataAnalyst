@@ -1960,7 +1960,8 @@
             "enum": [
               "AI_USE_CASE",
               "MODEL",
-              "AGENT"
+              "AGENT",
+              "PROMPT"
             ],
             "title": "Asset Kind",
             "type": "string"

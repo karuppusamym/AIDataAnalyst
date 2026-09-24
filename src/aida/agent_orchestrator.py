@@ -126,6 +126,7 @@ from aida.orchestration_stages import (
     ValidatedStatement,
     trace_entry,
 )
+from aida.prompt_registry import active_sql_instruction, instruction_sha256
 from aida.prompt_risk import DeterministicPromptRiskClassifier
 from aida.quality_coupling import (
     check_quality_gate,
@@ -1319,6 +1320,7 @@ class GovernedAgentOrchestrator:
         requested_limit: int | None,
         agent_asset_version_id: UUID | None = None,
         context_product_key: str | None = None,
+        sql_instruction_override: str | None = None,
     ) -> AgentDraftResult:
         """R11-SQL01: Ask up to the SQL, and stop -- the generation-only draft stage.
 
@@ -1340,6 +1342,7 @@ class GovernedAgentOrchestrator:
             requested_limit=requested_limit,
             agent_asset_version_id=agent_asset_version_id,
             context_product_key=context_product_key,
+            sql_instruction_override=sql_instruction_override,
         )
         ledger = await self._open_run(session, request)
         screened = await self._stage_screen(session, request, ledger)
@@ -2043,12 +2046,19 @@ class GovernedAgentOrchestrator:
                     ),
                 )
             )
-            system_instruction = (
-                "Return exactly one read-only SQL SELECT statement for the supplied "
-                "dialect. "
-                "Use only qualified tables, columns, and joins present in the supplied "
-                "metadata context. Never invent an identifier or include source values."
-            )
+            # R11-MP08: the fixed safety clause, then the organization's APPROVED
+            # prompt guidance if it has one -- or the optimiser's candidate, on a
+            # draft it is scoring. With neither, exactly the instruction Ask always sent.
+            if request.sql_instruction_override is not None:
+                system_instruction = request.sql_instruction_override
+                ledger.plan_evidence["sql_instruction"] = {
+                    "source": "OPTIMIZER_CANDIDATE",
+                    "instruction_sha256": instruction_sha256(system_instruction),
+                }
+            else:
+                active = await active_sql_instruction(session, request.organization_id)
+                system_instruction = active.text
+                ledger.plan_evidence["sql_instruction"] = active.evidence()
             # AR-10: the audit record keeps every hit verbatim; the model sees
             # the same hits with quarantined free text withheld.
             model_evidence_hits, withheld_fragments = self._screened_evidence_for_model(

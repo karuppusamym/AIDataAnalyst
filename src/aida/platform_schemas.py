@@ -396,7 +396,7 @@ class AiAssetDefinition(PlatformApiModel):
 
 class AiAssetCreate(AiAssetDefinition):
     asset_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
-    asset_kind: Literal["AI_USE_CASE", "MODEL", "AGENT"]
+    asset_kind: Literal["AI_USE_CASE", "MODEL", "AGENT", "PROMPT"]
 
 
 class AiAssetVersionRead(AiAssetDefinition):

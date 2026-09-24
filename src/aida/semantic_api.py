@@ -100,6 +100,7 @@ from aida.models import (
 )
 from aida.ontology_api import decide_ontology_version
 from aida.product_marketplace_api import approve_access_request
+from aida.prompt_registry import prompt_approval_problem
 from aida.quality_rule_proposals import decide_quality_rule_proposal
 from aida.query_history_miner import apply_query_history_metric_candidate_decision
 from aida.retrieval import hybrid_retrieve_cross_source
@@ -2000,6 +2001,15 @@ async def _decide_ai_asset_version(
         # or manufactured evidence blob can never let a publish through:
         # the CONFIRMED_RUN half is always recomputed fresh here from the
         # organization's real, current confirmed-run corpus.
+        # R11-MP08: a PROMPT version (guidance for SQL generation) is approved only
+        # on optimiser evidence computed for its exact instruction that scored no
+        # worse than the baseline over enough cases with no unsafe statement.
+        if ai_asset.asset_kind == "PROMPT":
+            problem = prompt_approval_problem(ai_version)
+            if problem is not None:
+                raise HTTPException(
+                    status_code=409, detail=f"prompt version cannot be approved: {problem}"
+                )
         if ai_asset.asset_kind == "AGENT":
             gate_result = await compute_agent_eval_gate(
                 session,

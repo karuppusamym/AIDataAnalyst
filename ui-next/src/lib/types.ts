@@ -362,7 +362,7 @@ export interface AiAssetCreate {
   evaluation_evidence?: Record<string, unknown>;
   runtime_evidence?: Record<string, unknown>;
   asset_key: string;
-  asset_kind: "AI_USE_CASE" | "MODEL" | "AGENT";
+  asset_kind: "AI_USE_CASE" | "MODEL" | "AGENT" | "PROMPT";
 }
 
 export interface AiAssetDefinition {

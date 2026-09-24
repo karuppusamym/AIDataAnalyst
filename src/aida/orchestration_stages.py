@@ -92,6 +92,10 @@ class OrchestrationRequest:
     #: resolved; the orchestrator still applies its own consumer-role check to
     #: it. Set at most one of these two.
     context_product_version: ContextProductVersion | None = None
+    #: R11-MP08: the prompt optimiser's candidate instruction, already composed
+    #: with the safety clause. Only `draft` sets it; `run` never does, so an answer
+    #: a person receives always uses the approved instruction.
+    sql_instruction_override: str | None = None
 
     @property
     def organization_id(self) -> UUID:
