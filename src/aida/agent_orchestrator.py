@@ -76,6 +76,7 @@ from aida.context_product_execution_scope import (
     ContextProductExecutionScope,
     resolve_scope_names,
 )
+from aida.decision_model import escalation_probability
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import SCREENING_VERSION, screen_text
 from aida.injection_defense import screen_metadata
@@ -1497,7 +1498,32 @@ class GovernedAgentOrchestrator:
                 "threat_type": obfuscation.threat_type,
                 "classifier_version": obfuscation.classifier_version,
             }
+        # R11-MP09: a governed decision model may add a refusal the deterministic
+        # screens did not make -- never remove one. Consulted only when both passed
+        # and a RISK_DECISION route is approved; sent the redacted question only.
+        decision_block = False
+        if not obfuscation_block and prompt_risk.decision != "BLOCK":
+            decision = await escalation_probability(
+                session,
+                self.settings,
+                organization_id=request.organization_id,
+                question=self._question_for_providers(request).text,
+            )
+            if decision is not None:
+                details["decision_model"] = decision.evidence()
+                decision_block = (
+                    decision.probability is not None
+                    and decision.probability >= self.settings.decision_escalation_threshold
+                )
+                if decision_block:
+                    details["decision"] = "BLOCK"
         ledger.advance(RuntimeStage.SCREENED, control_type="DETERMINISTIC", details=details)
+        if decision_block:
+            agent_run.generation_source = "POLICY_BLOCK"
+            await self._persist_rejection(
+                session, request, ledger, "PROMPT_POLICY_DENIED:DECISION_MODEL"
+            )
+            raise AgentPolicyRejected("request rejected by the governed decision model")
         if obfuscation_block and prompt_risk.decision != "BLOCK":
             agent_run.generation_source = "POLICY_BLOCK"
             await self._persist_rejection(

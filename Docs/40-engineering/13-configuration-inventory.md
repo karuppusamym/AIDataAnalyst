@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**310 settings.** 0 are read nowhere. 72 more ship switched off, empty or zero.
+**313 settings.** 0 are read nowhere. 72 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -104,9 +104,9 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_generation_enabled` | `bool` | `False` | 7 | Opt-in: requires an approved model route, checked at startup |
 | `model_route` | `str | None` | `None` | 6 | Supplied: the approved route generation uses |
 | `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` | Supplied: approved routes tried in order after the primary |
-| `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE'], str]` | `dict` | 2 | Opt-in: one route for every purpose is the default; a purpose route is named once it is approved |
+| `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE', 'RISK_DECISION'], str]` | `dict` | 3 | Opt-in: one route for every purpose is the default; a purpose route is named once it is approved |
 | `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 | Supplied: the upstreams each OpenRouter alias may use; without an entry the route fails closed |
-| `model_endpoint_urls` | `dict[str, str]` | `dict` | 3 | Supplied: private model endpoints by alias |
+| `model_endpoint_urls` | `dict[str, str]` | `dict` | 4 | Supplied: private model endpoints by alias |
 | `openai_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
 | `anthropic_api_key` | `SecretStr | None` | `None` | 2 | Supplied: the provider credential |
@@ -369,7 +369,10 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_generation_enabled` | `bool` | `False` | 7 |
 | `model_route` | `str | None` | `None` | 6 |
 | `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` |
-| `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE'], str]` | `dict` | 2 |
+| `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE', 'RISK_DECISION'], str]` | `dict` | 3 |
+| `decision_escalation_threshold` | `float` | `0.8` | 1 |
+| `decision_timeout_seconds` | `float` | `3.0` | 1 |
+| `openrouter_decisions_url` | `str` | `'https://openrouter.ai/api/alpha/decisions'` | 1 |
 | `model_timeout_seconds` | `int` | `30` | 11 |
 | `model_max_input_tokens` | `int` | `8000` | 1 |
 | `model_max_output_tokens` | `int` | `2000` | 3 |
@@ -379,7 +382,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `openrouter_base_url` | `str` | `'https://openrouter.ai/api/v1'` | 2 |
 | `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 |
 | `openrouter_require_pinned_provider` | `bool` | `True` | 2 |
-| `model_endpoint_urls` | `dict[str, str]` | `dict` | 3 |
+| `model_endpoint_urls` | `dict[str, str]` | `dict` | 4 |
 | `model_provider_max_attempts` | `int` | `3` | 6 |
 | `model_route_breaker_failure_threshold` | `int` | `3` | 1 |
 | `model_route_breaker_cooldown_seconds` | `int` | `60` | 1 |

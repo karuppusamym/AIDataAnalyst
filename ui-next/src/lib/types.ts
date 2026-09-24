@@ -3468,7 +3468,7 @@ export interface ModelRouteConfigurationCreate {
   credential_reference?: string | null;
   data_residency: string;
   retention_policy: "ZERO_RETENTION" | "BANK_MANAGED" | "PROVIDER_CONTRACT";
-  capabilities: ("SQL_GENERATION" | "EXPLANATION" | "EMBEDDINGS" | "CLASSIFICATION")[];
+  capabilities: ("SQL_GENERATION" | "EXPLANATION" | "EMBEDDINGS" | "CLASSIFICATION" | "DECISION")[];
   max_input_tokens?: number;
   max_output_tokens?: number;
   timeout_seconds?: number;

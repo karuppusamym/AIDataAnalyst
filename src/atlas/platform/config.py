@@ -1078,9 +1078,16 @@ class Settings(BaseSettings):
     # SQL_CANDIDATE (R11-MP07) is different: it has no default, and only when it
     # is named does Ask ask that route for a second, independent statement to
     # compare against the first. It needs the SQL_GENERATION capability.
+    # RISK_DECISION (R11-MP09) has no default either: only when it names an
+    # APPROVED route with the DECISION capability is a decision model consulted,
+    # and then only to refuse a question the deterministic screens let through.
     model_routes_by_purpose: dict[
-        Literal["SQL_GENERATION", "CLASSIFICATION", "SQL_CANDIDATE"], str
+        Literal["SQL_GENERATION", "CLASSIFICATION", "SQL_CANDIDATE", "RISK_DECISION"], str
     ] = Field(default_factory=dict)
+    #: R11-MP09: the probability at or above which the decision model refuses.
+    decision_escalation_threshold: float = Field(default=0.8, ge=0.5, le=0.99)
+    decision_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    openrouter_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
 
     def model_route_for(self, purpose: Literal["SQL_GENERATION", "CLASSIFICATION"]) -> str | None:
         """The route key this deployment uses for `purpose` (R11-MP03)."""
@@ -1456,6 +1463,7 @@ class Settings(BaseSettings):
             or not self.gemini_base_url.startswith("https://")
             or not self.anthropic_base_url.startswith("https://")
             or not self.openrouter_base_url.startswith("https://")
+            or not self.openrouter_decisions_url.startswith("https://")
         ):
             raise ValueError("production model provider URLs must use HTTPS")
         if self.environment == "production":

@@ -2278,9 +2278,9 @@ class ModelRouteConfigurationCreate(ApiModel):
     credential_reference: str | None = Field(default=None, max_length=1000)
     data_residency: str = Field(min_length=2, max_length=100)
     retention_policy: Literal["ZERO_RETENTION", "BANK_MANAGED", "PROVIDER_CONTRACT"]
-    capabilities: list[Literal["SQL_GENERATION", "EXPLANATION", "EMBEDDINGS", "CLASSIFICATION"]] = (
-        Field(min_length=1, max_length=4)
-    )
+    capabilities: list[
+        Literal["SQL_GENERATION", "EXPLANATION", "EMBEDDINGS", "CLASSIFICATION", "DECISION"]
+    ] = Field(min_length=1, max_length=5)
     max_input_tokens: int = Field(default=8000, ge=100, le=1_000_000)
     max_output_tokens: int = Field(default=2000, ge=100, le=100_000)
     timeout_seconds: int = Field(default=30, ge=1, le=300)

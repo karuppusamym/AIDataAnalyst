@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-436 Python modules under `src/`, 2702 intra-`src` import edges.
+437 Python modules under `src/`, 2709 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -21,7 +21,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
 | aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 76 |
-| aida domain modules | everything else flat in `aida.*` | 293 |
+| aida domain modules | everything else flat in `aida.*` | 294 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 9 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 7 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 4 |
@@ -49,7 +49,7 @@ restates the edge next to it and nothing more.
 graph LR
   app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>76 modules"]
-  domain["aida domain modules<br/>293 modules"]
+  domain["aida domain modules<br/>294 modules"]
   ctx_catalog["atlas.modules.catalog<br/>9 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>7 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>4 modules"]
@@ -144,13 +144,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 402 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 403 |
 | `aida.workflows.worker` | Temporal worker | 130 |
 | `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 207 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 90 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 428 of 436 modules.
+Union of all five: 429 of 437 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -159,7 +159,7 @@ Per group, how much of each group each process pulls in:
 | package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 76 | 0 | 3 | 1 | 0 | 76 |
-| aida domain modules | 269 | 81 | 154 | 44 | 6 | 293 |
+| aida domain modules | 270 | 81 | 154 | 44 | 6 | 294 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 9 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 7 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 4 |
@@ -178,13 +178,13 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>402 reached"])
+  aida_main(["aida.main<br/>403 reached"])
   aida_workflows_worker(["aida.workflows.worker<br/>130 reached"])
   aida_workflows_scheduler(["aida.workflows.scheduler<br/>207 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>90 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
   aida_main --> shared
-  only_aida_main["only this process<br/>204 modules"]
+  only_aida_main["only this process<br/>205 modules"]
   aida_main --> only_aida_main
   aida_workflows_worker --> shared
   only_aida_workflows_worker["only this process<br/>3 modules"]
@@ -1422,11 +1422,11 @@ a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida.models` | aida domain modules | 235 |
+| `aida.models` | aida domain modules | 236 |
 | `aida.security` | aida domain modules | 134 |
 | `aida.schemas` | aida domain modules | 114 |
 | `aida.db` | aida domain modules | 111 |
-| `aida.config` | aida domain modules | 108 |
+| `aida.config` | aida domain modules | 109 |
 | `aida.events` | aida domain modules | 100 |
 | `aida.context` | aida domain modules | 75 |
 | `aida.envelope_models` | aida domain modules | 44 |
@@ -1436,7 +1436,7 @@ a package's fan-in measures nothing but the size of the package.
 | `aida.connectors.base` | aida.connectors | 20 |
 | `aida.security_types` | aida domain modules | 20 |
 | `aida.procedure_lineage_models` | aida domain modules | 16 |
-| `aida.sql_redaction` | aida domain modules | 15 |
+| `aida.secrets` | aida domain modules | 15 |
 
 ## What this map cannot tell you
 

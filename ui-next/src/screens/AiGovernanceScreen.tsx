@@ -116,6 +116,7 @@ const CAPABILITIES: { value: ModelRouteConfigurationCreate["capabilities"][numbe
   { value: "CLASSIFICATION", label: "Metadata inference", defaultOn: true },
   { value: "EXPLANATION", label: "Explanation", defaultOn: false },
   { value: "EMBEDDINGS", label: "Embeddings", defaultOn: false },
+  { value: "DECISION", label: "Decision model", defaultOn: false },
 ];
 
 const LIFECYCLE_STEPS = [
