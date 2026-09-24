@@ -137,6 +137,7 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     TableProfile,
+    ToolCertificationRun,
 )
 from aida.okf_context import (
     MAX_CHARS_LIMIT,
@@ -695,10 +696,36 @@ def _handle_initialize(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _certified_version_ids(
+    session: AsyncSession, organization_id: UUID | None, version_ids: set[UUID]
+) -> set[UUID]:
+    """R11-MP18: which of these tool versions hold an active certification now.
+
+    The same rule `tool_certification.certification_is_active` applies: a
+    CERTIFIED run whose `expires_at` has not passed. An expired run stays in
+    storage as evidence and simply stops counting here.
+    """
+    if not version_ids or organization_id is None:
+        # No organization, nothing certified: fail closed.
+        return set()
+    now = datetime.now(UTC)
+    rows = await session.scalars(
+        select(ToolCertificationRun.tool_version_id).where(
+            ToolCertificationRun.organization_id == organization_id,
+            ToolCertificationRun.tool_version_id.in_(version_ids),
+            ToolCertificationRun.status == "CERTIFIED",
+            ToolCertificationRun.expires_at.is_not(None),
+            ToolCertificationRun.expires_at > now,
+        )
+    )
+    return set(rows.all())
+
+
 async def _handle_tools_list(
     session: AsyncSession,
     context: SecurityContext,
     params: dict[str, Any] | None = None,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
     """
     Return all PUBLISHED governed tools visible to the caller's organization.
@@ -750,6 +777,15 @@ async def _handle_tools_list(
         if eligible_version_ids is not None and version.id not in eligible_version_ids:
             continue
         eligible.append((version, tool))
+
+    # R11-MP18: where certification is required, a tool version with no active
+    # certification is not offered -- filtered here, before the catalog is
+    # built, like every other eligibility rule in this handler.
+    if settings is not None and settings.mcp_requires_tool_certification:
+        certified = await _certified_version_ids(
+            session, context.organization_id, {version.id for version, _tool in eligible}
+        )
+        eligible = [(version, tool) for version, tool in eligible if version.id in certified]
 
     # TL-4: usage-weighted ranking. Popular tools rank higher in the catalog
     # an MCP client is offered -- ordered on the same real, already-persisted
@@ -2453,6 +2489,26 @@ async def _handle_tools_call(
                 "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
             }
 
+    # R11-MP18: an uncertified version answers exactly like an unpublished one
+    # where certification is required -- no side channel on its existence -- and
+    # the refusal is recorded for operators.
+    if settings.mcp_requires_tool_certification and version.id not in (
+        await _certified_version_ids(session, context.organization_id, {version.id})
+    ):
+        record_audit(
+            session,
+            context,
+            action="mcp.tool_call.certification_missing",
+            resource_type="governed_tool_version",
+            resource_id=str(version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+        )
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
+
     # Role-binding enforcement (CX-5, mirrors tool_api.py execute_tool).
     # A caller whose roles do not intersect the tool's allowed_roles gets
     # the identical "not found or not published" response used above --
@@ -3729,7 +3785,7 @@ async def mcp_endpoint(
             result = {}
 
         elif method == "tools/list":
-            result = await _handle_tools_list(session, context, params)
+            result = await _handle_tools_list(session, context, params, settings)
 
         elif method == "tools/call":
             result = await _handle_tools_call(params, session, context, settings, correlation_id)

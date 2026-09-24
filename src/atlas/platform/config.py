@@ -634,6 +634,19 @@ class Settings(BaseSettings):
     # every user of its datasource, so it needs a confirmation from someone other
     # than the person who asked it. Off only for a single-user demo estate.
     query_memory_requires_second_confirmation: bool = True
+    # R11-MP18: MCP offers and runs only governed tool versions with an active
+    # certification (`tool_certification.certification_is_active`). Unset means
+    # "required in staging and production, not in development and test", so a
+    # demo estate with uncertified tools still works and a bank deployment does
+    # not expose one. Set it to decide explicitly.
+    mcp_tool_certification_required: bool | None = None
+
+    @property
+    def mcp_requires_tool_certification(self) -> bool:
+        if self.mcp_tool_certification_required is not None:
+            return self.mcp_tool_certification_required
+        return self.environment in {"staging", "production"}
+
     # --- Ask rate budget (R11-MP14) ----------------------------------------------
     # Questions per caller per minute on the two Ask routes. Off by default, like
     # the MCP and GraphQL budgets, because it needs Redis; the per-call model-token
