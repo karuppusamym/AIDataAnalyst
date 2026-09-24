@@ -1025,9 +1025,12 @@ class Settings(BaseSettings):
     # inference, column drafting, marketplace discovery). A purpose with no entry
     # uses `model_route`. Each named route must still be APPROVED, for that
     # capability, in the caller's organization; naming it here approves nothing.
-    model_routes_by_purpose: dict[Literal["SQL_GENERATION", "CLASSIFICATION"], str] = Field(
-        default_factory=dict
-    )
+    # SQL_CANDIDATE (R11-MP07) is different: it has no default, and only when it
+    # is named does Ask ask that route for a second, independent statement to
+    # compare against the first. It needs the SQL_GENERATION capability.
+    model_routes_by_purpose: dict[
+        Literal["SQL_GENERATION", "CLASSIFICATION", "SQL_CANDIDATE"], str
+    ] = Field(default_factory=dict)
 
     def model_route_for(self, purpose: Literal["SQL_GENERATION", "CLASSIFICATION"]) -> str | None:
         """The route key this deployment uses for `purpose` (R11-MP03)."""

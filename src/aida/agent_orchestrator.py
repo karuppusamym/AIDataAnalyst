@@ -147,6 +147,7 @@ from aida.semantic_inference import (
     resolve_scoped_glossary_term,
 )
 from aida.signing import sign_value
+from aida.sql_candidate_agreement import compare_candidates
 from aida.sql_validation import (
     FINDING_CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN,
     FINDING_EXACTLY_ONE_STATEMENT_REQUIRED,
@@ -448,6 +449,7 @@ REPAIRABLE_FINDING_CODES: Final[frozenset[str]] = frozenset(
     }
 )
 SQL_REPAIR_VERSION: Final = "sql-repair-v1"
+SQL_CANDIDATE_VERSION: Final = "sql-candidate-v1"
 
 CONTEXT_PRODUCT_UNAVAILABLE: Final = "CONTEXT_PRODUCT_NOT_AVAILABLE"
 CONTEXT_PRODUCT_FORBIDDEN: Final = "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"
@@ -1775,6 +1777,7 @@ class GovernedAgentOrchestrator:
             statement = await self._repair_generated_statement(
                 session, request, ledger, screened, retrieved, statement
             )
+            await self._compare_second_candidate(session, request, ledger, screened, statement)
 
         if retrieved.context_product_scope is not None:
             # Scoping retrieval decides what the model was shown; it does not decide what it
@@ -2353,7 +2356,7 @@ class GovernedAgentOrchestrator:
             entry: dict[str, Any] = {"attempt": attempt, "findings": codes}
             history.append(entry)
             try:
-                output, evidence, call_attempts = await self._budgeted_repair_call(
+                output, evidence, call_attempts = await self._budgeted_extra_generation(
                     session,
                     request,
                     ledger,
@@ -2397,7 +2400,96 @@ class GovernedAgentOrchestrator:
             ledger.publish_plan_evidence()
         return current
 
-    async def _budgeted_repair_call(
+    async def _compare_second_candidate(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        ledger: RunLedger,
+        screened: ScreenOutcome,
+        statement: ValidatedStatement,
+    ) -> None:
+        """R11-MP07: ask a second approved route for its own statement, and record
+        how far the two agree.
+
+        Runs only when `model_routes_by_purpose` names a SQL_CANDIDATE route and
+        the statement came from a model. The candidate gets the same instruction
+        and payload the primary did, through the same budgeted path; it is never
+        executed and never replaces the primary. The comparison is structural
+        (`aida.sql_candidate_agreement`), and what is recorded is the agreement
+        level, table counts, the route and an output fingerprint -- no SQL text.
+        A candidate call that fails is recorded and does not fail the run.
+        """
+        inputs = statement.generation_inputs
+        candidate_key = self.settings.model_routes_by_purpose.get("SQL_CANDIDATE")
+        if inputs is None or not candidate_key:
+            return
+        route = await self._approved_route_for_key(
+            session, request.organization_id, candidate_key, capability="SQL_GENERATION"
+        )
+        record: dict[str, Any] = {"route": candidate_key, "control_version": SQL_CANDIDATE_VERSION}
+        if route is None:
+            record["result"] = "CANDIDATE_ROUTE_NOT_APPROVED"
+        elif route.route_key in {r.route_key for r in inputs.approved_routes[:1]}:
+            record["result"] = "CANDIDATE_ROUTE_IS_THE_PRIMARY"
+        else:
+            try:
+                output, evidence, _attempts = await self._budgeted_extra_generation(
+                    session,
+                    request,
+                    ledger,
+                    screened,
+                    approved_routes=[route],
+                    system_instruction=inputs.system_instruction,
+                    payload=inputs.payload,
+                )
+            except ModelGatewayError as exc:
+                record["result"] = "CANDIDATE_CALL_FAILED"
+                record["error_class"] = type(exc).__name__
+            else:
+                agreement = compare_candidates(
+                    statement.sql, output.sql, dialect=request.datasource.dialect
+                )
+                record["result"] = "COMPARED"
+                record["agreement"] = agreement.evidence()
+                record["output_fingerprint"] = evidence.output_fingerprint
+                record["candidate_confidence"] = output.confidence
+        ledger.plan_evidence["sql_candidate"] = record
+        ledger.publish_plan_evidence()
+
+    async def _approved_route_for_key(
+        self,
+        session: AsyncSession,
+        organization_id: UUID,
+        route_key: str,
+        *,
+        capability: str,
+    ) -> ApprovedModelRoute | None:
+        """The organization's newest APPROVED version of `route_key`, if it has
+        `capability` and a credential; else None."""
+        route = await session.scalar(
+            select(ModelRouteConfiguration)
+            .where(
+                ModelRouteConfiguration.organization_id == organization_id,
+                ModelRouteConfiguration.route_key == route_key,
+                ModelRouteConfiguration.status == "APPROVED",
+            )
+            .order_by(ModelRouteConfiguration.version.desc())
+            .limit(1)
+        )
+        if route is None or capability not in route.capabilities or not route.credential_reference:
+            return None
+        return ApprovedModelRoute(
+            route_key=route.route_key,
+            provider_type=route.provider_type,
+            model_id=route.model_id,
+            endpoint_alias=route.endpoint_alias,
+            credential_reference=route.credential_reference,
+            max_input_tokens=route.max_input_tokens,
+            max_output_tokens=route.max_output_tokens,
+            timeout_seconds=route.timeout_seconds,
+        )
+
+    async def _budgeted_extra_generation(
         self,
         session: AsyncSession,
         request: OrchestrationRequest,
@@ -2408,7 +2500,8 @@ class GovernedAgentOrchestrator:
         system_instruction: str,
         payload: dict[str, Any],
     ) -> tuple[SqlGenerationOutput, ModelCallEvidence, list[dict[str, Any]]]:
-        """One repair generation under the same budget rules as the first call.
+        """One more generation (a repair, or a second candidate) under the same
+        budget rules as the first call.
 
         Reserved, settled on failure and reconciled on success exactly as in
         `_generate_statement`; the per-run cap is checked against this run's
