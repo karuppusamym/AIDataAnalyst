@@ -162,6 +162,10 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "gemini_api_key": (SUPPLIED, "the provider credential"),
     "anthropic_api_key": (SUPPLIED, "the provider credential"),
     "openrouter_api_key": (SUPPLIED, "the provider credential"),
+    "model_routes_by_purpose": (
+        OPT_IN,
+        "one route for every purpose is the default; a purpose route is named once it is approved",
+    ),
     "openrouter_provider_order": (
         SUPPLIED,
         "the upstreams each OpenRouter alias may use; without an entry the route fails closed",

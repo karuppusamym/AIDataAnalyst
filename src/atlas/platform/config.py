@@ -1011,11 +1011,36 @@ class Settings(BaseSettings):
             key = raw.strip()
             if not key or key in seen:
                 continue
-            if self.model_route and key == self.model_route:
+            # The primary is the SQL_GENERATION route (R11-MP03), which is
+            # `model_route` unless a purpose route replaces it.
+            if key == self.model_route_for("SQL_GENERATION"):
                 continue
             seen.add(key)
             keys.append(key)
         return keys
+
+    # R11-MP03: an approved route per purpose, so a cheap model can classify
+    # while a stronger one writes SQL. Keys are the route capabilities the runtime
+    # asks a model for: SQL_GENERATION (Ask) and CLASSIFICATION (semantic
+    # inference, column drafting, marketplace discovery). A purpose with no entry
+    # uses `model_route`. Each named route must still be APPROVED, for that
+    # capability, in the caller's organization; naming it here approves nothing.
+    model_routes_by_purpose: dict[Literal["SQL_GENERATION", "CLASSIFICATION"], str] = Field(
+        default_factory=dict
+    )
+
+    def model_route_for(self, purpose: Literal["SQL_GENERATION", "CLASSIFICATION"]) -> str | None:
+        """The route key this deployment uses for `purpose` (R11-MP03)."""
+        return self.model_routes_by_purpose.get(purpose) or self.model_route
+
+    @property
+    def selected_model_route_keys(self) -> frozenset[str]:
+        """Every route key the runtime may call: the default route, each
+        purpose's route and the fallbacks. The gateway admits a call only on
+        one of these."""
+        keys = {self.model_route, *self.model_routes_by_purpose.values()}
+        keys.update(self.model_route_fallback_keys)
+        return frozenset(key for key in keys if key)
 
     model_timeout_seconds: int = Field(default=30, ge=1, le=300)
     model_max_input_tokens: int = Field(default=8_000, ge=100, le=1_000_000)

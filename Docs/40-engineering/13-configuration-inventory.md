@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**298 settings.** 0 are read nowhere. 67 more ship switched off, empty or zero.
+**299 settings.** 0 are read nowhere. 68 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -98,8 +98,9 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `okf_import_enabled` | `bool` | `False` | 1 | Off by design: R11-OKF03: imported OKF edits become pending proposals only; the import stays off until the row's hostile-content, round-trip and review-journey evidence is accepted |
 | `agent_query_memory_enabled` | `bool` | `False` | 1 | Opt-in: changes what grounds a generated prompt; the SQL still passes the gateway |
 | `model_generation_enabled` | `bool` | `False` | 7 | Opt-in: requires an approved model route, checked at startup |
-| `model_route` | `str | None` | `None` | 14 | Supplied: the approved route generation uses |
-| `model_route_fallbacks` | `str | None` | `None` | 3 via `model_route_fallback_keys` | Supplied: approved routes tried in order after the primary |
+| `model_route` | `str | None` | `None` | 4 | Supplied: the approved route generation uses |
+| `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` | Supplied: approved routes tried in order after the primary |
+| `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION'], str]` | `dict` | 1 | Opt-in: one route for every purpose is the default; a purpose route is named once it is approved |
 | `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 | Supplied: the upstreams each OpenRouter alias may use; without an entry the route fails closed |
 | `model_endpoint_urls` | `dict[str, str]` | `dict` | 3 | Supplied: private model endpoints by alias |
 | `openai_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
@@ -352,8 +353,9 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `agent_query_memory_min_similarity` | `float` | `0.6` | 2 |
 | `agent_query_memory_scan_limit` | `int` | `200` | 1 |
 | `model_generation_enabled` | `bool` | `False` | 7 |
-| `model_route` | `str | None` | `None` | 14 |
-| `model_route_fallbacks` | `str | None` | `None` | 3 via `model_route_fallback_keys` |
+| `model_route` | `str | None` | `None` | 4 |
+| `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` |
+| `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION'], str]` | `dict` | 1 |
 | `model_timeout_seconds` | `int` | `30` | 11 |
 | `model_max_input_tokens` | `int` | `8000` | 1 |
 | `model_max_output_tokens` | `int` | `2000` | 2 |

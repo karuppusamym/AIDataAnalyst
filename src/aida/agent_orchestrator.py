@@ -652,8 +652,9 @@ class GovernedAgentOrchestrator:
     async def _approved_model_routes(
         self, session: AsyncSession, organization_id: UUID
     ) -> list[ApprovedModelRoute]:
-        """Return the ordered list of approved routes to try: the primary
-        `settings.model_route` first, then each entry in
+        """Return the ordered list of approved routes to try: the primary --
+        the SQL_GENERATION purpose route, else `settings.model_route`
+        (R11-MP03) -- first, then each entry in
         `settings.model_route_fallback_keys`.
 
         Unapproved / disabled / uncapable entries are silently skipped rather
@@ -664,8 +665,9 @@ class GovernedAgentOrchestrator:
         1 + len(settings.model_route_fallback_keys), typically 1-3.
         """
         keys: list[str] = []
-        if self.settings.model_route:
-            keys.append(self.settings.model_route)
+        primary = self.settings.model_route_for("SQL_GENERATION")
+        if primary:
+            keys.append(primary)
         for key in self.settings.model_route_fallback_keys:
             if key not in keys:
                 keys.append(key)
@@ -851,13 +853,14 @@ class GovernedAgentOrchestrator:
     async def _approved_model_route(
         self, session: AsyncSession, organization_id: UUID
     ) -> ApprovedModelRoute | None:
-        if not self.settings.model_route:
+        route_key = self.settings.model_route_for("SQL_GENERATION")
+        if not route_key:
             return None
         route = await session.scalar(
             select(ModelRouteConfiguration)
             .where(
                 ModelRouteConfiguration.organization_id == organization_id,
-                ModelRouteConfiguration.route_key == self.settings.model_route,
+                ModelRouteConfiguration.route_key == route_key,
                 ModelRouteConfiguration.status == "APPROVED",
             )
             .order_by(ModelRouteConfiguration.version.desc())

@@ -34,7 +34,7 @@ hedging the instruction asks for and the human decision are the controls.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -70,7 +70,7 @@ MODEL_DRAFT_PROMPT_VERSION = "column-description-model-v1"
 
 #: The route capability that approves sending catalog metadata to a model for
 #: semantic proposals -- the same one `semantic_inference` requires.
-MODEL_ROUTE_CAPABILITY = "CLASSIFICATION"
+MODEL_ROUTE_CAPABILITY: Final = "CLASSIFICATION"
 
 #: Tables per model-assisted request. The calls run inside the request.
 MODEL_DRAFT_TABLE_LIMIT = 5
@@ -133,7 +133,9 @@ async def approved_drafting_route(
         raise ColumnDraftModelUnavailable(
             "model calls are switched off for this deployment (AIDA_MODEL_GENERATION_ENABLED)"
         )
-    if not settings.model_route:
+    # R11-MP03: the CLASSIFICATION purpose route, else the default route.
+    route_key = settings.model_route_for(MODEL_ROUTE_CAPABILITY)
+    if not route_key:
         raise ColumnDraftModelUnavailable(
             "no model route is configured for this deployment (AIDA_MODEL_ROUTE)"
         )
@@ -141,7 +143,7 @@ async def approved_drafting_route(
         select(ModelRouteConfiguration)
         .where(
             ModelRouteConfiguration.organization_id == organization_id,
-            ModelRouteConfiguration.route_key == settings.model_route,
+            ModelRouteConfiguration.route_key == route_key,
             ModelRouteConfiguration.status == "APPROVED",
         )
         .order_by(ModelRouteConfiguration.version.desc())
@@ -149,7 +151,7 @@ async def approved_drafting_route(
     )
     if route is None:
         raise ColumnDraftModelUnavailable(
-            f"model route {settings.model_route!r} is not approved for this organization"
+            f"model route {route_key!r} is not approved for this organization"
         )
     if MODEL_ROUTE_CAPABILITY not in (route.capabilities or []):
         raise ColumnDraftModelUnavailable(

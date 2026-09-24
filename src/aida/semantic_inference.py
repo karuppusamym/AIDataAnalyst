@@ -350,13 +350,15 @@ def model_input(
 async def approved_classification_route(
     session: AsyncSession, organization_id: UUID, settings: Settings
 ) -> ApprovedModelRoute | None:
-    if not settings.model_route:
+    # R11-MP03: the CLASSIFICATION purpose route, else the default route.
+    route_key = settings.model_route_for("CLASSIFICATION")
+    if not route_key:
         return None
     route = await session.scalar(
         select(ModelRouteConfiguration)
         .where(
             ModelRouteConfiguration.organization_id == organization_id,
-            ModelRouteConfiguration.route_key == settings.model_route,
+            ModelRouteConfiguration.route_key == route_key,
             ModelRouteConfiguration.status == "APPROVED",
         )
         .order_by(ModelRouteConfiguration.version.desc())

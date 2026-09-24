@@ -41,7 +41,11 @@ def _configuration_fingerprint(body: ModelRouteConfigurationCreate) -> str:
 
 
 def _route_read(route: ModelRouteConfiguration, settings: Settings) -> ModelRouteConfigurationRead:
-    selected = settings.model_route == route.route_key
+    # R11-MP03: a route a purpose names is selected as much as the default one.
+    selected = route.route_key in {
+        settings.model_route,
+        *settings.model_routes_by_purpose.values(),
+    }
     adapter_available = route_adapter_available(
         provider_type=route.provider_type,
         credential_reference=route.credential_reference,
