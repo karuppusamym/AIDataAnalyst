@@ -3420,7 +3420,7 @@ export interface ModelImportExclusionRequest {
 export interface ModelRouteConfigurationCreate {
   route_key: string;
   display_name: string;
-  provider_type: "OPENAI" | "GOOGLE_GEMINI" | "AZURE_OPENAI" | "AWS_BEDROCK" | "GOOGLE_VERTEX" | "OPENAI_COMPATIBLE_PRIVATE" | "ON_PREM";
+  provider_type: "OPENAI" | "GOOGLE_GEMINI" | "AZURE_OPENAI" | "AWS_BEDROCK" | "GOOGLE_VERTEX" | "OPENAI_COMPATIBLE_PRIVATE" | "ON_PREM" | "ANTHROPIC" | "OPENROUTER";
   model_id: string;
   endpoint_alias: string;
   credential_reference?: string | null;

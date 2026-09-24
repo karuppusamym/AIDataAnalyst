@@ -20660,7 +20660,9 @@
               "AWS_BEDROCK",
               "GOOGLE_VERTEX",
               "OPENAI_COMPATIBLE_PRIVATE",
-              "ON_PREM"
+              "ON_PREM",
+              "ANTHROPIC",
+              "OPENROUTER"
             ],
             "title": "Provider Type",
             "type": "string"

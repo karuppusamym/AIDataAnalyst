@@ -80,26 +80,28 @@ read the deployment's secret store for the values.
 
 ## Coverage
 
-- Settings inventoried: **40** (24 destinations, 16 credential references)
-- Rows with at least one `unknown` cell: **40**
-- `unknown` cells in total: **40** (of which 40 are the `Verified` column, by construction)
+- Settings inventoried: **44** (26 destinations, 18 credential references)
+- Rows with at least one `unknown` cell: **44**
+- `unknown` cells in total: **44** (of which 44 are the `Verified` column, by construction)
 
 ### Gap list -- cells the analysis could not determine
 
 | Cell | Rows | Which |
 |---|---|---|
-| verified | 40 | every row |
+| verified | 44 | every row |
 
 ### Findings
 
 - **Settings no code in `src/` reads (0):** none. A destination or credential that nothing consumes is either dead configuration or a consumer that reads it some way this analysis cannot see; either way it should not sit in `Settings` unexplained.
-- **Destinations with no readiness probe (22 of 24):** `audit_archive_bucket_name`, `audit_archive_filesystem_root`, `dq_itsm_webhook_url`, `entitlement_webhook_url`, `gemini_base_url`, `hmac_signing_vault_url`, `kafka_bootstrap_servers`, `model_endpoint_urls`, `neo4j_uri`, `object_store_endpoint`, `oidc_issuer`, `oidc_jwks_url`, `openai_base_url`, `otel_endpoint`, `portal_base_url`, `redis_url`, `secrets_vault_url`, `siem_endpoint`, `slack_webhook_url`, `teams_webhook_url`, `tokenization_vault_url`, `vector_index_url`. `/health/ready` gates on PostgreSQL only and reports Temporal, the archive task, the reconnect task and the outbox backlog (F18); nothing else below is observed at all.
-- **Destinations that ship pointing somewhere real (2):** `gemini_base_url`, `openai_base_url`. Every other destination is inert on arrival, which is the posture the review's F01/F04 notes describe: a deployment that has named nothing talks to nothing, rather than to a default somebody forgot about.
+- **Destinations with no readiness probe (24 of 26):** `anthropic_base_url`, `audit_archive_bucket_name`, `audit_archive_filesystem_root`, `dq_itsm_webhook_url`, `entitlement_webhook_url`, `gemini_base_url`, `hmac_signing_vault_url`, `kafka_bootstrap_servers`, `model_endpoint_urls`, `neo4j_uri`, `object_store_endpoint`, `oidc_issuer`, `oidc_jwks_url`, `openai_base_url`, `openrouter_base_url`, `otel_endpoint`, `portal_base_url`, `redis_url`, `secrets_vault_url`, `siem_endpoint`, `slack_webhook_url`, `teams_webhook_url`, `tokenization_vault_url`, `vector_index_url`. `/health/ready` gates on PostgreSQL only and reports Temporal, the archive task, the reconnect task and the outbox backlog (F18); nothing else below is observed at all.
+- **Destinations that ship pointing somewhere real (4):** `anthropic_base_url`, `gemini_base_url`, `openai_base_url`, `openrouter_base_url`. Every other destination is inert on arrival, which is the posture the review's F01/F04 notes describe: a deployment that has named nothing talks to nothing, rather than to a default somebody forgot about.
 
 ## Inventory
 
 | Setting | Kind | Points at | Default | Default inert? | Consumed by | Configured | Approved | Active | Healthy | Verified |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `anthropic_api_key` | credential | a credential held in process configuration | unset (None) | yes -- names nothing | `aida.model_gateway`, `aida.model_route_health` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
+| `anthropic_base_url` | destination | `api.anthropic.com` over `https` | names a remote host (host only shown) | no -- ships pointing somewhere | `aida.model_gateway`, `aida.model_route_health` | yes -- ships with a default target | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `audit_archive_bucket_name` | destination | an object-store bucket, named by this setting (name not shown) | bare literal (value not shown) | yes -- names nothing | `aida.main` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | `audit_archive_enabled` defaults on | no readiness probe | unknown |
 | `audit_archive_filesystem_root` | destination | a local filesystem path | empty string | yes -- names nothing | `aida.main` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | `audit_archive_enabled` defaults on | no readiness probe | unknown |
 | `audit_hmac_key` | credential | a credential held in process configuration | placeholder literal | yes -- development placeholder | `aida.signing` | no -- the shipped default is a placeholder | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
@@ -127,6 +129,8 @@ read the deployment's secret store for the values.
 | `oidc_jwks_url` | destination | whatever the deployment supplies -- unset by default | unset (None) | yes -- names nothing | `aida.api`, `aida.oidc`, `aida.security` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `openai_api_key` | credential | a credential held in process configuration | unset (None) | yes -- names nothing | `aida.embedding_provider`, `aida.model_gateway`, `aida.model_route_health` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `openai_base_url` | destination | `api.openai.com` over `https` | names a remote host (host only shown) | no -- ships pointing somewhere | `aida.embedding_provider`, `aida.model_gateway`, `aida.model_route_health` | yes -- ships with a default target | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
+| `openrouter_api_key` | credential | a credential held in process configuration | unset (None) | yes -- names nothing | `aida.model_gateway` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
+| `openrouter_base_url` | destination | `openrouter.ai` over `https` | names a remote host (host only shown) | no -- ships pointing somewhere | `aida.model_gateway`, `aida.model_route_health` | yes -- ships with a default target | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `otel_endpoint` | destination | `localhost:4317` over `http` | localhost default (host only shown) | yes -- local only, not an external destination | `aida.main` | no external target -- localhost default only | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `portal_base_url` | destination | whatever the deployment supplies -- unset by default | unset (None) | yes -- names nothing | `aida.governance_notifications` | no -- the shipped default names nothing | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |
 | `redis_url` | destination | `localhost:6379` over `redis` | localhost default (host only shown) | yes -- local only, not an external destination | `aida.request_budget`, `aida.unified_lineage_service` | no external target -- localhost default only | no approval gate found -- whoever sets the variable decides | no enabling flag -- used whenever read | no readiness probe | unknown |

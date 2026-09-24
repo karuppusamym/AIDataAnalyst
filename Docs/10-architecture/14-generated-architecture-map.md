@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-424 Python modules under `src/`, 2644 intra-`src` import edges.
+424 Python modules under `src/`, 2645 intra-`src` import edges.
 
 ## How this map aggregates
 

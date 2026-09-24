@@ -100,6 +100,8 @@ const PROVIDER_TYPES: ModelRouteConfigurationCreate["provider_type"][] = [
   "GOOGLE_VERTEX",
   "OPENAI_COMPATIBLE_PRIVATE",
   "ON_PREM",
+  "ANTHROPIC",
+  "OPENROUTER",
 ];
 
 const RETENTION_POLICIES: ModelRouteConfigurationCreate["retention_policy"][] = [

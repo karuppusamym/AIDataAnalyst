@@ -59,6 +59,7 @@ from sqlalchemy import select
 from aida.config import Settings
 from aida.context import get_correlation_id
 from aida.events import record_audit
+from aida.model_gateway import ANTHROPIC_API_VERSION
 from aida.models import ModelRouteConfiguration
 from aida.security_types import SecurityContext
 
@@ -132,6 +133,29 @@ async def _served_models(provider_type: str, settings: Settings) -> set[str] | N
                     f"{settings.openai_base_url}/models",
                     headers={"Authorization": f"Bearer {key.get_secret_value()}"},
                 )
+            if response.status_code != 200:
+                return None
+            return {str(model.get("id", "")) for model in response.json().get("data", [])}
+        if provider_type == "ANTHROPIC":
+            key = settings.anthropic_api_key
+            if key is None:
+                return None
+            async with httpx.AsyncClient(timeout=settings.model_timeout_seconds) as client:
+                response = await client.get(
+                    f"{settings.anthropic_base_url}/models",
+                    params={"limit": 1000},
+                    headers={
+                        "x-api-key": key.get_secret_value(),
+                        "anthropic-version": ANTHROPIC_API_VERSION,
+                    },
+                )
+            if response.status_code != 200:
+                return None
+            return {str(model.get("id", "")) for model in response.json().get("data", [])}
+        if provider_type == "OPENROUTER":
+            # OpenRouter's catalogue is public; no credential is sent to list it.
+            async with httpx.AsyncClient(timeout=settings.model_timeout_seconds) as client:
+                response = await client.get(f"{settings.openrouter_base_url}/models")
             if response.status_code != 200:
                 return None
             return {str(model.get("id", "")) for model in response.json().get("data", [])}

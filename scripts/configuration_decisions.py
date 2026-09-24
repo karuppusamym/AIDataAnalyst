@@ -160,6 +160,12 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "model_endpoint_urls": (SUPPLIED, "private model endpoints by alias"),
     "openai_api_key": (SUPPLIED, "the provider credential"),
     "gemini_api_key": (SUPPLIED, "the provider credential"),
+    "anthropic_api_key": (SUPPLIED, "the provider credential"),
+    "openrouter_api_key": (SUPPLIED, "the provider credential"),
+    "openrouter_provider_order": (
+        SUPPLIED,
+        "the upstreams each OpenRouter alias may use; without an entry the route fails closed",
+    ),
     "hmac_signing_vault_url": (SUPPLIED, "production refuses the local HMAC signer"),
     "hmac_signing_vault_token_reference": (SUPPLIED, "the signing vault credential"),
     "tokenization_vault_url": (SUPPLIED, "production refuses the local tokenization provider"),

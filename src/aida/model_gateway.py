@@ -17,7 +17,26 @@ from aida.models import KillSwitchState
 from aida.secrets import SecretResolutionError, SecretResolver
 
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
-SUPPORTED_MODEL_PROVIDERS = frozenset({"OPENAI", "GOOGLE_GEMINI"})
+SUPPORTED_MODEL_PROVIDERS = frozenset(
+    {
+        "OPENAI",
+        "GOOGLE_GEMINI",
+        # R11-MP01: Anthropic's Messages API, and one OpenAI-compatible
+        # chat-completions adapter serving OpenRouter plus the two private types.
+        "ANTHROPIC",
+        "OPENROUTER",
+        "OPENAI_COMPATIBLE_PRIVATE",
+        "ON_PREM",
+    }
+)
+#: Provider types with no public default endpoint: a route of one of these types
+#: is callable only once `settings.model_endpoint_urls` maps its `endpoint_alias`
+#: to the bank's own URL. Falling back to some public URL would send the
+#: prompt somewhere the route's approval never named.
+PRIVATE_ENDPOINT_PROVIDERS = frozenset({"OPENAI_COMPATIBLE_PRIVATE", "ON_PREM"})
+#: Anthropic API version header. Pinned: the Messages API contract this adapter
+#: parses is the one this version defines.
+ANTHROPIC_API_VERSION = "2023-06-01"
 
 # Sentinel `route_key` for an organization-wide kill switch row in `KillSwitchState`
 # (MG-2), as opposed to a row scoped to one specific route_key.
@@ -111,10 +130,19 @@ class ApprovedModelRoute:
 
 @dataclass(frozen=True, slots=True)
 class ProviderUsage:
-    """Tokens a provider reports it billed for one call."""
+    """Tokens a provider reports it billed for one call.
+
+    `input_tokens` is every billed input token, cached or not.
+    `cached_input_tokens` is the part of it served from the provider's prompt
+    cache (billed at a discount), when the provider says so. `reported_cost_usd`
+    is the charge in US dollars where the provider itself states one (OpenRouter
+    does); it is never computed here.
+    """
 
     input_tokens: int
     output_tokens: int
+    cached_input_tokens: int | None = None
+    reported_cost_usd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +203,54 @@ def gemini_usage(response: dict[str, Any]) -> ProviderUsage | None:
         return None
     thoughts = _token_count(usage.get("thoughtsTokenCount")) or 0
     return ProviderUsage(input_tokens=prompt, output_tokens=candidates + thoughts)
+
+
+def anthropic_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usage` from an Anthropic Messages answer. Its `input_tokens` excludes the
+    tokens written to and read from the prompt cache, which are billed too, so
+    all three are added; the cache reads are also reported as cached."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("input_tokens"))
+    output_tokens = _token_count(usage.get("output_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    cache_write = _token_count(usage.get("cache_creation_input_tokens")) or 0
+    cache_read = _token_count(usage.get("cache_read_input_tokens"))
+    return ProviderUsage(
+        input_tokens=input_tokens + cache_write + (cache_read or 0),
+        output_tokens=output_tokens,
+        cached_input_tokens=cache_read,
+    )
+
+
+def _reported_cost(value: Any) -> float | None:
+    """A provider-stated dollar charge, or None for anything that is not one."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if value >= 0 else None
+
+
+def chat_completions_usage(response: dict[str, Any]) -> ProviderUsage | None:
+    """`usage` from an OpenAI-compatible chat-completions answer. OpenRouter adds
+    `cost` (US dollars, what it charged) when the request asks for usage
+    accounting; a private server usually reports only the two token counts."""
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _token_count(usage.get("prompt_tokens"))
+    output_tokens = _token_count(usage.get("completion_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    details = usage.get("prompt_tokens_details")
+    cached = _token_count(details.get("cached_tokens")) if isinstance(details, dict) else None
+    return ProviderUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached,
+        reported_cost_usd=_reported_cost(usage.get("cost")),
+    )
 
 
 #: Longest provider reason a `ModelGatewayError` carries: enough for "Invalid
@@ -428,6 +504,229 @@ class GeminiGenerateContentProvider:
         return ProviderCompletion(parsed, gemini_usage(response))
 
 
+def _tool_name(schema_name: str) -> str:
+    """A tool name Anthropic accepts (`^[a-zA-Z0-9_-]{1,64}$`) from a schema name."""
+    cleaned = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in schema_name)
+    return (cleaned or "structured_output")[:64]
+
+
+class AnthropicMessagesProvider:
+    """Anthropic Messages API adapter (R11-MP01).
+
+    Structured output is a forced tool call: the output schema is the one tool's
+    `input_schema` and `tool_choice` names it, so the answer arrives as the
+    tool's parsed `input` rather than as free text to be parsed. The system
+    instruction is marked for prompt caching; Anthropic caches the tool
+    definition and system prefix together, and a repeat call inside the cache
+    window bills that prefix at the cached rate, reported as
+    `cached_input_tokens`. A prefix shorter than the model's caching minimum is
+    simply not cached -- the marker costs nothing then.
+    """
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        self.settings = settings
+        self.client = client
+
+    async def __call__(
+        self,
+        *,
+        route: ApprovedModelRoute,
+        credential: str,
+        system_instruction: str,
+        payload: dict[str, Any],
+        output_schema: dict[str, Any],
+        schema_name: str,
+        max_output_tokens: int,
+    ) -> ProviderCompletion:
+        tool_name = _tool_name(schema_name)
+        body = {
+            "model": route.model_id,
+            "max_tokens": max_output_tokens,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_instruction,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                }
+            ],
+            "tools": [
+                {
+                    "name": tool_name,
+                    "description": "Return the answer in exactly this structure.",
+                    "input_schema": output_schema,
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": tool_name},
+        }
+        base_url = _resolve_endpoint_base_url(
+            route, self.settings, self.settings.anthropic_base_url
+        )
+        owned_client = self.client is None
+        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
+        try:
+            response = await post_with_retry(
+                client=client,
+                url=f"{base_url.rstrip('/')}/messages",
+                headers={
+                    "x-api-key": credential,
+                    "anthropic-version": ANTHROPIC_API_VERSION,
+                    "Content-Type": "application/json",
+                },
+                body=body,
+                attempts=self.settings.model_provider_max_attempts,
+            )
+        finally:
+            if owned_client:
+                await client.aclose()
+        if response.get("stop_reason") == "max_tokens":
+            raise ModelOutputInvalid("Anthropic output was cut off at the output token cap")
+        for block in response.get("content", []):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == tool_name
+                and isinstance(block.get("input"), dict)
+            ):
+                return ProviderCompletion(block["input"], anthropic_usage(response))
+        raise ModelOutputInvalid("Anthropic response did not contain structured output")
+
+
+def openrouter_provider_preferences(
+    route: ApprovedModelRoute, settings: Settings
+) -> dict[str, Any]:
+    """OpenRouter's `provider` routing object for this route.
+
+    Always refuses upstreams that retain or train on prompts
+    (`data_collection: deny`) and upstreams that would ignore the JSON schema
+    (`require_parameters`). Where the route's alias names upstream providers,
+    OpenRouter is held to them (`allow_fallbacks: false`), so the residency the
+    route was approved for is where the prompt goes. Raises
+    `ModelRouteNotApproved` for an unpinned alias while pinning is required.
+    """
+    preferences: dict[str, Any] = {"data_collection": "deny", "require_parameters": True}
+    order = settings.openrouter_provider_order.get(route.endpoint_alias)
+    if order:
+        preferences["order"] = list(order)
+        preferences["allow_fallbacks"] = False
+    elif settings.openrouter_require_pinned_provider:
+        raise ModelRouteNotApproved(
+            f"OpenRouter route alias {route.endpoint_alias!r} names no pinned upstream "
+            "provider (openrouter_provider_order)"
+        )
+    return preferences
+
+
+class OpenAICompatibleChatProvider:
+    """One chat-completions adapter for every OpenAI-compatible endpoint (R11-MP01).
+
+    Serves OpenRouter (public default URL, pinned upstreams, usage accounting
+    with a stated dollar cost) and the two private types, OPENAI_COMPATIBLE_PRIVATE
+    and ON_PREM (vLLM, TGI, Ollama, a bank gateway), which have no public
+    default: their alias must be mapped in `model_endpoint_urls`, or the call is
+    refused before anything is sent.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        provider_type: str = "OPENAI_COMPATIBLE_PRIVATE",
+    ) -> None:
+        self.settings = settings
+        self.client = client
+        self.provider_type = provider_type
+
+    def _base_url(self, route: ApprovedModelRoute) -> str:
+        if self.provider_type == "OPENROUTER":
+            return _resolve_endpoint_base_url(
+                route, self.settings, self.settings.openrouter_base_url
+            )
+        mapped = self.settings.model_endpoint_urls.get(route.endpoint_alias)
+        if not mapped:
+            raise ModelRouteNotApproved(
+                f"private model route alias {route.endpoint_alias!r} has no endpoint URL "
+                "(model_endpoint_urls)"
+            )
+        return mapped
+
+    async def __call__(
+        self,
+        *,
+        route: ApprovedModelRoute,
+        credential: str,
+        system_instruction: str,
+        payload: dict[str, Any],
+        output_schema: dict[str, Any],
+        schema_name: str,
+        max_output_tokens: int,
+    ) -> ProviderCompletion:
+        base_url = self._base_url(route)
+        body: dict[str, Any] = {
+            "model": route.model_id,
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                },
+            ],
+            "max_tokens": max_output_tokens,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name.lower(),
+                    "strict": True,
+                    "schema": _openai_strict_schema(output_schema),
+                },
+            },
+        }
+        if self.provider_type == "OPENROUTER":
+            body["provider"] = openrouter_provider_preferences(route, self.settings)
+            body["usage"] = {"include": True}
+        owned_client = self.client is None
+        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
+        try:
+            response = await post_with_retry(
+                client=client,
+                url=f"{base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {credential}",
+                    "Content-Type": "application/json",
+                },
+                body=body,
+                attempts=self.settings.model_provider_max_attempts,
+            )
+        finally:
+            if owned_client:
+                await client.aclose()
+        try:
+            choice = response["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ModelOutputInvalid("chat completion did not contain a message") from exc
+        if not isinstance(choice, dict) or not isinstance(message, dict):
+            raise ModelOutputInvalid("chat completion has an invalid shape")
+        if choice.get("finish_reason") == "length":
+            raise ModelOutputInvalid("chat completion was cut off at the output token cap")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ModelOutputInvalid("chat completion did not contain structured output")
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ModelOutputInvalid("chat completion structured output was not JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ModelOutputInvalid("chat completion structured output has an invalid shape")
+        return ProviderCompletion(parsed, chat_completions_usage(response))
+
+
 def _resolve_endpoint_base_url(route: ApprovedModelRoute, settings: Settings, default: str) -> str:
     """MG-3: route a call through its approved route's private endpoint, if one is
     configured for that `endpoint_alias`, instead of always the public default.
@@ -445,13 +744,50 @@ def build_model_providers(settings: Settings) -> dict[str, StructuredModelProvid
     return {
         "OPENAI": OpenAIResponsesProvider(settings),
         "GOOGLE_GEMINI": GeminiGenerateContentProvider(settings),
+        "ANTHROPIC": AnthropicMessagesProvider(settings),
+        "OPENROUTER": OpenAICompatibleChatProvider(settings, provider_type="OPENROUTER"),
+        "OPENAI_COMPATIBLE_PRIVATE": OpenAICompatibleChatProvider(
+            settings, provider_type="OPENAI_COMPATIBLE_PRIVATE"
+        ),
+        "ON_PREM": OpenAICompatibleChatProvider(settings, provider_type="ON_PREM"),
     }
 
 
+def route_endpoint_problem(
+    *, provider_type: str, endpoint_alias: str, settings: Settings
+) -> str | None:
+    """Why this route's endpoint cannot be called as configured, or None.
+
+    The two conditions the adapters refuse at call time, answered ahead of it so
+    a route's activation status says ADAPTER_REGISTRATION_REQUIRED instead of
+    READY-then-refused: a private type whose alias maps to no URL, and an
+    OpenRouter alias with no pinned upstream while pinning is required.
+    """
+    if provider_type in PRIVATE_ENDPOINT_PROVIDERS and not settings.model_endpoint_urls.get(
+        endpoint_alias
+    ):
+        return "PRIVATE_ENDPOINT_NOT_MAPPED"
+    if (
+        provider_type == "OPENROUTER"
+        and settings.openrouter_require_pinned_provider
+        and not settings.openrouter_provider_order.get(endpoint_alias)
+    ):
+        return "OPENROUTER_UPSTREAM_NOT_PINNED"
+    return None
+
+
 def route_adapter_available(
-    *, provider_type: str, credential_reference: str | None, settings: Settings
+    *,
+    provider_type: str,
+    credential_reference: str | None,
+    settings: Settings,
+    endpoint_alias: str | None = None,
 ) -> bool:
     if provider_type not in SUPPORTED_MODEL_PROVIDERS or not credential_reference:
+        return False
+    if route_endpoint_problem(
+        provider_type=provider_type, endpoint_alias=endpoint_alias or "", settings=settings
+    ):
         return False
     try:
         _resolve_model_credential(credential_reference, settings, SecretResolver(settings))
@@ -492,6 +828,8 @@ def _resolve_model_credential(reference: str, settings: Settings, resolver: Secr
     local_keys = {
         "env://OPENAI_API_KEY": settings.openai_api_key,
         "env://GEMINI_API_KEY": settings.gemini_api_key,
+        "env://ANTHROPIC_API_KEY": settings.anthropic_api_key,
+        "env://OPENROUTER_API_KEY": settings.openrouter_api_key,
     }
     configured = local_keys.get(reference)
     if configured is not None:
@@ -524,6 +862,12 @@ class ModelCallEvidence:
     #: reported nothing: a fixture provider, or an answer without usage.
     provider_input_tokens: int | None = None
     provider_output_tokens: int | None = None
+    #: Of `provider_input_tokens`, how many the provider served from its prompt
+    #: cache, when it says so (Anthropic, OpenAI-compatible servers that report it).
+    provider_cached_input_tokens: int | None = None
+    #: The dollar charge the provider itself stated for this call (OpenRouter),
+    #: or None. Never computed from a price list: see `aida.cost_metrics`.
+    provider_reported_cost_usd: float | None = None
 
 
 class ProviderNeutralModelGateway:
@@ -625,6 +969,10 @@ class ProviderNeutralModelGateway:
             estimated_output_tokens=estimate_serialized_tokens(serialized_output),
             provider_input_tokens=usage.input_tokens if usage is not None else None,
             provider_output_tokens=usage.output_tokens if usage is not None else None,
+            provider_cached_input_tokens=(
+                usage.cached_input_tokens if usage is not None else None
+            ),
+            provider_reported_cost_usd=usage.reported_cost_usd if usage is not None else None,
         )
         # R11-FP17: one place, so every caller of this gateway is counted once and
         # none of them has to remember to. Pure metric publication -- no session

@@ -1022,6 +1022,16 @@ class Settings(BaseSettings):
     model_max_output_tokens: int = Field(default=2_000, ge=100, le=100_000)
     openai_base_url: str = "https://api.openai.com/v1"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # R11-MP01: OpenRouter forwards a request to whichever upstream provider it
+    # picks, which is a residency decision nobody approved. Keyed by a route's
+    # `endpoint_alias`, the upstream providers that route may use, in preference
+    # order; the adapter sends them with `allow_fallbacks: false`. With
+    # `openrouter_require_pinned_provider` on (the default), an OpenRouter route
+    # whose alias has no entry here fails closed instead of letting OpenRouter choose.
+    openrouter_provider_order: dict[str, list[str]] = Field(default_factory=dict)
+    openrouter_require_pinned_provider: bool = True
     # MG-3: private routing. A `ModelRouteConfiguration.endpoint_alias` that appears
     # as a key here resolves to this base URL instead of the public
     # openai_base_url/gemini_base_url default -- e.g. an Azure OpenAI private
@@ -1032,6 +1042,10 @@ class Settings(BaseSettings):
     model_provider_max_attempts: int = Field(default=3, ge=1, le=5)
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, validation_alias="GEMINI_API_KEY")
+    anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    openrouter_api_key: SecretStr | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
     allow_development_sql_override: bool = True
     audit_hmac_key: str = "development-only-change-me"
     # QG-5: which signer produces the audit HMAC evidence in query_gateway.py.
@@ -1352,6 +1366,8 @@ class Settings(BaseSettings):
         if self.environment == "production" and (
             not self.openai_base_url.startswith("https://")
             or not self.gemini_base_url.startswith("https://")
+            or not self.anthropic_base_url.startswith("https://")
+            or not self.openrouter_base_url.startswith("https://")
         ):
             raise ValueError("production model provider URLs must use HTTPS")
         if self.environment == "production":

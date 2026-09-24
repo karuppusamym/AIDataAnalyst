@@ -46,6 +46,7 @@ def _route_read(route: ModelRouteConfiguration, settings: Settings) -> ModelRout
         provider_type=route.provider_type,
         credential_reference=route.credential_reference,
         settings=settings,
+        endpoint_alias=route.endpoint_alias,
     )
     if route.status != "APPROVED":
         activation_status = route.status

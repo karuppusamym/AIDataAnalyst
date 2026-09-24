@@ -2270,6 +2270,8 @@ class ModelRouteConfigurationCreate(ApiModel):
         "GOOGLE_VERTEX",
         "OPENAI_COMPATIBLE_PRIVATE",
         "ON_PREM",
+        "ANTHROPIC",
+        "OPENROUTER",
     ]
     model_id: str = Field(min_length=2, max_length=255)
     endpoint_alias: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{2,254}$")

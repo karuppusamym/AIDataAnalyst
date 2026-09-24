@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**290 settings.** 0 are read nowhere. 64 more ship switched off, empty or zero.
+**296 settings.** 0 are read nowhere. 67 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -100,9 +100,12 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_generation_enabled` | `bool` | `False` | 7 | Opt-in: requires an approved model route, checked at startup |
 | `model_route` | `str | None` | `None` | 14 | Supplied: the approved route generation uses |
 | `model_route_fallbacks` | `str | None` | `None` | 3 via `model_route_fallback_keys` | Supplied: approved routes tried in order after the primary |
-| `model_endpoint_urls` | `dict[str, str]` | `dict` | 1 | Supplied: private model endpoints by alias |
+| `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 | Supplied: the upstreams each OpenRouter alias may use; without an entry the route fails closed |
+| `model_endpoint_urls` | `dict[str, str]` | `dict` | 3 | Supplied: private model endpoints by alias |
 | `openai_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 | Supplied: the provider credential |
+| `anthropic_api_key` | `SecretStr | None` | `None` | 2 | Supplied: the provider credential |
+| `openrouter_api_key` | `SecretStr | None` | `None` | 1 | Supplied: the provider credential |
 | `hmac_signing_vault_url` | `str | None` | `None` | 2 | Supplied: production refuses the local HMAC signer |
 | `hmac_signing_vault_token_reference` | `str` | `''` | 2 | Supplied: the signing vault credential |
 | `tokenization_vault_url` | `str | None` | `None` | 2 | Supplied: production refuses the local tokenization provider |
@@ -351,15 +354,21 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_generation_enabled` | `bool` | `False` | 7 |
 | `model_route` | `str | None` | `None` | 14 |
 | `model_route_fallbacks` | `str | None` | `None` | 3 via `model_route_fallback_keys` |
-| `model_timeout_seconds` | `int` | `30` | 7 |
+| `model_timeout_seconds` | `int` | `30` | 11 |
 | `model_max_input_tokens` | `int` | `8000` | 1 |
 | `model_max_output_tokens` | `int` | `2000` | 2 |
 | `openai_base_url` | `str` | `'https://api.openai.com/v1'` | 3 |
 | `gemini_base_url` | `str` | `'https://generativelanguage.googleapis.com/v1beta'` | 3 |
-| `model_endpoint_urls` | `dict[str, str]` | `dict` | 1 |
-| `model_provider_max_attempts` | `int` | `3` | 4 |
+| `anthropic_base_url` | `str` | `'https://api.anthropic.com/v1'` | 2 |
+| `openrouter_base_url` | `str` | `'https://openrouter.ai/api/v1'` | 2 |
+| `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 |
+| `openrouter_require_pinned_provider` | `bool` | `True` | 2 |
+| `model_endpoint_urls` | `dict[str, str]` | `dict` | 3 |
+| `model_provider_max_attempts` | `int` | `3` | 6 |
 | `openai_api_key` | `SecretStr | None` | `None` | 3 |
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 |
+| `anthropic_api_key` | `SecretStr | None` | `None` | 2 |
+| `openrouter_api_key` | `SecretStr | None` | `None` | 1 |
 | `allow_development_sql_override` | `bool` | `True` | 2 |
 | `audit_hmac_key` | `str` | `'development-only-change-me'` | 1 |
 | `hmac_signing_provider` | `Literal['local', 'vault_transit']` | `'local'` | 1 |
