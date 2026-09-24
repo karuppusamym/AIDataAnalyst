@@ -404,6 +404,7 @@ class QueryExecutionGateway:
         requested_limit: int | None,
         guard_result: SqlValidationResult,
         context_product_scope: ContextProductExecutionScope | None = None,
+        run_estimate: bool = True,
     ) -> _ValidationOutcome:
         """The one deterministic validation pipeline (review item N14).
 
@@ -440,6 +441,9 @@ class QueryExecutionGateway:
         allowlist's, never substituted for them, so no existing refusal is
         removed and a caller that passes `None` sees the identical pipeline it
         always did.
+
+        `run_estimate=False` (R11-MP05, `structural_findings` only) stops before the
+        phase that opens a connector: the guard and catalog findings, no dry run.
         """
         dialect = datasource.dialect
         findings: list[SqlFinding] = findings_from_guard(guard_result)
@@ -515,7 +519,7 @@ class QueryExecutionGateway:
                     )
                 )
 
-        if normalized_sql is not None and not blocked():
+        if run_estimate and normalized_sql is not None and not blocked():
             dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
             executor = open_execution_session(datasource.connector_type, dsn)
             if not executor.capabilities.explain:
@@ -558,6 +562,39 @@ class QueryExecutionGateway:
             executable_sql=normalized_sql,
             executor=executor,
         )
+
+    async def structural_findings(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        sql: str,
+        requested_limit: int | None,
+        context_product_scope: ContextProductExecutionScope | None = None,
+    ) -> SqlValidationReport:
+        """R11-MP05: the guard and catalog phases of the one pipeline, nothing more.
+
+        For the orchestrator to decide whether a statement a model just wrote is
+        worth one repair attempt before anything reaches the source. No
+        authorization, no audit row, no connector and no estimate: it reads only
+        this platform's own catalog, and it decides nothing. Whatever statement
+        is finally submitted still goes through `execute`, whole.
+        """
+        guard_result = self.guard.validate(
+            sql,
+            dialect=datasource.dialect,
+            requested_limit=requested_limit,
+            user_defined_functions=await self.declared_routine_names(session, datasource),
+        )
+        outcome = await self._run_validation(
+            session,
+            datasource=datasource,
+            requested_limit=requested_limit,
+            guard_result=guard_result,
+            context_product_scope=context_product_scope,
+            run_estimate=False,
+        )
+        return outcome.report
 
     async def _gate_product_entitlements(
         self,

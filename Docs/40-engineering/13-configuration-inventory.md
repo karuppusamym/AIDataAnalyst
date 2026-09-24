@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**299 settings.** 0 are read nowhere. 68 more ship switched off, empty or zero.
+**300 settings.** 0 are read nowhere. 68 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -358,7 +358,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION'], str]` | `dict` | 1 |
 | `model_timeout_seconds` | `int` | `30` | 11 |
 | `model_max_input_tokens` | `int` | `8000` | 1 |
-| `model_max_output_tokens` | `int` | `2000` | 2 |
+| `model_max_output_tokens` | `int` | `2000` | 3 |
 | `openai_base_url` | `str` | `'https://api.openai.com/v1'` | 3 |
 | `gemini_base_url` | `str` | `'https://generativelanguage.googleapis.com/v1beta'` | 3 |
 | `anthropic_base_url` | `str` | `'https://api.anthropic.com/v1'` | 2 |
@@ -369,6 +369,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `model_provider_max_attempts` | `int` | `3` | 6 |
 | `model_route_breaker_failure_threshold` | `int` | `3` | 1 |
 | `model_route_breaker_cooldown_seconds` | `int` | `60` | 1 |
+| `agent_sql_repair_attempts` | `int` | `1` | 1 |
 | `openai_api_key` | `SecretStr | None` | `None` | 3 |
 | `gemini_api_key` | `SecretStr | None` | `None` | 3 |
 | `anthropic_api_key` | `SecretStr | None` | `None` | 2 |

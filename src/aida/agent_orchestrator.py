@@ -115,6 +115,7 @@ from aida.okf_export import OkfExportError
 from aida.okf_store import BUNDLE_ROLE_CHANNELS, read_okf_context, record_okf_read
 from aida.orchestration_stages import (
     ExecutionOutcome,
+    GenerationInputs,
     OrchestrationRequest,
     PlanOutcome,
     RetrievalOutcome,
@@ -146,6 +147,14 @@ from aida.semantic_inference import (
     resolve_scoped_glossary_term,
 )
 from aida.signing import sign_value
+from aida.sql_validation import (
+    FINDING_CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN,
+    FINDING_EXACTLY_ONE_STATEMENT_REQUIRED,
+    FINDING_SELECT_WILDCARD_FORBIDDEN,
+    FINDING_SQL_PARSE_ERROR,
+    FINDING_UNKNOWN_COLUMN,
+    FINDING_UNKNOWN_OR_UNAUTHORIZED_TABLE,
+)
 from aida.tool_rendering import ToolParameterError, render_tool_sql
 from aida.tool_source_binding import SOURCE_CHANGED_MESSAGE, fetch_source_binding_holds
 from aida.trust_scoring import AssetContext, compute_trust_score
@@ -423,6 +432,22 @@ def run_token_charge(evidence: ModelCallEvidence, attempt_count: int) -> RunToke
         ),
     )
 
+
+#: R11-MP05: the blocking findings a model can fix by rewriting its statement.
+#: Security and boundary refusals (mutations, SELECT INTO, forbidden functions,
+#: locking reads, context-product scope, cost) are deliberately absent: a
+#: statement refused for one of those is never offered back to the model.
+REPAIRABLE_FINDING_CODES: Final[frozenset[str]] = frozenset(
+    {
+        FINDING_SQL_PARSE_ERROR,
+        FINDING_EXACTLY_ONE_STATEMENT_REQUIRED,
+        FINDING_CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN,
+        FINDING_SELECT_WILDCARD_FORBIDDEN,
+        FINDING_UNKNOWN_OR_UNAUTHORIZED_TABLE,
+        FINDING_UNKNOWN_COLUMN,
+    }
+)
+SQL_REPAIR_VERSION: Final = "sql-repair-v1"
 
 CONTEXT_PRODUCT_UNAVAILABLE: Final = "CONTEXT_PRODUCT_NOT_AVAILABLE"
 CONTEXT_PRODUCT_FORBIDDEN: Final = "CONTEXT_PRODUCT_CONSUMER_ROLE_REQUIRED"
@@ -1740,6 +1765,9 @@ class GovernedAgentOrchestrator:
             statement = await self._generate_statement(
                 session, request, ledger, screened, retrieved
             )
+            statement = await self._repair_generated_statement(
+                session, request, ledger, screened, retrieved, statement
+            )
 
         if retrieved.context_product_scope is not None:
             # Scoping retrieval decides what the model was shown; it does not decide what it
@@ -2242,7 +2270,194 @@ class GovernedAgentOrchestrator:
             generation_source=(
                 "QUERY_MEMORY_ADAPTATION" if memory_match is not None else "MODEL_GATEWAY"
             ),
+            generation_inputs=GenerationInputs(
+                system_instruction=system_instruction,
+                payload=payload,
+                approved_routes=tuple(approved_routes),
+            ),
         )
+
+    async def _repair_generated_statement(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        ledger: RunLedger,
+        screened: ScreenOutcome,
+        retrieved: RetrievalOutcome,
+        statement: ValidatedStatement,
+    ) -> ValidatedStatement:
+        """R11-MP05: let the model correct a statement the pipeline would refuse
+        for a reason a model can fix, before anything reaches the source.
+
+        The check is the gateway's own guard and catalog phases
+        (`QueryExecutionGateway.structural_findings`): no connector, no estimate.
+        Only when *every* blocking finding is in `REPAIRABLE_FINDING_CODES` is the
+        model asked again, with its own rejected statement and the findings --
+        codes, identifier refs and hints, which carry no source value (INV-6).
+        A statement refused for a security or boundary reason (a mutation, a
+        forbidden function, a context-product table) is never offered back: the
+        refusal stands, from the execute stage, exactly as before.
+
+        Each attempt is a full budgeted model call through the approved routes.
+        If it fails, the original statement goes on unchanged. Whatever comes
+        out still goes through the context-product check and the whole gateway
+        pipeline; this method only decides what the model is asked.
+        """
+        inputs = statement.generation_inputs
+        attempts_allowed = self.settings.agent_sql_repair_attempts
+        if inputs is None or attempts_allowed <= 0:
+            return statement
+        scope = (
+            None
+            if retrieved.context_product_scope is None
+            else retrieved.context_product_scope.execution_scope()
+        )
+        history: list[dict[str, Any]] = []
+        current = statement
+        for attempt in range(1, attempts_allowed + 1):
+            report = await self.query_gateway.structural_findings(
+                session,
+                datasource=request.datasource,
+                sql=current.sql,
+                requested_limit=request.requested_limit,
+                context_product_scope=scope,
+            )
+            blocking = report.blocking_findings
+            codes = sorted({finding.code for finding in blocking})
+            if not blocking or not set(codes) <= REPAIRABLE_FINDING_CODES:
+                if history:
+                    history[-1]["result"] = "VALID" if not blocking else "STILL_REFUSED"
+                break
+            findings = [
+                {"code": finding.code, "ref": finding.ref, "hint": finding.hint}
+                for finding in blocking
+            ]
+            payload = {
+                **inputs.payload,
+                "rejected_sql": current.sql,
+                "rejection_findings": findings,
+            }
+            system_instruction = inputs.system_instruction + (
+                " Your previous statement, supplied as rejected_sql, was refused by the "
+                "platform's validator for the reasons in rejection_findings. Return a "
+                "corrected statement that fixes every finding, using only the tables and "
+                "columns in metadata_context."
+            )
+            entry: dict[str, Any] = {"attempt": attempt, "findings": codes}
+            history.append(entry)
+            try:
+                output, evidence, call_attempts = await self._budgeted_repair_call(
+                    session,
+                    request,
+                    ledger,
+                    screened,
+                    approved_routes=list(inputs.approved_routes),
+                    system_instruction=system_instruction,
+                    payload=payload,
+                )
+            except ModelGatewayError as exc:
+                entry["result"] = "REPAIR_CALL_FAILED"
+                entry["error_class"] = type(exc).__name__
+                break
+            entry["result"] = "REPAIRED_UNCHECKED"
+            entry["route"] = evidence.route
+            entry["output_fingerprint"] = evidence.output_fingerprint
+            if len(call_attempts) > 1:
+                entry["model_call_attempts"] = call_attempts
+            current = ValidatedStatement(
+                sql=output.sql,
+                generation_source=current.generation_source,
+                generation_inputs=inputs,
+            )
+        else:
+            # Attempts exhausted: say whether the last repair is now clean.
+            final = await self.query_gateway.structural_findings(
+                session,
+                datasource=request.datasource,
+                sql=current.sql,
+                requested_limit=request.requested_limit,
+                context_product_scope=scope,
+            )
+            if history:
+                history[-1]["result"] = (
+                    "VALID" if not final.blocking_findings else "STILL_REFUSED"
+                )
+        if history:
+            ledger.plan_evidence["sql_repair"] = {
+                "attempts": history,
+                "control_version": SQL_REPAIR_VERSION,
+            }
+            ledger.publish_plan_evidence()
+        return current
+
+    async def _budgeted_repair_call(
+        self,
+        session: AsyncSession,
+        request: OrchestrationRequest,
+        ledger: RunLedger,
+        screened: ScreenOutcome,
+        *,
+        approved_routes: list[ApprovedModelRoute],
+        system_instruction: str,
+        payload: dict[str, Any],
+    ) -> tuple[SqlGenerationOutput, ModelCallEvidence, list[dict[str, Any]]]:
+        """One repair generation under the same budget rules as the first call.
+
+        Reserved, settled on failure and reconciled on success exactly as in
+        `_generate_statement`; the per-run cap is checked against this run's
+        whole charge -- the first generation's plus this one -- and the run's
+        token columns and `budget_evidence` are brought up to that total.
+        """
+        agent_run = ledger.agent_run
+        reservation = await self._reserve_generation_budget(
+            session,
+            request,
+            ledger,
+            screened,
+            payload=payload,
+            attempt_count=len(approved_routes),
+            output_allowance=sum(
+                min(self.settings.model_max_output_tokens, route.max_output_tokens)
+                for route in approved_routes
+            ),
+        )
+        try:
+            output, evidence, call_attempts = await self._generate_with_fallback(
+                session=session,
+                organization_id=request.organization_id,
+                approved_routes=approved_routes,
+                system_instruction=system_instruction,
+                payload=payload,
+            )
+        except BaseException:
+            await settle_unresolved_run_budget(session, reservation)
+            raise
+        charge = run_token_charge(evidence, len(call_attempts))
+        try:
+            await reconcile_run_budget(session, reservation, actual_tokens=charge.charged)
+        except AgentBudgetExceeded as exc:
+            await self._persist_rejection(session, request, ledger, exc.reason_code)
+            raise AgentPolicyRejected(exc.reason_code) from exc
+        agent_run.estimated_input_tokens = (agent_run.estimated_input_tokens or 0) + (
+            evidence.estimated_input_tokens * max(len(call_attempts), 1)
+        )
+        agent_run.estimated_output_tokens = (
+            agent_run.estimated_output_tokens or 0
+        ) + evidence.estimated_output_tokens
+        budget = ledger.plan_evidence.get("budget_evidence")
+        total = charge.charged
+        if isinstance(budget, dict):
+            total += int(budget.get("charged_tokens") or 0)
+            budget["charged_tokens"] = total
+            budget["repair_charged_tokens"] = (
+                int(budget.get("repair_charged_tokens") or 0) + charge.charged
+            )
+        overrun = per_run_violation(screened.agent_contract, tokens=total)
+        if overrun is not None:
+            ledger.publish_plan_evidence()
+            await self._persist_rejection(session, request, ledger, overrun)
+            raise AgentPolicyRejected(overrun)
+        return output, evidence, call_attempts
 
     # ------------------------------------------------------------------
     # Stage 5 -- execute

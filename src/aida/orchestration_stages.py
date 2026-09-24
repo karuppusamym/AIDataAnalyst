@@ -33,6 +33,7 @@ from aida.agent_runtime import RuntimeStage, RuntimeState
 if TYPE_CHECKING:
     from aida.agent_intelligence import AgentPlan, RetrievalHit
     from aida.agent_orchestrator import ContextProductScope
+    from aida.model_gateway import ApprovedModelRoute
     from aida.models import (
         AgentContract,
         AgentRun,
@@ -194,6 +195,18 @@ class ValidatedStatement:
     sql: str
     generation_source: str
     tool_execution: ToolExecution | None = None
+    #: R11-MP05: on the model paths, the instruction, payload and routes the
+    #: statement was generated from, so a repair attempt resends exactly them.
+    generation_inputs: GenerationInputs | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationInputs:
+    """What one SQL generation sent to the model (R11-MP05)."""
+
+    system_instruction: str
+    payload: dict[str, Any]
+    approved_routes: tuple[ApprovedModelRoute, ...]
 
 
 @dataclass(frozen=True, slots=True)
