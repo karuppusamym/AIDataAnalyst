@@ -630,6 +630,13 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # R11-MP21: values that identify a person or an account (account and card
+    # numbers, IBANs, e-mail addresses, SSNs) are replaced by tokens before the
+    # question reaches a model or embedding provider, and restored into the SQL
+    # locally. And the question also passes the metadata injection screen, which
+    # handles homoglyphs, encodings and several languages.
+    question_value_redaction_enabled: bool = True
+    question_obfuscation_screen_enabled: bool = True
     # R11-MP17: a confirmed query becomes a template and few-shot example for
     # every user of its datasource, so it needs a confirmation from someone other
     # than the person who asked it. Off only for a single-user demo estate.

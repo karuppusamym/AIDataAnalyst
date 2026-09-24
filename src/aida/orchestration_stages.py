@@ -222,6 +222,9 @@ class GenerationInputs:
     system_instruction: str
     payload: dict[str, Any]
     approved_routes: tuple[ApprovedModelRoute, ...]
+    #: R11-MP21: token -> value for the values redacted from the question. Held
+    #: in memory for this run only, to restore them into what a model writes.
+    redacted_values: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

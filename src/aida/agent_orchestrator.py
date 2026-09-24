@@ -78,6 +78,7 @@ from aida.context_product_execution_scope import (
 )
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import SCREENING_VERSION, screen_text
+from aida.injection_defense import screen_metadata
 from aida.model_gateway import (
     ApprovedModelRoute,
     ModelCallEvidence,
@@ -140,6 +141,15 @@ from aida.query_memory import (
     find_query_memory_match,
     find_query_memory_matches,
     retrieved_table_ids_from_hits,
+)
+from aida.question_redaction import (
+    MODEL_INSTRUCTION as REDACTED_VALUES_INSTRUCTION,
+)
+from aida.question_redaction import (
+    RedactedQuestion,
+    redact_question,
+    restore_values,
+    tokenize_values,
 )
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
@@ -1463,16 +1473,36 @@ class GovernedAgentOrchestrator:
             )
 
         prompt_risk = self.prompt_risk_classifier.assess(request.question)
-        ledger.advance(
-            RuntimeStage.SCREENED,
-            control_type="DETERMINISTIC",
-            details={
-                "decision": prompt_risk.decision,
-                "risk_score": prompt_risk.score,
-                "reason_codes": prompt_risk.reason_codes,
-                "classifier_version": prompt_risk.classifier_version,
-            },
+        # R11-MP21: the question screen is English-only regex; the metadata screen
+        # also normalises homoglyphs and invisible characters, decodes encodings and
+        # covers several languages. The question passes both, and either blocks.
+        obfuscation = (
+            screen_metadata(request.question, content_origin="user_question")
+            if self.settings.question_obfuscation_screen_enabled
+            else None
         )
+        obfuscation_block = obfuscation is not None and obfuscation.flagged
+        details: dict[str, object] = {
+            "decision": "BLOCK" if obfuscation_block else prompt_risk.decision,
+            "risk_score": prompt_risk.score,
+            "reason_codes": prompt_risk.reason_codes,
+            "classifier_version": prompt_risk.classifier_version,
+        }
+        if obfuscation is not None:
+            details["metadata_screen"] = {
+                "flagged": obfuscation.flagged,
+                "threat_type": obfuscation.threat_type,
+                "classifier_version": obfuscation.classifier_version,
+            }
+        ledger.advance(RuntimeStage.SCREENED, control_type="DETERMINISTIC", details=details)
+        if obfuscation_block and prompt_risk.decision != "BLOCK":
+            agent_run.generation_source = "POLICY_BLOCK"
+            await self._persist_rejection(
+                session, request, ledger, "PROMPT_POLICY_DENIED:METADATA_SCREEN"
+            )
+            raise AgentPolicyRejected(
+                "request rejected by deterministic prompt safety controls"
+            )
         if prompt_risk.decision == "BLOCK":
             plan = self.planner.plan(
                 retrieval_hits=[],
@@ -1553,7 +1583,8 @@ class GovernedAgentOrchestrator:
         scored_candidates = await self.retriever.score_candidates(
             session,
             datasource=datasource,
-            question=request.question,
+            # R11-MP21: the retriever embeds the question with a hosted provider.
+            question=self._question_for_providers(request).text,
             preferred_tool_version_id=request.preferred_tool_version_id,
         )
         scope: ContextProductScope | None = None
@@ -2024,8 +2055,13 @@ class GovernedAgentOrchestrator:
                 retrieved.evidence
             )
             withheld_fragments += withheld_tables
+            # R11-MP21: identifying values leave as tokens and come back locally.
+            redaction = self._question_for_providers(request)
+            if redaction.redacted:
+                system_instruction += REDACTED_VALUES_INSTRUCTION
+                ledger.plan_evidence["question_redaction"] = redaction.evidence()
             payload: dict[str, Any] = {
-                "question": request.question,
+                "question": redaction.text,
                 "datasource_id": str(request.datasource.id),
                 "semantic_version": retrieved.semantic_version,
                 "retrieval_evidence": model_evidence_hits,
@@ -2293,7 +2329,7 @@ class GovernedAgentOrchestrator:
                 ),
             ) from exc
         return ValidatedStatement(
-            sql=output.sql,
+            sql=restore_values(output.sql, redaction.values),
             generation_source=(
                 "QUERY_MEMORY_ADAPTATION" if memory_match is not None else "MODEL_GATEWAY"
             ),
@@ -2301,8 +2337,16 @@ class GovernedAgentOrchestrator:
                 system_instruction=system_instruction,
                 payload=payload,
                 approved_routes=tuple(approved_routes),
+                redacted_values=redaction.values,
             ),
         )
+
+    def _question_for_providers(self, request: OrchestrationRequest) -> RedactedQuestion:
+        """The question as it may be sent to a model or embedding provider
+        (R11-MP21): identifying values tokenised, unless redaction is off."""
+        if not self.settings.question_value_redaction_enabled:
+            return RedactedQuestion(text=request.question)
+        return redact_question(request.question)
 
     async def _repair_generated_statement(
         self,
@@ -2361,7 +2405,8 @@ class GovernedAgentOrchestrator:
             ]
             payload = {
                 **inputs.payload,
-                "rejected_sql": current.sql,
+                # R11-MP21: the statement holds restored values; the model gets tokens.
+                "rejected_sql": tokenize_values(current.sql, inputs.redacted_values),
                 "rejection_findings": findings,
             }
             system_instruction = inputs.system_instruction + (
@@ -2392,7 +2437,7 @@ class GovernedAgentOrchestrator:
             if len(call_attempts) > 1:
                 entry["model_call_attempts"] = call_attempts
             current = ValidatedStatement(
-                sql=output.sql,
+                sql=restore_values(output.sql, inputs.redacted_values),
                 generation_source=current.generation_source,
                 generation_inputs=inputs,
             )
@@ -2464,7 +2509,9 @@ class GovernedAgentOrchestrator:
                 record["error_class"] = type(exc).__name__
             else:
                 agreement = compare_candidates(
-                    statement.sql, output.sql, dialect=request.datasource.dialect
+                    statement.sql,
+                    restore_values(output.sql, inputs.redacted_values),
+                    dialect=request.datasource.dialect,
                 )
                 record["result"] = "COMPARED"
                 record["agreement"] = agreement.evidence()
