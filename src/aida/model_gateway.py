@@ -12,9 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
-from aida.cost_metrics import observe_model_call
+from aida.cost_metrics import observe_model_call, record_model_spend
 from aida.models import KillSwitchState
 from aida.secrets import SecretResolutionError, SecretResolver
+from aida.usage_quotas import QuotaRefused, UsageDimension, consume_quota, settle_quota
 
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
 SUPPORTED_MODEL_PROVIDERS = frozenset(
@@ -80,6 +81,20 @@ class ModelRouteNotApproved(ModelGatewayError):
 
 class ModelOutputInvalid(ModelGatewayError):
     pass
+
+
+class ModelQuotaExhausted(ModelGatewayError):
+    """R11-MP14: a declared model-token quota refused this call before it was made.
+
+    A subclass, and with no provider status, on purpose: it is not a route
+    failure, so it neither falls back to another route (the quota is the
+    tenant's or the source's, not the route's) nor counts toward a route's
+    circuit breaker. `reason_code` names the window that refused.
+    """
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(f"model token quota is exhausted ({reason_code})")
+        self.reason_code = reason_code
 
 
 class KillSwitchEngaged(ModelGatewayError):
@@ -892,7 +907,13 @@ class ProviderNeutralModelGateway:
         system_instruction: str,
         payload: dict[str, Any],
         output_schema: type[StructuredModel],
+        datasource_id: UUID | None = None,
     ) -> tuple[StructuredModel, ModelCallEvidence]:
+        # R11-MP14: `datasource_id` is the source this call is on behalf of, when
+        # there is one. It is what the per-source token quota and the per-source
+        # spend attribution are keyed by; a call with none is charged to the
+        # tenant only.
+        #
         # Checked first, ahead of every other activation condition (MG-2): a kill
         # switch engaged through the governed API is a live DB read on this call,
         # not cached config, so it blocks the very next generation request.
@@ -931,6 +952,23 @@ class ProviderNeutralModelGateway:
         output_budget = min(self.settings.model_max_output_tokens, route.max_output_tokens)
         if estimated_tokens > input_budget:
             raise ModelGatewayError("model input exceeds the approved token budget")
+        # R11-MP14: the declared model-token quota, enforced atomically before
+        # anything is sent. The reservation is the most this call may cost -- the
+        # input estimate plus the output cap -- and is settled to the billed figure
+        # below. With no quota declared this writes nothing and returns False.
+        reservation = estimated_tokens + output_budget
+        try:
+            reserved = await consume_quota(
+                session,
+                self.settings,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                dimension=UsageDimension.MODEL_TOKENS,
+                amount=reservation,
+            )
+        except QuotaRefused as refused:
+            raise ModelQuotaExhausted(refused.reason_code) from refused
+        reserved_amount = reservation if reserved else 0
         try:
             raw = await asyncio.wait_for(
                 provider(
@@ -946,10 +984,26 @@ class ProviderNeutralModelGateway:
             )
             completion = raw if isinstance(raw, ProviderCompletion) else ProviderCompletion(raw)
             output = output_schema.model_validate(completion.output)
-        except TimeoutError as exc:
-            raise ModelGatewayError("model route timed out") from exc
-        except ValidationError as exc:
-            raise ModelOutputInvalid("model output failed its structured contract") from exc
+        except BaseException as failure:
+            # The input was sent and may have been billed; the output allowance
+            # was never produced. Charge the input estimate, release the rest --
+            # the same settlement `agent_budget.settle_unresolved_run_budget` makes.
+            await settle_quota(
+                session,
+                self.settings,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                dimension=UsageDimension.MODEL_TOKENS,
+                reserved=reserved_amount,
+                actual=estimated_tokens,
+            )
+            if isinstance(failure, TimeoutError):
+                raise ModelGatewayError("model route timed out") from failure
+            if isinstance(failure, ValidationError):
+                raise ModelOutputInvalid(
+                    "model output failed its structured contract"
+                ) from failure
+            raise
         serialized_output = json.dumps(output.model_dump(mode="json"), sort_keys=True)
         usage = completion.usage
         evidence = ModelCallEvidence(
@@ -978,6 +1032,17 @@ class ProviderNeutralModelGateway:
         # never given (it receives an organization and a route), and lives in
         # `cost_metrics.record_model_spend`, called by the callers that know it.
         observe_model_call(evidence)
+        # R11-MP14: settle the reservation to what the provider billed (or the
+        # estimate where it reported nothing), and attribute the spend to the
+        # tenant and source for every caller -- Ask's spend was never recorded.
+        await record_model_spend(
+            session,
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            evidence=evidence,
+            settings=self.settings,
+            reserved=reserved_amount,
+        )
         return output, evidence
 
 

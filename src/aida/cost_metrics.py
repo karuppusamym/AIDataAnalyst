@@ -127,6 +127,8 @@ if TYPE_CHECKING:  # pragma: no cover -- typing only
     # annotation a string, so the type is still checked and never imported.
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from aida.config import Settings
+
 _log = structlog.get_logger(__name__)
 
 # `aida.usage_quotas` is imported inside the two `record_*_spend` coroutines
@@ -517,6 +519,8 @@ async def record_model_spend(
     organization_id: UUID,
     datasource_id: UUID | None,
     evidence: ModelSpendEvidence,
+    settings: Settings | None = None,
+    reserved: int = 0,
 ) -> None:
     """Attribute one model call's tokens to a source, in the day's usage window.
 
@@ -534,23 +538,37 @@ async def record_model_spend(
 
     Uses `record_usage`, not `consume_quota`: attributing spend that has already
     happened must never refuse it. Enforcement for this dimension happens
-    *before* the call, wherever a caller chooses to enforce it.
+    *before* the call -- since R11-MP14, in the model gateway itself, which
+    reserves the call's cap with `consume_quota` and then passes `settings` and
+    `reserved` here so the windows are settled to the billed figure
+    (`usage_quotas.settle_quota`) instead of charged twice.
     """
     charged, basis = billable_tokens(evidence)
     SPEND_ATTRIBUTION.labels(
         attributed=_ATTRIBUTED if datasource_id is not None else _UNATTRIBUTED
     ).inc()
+    from aida.usage_quotas import UsageDimension, record_usage, settle_quota
+
+    if settings is not None and reserved > 0:
+        await settle_quota(
+            session,
+            settings,
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            dimension=UsageDimension.MODEL_TOKENS,
+            reserved=reserved,
+            actual=max(charged, 0),
+        )
+    elif charged > 0:
+        await record_usage(
+            session,
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            dimension=UsageDimension.MODEL_TOKENS,
+            amount=charged,
+        )
     if charged <= 0:
         return
-    from aida.usage_quotas import UsageDimension, record_usage
-
-    await record_usage(
-        session,
-        organization_id=organization_id,
-        datasource_id=datasource_id,
-        dimension=UsageDimension.MODEL_TOKENS,
-        amount=charged,
-    )
     _log.info(
         "model_spend_recorded",
         organization_id=str(organization_id),

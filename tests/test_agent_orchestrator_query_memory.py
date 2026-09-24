@@ -112,6 +112,7 @@ class _CapturingModelGateway:
         system_instruction: str,
         payload: dict[str, Any],
         output_schema: type[SqlGenerationOutput],
+        datasource_id: UUID | None = None,
     ) -> tuple[SqlGenerationOutput, ModelCallEvidence]:
         self.calls.append({"system_instruction": system_instruction, "payload": payload})
         output = output_schema(

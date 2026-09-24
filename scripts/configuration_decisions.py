@@ -162,6 +162,10 @@ DECISIONS: dict[str, tuple[str, str]] = {
     "gemini_api_key": (SUPPLIED, "the provider credential"),
     "anthropic_api_key": (SUPPLIED, "the provider credential"),
     "openrouter_api_key": (SUPPLIED, "the provider credential"),
+    "ask_budget_enabled": (
+        OPT_IN,
+        "needs Redis, like the MCP and GraphQL budgets; the model-token quota bounds spend without it",
+    ),
     "model_routes_by_purpose": (
         OPT_IN,
         "one route for every purpose is the default; a purpose route is named once it is approved",

@@ -82,6 +82,7 @@ from aida.model_gateway import (
     ApprovedModelRoute,
     ModelCallEvidence,
     ModelGatewayError,
+    ModelQuotaExhausted,
     ProviderNeutralModelGateway,
     SqlGenerationOutput,
     estimate_payload_tokens,
@@ -740,6 +741,7 @@ class GovernedAgentOrchestrator:
         approved_routes: list[ApprovedModelRoute],
         system_instruction: str,
         payload: dict[str, Any],
+        datasource_id: UUID | None = None,
     ) -> tuple[SqlGenerationOutput, ModelCallEvidence, list[dict[str, Any]]]:
         """Try `approved_routes` in preference order; return the first
         route's `(output, evidence)` along with the full per-route attempt
@@ -819,6 +821,7 @@ class GovernedAgentOrchestrator:
                     system_instruction=system_instruction,
                     payload=payload,
                     output_schema=SqlGenerationOutput,
+                    datasource_id=datasource_id,
                 )
             except ModelGatewayError as exc:
                 attempts.append(
@@ -2155,6 +2158,7 @@ class GovernedAgentOrchestrator:
                     approved_routes=approved_routes,
                     system_instruction=system_instruction,
                     payload=payload,
+                    datasource_id=request.datasource.id,
                 )
             except BaseException:
                 # A timeout or an invalid response can follow work the provider
@@ -2269,11 +2273,24 @@ class GovernedAgentOrchestrator:
             if exc_attempts:
                 ledger.plan_evidence["model_call_attempts"] = exc_attempts
                 ledger.publish_plan_evidence()
+            quota_refused = isinstance(exc, ModelQuotaExhausted)
             await self._persist_rejection(
-                session, request, ledger, "MODEL_ROUTE_NOT_CONFIGURED"
+                session,
+                request,
+                ledger,
+                (
+                    f"MODEL_TOKEN_QUOTA_EXHAUSTED:{exc.reason_code}"
+                    if isinstance(exc, ModelQuotaExhausted)
+                    else "MODEL_ROUTE_NOT_CONFIGURED"
+                ),
             )
+            # R11-MP14: a spent quota answers 429, like a throttled provider:
+            # the caller should wait, not reconfigure anything.
             raise ModelRouteUnavailable(
-                str(exc), provider_status_code=getattr(exc, "provider_status_code", None)
+                str(exc),
+                provider_status_code=(
+                    429 if quota_refused else getattr(exc, "provider_status_code", None)
+                ),
             ) from exc
         return ValidatedStatement(
             sql=output.sql,
@@ -2528,6 +2545,7 @@ class GovernedAgentOrchestrator:
                 approved_routes=approved_routes,
                 system_instruction=system_instruction,
                 payload=payload,
+                datasource_id=request.datasource.id,
             )
         except BaseException:
             await settle_unresolved_run_budget(session, reservation)

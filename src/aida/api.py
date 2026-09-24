@@ -66,6 +66,7 @@ from aida.query_gateway import (
     QueryExecutionGateway,
     QueryRejected,
 )
+from aida.request_budget import budget_headers, consume_window_budget, principal_hash
 from aida.schemas import (
     AgentAnalysisRequest,
     AgentAnalysisResponse,
@@ -1718,6 +1719,31 @@ async def get_query_lineage(
     )
 
 
+async def _admit_ask(settings: Settings, context: SecurityContext) -> None:
+    """R11-MP14: the caller's per-minute Ask budget, before anything is read.
+
+    Counted per organization and principal in a fixed window (`aida.request_budget`),
+    so one caller cannot drain the model quota the rest of the organization shares.
+    Off unless `ask_budget_enabled`; fails closed in staging and production when
+    the store is unreachable. A refusal is a 429 naming when to come back.
+    """
+    decision = await consume_window_budget(
+        settings,
+        namespace="ask-budget",
+        bucket="REQUEST_MINUTE",
+        key_hash=principal_hash(context),
+        limit=settings.ask_requests_per_minute,
+        window_seconds=60,
+        enabled=settings.ask_budget_enabled,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"the caller's Ask budget of {decision.limit} questions a minute is spent",
+            headers=budget_headers(decision),
+        )
+
+
 async def _agent_analysis_contract(
     session: AsyncSession, context: SecurityContext, datasource: DataSource
 ) -> AgentContract | None:
@@ -1835,6 +1861,7 @@ async def run_agent_analysis(
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
+    await _admit_ask(settings, context)
     caller_contract = await _agent_analysis_contract(session, context, datasource)
     return await _orchestrate_agent_analysis(
         session,
@@ -1883,6 +1910,7 @@ async def stream_agent_analysis(
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
+    await _admit_ask(settings, context)
     caller_contract = await _agent_analysis_contract(session, context, datasource)
     events: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
     correlation_id = get_correlation_id()

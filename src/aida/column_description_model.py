@@ -44,7 +44,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.catalog_read_model import _business_annotations, _latest_approved_documentation
 from aida.column_description_service import ORIGIN_MODEL_INFERRED, ColumnEvidence
 from aida.config import Settings
-from aida.cost_metrics import record_model_spend
 from aida.ingest_screening import SCREENING_VERSION, screen_text
 from aida.model_gateway import (
     ApprovedModelRoute,
@@ -397,6 +396,7 @@ async def draft_thin_columns(
                 system_instruction=SYSTEM_INSTRUCTION,
                 payload=request.payload,
                 output_schema=ModelColumnDraftBatch,
+                datasource_id=datasource_id,
             )
         except (KillSwitchEngaged, ModelRouteNotApproved) as exc:
             outcome.note = outcome.note or str(exc)
@@ -405,16 +405,9 @@ async def draft_thin_columns(
         except ModelGatewayError as exc:
             outcome.note = outcome.note or str(exc)
             continue
-        # R11-FP17: recorded per call rather than per request, because a request
-        # that stops half way through its chunks still spent what it spent, and
-        # a figure only written on the happy path would understate exactly the
-        # tables that are expensive because the model keeps refusing them.
-        await record_model_spend(
-            session,
-            organization_id=organization_id,
-            datasource_id=datasource_id,
-            evidence=call,
-        )
+        # R11-FP17's per-call spend attribution now happens inside the gateway
+        # (R11-MP14), which is given `datasource_id` above: recording it here too
+        # would charge the source twice.
         results, quarantined = validate_model_drafts(output, request, call=_call_record(call))
         outcome.withheld += quarantined
         outcome.results.extend(results)

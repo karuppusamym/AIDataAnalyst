@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**300 settings.** 0 are read nowhere. 68 more ship switched off, empty or zero.
+**302 settings.** 0 are read nowhere. 69 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -82,6 +82,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `teams_webhook_url` | `str | None` | `None` | 2 | Supplied: the Teams destination |
 | `portal_base_url` | `str | None` | `None` | 1 | Supplied: links in notifications are omitted when unset |
 | `mcp_budget_enabled` | `bool` | `False` | 1 | Opt-in: needs Redis for the budget buckets |
+| `ask_budget_enabled` | `bool` | `False` | 1 | Opt-in: needs Redis, like the MCP and GraphQL budgets; the model-token quota bounds spend without it |
 | `graphql_budget_enabled` | `bool` | `False` | 1 | Opt-in: needs Redis for the budget buckets, as MCP's does |
 | `graphql_introspection_enabled` | `bool` | `False` | 1 | Off by design: R11-GQL01: clients discover the schema from the published SDL; on only for a development or staging explorer (PlatformAdmin and AgentDeveloper), and production refuses it |
 | `quality_seasonal_thresholds_enabled` | `bool` | `False` | 1 | Opt-in: changes VOLUME_CHANGE verdicts; an estate reviews it against its own history first |
@@ -277,6 +278,8 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `mcp_consumer_requests_per_minute` | `int` | `30` | 1 |
 | `mcp_consumer_tool_calls_per_day` | `int` | `200` | 1 |
 | `mcp_consumer_context_reads_per_day` | `int` | `1000` | 1 |
+| `ask_budget_enabled` | `bool` | `False` | 1 |
+| `ask_requests_per_minute` | `int` | `20` | 1 |
 | `graphql_budget_enabled` | `bool` | `False` | 1 |
 | `graphql_requests_per_minute` | `int` | `120` | 1 |
 | `graphql_executions_per_day` | `int` | `500` | 1 |

@@ -894,6 +894,7 @@ class _FakeModelGateway:
         system_instruction: str,
         payload: dict[str, Any],
         output_schema: type[SqlGenerationOutput],
+        datasource_id: UUID | None = None,
     ) -> tuple[SqlGenerationOutput, ModelCallEvidence]:
         self.calls.append({"payload": payload})
         output = output_schema(sql=self.sql, confidence=0.9, rationale_codes=["FAKE"])

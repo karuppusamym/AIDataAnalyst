@@ -601,6 +601,124 @@ async def record_usage(
     )
 
 
+async def _release_tenant(
+    session: AsyncSession,
+    *,
+    window_id: UUID,
+    organization_id: UUID,
+    amount: int,
+) -> None:
+    """Give back part of a tenant consumption, clamped at zero (R11-MP14).
+
+    The tenant-side counterpart `_release_source` explains why there was none
+    before: `consume_quota` never needed one. `settle_quota` does, because a
+    model call is reserved at its cap and settled down to what was billed.
+    """
+    adjusted = TenantUsageWindow.used - amount
+    await session.execute(
+        update(TenantUsageWindow)
+        .where(
+            TenantUsageWindow.id == window_id,
+            TenantUsageWindow.organization_id == organization_id,
+        )
+        .values(used=case((adjusted < 0, literal(0)), else_=adjusted))
+    )
+
+
+async def settle_quota(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    organization_id: UUID,
+    datasource_id: UUID | None,
+    dimension: UsageDimension,
+    reserved: int,
+    actual: int,
+    now: dt.datetime | None = None,
+) -> None:
+    """Bring the windows to `actual` after a `consume_quota(amount=reserved)` (R11-MP14).
+
+    A model call is reserved before it is made at the most it may cost -- the
+    input estimate plus the output cap -- because that is the only figure known
+    then, and the reservation is what makes the refusal atomic. Afterwards the
+    windows are settled to what the call actually cost:
+
+    * a window `consume_quota` charged (its cap is declared) moves by
+      ``actual - reserved`` -- released when the call cost less, charged the
+      excess when it cost more, never refused, because the spend has happened;
+    * a window it did not charge (no cap declared) records ``actual``, the
+      attribution `record_usage` has always done.
+
+    `reserved` is 0 when `consume_quota` returned False (nothing declared), and
+    then this is exactly `record_usage(actual)`. Never raises for a full window.
+    """
+    if reserved < 0 or actual < 0:
+        raise ValueError("a settlement cannot be negative")
+    caps = caps_for(settings, dimension)
+    window_date = _window_date(now)
+
+    async def _move_source(amount: int, *, release: bool) -> None:
+        assert datasource_id is not None
+        window = await _ensure_source_window(
+            session,
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            dimension=dimension.value,
+            window_date=window_date,
+        )
+        if release:
+            await _release_source(
+                session,
+                window_id=window,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                amount=amount,
+            )
+        else:
+            await _consume_source(
+                session,
+                window_id=window,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                amount=amount,
+                cap=None,
+            )
+
+    async def _move_tenant(amount: int, *, release: bool) -> None:
+        window = await _ensure_tenant_window(
+            session,
+            organization_id=organization_id,
+            dimension=dimension.value,
+            window_date=window_date,
+        )
+        if release:
+            await _release_tenant(
+                session, window_id=window, organization_id=organization_id, amount=amount
+            )
+        else:
+            await _consume_tenant(
+                session,
+                window_id=window,
+                organization_id=organization_id,
+                amount=amount,
+                cap=None,
+            )
+
+    if datasource_id is not None:
+        charged_before = reserved if caps.source is not None else 0
+        delta = actual - charged_before
+        if delta > 0:
+            await _move_source(delta, release=False)
+        elif delta < 0:
+            await _move_source(-delta, release=True)
+    charged_before = reserved if caps.tenant is not None else 0
+    delta = actual - charged_before
+    if delta > 0:
+        await _move_tenant(delta, release=False)
+    elif delta < 0:
+        await _move_tenant(-delta, release=True)
+
+
 async def tenant_usage(
     session: AsyncSession,
     *,

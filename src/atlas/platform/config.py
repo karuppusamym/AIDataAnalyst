@@ -630,6 +630,12 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # --- Ask rate budget (R11-MP14) ----------------------------------------------
+    # Questions per caller per minute on the two Ask routes. Off by default, like
+    # the MCP and GraphQL budgets, because it needs Redis; the per-call model-token
+    # quota (`model_token_daily_quota_*`) bounds spend with or without it.
+    ask_budget_enabled: bool = False
+    ask_requests_per_minute: int = Field(default=20, ge=1, le=10_000)
     # --- GraphQL rate budgets (R11-GQL01) ---------------------------------------
     # Off by default, like the MCP budget above: an operator turns them on where Redis is part
     # of the deployment. Counted per caller (organization, principal type, principal id) in
