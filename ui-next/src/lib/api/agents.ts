@@ -40,6 +40,7 @@ import type {
   KillSwitchStateRead,
   ModelRouteConfigurationCreate,
   ModelRouteConfigurationRead,
+  ModelRouteOutcomesRead,
   ReviewAuditSampleRead,
   ReviewerAgentRunResult,
   ReviewerAgentStateRead,
@@ -488,6 +489,31 @@ export function fetchAiAssessmentTemplates(
 export interface ModelRouteQuery {
   limit?: number;
   offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/model-route-outcomes`
+ *  (`list_model_route_outcomes`, R11-MP11) -- each route's record over the last
+ *  `days` of Ask runs, counted from what the runs recorded. The demo build has
+ *  no runs, so it answers an empty window rather than invented counts. */
+export function fetchModelRouteOutcomes(
+  organizationId: string,
+  days: number,
+  signal?: AbortSignal,
+): Promise<ModelRouteOutcomesRead> {
+  return demoOr(
+    async () => ({
+      organization_id: organizationId,
+      since: new Date(Date.now() - days * 86_400_000).toISOString(),
+      runs_considered: 0,
+      truncated: false,
+      routes: [],
+    }),
+    async () =>
+      get<ModelRouteOutcomesRead>(
+        `/v1/organizations/${organizationId}/model-route-outcomes?days=${days}`,
+        signal,
+      ),
+  );
 }
 
 /** `GET /v1/organizations/{organization_id}/model-routes` (`list_model_routes`,

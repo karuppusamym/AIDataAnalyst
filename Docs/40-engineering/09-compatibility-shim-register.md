@@ -55,12 +55,12 @@ that still genuinely lives in the file is not use of the shim.
 
 ## Register
 
-14 shims, 1297 shim-to-caller-file relationships across 621 distinct files, 0 shim(s) with a measured caller count of zero.
+14 shims, 1299 shim-to-caller-file relationships across 622 distinct files, 0 shim(s) with a measured caller count of zero.
 
 | Shim | Kind | Replacement path | Owner area | Callers | Import stmts | String refs |
 |---|---|---|---|---:|---:|---:|
-| [`aida.db`](#aidadb) | python | `atlas.platform.db` | Platform infrastructure | 338 | 343 | 2 |
-| [`aida.config`](#aidaconfig) | python | `atlas.platform.config` | Platform infrastructure | 282 | 292 | 1 |
+| [`aida.db`](#aidadb) | python | `atlas.platform.db` | Platform infrastructure | 339 | 344 | 2 |
+| [`aida.config`](#aidaconfig) | python | `atlas.platform.config` | Platform infrastructure | 283 | 293 | 1 |
 | [`aida.context`](#aidacontext) | python | `atlas.platform.context` | Platform infrastructure | 74 | 74 | 0 |
 | [`aida.logging`](#aidalogging) | python | `atlas.platform.logging` | Platform infrastructure | 5 | 5 | 0 |
 | [`aida.models`](#aidamodels) | python-partial | `atlas.modules.<context>.models` (re-exported classes only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 489 | 610 | 2 |
@@ -88,8 +88,8 @@ caller today.
 - **Owner area** *(hand-written)* — Platform infrastructure
 - **Introduced by** — ST-04, Phase 1 of Docs/40-engineering/06-refactor-plan.md
 - **Re-exports** — 6 name(s) from `atlas.platform.db`
-- **Callers** — 338 file(s), 343 import statement(s)
-  - By source root: `migrations` 1, `scripts` 8, `src/aida` 104, `src/atlas` 5, `tests` 220
+- **Callers** — 339 file(s), 344 import statement(s)
+  - By source root: `migrations` 1, `scripts` 8, `src/aida` 104, `src/atlas` 5, `tests` 221
 - **String references** — 2 file(s): `tests/test_footprint_metrics.py`, `tests/test_siem_wiring.py`
 - **Removal condition** *(hand-written)* — Import callers and string references both reach zero, **and** `migrations/env.py` imports `Base` from the canonical module instead. Alembic's environment is the caller most easily forgotten: it is not under `src/`, and breaking it breaks every migration rather than a test.
 - **Note** — Lazy `__getattr__` for `engine`/`session_factory`/`settings`, so importing the shim does not construct an engine. A rewrite of the shim must keep that.
@@ -101,8 +101,8 @@ caller today.
 - **Owner area** *(hand-written)* — Platform infrastructure
 - **Introduced by** — ST-04, Phase 1 of Docs/40-engineering/06-refactor-plan.md
 - **Re-exports** — 2 name(s) from `atlas.platform.config`
-- **Callers** — 282 file(s), 292 import statement(s)
-  - By source root: `migrations` 1, `scripts` 5, `src/aida` 99, `src/atlas` 4, `tests` 173
+- **Callers** — 283 file(s), 293 import statement(s)
+  - By source root: `migrations` 1, `scripts` 5, `src/aida` 99, `src/atlas` 4, `tests` 174
 - **String references** — 1 file(s): `scripts/generate_destination_inventory.py`
 - **Removal condition** *(hand-written)* — Import callers and string references both reach zero, **and** `migrations/env.py` reads settings from the canonical module. `Settings` is also the type annotation on FastAPI dependency callables, so a caller count here undercounts nothing only because those callers import the name.
 
@@ -144,7 +144,7 @@ caller today.
 
 ### aida.schemas
 
-- **File** — `src/aida/schemas.py` (4730 lines)
+- **File** — `src/aida/schemas.py` (4758 lines)
 - **Replacement path** *(hand-written)* — Each re-exported DTO has moved to the `schemas` module of the bounded context that owns it. The shared `ApiModel` lives independently in `atlas.platform.schemas`; this file preserves its identity alias. The rest of the file has not moved.
 - **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md

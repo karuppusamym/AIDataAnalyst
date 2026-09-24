@@ -13,6 +13,7 @@ import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { KillSwitchPanel } from "./AiGovernanceKillSwitch";
+import { RouteOutcomesPanel } from "./AiGovernanceRouteOutcomes";
 import "./AiGovernanceScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -570,6 +571,8 @@ export function AiGovernanceScreen() {
               </Button>
             </form>
           </article>
+
+          <RouteOutcomesPanel organizationId={ORG} />
 
           <article className="aig__panel">
             <div className="aig__panelhead aig__panelhead--padded">

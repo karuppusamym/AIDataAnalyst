@@ -98,7 +98,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `okf_import_enabled` | `bool` | `False` | 1 | Off by design: R11-OKF03: imported OKF edits become pending proposals only; the import stays off until the row's hostile-content, round-trip and review-journey evidence is accepted |
 | `agent_query_memory_enabled` | `bool` | `False` | 1 | Opt-in: changes what grounds a generated prompt; the SQL still passes the gateway |
 | `model_generation_enabled` | `bool` | `False` | 7 | Opt-in: requires an approved model route, checked at startup |
-| `model_route` | `str | None` | `None` | 4 | Supplied: the approved route generation uses |
+| `model_route` | `str | None` | `None` | 6 | Supplied: the approved route generation uses |
 | `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` | Supplied: approved routes tried in order after the primary |
 | `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE'], str]` | `dict` | 2 | Opt-in: one route for every purpose is the default; a purpose route is named once it is approved |
 | `openrouter_provider_order` | `dict[str, list[str]]` | `dict` | 2 | Supplied: the upstreams each OpenRouter alias may use; without an entry the route fails closed |
@@ -353,7 +353,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `agent_query_memory_min_similarity` | `float` | `0.6` | 2 |
 | `agent_query_memory_scan_limit` | `int` | `200` | 1 |
 | `model_generation_enabled` | `bool` | `False` | 7 |
-| `model_route` | `str | None` | `None` | 4 |
+| `model_route` | `str | None` | `None` | 6 |
 | `model_route_fallbacks` | `str | None` | `None` | 2 via `model_route_fallback_keys` |
 | `model_routes_by_purpose` | `dict[Literal['SQL_GENERATION', 'CLASSIFICATION', 'SQL_CANDIDATE'], str]` | `dict` | 2 |
 | `model_timeout_seconds` | `int` | `30` | 11 |

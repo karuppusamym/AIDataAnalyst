@@ -20858,6 +20858,137 @@
         "title": "ModelRouteConfigurationRead",
         "type": "object"
       },
+      "ModelRouteOutcomeRead": {
+        "additionalProperties": false,
+        "description": "R11-MP11: one route's record over a window of Ask runs.",
+        "properties": {
+          "cached_input_tokens": {
+            "title": "Cached Input Tokens",
+            "type": "integer"
+          },
+          "candidates_compared": {
+            "title": "Candidates Compared",
+            "type": "integer"
+          },
+          "candidates_different": {
+            "title": "Candidates Different",
+            "type": "integer"
+          },
+          "candidates_identical": {
+            "title": "Candidates Identical",
+            "type": "integer"
+          },
+          "candidates_same_sources": {
+            "title": "Candidates Same Sources",
+            "type": "integer"
+          },
+          "circuit_skips": {
+            "title": "Circuit Skips",
+            "type": "integer"
+          },
+          "completed": {
+            "title": "Completed",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "fallback_runs": {
+            "title": "Fallback Runs",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "repairs_attempted": {
+            "title": "Repairs Attempted",
+            "type": "integer"
+          },
+          "repairs_valid": {
+            "title": "Repairs Valid",
+            "type": "integer"
+          },
+          "route_key": {
+            "title": "Route Key",
+            "type": "string"
+          },
+          "runs": {
+            "title": "Runs",
+            "type": "integer"
+          },
+          "stated_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stated Cost Usd"
+          }
+        },
+        "required": [
+          "route_key",
+          "runs",
+          "completed",
+          "rejected",
+          "failed",
+          "fallback_runs",
+          "circuit_skips",
+          "repairs_attempted",
+          "repairs_valid",
+          "candidates_compared",
+          "candidates_identical",
+          "candidates_same_sources",
+          "candidates_different",
+          "stated_cost_usd",
+          "cached_input_tokens"
+        ],
+        "title": "ModelRouteOutcomeRead",
+        "type": "object"
+      },
+      "ModelRouteOutcomesRead": {
+        "additionalProperties": false,
+        "properties": {
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/ModelRouteOutcomeRead"
+            },
+            "title": "Routes",
+            "type": "array"
+          },
+          "runs_considered": {
+            "title": "Runs Considered",
+            "type": "integer"
+          },
+          "since": {
+            "format": "date-time",
+            "title": "Since",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "organization_id",
+          "since",
+          "runs_considered",
+          "truncated",
+          "routes"
+        ],
+        "title": "ModelRouteOutcomesRead",
+        "type": "object"
+      },
       "MultiTableToolBlueprintRequest": {
         "additionalProperties": false,
         "description": "SM-5: request a deterministically-rendered multi-table JOIN tool\ndraft instead of hand-authoring `sql_template`. Everything below mirrors\n`GovernedToolVersionCreate`'s equivalent fields exactly (same\nslug/name/description/allowed_roles constraints) -- only `sql_template`\nand `parameters` are replaced with `table_ids`, since those two are\ngenerated from the tables' declared/approved relationships rather than\nwritten by hand.",
@@ -85434,6 +85565,147 @@
         "summary": "Generate Metric Suggestion Proposals",
         "tags": [
           "metric-suggestions"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/model-route-outcomes": {
+      "get": {
+        "description": "R11-MP11: each route's record over the last `days` of this organization's\nAsk runs -- completions and refusals, fallbacks and circuit skips, repairs,\ncandidate agreement, stated cost and cache hits -- counted from what each\nrun recorded. Read-only; bounded, and says so when the bound cut it short.",
+        "operationId": "list_model_route_outcomes_v1_organizations__organization_id__model_route_outcomes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRouteOutcomesRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Model Route Outcomes",
+        "tags": [
+          "ai-governance"
         ]
       }
     },

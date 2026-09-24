@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **557**
-- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 461, SDK 1
+- Surfaces covered: **558**
+- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 462, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -326,6 +326,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/lines-of-business` | REST | `atlas.modules.identity_tenancy.router.list_lines_of_business` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/metric-conflicts` | REST | `aida.semantic_api.list_metric_formula_collisions` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/metric-suggestions` | REST | `aida.metric_suggestion_api.list_metric_suggestion_proposals` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/model-route-outcomes` | REST | `aida.ai_governance_api.list_model_route_outcomes` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/model-routes` | REST | `aida.ai_governance_api.list_model_routes` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/notifications/governance` | REST | `aida.retrieval_ops_api.list_governance_notifications` | Analyst, Auditor, DataSteward, MetadataAdmin, Operations, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/ontology-versions` | REST | `aida.ontology_api.list_ontology_versions` | DataSteward, MetadataAdmin, PlatformAdmin, Reviewer | yes | yes | read | no | not cancellable |

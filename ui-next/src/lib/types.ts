@@ -3460,6 +3460,33 @@ export interface ModelRouteConfigurationRead {
   updated_at: string;
 }
 
+/** R11-MP11: one route's record over a window of Ask runs. */
+export interface ModelRouteOutcomeRead {
+  route_key: string;
+  runs: number;
+  completed: number;
+  rejected: number;
+  failed: number;
+  fallback_runs: number;
+  circuit_skips: number;
+  repairs_attempted: number;
+  repairs_valid: number;
+  candidates_compared: number;
+  candidates_identical: number;
+  candidates_same_sources: number;
+  candidates_different: number;
+  stated_cost_usd: number | null;
+  cached_input_tokens: number;
+}
+
+export interface ModelRouteOutcomesRead {
+  organization_id: string;
+  since: string;
+  runs_considered: number;
+  truncated: boolean;
+  routes: ModelRouteOutcomeRead[];
+}
+
 /** SM-5: request a deterministically-rendered multi-table JOIN tool */
 export interface MultiTableToolBlueprintRequest {
   slug: string;

@@ -2314,6 +2314,34 @@ class ModelRouteConfigurationRead(ApiModel):
     updated_at: datetime
 
 
+class ModelRouteOutcomeRead(ApiModel):
+    """R11-MP11: one route's record over a window of Ask runs."""
+
+    route_key: str
+    runs: int
+    completed: int
+    rejected: int
+    failed: int
+    fallback_runs: int
+    circuit_skips: int
+    repairs_attempted: int
+    repairs_valid: int
+    candidates_compared: int
+    candidates_identical: int
+    candidates_same_sources: int
+    candidates_different: int
+    stated_cost_usd: float | None
+    cached_input_tokens: int
+
+
+class ModelRouteOutcomesRead(ApiModel):
+    organization_id: UUID
+    since: datetime
+    runs_considered: int
+    truncated: bool
+    routes: list[ModelRouteOutcomeRead]
+
+
 class KillSwitchEngageRequest(ApiModel):
     reason: str = Field(min_length=3, max_length=2000)
     route_key: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
