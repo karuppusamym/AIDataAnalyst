@@ -212,10 +212,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -253,10 +253,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -322,10 +322,10 @@ jobs:
     # per `Docs/40-engineering/16-deployment-alignment-and-enablement-runbook.md`.
     if: github.event_name == 'workflow_dispatch' && inputs.parity_base_url != ''
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -345,7 +345,7 @@ jobs:
 
       - name: Upload the parity findings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: deployment-parity
           path: parity.json
@@ -365,10 +365,10 @@ jobs:
     env:
       AIDA_ENVIRONMENT: "development"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -391,10 +391,10 @@ jobs:
     env:
       AIDA_ENVIRONMENT: "development"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -415,10 +415,10 @@ jobs:
       run:
         working-directory: ui-next
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: "npm"
@@ -447,10 +447,10 @@ jobs:
     env:
       AIDA_ENVIRONMENT: "development"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -472,10 +472,10 @@ jobs:
     env:
       AIDA_ENVIRONMENT: "development"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -493,10 +493,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -530,10 +530,10 @@ jobs:
     env:
       AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL: "postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida_migration_drift_test"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -593,10 +593,10 @@ jobs:
       AIDA_CN3_POSTGRES16_FIXTURE_DATABASE_URL: "postgresql://aida:aida-local-only@localhost:5432/aida"
       AIDA_CN3_POSTGRES14_FIXTURE_DATABASE_URL: "postgresql://aida:aida-local-only@localhost:5433/aida"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -617,10 +617,10 @@ jobs:
     # limit, so no CI run finished the backend suite in that time.
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -640,7 +640,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: coverage.xml
@@ -651,10 +651,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -667,7 +667,7 @@ jobs:
         run: uv export --frozen --no-dev --no-hashes -o requirements-locked.txt
 
       - name: pip-audit -- full report (uploaded as an artifact, not gating)
-        run: uvx --python 3.13 pip-audit -r requirements-locked.txt --format json -o pip-audit-report.json
+        run: uvx --python 3.13 pip-audit==2.10.1 -r requirements-locked.txt --format json -o pip-audit-report.json
         continue-on-error: true
 
       - name: pip-audit -- fail on any unbaselined known vulnerability
@@ -690,13 +690,13 @@ jobs:
         #   set, so the baseline below is empty; re-add entries here if a
         #   future scan finds something that again can't be fixed in scope.
         run: |
-          uvx --python 3.13 pip-audit -r requirements-locked.txt
+          uvx --python 3.13 pip-audit==2.10.1 -r requirements-locked.txt
 
       - name: Generate CycloneDX SBOM from the locked dependency set
-        run: uvx --from cyclonedx-bom cyclonedx-py requirements requirements-locked.txt -o sbom.cdx.json --output-format json
+        run: uvx --from cyclonedx-bom==7.4.0 cyclonedx-py requirements requirements-locked.txt -o sbom.cdx.json --output-format json
 
       - name: Upload dependency-scan artifacts (requirements, pip-audit report, SBOM)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dependency-scan-${{ github.sha }}
           path: |
@@ -710,10 +710,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -722,7 +722,7 @@ jobs:
       # blocked by an install problem it has nothing to do with. It is also the
       # set `npm ci` would install, so the two cannot drift.
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
 
@@ -752,9 +752,23 @@ jobs:
       - name: npm audit -- fail on any unbaselined advisory
         run: python scripts/check_npm_audit.py --check --report npm-audit-report.json
 
+      # R11-MP20: the ui-next SBOM, from the committed lockfile alone (no install),
+      # beside the Python one the dependency-scan job already produces.
+      - name: CycloneDX SBOM for ui-next
+        working-directory: ui-next
+        run: npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --package-lock-only --output-format JSON --output-file ../sbom-ui-next.cdx.json
+
+      - name: Upload ui-next SBOM
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-ui-next-${{ github.sha }}
+          path: sbom-ui-next.cdx.json
+          retention-days: 90
+
       - name: Upload npm audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-audit-report-${{ github.sha }}
           path: npm-audit-report.json
@@ -765,10 +779,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
 
@@ -788,10 +802,10 @@ jobs:
     env:
       AIDA_ENVIRONMENT: "development"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -813,13 +827,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # gitleaks scans the full git history, not just the checked-out tree
 
       - name: Install gitleaks
         run: |
           curl -sSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          # R11-MP20: the release's own published sha256, checked before the binary runs.
+          echo "5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba  gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf gitleaks.tar.gz gitleaks
           chmod +x gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
@@ -832,7 +848,7 @@ jobs:
 
       - name: Upload gitleaks report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gitleaks-report-${{ github.sha }}
           path: gitleaks-report.json
@@ -843,7 +859,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: docker build
         run: docker build --tag aida:${{ github.sha }} .
@@ -869,7 +885,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # The real image: nginx serving the real built SPA with the real
       # ui-next/nginx.conf. Not a hand-written nginx config for the test -- that
@@ -1069,10 +1085,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -1148,7 +1164,7 @@ jobs:
 
       - name: Upload the Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: browser-journey-report
           path: e2e/playwright-report
@@ -1169,10 +1185,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
 
