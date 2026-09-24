@@ -630,6 +630,10 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # R11-MP17: a confirmed query becomes a template and few-shot example for
+    # every user of its datasource, so it needs a confirmation from someone other
+    # than the person who asked it. Off only for a single-user demo estate.
+    query_memory_requires_second_confirmation: bool = True
     # --- Ask rate budget (R11-MP14) ----------------------------------------------
     # Questions per caller per minute on the two Ask routes. Off by default, like
     # the MCP and GraphQL budgets, because it needs Redis; the per-call model-token

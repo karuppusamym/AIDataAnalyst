@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**302 settings.** 0 are read nowhere. 69 more ship switched off, empty or zero.
+**303 settings.** 0 are read nowhere. 69 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -278,6 +278,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `mcp_consumer_requests_per_minute` | `int` | `30` | 1 |
 | `mcp_consumer_tool_calls_per_day` | `int` | `200` | 1 |
 | `mcp_consumer_context_reads_per_day` | `int` | `1000` | 1 |
+| `query_memory_requires_second_confirmation` | `bool` | `True` | 1 |
 | `ask_budget_enabled` | `bool` | `False` | 1 |
 | `ask_requests_per_minute` | `int` | `20` | 1 |
 | `graphql_budget_enabled` | `bool` | `False` | 1 |

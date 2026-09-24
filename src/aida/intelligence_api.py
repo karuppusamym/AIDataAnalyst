@@ -136,6 +136,45 @@ def _is_positive(rating: str) -> bool:
     return rating == "HELPFUL"
 
 
+#: R11-MP17: roles that may confirm a run they did not ask. The confirmation is
+#: what turns someone else's query into a shared example, so it is a checker's
+#: act, not an analyst's.
+SECOND_CONFIRMATION_ROLES: frozenset[str] = frozenset(
+    {"PlatformAdmin", "DataSteward", "Reviewer"}
+)
+AWAITING_SECOND_CONFIRMATION = "AWAITING_SECOND_CONFIRMATION"
+
+
+async def _memory_status(
+    session: AsyncSession, agent_run: AgentRun, *, second_confirmation: bool
+) -> str:
+    """The query memory status from every rating on the run, recounted (R11-MP17).
+
+    Any negative rating suppresses reuse. Otherwise the query is ELIGIBLE -- a
+    template and few-shot example for everyone on the datasource -- only once
+    someone other than the run's owner rated it helpful; the owner's own rating
+    alone leaves it AWAITING_SECOND_CONFIRMATION. Recounted from the rows
+    rather than from the counters so the rule cannot drift from the evidence.
+    """
+    ratings = (
+        await session.execute(
+            select(QueryFeedback.principal_id, QueryFeedback.rating).where(
+                QueryFeedback.agent_run_id == agent_run.id
+            )
+        )
+    ).all()
+    if any(not _is_positive(rating) for _principal, rating in ratings):
+        return "SUPPRESSED"
+    positives = [principal for principal, rating in ratings if _is_positive(rating)]
+    if not positives:
+        return "OBSERVED"
+    if not second_confirmation:
+        return "ELIGIBLE"
+    if any(principal != agent_run.principal_id for principal in positives):
+        return "ELIGIBLE"
+    return AWAITING_SECOND_CONFIRMATION
+
+
 @router.get(
     "/datasources/{datasource_id}/knowledge-graph",
     response_model=KnowledgeGraphRead,
@@ -515,7 +554,11 @@ async def get_knowledge_graph_neighborhood(
 async def upsert_query_feedback(
     agent_run_id: UUID,
     body: QueryFeedbackUpsert,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "Analyst", "AgentDeveloper")),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "Analyst", "AgentDeveloper", "DataSteward", "Reviewer"
+        )
+    ),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> QueryFeedback:
@@ -523,8 +566,16 @@ async def upsert_query_feedback(
     if agent_run is None:
         raise HTTPException(status_code=404, detail="agent run not found")
     enforce_organization(context, agent_run.organization_id)
-    if "PlatformAdmin" not in context.roles and agent_run.principal_id != context.principal_id:
-        raise HTTPException(status_code=403, detail="feedback is limited to the run owner")
+    if agent_run.principal_id != context.principal_id and not (
+        SECOND_CONFIRMATION_ROLES & set(context.roles)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "feedback on another person's run is a second confirmation, "
+                "limited to PlatformAdmin, DataSteward and Reviewer"
+            ),
+        )
     if agent_run.status != "COMPLETED" or agent_run.query_execution_id is None:
         raise HTTPException(status_code=409, detail="only completed agent runs accept feedback")
     execution = await session.get(QueryExecution, agent_run.query_execution_id)
@@ -575,12 +626,11 @@ async def upsert_query_feedback(
         memory.positive_feedback_count += 1
     else:
         memory.negative_feedback_count += 1
-    memory.status = (
-        "SUPPRESSED"
-        if memory.negative_feedback_count > 0
-        else "ELIGIBLE"
-        if memory.positive_feedback_count > 0
-        else "OBSERVED"
+    await session.flush()
+    memory.status = await _memory_status(
+        session,
+        agent_run,
+        second_confirmation=settings.query_memory_requires_second_confirmation,
     )
     await session.flush()
     execution_context = replace(context, organization_id=agent_run.organization_id)

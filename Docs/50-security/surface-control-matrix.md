@@ -144,7 +144,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/sql-drafts/{receipt_id}/run` | JOB | `aida.sql_workspace_api.run_sql_draft` | Analyst, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/tool-certification-runs/{run_id}/decision` | JOB | `aida.tool_api.decide_tool_certification` | PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/tool-versions/{version_id}/certification-runs` | JOB | `aida.tool_api.execute_tool_certification` | PlatformAdmin, SemanticAdmin, ToolDeveloper | yes | no | writes | yes | not cancellable |
-| `PUT /v1/agent-runs/{agent_run_id}/feedback` | JOB | `aida.intelligence_api.upsert_query_feedback` | AgentDeveloper, Analyst, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `PUT /v1/agent-runs/{agent_run_id}/feedback` | JOB | `aida.intelligence_api.upsert_query_feedback` | AgentDeveloper, Analyst, DataSteward, PlatformAdmin, Reviewer | yes | no | writes | yes | not cancellable |
 | `MCP initialize` | MCP | `aida.mcp_server._handle_initialize` | per-tool role eligibility (see `_tool_role_eligible`) | no | no | read | no | not cancellable |
 | `MCP ping` | MCP | `unknown` | unknown | unknown | unknown | unknown | unknown | unknown |
 | `MCP prompts/get` | MCP | `aida.mcp_server._handle_prompts_get` | per-tool role eligibility (see `_tool_role_eligible`) | yes | yes | writes | yes | not cancellable |
