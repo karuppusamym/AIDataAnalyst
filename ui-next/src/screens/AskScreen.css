@@ -79,3 +79,6 @@
 .ask__view{display:flex;flex-direction:column;gap:10px;min-width:0}
 .ask__view[hidden]{display:none}
 .ask__view pre{max-width:100%;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* R11-MP06: the governed stage the in-flight Ask has reached; spans the form grid. */
+.askscreen__stage{grid-column:1/-1;margin:0;font-size:12.5px;color:var(--ink-3)}

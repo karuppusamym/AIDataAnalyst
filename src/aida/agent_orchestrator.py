@@ -1244,6 +1244,7 @@ class GovernedAgentOrchestrator:
         agent_asset_version_id: UUID | None = None,
         context_product_key: str | None = None,
         context_product_version: ContextProductVersion | None = None,
+        stage_listener: Callable[[str], None] | None = None,
     ) -> AgentOrchestrationResult:
         """Compose the six governed stages; hold no rule of its own.
 
@@ -1261,6 +1262,9 @@ class GovernedAgentOrchestrator:
         is written down; a post-execution checkpoint refusal raises
         `QueryRejected` through `_deny_after_execution` instead, because the
         query genuinely ran and its execution id has to survive.
+
+        `stage_listener` (R11-MP06) is told each stage the run reaches, starting
+        with the one `_open_run` left it at. It observes; it decides nothing.
         """
         request = OrchestrationRequest(
             datasource=datasource,
@@ -1276,6 +1280,9 @@ class GovernedAgentOrchestrator:
             context_product_version=context_product_version,
         )
         ledger = await self._open_run(session, request)
+        if stage_listener is not None:
+            ledger.stage_listener = stage_listener
+            ledger.notify_stage()
 
         screened = await self._stage_screen(session, request, ledger)
         retrieved = await self._stage_retrieve(session, request, ledger, screened)

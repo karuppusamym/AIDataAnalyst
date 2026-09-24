@@ -14,7 +14,7 @@
 
 import { demoOr, get, postJson, putJson } from "./transport";
 import { USE_FIXTURES } from "../appConfig";
-import { ApiError } from "../http";
+import { ApiError, requestEventStream, streamedApiError } from "../http";
 import type {
   AnalysisToolBlueprintRead,
   AgentAnalysisRequest,
@@ -78,20 +78,49 @@ import type { PageOf } from "../ui-types";
  *         or query layer refused the request or the generated query.
  *    503  `ModelRouteUnavailable` -- no model route could serve the request.
  *    502  anything unhandled -- `"agent analysis execution failed"`.
+ *
+ *  R11-MP06: pass `onStage` to be told each governed stage as the run reaches
+ *  it. The call then goes to `POST .../agent-analyses/stream`, the same run
+ *  with server-sent events, and still resolves to the same response or
+ *  rejects with the same `ApiError` status and `detail` -- so every caller and
+ *  `classifyAgentAskError` read it unchanged. Without `onStage`, nothing changes.
  */
 export function runAgentAnalysis(
   datasourceId: string,
   body: AgentAnalysisRequest,
   signal?: AbortSignal,
+  onStage?: (stage: string) => void,
 ): Promise<AgentAnalysisResponse> {
   return demoOr(
     async (fixtures) => fixtures.makeFixtureAgentAnalysis(datasourceId, body),
     async () => {
-      return postJson<AgentAnalysisResponse>(
-        `/v1/datasources/${datasourceId}/agent-analyses`,
+      if (!onStage) {
+        return postJson<AgentAnalysisResponse>(
+          `/v1/datasources/${datasourceId}/agent-analyses`,
+          body,
+          signal,
+        );
+      }
+      let result: AgentAnalysisResponse | null = null;
+      let failure: { status: number; detail: unknown } | null = null;
+      await requestEventStream(
+        `/v1/datasources/${datasourceId}/agent-analyses/stream`,
         body,
+        (event, data) => {
+          if (event === "stage") onStage((data as { stage: string }).stage);
+          else if (event === "result") result = data as AgentAnalysisResponse;
+          else if (event === "error") failure = data as { status: number; detail: unknown };
+        },
         signal,
       );
+      if (failure) {
+        const { status, detail } = failure as { status: number; detail: unknown };
+        throw await streamedApiError(status, detail);
+      }
+      if (result) return result;
+      throw new ApiError(502, "the answer stream ended without a result", {
+        code: "STREAM_INCOMPLETE",
+      });
     },
   );
 }

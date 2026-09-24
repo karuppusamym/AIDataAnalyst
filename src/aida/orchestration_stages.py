@@ -22,6 +22,7 @@ fourteen times, and nothing stopped the second from being forgotten.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -110,6 +111,19 @@ class RunLedger:
     state: RuntimeState
     trace: list[dict[str, object]] = field(default_factory=list)
     plan_evidence: dict[str, Any] = field(default_factory=dict)
+    #: R11-MP06: told the name of each stage the run reaches, for a caller that
+    #: streams progress. Observes only: it cannot change the run, and a listener
+    #: that raises is ignored rather than allowed to fail a governed run.
+    stage_listener: Callable[[str], None] | None = None
+
+    def notify_stage(self) -> None:
+        """Tell the listener, if any, which stage the run is at now."""
+        if self.stage_listener is None:
+            return
+        try:
+            self.stage_listener(self.state.stage.value)
+        except Exception:  # noqa: BLE001 - progress reporting never fails a run
+            self.stage_listener = None
 
     def record(self, control_type: str, details: dict[str, object] | None = None) -> None:
         """Trace the current state without changing it -- used for the initial
@@ -126,6 +140,7 @@ class RunLedger:
     ) -> None:
         self.state = self.state.transition(stage, **transition)
         self.record(control_type, details)
+        self.notify_stage()
 
     def publish_plan_evidence(self) -> None:
         """Push accumulated evidence onto the run row.

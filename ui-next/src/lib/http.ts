@@ -330,6 +330,92 @@ export async function request<T>(
 }
 
 /**
+ * A POST answered with server-sent events (R11-MP06).
+ *
+ * `EventSource` cannot POST or send this app's identity headers, so the stream
+ * is read from `fetch` directly. A refusal before the stream opens (401, 403,
+ * 404, a disabled source) decodes exactly as it does for `request`; after that,
+ * each `event:`/`data:` block is handed to `onEvent` with its JSON parsed.
+ * Resolves when the server closes the stream.
+ */
+export async function requestEventStream(
+  path: string,
+  body: unknown,
+  onEvent: (event: string, data: unknown) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+    "Content-Type": "application/json",
+    ...headerProvider(),
+  };
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      signal,
+      headers,
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    const error = new ApiError(0, "the server could not be reached", {
+      code: "NETWORK_UNREACHABLE",
+      retryable: true,
+    });
+    notify({ ok: false, status: 0, at: Date.now(), error });
+    throw error;
+  }
+  if (!res.ok) {
+    const error = await decodeError(res);
+    notify({ ok: false, status: res.status, at: Date.now(), error });
+    throw error;
+  }
+  notify({ ok: true, status: res.status, at: Date.now() });
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut = buffer.indexOf("\n\n");
+    while (cut >= 0) {
+      dispatchEvent(buffer.slice(0, cut), onEvent);
+      buffer = buffer.slice(cut + 2);
+      cut = buffer.indexOf("\n\n");
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) dispatchEvent(buffer, onEvent);
+}
+
+function dispatchEvent(block: string, onEvent: (event: string, data: unknown) => void): void {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (data.length) onEvent(event, JSON.parse(data.join("\n")));
+}
+
+/**
+ * The `ApiError` a streamed `error` event stands for: the status and `detail`
+ * the single-shot route would have answered with, decoded by the same code.
+ */
+export function streamedApiError(status: number, detail: unknown): Promise<ApiError> {
+  return decodeError(
+    new Response(JSON.stringify({ detail }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+}
+
+/**
  * A download that must carry this app's identity headers.
  *
  * A bare `<a download href>` cannot send them, so the bytes are fetched here

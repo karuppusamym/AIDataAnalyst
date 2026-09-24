@@ -73,6 +73,28 @@ import { stalenessText, useChangesSincePublished } from "./ContextProductFreshne
 
 import { useOrgId } from "../lib/org";
 const MIN_QUESTION_LEN = 3;
+
+/** R11-MP06: what the person reads while a governed stage is running. Keyed by
+ *  `RuntimeStage` (agent_runtime.py); an unknown stage reads as its own name. */
+const ASK_STAGE_LABELS: Record<string, string> = {
+  RECEIVED: "Received",
+  AUTHORIZED: "Checking access",
+  SCREENED: "Screening the question",
+  RESOLVED: "Finding the tables that answer it",
+  PLANNED: "Choosing how to answer",
+  GENERATED: "Checking the query",
+  VALIDATED: "Validating against policy",
+  COSTED: "Estimating the query cost",
+  EXECUTED: "Reading the data",
+  EXPLAINED: "Explaining the answer",
+  COMPLETED: "Done",
+  REJECTED: "Refused",
+  FAILED: "Failed",
+};
+
+function askStageLabel(stage: string): string {
+  return ASK_STAGE_LABELS[stage] ?? stage;
+}
 const MAX_QUESTION_LEN = 10000;
 
 const statusTone = (status: string): Tone => {
@@ -1073,6 +1095,8 @@ export function AskScreen() {
 
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
+  // R11-MP06: the governed stage the in-flight run has reached, from the stream.
+  const [askStage, setAskStage] = useState<string | null>(null);
   const [askResult, setAskResult] = useState<AgentAnalysisResponse | null>(null);
   // Freshness of the ANSWER. Recorded here because the response has no
   // timestamp of its own, and deliberately not persisted anywhere: it is a
@@ -1099,6 +1123,7 @@ export function AskScreen() {
     const seq = ++askSeq.current;
 
     setAsking(true);
+    setAskStage(null);
     setAskError(null);
     try {
       // A retry after a clarification pins the tool the server already chose:
@@ -1118,6 +1143,9 @@ export function AskScreen() {
             }
           : { question: trimmed, ...askedThrough },
         ac.signal,
+        (stage) => {
+          if (seq === askSeq.current) setAskStage(stage);
+        },
       );
       if (seq !== askSeq.current) return;
       setAskResult(response);
@@ -1140,7 +1168,10 @@ export function AskScreen() {
         });
       }
     } finally {
-      if (seq === askSeq.current) setAsking(false);
+      if (seq === askSeq.current) {
+        setAsking(false);
+        setAskStage(null);
+      }
     }
   },
     [dsId, askedThroughKey, question, setParams],
@@ -1416,6 +1447,11 @@ export function AskScreen() {
             {asking ? "Asking…" : "Ask"}
           </Button>
         </div>
+        {asking && askStage ? (
+          <p className="askscreen__stage" role="status" aria-live="polite">
+            {askStageLabel(askStage)}
+          </p>
+        ) : null}
       </form>
 
       {askError ? (

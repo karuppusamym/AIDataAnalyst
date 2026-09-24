@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **556**
-- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 460, SDK 1
+- Surfaces covered: **557**
+- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 461, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -443,6 +443,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/data-product-versions/{version_id}/submit` | REST | `aida.product_marketplace_api.submit_data_product_version` | DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/data-products/{product_id}/contracts` | REST | `aida.product_marketplace_api.create_data_contract` | DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/data-products/{product_id}/versions` | REST | `aida.product_marketplace_api.create_data_product_version` | DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/datasources/{datasource_id}/agent-analyses/stream` | REST | `aida.api.stream_agent_analysis` | AgentDeveloper, Analyst, PlatformAdmin | yes | yes | writes | yes | cooperative |
 | `POST /v1/datasources/{datasource_id}/agent-analyses` | REST | `aida.api.run_agent_analysis` | AgentDeveloper, Analyst, PlatformAdmin | yes | yes | writes | yes | cooperative |
 | `POST /v1/datasources/{datasource_id}/agent-retrieval-preview` | REST | `aida.api.preview_agent_retrieval` | AgentDeveloper, Analyst, PlatformAdmin, Viewer | yes | yes | mutating verb, no write found | no | cooperative |
 | `POST /v1/datasources/{datasource_id}/classification-feed/ingest` | REST | `aida.api.ingest_datasource_classification_feed` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |

@@ -51253,6 +51253,138 @@
         "summary": "Run Agent Analysis"
       }
     },
+    "/v1/datasources/{datasource_id}/agent-analyses/stream": {
+      "post": {
+        "description": "R11-MP06: the same governed Ask, with each stage streamed as it is reached.\n\nAdmission (404, organization, disabled datasource, agent contract) is\nanswered as an ordinary HTTP error before the stream opens. After that the\nrun is the one `run_agent_analysis` performs -- same orchestrator, same\nrefusal mapping -- and its outcome arrives as the stream's last event. A\nclient that disconnects stops receiving events, not the run: it completes\nand is recorded like any other, so run history never holds a half-run.",
+        "operationId": "stream_agent_analysis_v1_datasources__datasource_id__agent_analyses_stream_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentAnalysisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {}
+            },
+            "description": "Server-sent events: `stage` ({stage}) as the run advances, then exactly one `result` (an AgentAnalysisResponse) or `error` ({status, detail}) carrying the status and detail the single-shot route would have answered with."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Agent Analysis"
+      }
+    },
     "/v1/datasources/{datasource_id}/agent-retrieval-preview": {
       "post": {
         "operationId": "preview_agent_retrieval_v1_datasources__datasource_id__agent_retrieval_preview_post",

@@ -1,10 +1,13 @@
-from collections.abc import Sequence
+import asyncio
+import json
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +38,7 @@ from aida.graph_store import GraphStoreUnavailable, build_graph_store, resolve_g
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
+    AgentContract,
     AgentEvaluationRun,
     AgentRun,
     AnalysisRun,
@@ -1714,21 +1718,12 @@ async def get_query_lineage(
     )
 
 
-@router.post(
-    "/datasources/{datasource_id}/agent-analyses",
-    response_model=AgentAnalysisResponse,
-)
-async def run_agent_analysis(
-    datasource_id: UUID,
-    body: AgentAnalysisRequest,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "Analyst", "AgentDeveloper")),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> AgentAnalysisResponse:
-    datasource = await session.get(DataSource, datasource_id)
-    if datasource is None:
-        raise HTTPException(status_code=404, detail="datasource not found")
-    enforce_organization(context, datasource.organization_id)
+async def _agent_analysis_contract(
+    session: AsyncSession, context: SecurityContext, datasource: DataSource
+) -> AgentContract | None:
+    """Admission shared by the single-shot and streaming Ask routes: the
+    datasource must be enabled, and a contracted agent's contract is loaded.
+    Raises the HTTP refusal; the caller has already enforced the organization."""
     try:
         ensure_datasource_enabled(datasource)
     except RunAdmissionRejected as exc:
@@ -1746,13 +1741,29 @@ async def run_agent_analysis(
         )
     except AgentContractValidationError as exc:
         raise HTTPException(status_code=403, detail=exc.code) from exc
+    return caller_contract
+
+
+async def _orchestrate_agent_analysis(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    context: SecurityContext,
+    datasource: DataSource,
+    body: AgentAnalysisRequest,
+    caller_contract: AgentContract | None,
+    correlation_id: str,
+    stage_listener: Callable[[str], None] | None = None,
+) -> AgentAnalysisResponse:
+    """Run the orchestrator for one Ask and map every refusal to its HTTP
+    status -- the one mapping both Ask routes answer with."""
     orchestrator = GovernedAgentOrchestrator(settings)
     try:
         result = await orchestrator.run(
             session,
             datasource=datasource,
             context=replace(context, organization_id=datasource.organization_id),
-            correlation_id=get_correlation_id(),
+            correlation_id=correlation_id,
             question=body.question,
             candidate_sql=body.candidate_sql,
             preferred_tool_version_id=body.preferred_tool_version_id,
@@ -1762,6 +1773,7 @@ async def run_agent_analysis(
                 caller_contract.ai_asset_version_id if caller_contract is not None else None
             ),
             context_product_key=body.context_product_key,
+            stage_listener=stage_listener,
         )
     except AgentClarificationRequired as exc:
         # Structured, because the caller has to *act* on this one: it names the
@@ -1805,6 +1817,112 @@ async def run_agent_analysis(
         plan_evidence=result.agent_run.plan_evidence,
         execution=query_execution_response(result.gateway_result),
         explanation=result.explanation,
+    )
+
+
+@router.post(
+    "/datasources/{datasource_id}/agent-analyses",
+    response_model=AgentAnalysisResponse,
+)
+async def run_agent_analysis(
+    datasource_id: UUID,
+    body: AgentAnalysisRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "Analyst", "AgentDeveloper")),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AgentAnalysisResponse:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    caller_contract = await _agent_analysis_contract(session, context, datasource)
+    return await _orchestrate_agent_analysis(
+        session,
+        settings=settings,
+        context=context,
+        datasource=datasource,
+        body=body,
+        caller_contract=caller_contract,
+        correlation_id=get_correlation_id(),
+    )
+
+
+@router.post(
+    "/datasources/{datasource_id}/agent-analyses/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": (
+                "Server-sent events: `stage` ({stage}) as the run advances, then exactly one "
+                "`result` (an AgentAnalysisResponse) or `error` ({status, detail}) carrying the "
+                "status and detail the single-shot route would have answered with."
+            ),
+            "content": {"text/event-stream": {}},
+        }
+    },
+)
+async def stream_agent_analysis(
+    datasource_id: UUID,
+    body: AgentAnalysisRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "Analyst", "AgentDeveloper")),
+    # `request` scope: the session must outlive this function, because the run
+    # it serves continues while the response streams.
+    session: AsyncSession = Depends(get_session, scope="request"),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """R11-MP06: the same governed Ask, with each stage streamed as it is reached.
+
+    Admission (404, organization, disabled datasource, agent contract) is
+    answered as an ordinary HTTP error before the stream opens. After that the
+    run is the one `run_agent_analysis` performs -- same orchestrator, same
+    refusal mapping -- and its outcome arrives as the stream's last event. A
+    client that disconnects stops receiving events, not the run: it completes
+    and is recorded like any other, so run history never holds a half-run.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    caller_contract = await _agent_analysis_contract(session, context, datasource)
+    events: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    correlation_id = get_correlation_id()
+
+    async def orchestrate() -> None:
+        try:
+            response = await _orchestrate_agent_analysis(
+                session,
+                settings=settings,
+                context=context,
+                datasource=datasource,
+                body=body,
+                caller_contract=caller_contract,
+                correlation_id=correlation_id,
+                stage_listener=lambda stage: events.put_nowait(("stage", {"stage": stage})),
+            )
+        except HTTPException as exc:
+            events.put_nowait(("error", {"status": exc.status_code, "detail": exc.detail}))
+        else:
+            events.put_nowait(("result", response.model_dump(mode="json")))
+        finally:
+            events.put_nowait(("end", None))
+
+    run = asyncio.create_task(orchestrate())
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            while True:
+                event, data = await events.get()
+                if event == "end":
+                    break
+                yield f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+        finally:
+            if not run.done():
+                await asyncio.shield(run)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 
