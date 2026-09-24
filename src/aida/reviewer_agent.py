@@ -77,7 +77,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.column_description_service import ORIGIN_MODEL_INFERRED
+from aida.column_description_service import ORIGIN_METADATA, ORIGIN_MODEL_INFERRED
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
@@ -256,6 +256,9 @@ EVIDENCE_SUBJECT_MISSING = "proposal_object_not_found"
 EVIDENCE_VALUE_MISSING = "proposal_carries_no_confidence"
 EVIDENCE_SIZE_UNRESOLVED = "bulk_change_count_unresolvable"
 EVIDENCE_MODEL_INFERRED = "model_inferred_proposal_needs_a_human"
+#: R11-MP19: a draft whose origin is missing or unrecognised. It may have been
+#: written by a model, so it is treated as though it were.
+EVIDENCE_ORIGIN_UNKNOWN = "draft_origin_not_recorded_needs_a_human"
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +391,18 @@ async def _column_description_draft_evidence(
             reason=EVIDENCE_MODEL_INFERRED,
             source="column_description_draft.evidence.origin",
             details={"origin": origin},
+        )
+    # R11-MP19: fail closed. The abstention above used to rest on one optional
+    # dict key: a draft with no origin fell through to its score and could be
+    # approved. Only an origin this module recognises as metadata-derived (with
+    # or without human edits) reaches the score now; anything else -- absent,
+    # empty, or a value a future producer invents -- is a person's decision.
+    if not origin.startswith(ORIGIN_METADATA):
+        return ProposalEvidence(
+            resolved=False,
+            reason=EVIDENCE_ORIGIN_UNKNOWN,
+            source="column_description_draft.evidence.origin",
+            details={"origin": origin or None},
         )
     return _confidence_evidence(row, ColumnDescriptionDraft, "overall_score")
 

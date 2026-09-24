@@ -1336,27 +1336,25 @@ def test_every_truth_label_records_its_basis_and_what_would_falsify_it() -> None
     assert str(TRUTH["provenance"]["authored_on"]) == "2026-09-12"
 
 
-async def test_the_model_origin_abstention_rests_on_one_unenforced_dict_key(
-    session: AsyncSession,
+@pytest.mark.parametrize("origin", [None, "", "SOMETHING_A_NEW_PRODUCER_WROTE"])
+async def test_a_draft_with_no_recognised_origin_is_left_to_a_person(
+    session: AsyncSession, origin: str | None
 ) -> None:
-    """A robustness probe, not a corpus case: how the abstention fails.
+    """A robustness probe, not a corpus case: the abstention now fails closed.
 
     `_column_description_draft_evidence` decides a model wrote a draft by
-    reading `evidence["origin"]`. Nothing in the schema requires that key, and
-    a row whose `evidence` simply lacks it is not treated as unknown-origin --
-    it falls through to the score and is approved. Every in-tree producer
-    writes the key (`column_description_model.py`), so this is not a reachable
-    false approval today, which is why it is kept out of the count. It is here
-    because the control's strongest abstention turns out to rest on one
-    optional dict key, and the next producer to write a draft is one omission
-    away from switching it off.
+    reading `evidence["origin"]`. This probe used to pin that a row with no
+    origin key fell through to its score and was APPROVED -- the control's
+    strongest abstention rested on one optional dict key (R11-MP19). Now only a
+    recognised metadata origin reaches the score, and an absent, empty or
+    unrecognised one is a person's decision, however high it scored.
     """
     org = Organization(name="Bank", slug=f"bank-{uuid4().hex[:8]}")
     session.add(org)
     await session.flush()
     evidence = _column_evidence(comment="Date the order shipped.", dbt="")
-    review = await _column_draft(session, org, evidence, origin=None, overall=0.95)
+    review = await _column_draft(session, org, evidence, origin=origin, overall=0.95)
 
-    recommendation, confidence = await _decide(session, review)
+    recommendation, _confidence = await _decide(session, review)
 
-    assert (recommendation, confidence) == (_APPROVE, 0.95)
+    assert recommendation != _APPROVE
