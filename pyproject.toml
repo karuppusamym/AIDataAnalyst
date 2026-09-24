@@ -621,6 +621,7 @@ forbidden_modules = [
   "aida.detokenization_api",
   "aida.document_ingestion_api",
   "aida.engine_capability_api",
+  "aida.external_mcp_api",
   "aida.footprint_gaps_api",
   "aida.glossary_api",
   "aida.ingestion_api",

@@ -15,7 +15,6 @@ from aida.connectors.base import (
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
-    WritePrivilegeProbe,
     attach_native_objects,
     bounded_scan_scope,
     build_sequences,
@@ -497,20 +496,6 @@ async def _captured(read: _CapturedRead) -> Sequence[Any]:
     return read
 
 
-#: R11-MP22: whether the connected login can change data or structure in this
-#: database. A fixed query with no parameters; object-level grants are not checked.
-SQLSERVER_WRITE_PROBE = """
-SELECT
-    HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'INSERT') AS database_insert,
-    HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'UPDATE') AS database_update,
-    HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'DELETE') AS database_delete,
-    HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS database_alter,
-    IS_ROLEMEMBER('db_owner') AS db_owner,
-    IS_ROLEMEMBER('db_datawriter') AS db_datawriter,
-    IS_ROLEMEMBER('db_ddladmin') AS db_ddladmin
-"""
-
-
 class SqlServerConnector(SqlExecutor):
     connector_type = "sqlserver"
     dialect = "tsql"
@@ -578,34 +563,6 @@ class SqlServerConnector(SqlExecutor):
                 cursor.close()
         finally:
             connection.close()
-
-    async def probe_write_privileges(self) -> WritePrivilegeProbe:
-        """R11-MP22: database-level INSERT, UPDATE, DELETE or ALTER, or membership of
-        db_owner, db_datawriter or db_ddladmin. Object-level grants are not checked.
-
-        Needed here in particular: the connection's `readonly=True` sets the TDS
-        read-only application intent, a routing hint, and refuses no write."""
-        return await asyncio.to_thread(self._probe_write_privileges_sync)
-
-    def _probe_write_privileges_sync(self) -> WritePrivilegeProbe:
-        connection = self._connect(timeout_seconds=self._command_timeout, autocommit=True)
-        try:
-            cursor = connection.cursor()
-            try:
-                cursor.execute(SQLSERVER_WRITE_PROBE)
-                row = cursor.fetchone()
-            finally:
-                cursor.close()
-        finally:
-            connection.close()
-        if not row:
-            return WritePrivilegeProbe(checked=True, can_write=None, detail="no answer")
-        found = [name for name, value in dict(row).items() if value]
-        return WritePrivilegeProbe(
-            checked=True,
-            can_write=bool(found),
-            detail=", ".join(sorted(found)) if found else "read-only",
-        )
 
     def scope_discovery(
         self,

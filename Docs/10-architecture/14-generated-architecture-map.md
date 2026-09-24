@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-437 Python modules under `src/`, 2709 intra-`src` import edges.
+438 Python modules under `src/`, 2715 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -28,7 +28,7 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | atlas.modules.ingestion | `atlas.modules.ingestion.*` | 4 |
 | atlas.modules.observability_audit | `atlas.modules.observability_audit.*` | 4 |
 | atlas.modules.profiling | `atlas.modules.profiling.*` | 5 |
-| aida.connectors | `aida.connectors.*` | 14 |
+| aida.connectors | `aida.connectors.*` | 15 |
 | aida.workflows | `aida.workflows.*` | 7 |
 | aida.projectors | `aida.projectors.*` | 3 |
 | atlas.platform | `atlas.platform.*` | 6 |
@@ -56,7 +56,7 @@ graph LR
   ctx_ingestion["atlas.modules.ingestion<br/>4 modules"]
   ctx_observability_audit["atlas.modules.observability_audit<br/>4 modules"]
   ctx_profiling["atlas.modules.profiling<br/>5 modules"]
-  connectors["aida.connectors<br/>14 modules"]
+  connectors["aida.connectors<br/>15 modules"]
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>6 modules"]
@@ -76,6 +76,7 @@ graph LR
   ctx_ingestion -->|8| domain
   domain -->|8| ctx_profiling
   ctx_observability_audit -->|6| domain
+  workflows -->|5| connectors
   ctx_catalog -->|4| platform
   ctx_connectivity -->|4| platform
   ctx_identity_tenancy -->|4| platform
@@ -87,7 +88,6 @@ graph LR
   domain -->|4| ctx_ingestion
   domain -->|4| ctx_observability_audit
   domain -->|4| workflows
-  workflows -->|4| connectors
   ctx_ingestion -->|3| workflows
   app -->|2| ctx_catalog
   app -->|2| ctx_connectivity
@@ -144,13 +144,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 403 |
-| `aida.workflows.worker` | Temporal worker | 130 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 404 |
+| `aida.workflows.worker` | Temporal worker | 131 |
 | `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 207 |
 | `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 90 |
 | `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 27 |
 
-Union of all five: 429 of 437 modules.
+Union of all five: 430 of 438 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -166,7 +166,7 @@ Per group, how much of each group each process pulls in:
 | atlas.modules.ingestion | 4 | 3 | 3 | 3 | 2 | 4 |
 | atlas.modules.observability_audit | 4 | 3 | 3 | 3 | 2 | 4 |
 | atlas.modules.profiling | 4 | 4 | 4 | 4 | 2 | 5 |
-| aida.connectors | 14 | 13 | 14 | 13 | 0 | 14 |
+| aida.connectors | 15 | 14 | 14 | 13 | 0 | 15 |
 | aida.workflows | 5 | 6 | 4 | 0 | 0 | 7 |
 | aida.projectors | 0 | 0 | 2 | 2 | 2 | 3 |
 | atlas.platform | 6 | 6 | 6 | 6 | 4 | 6 |
@@ -178,8 +178,8 @@ pulls in:
 ```mermaid
 graph LR
   shared["shared substrate<br/>25 modules"]
-  aida_main(["aida.main<br/>403 reached"])
-  aida_workflows_worker(["aida.workflows.worker<br/>130 reached"])
+  aida_main(["aida.main<br/>404 reached"])
+  aida_workflows_worker(["aida.workflows.worker<br/>131 reached"])
   aida_workflows_scheduler(["aida.workflows.scheduler<br/>207 reached"])
   aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>90 reached"])
   aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>27 reached"])
@@ -243,9 +243,9 @@ push rather than described.
 | F05 the governance decision service is never reached from a router (and never imports one) | forbidden | 3 source module(s) may not import 5 module(s) |
 | R02 extracted lineage/graph/portfolio services never import a router | forbidden | 4 source module(s) may not import 5 module(s) |
 | ADR-0029 the steward agent and the rules it shares never import a router | forbidden | 14 source module(s) may not import 16 module(s) |
-| R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router | forbidden | 10 source module(s) may not import 77 module(s) |
+| R11-GQL01 GraphQL's read modules and the shared context-product and OKF read services never import a router | forbidden | 10 source module(s) may not import 78 module(s) |
 
-13 contracts, 1043 forbidden module pairs. The
+13 contracts, 1053 forbidden module pairs. The
 forbidden edges, drawn — a dashed line is an import the build rejects:
 
 ```mermaid
@@ -327,6 +327,7 @@ graph LR
   aida_detokenization_api["aida.detokenization_api"]
   aida_document_ingestion_api["aida.document_ingestion_api"]
   aida_engine_capability_api["aida.engine_capability_api"]
+  aida_external_mcp_api["aida.external_mcp_api"]
   aida_footprint_gaps_api["aida.footprint_gaps_api"]
   aida_glossary_api["aida.glossary_api"]
   aida_ingestion_api["aida.ingestion_api"]
@@ -670,6 +671,7 @@ graph LR
   aida_context_product_read_service -.->|forbidden| aida_detokenization_api
   aida_context_product_read_service -.->|forbidden| aida_document_ingestion_api
   aida_context_product_read_service -.->|forbidden| aida_engine_capability_api
+  aida_context_product_read_service -.->|forbidden| aida_external_mcp_api
   aida_context_product_read_service -.->|forbidden| aida_footprint_gaps_api
   aida_context_product_read_service -.->|forbidden| aida_glossary_api
   aida_context_product_read_service -.->|forbidden| aida_ingestion_api
@@ -747,6 +749,7 @@ graph LR
   aida_context_product_reads -.->|forbidden| aida_detokenization_api
   aida_context_product_reads -.->|forbidden| aida_document_ingestion_api
   aida_context_product_reads -.->|forbidden| aida_engine_capability_api
+  aida_context_product_reads -.->|forbidden| aida_external_mcp_api
   aida_context_product_reads -.->|forbidden| aida_footprint_gaps_api
   aida_context_product_reads -.->|forbidden| aida_glossary_api
   aida_context_product_reads -.->|forbidden| aida_ingestion_api
@@ -824,6 +827,7 @@ graph LR
   aida_governed_execution -.->|forbidden| aida_detokenization_api
   aida_governed_execution -.->|forbidden| aida_document_ingestion_api
   aida_governed_execution -.->|forbidden| aida_engine_capability_api
+  aida_governed_execution -.->|forbidden| aida_external_mcp_api
   aida_governed_execution -.->|forbidden| aida_footprint_gaps_api
   aida_governed_execution -.->|forbidden| aida_glossary_api
   aida_governed_execution -.->|forbidden| aida_ingestion_api
@@ -901,6 +905,7 @@ graph LR
   aida_graphql_limits -.->|forbidden| aida_detokenization_api
   aida_graphql_limits -.->|forbidden| aida_document_ingestion_api
   aida_graphql_limits -.->|forbidden| aida_engine_capability_api
+  aida_graphql_limits -.->|forbidden| aida_external_mcp_api
   aida_graphql_limits -.->|forbidden| aida_footprint_gaps_api
   aida_graphql_limits -.->|forbidden| aida_glossary_api
   aida_graphql_limits -.->|forbidden| aida_ingestion_api
@@ -978,6 +983,7 @@ graph LR
   aida_graphql_okf -.->|forbidden| aida_detokenization_api
   aida_graphql_okf -.->|forbidden| aida_document_ingestion_api
   aida_graphql_okf -.->|forbidden| aida_engine_capability_api
+  aida_graphql_okf -.->|forbidden| aida_external_mcp_api
   aida_graphql_okf -.->|forbidden| aida_footprint_gaps_api
   aida_graphql_okf -.->|forbidden| aida_glossary_api
   aida_graphql_okf -.->|forbidden| aida_ingestion_api
@@ -1055,6 +1061,7 @@ graph LR
   aida_graphql_reads -.->|forbidden| aida_detokenization_api
   aida_graphql_reads -.->|forbidden| aida_document_ingestion_api
   aida_graphql_reads -.->|forbidden| aida_engine_capability_api
+  aida_graphql_reads -.->|forbidden| aida_external_mcp_api
   aida_graphql_reads -.->|forbidden| aida_footprint_gaps_api
   aida_graphql_reads -.->|forbidden| aida_glossary_api
   aida_graphql_reads -.->|forbidden| aida_ingestion_api
@@ -1132,6 +1139,7 @@ graph LR
   aida_graphql_schema -.->|forbidden| aida_detokenization_api
   aida_graphql_schema -.->|forbidden| aida_document_ingestion_api
   aida_graphql_schema -.->|forbidden| aida_engine_capability_api
+  aida_graphql_schema -.->|forbidden| aida_external_mcp_api
   aida_graphql_schema -.->|forbidden| aida_footprint_gaps_api
   aida_graphql_schema -.->|forbidden| aida_glossary_api
   aida_graphql_schema -.->|forbidden| aida_ingestion_api
@@ -1209,6 +1217,7 @@ graph LR
   aida_okf_read_model -.->|forbidden| aida_detokenization_api
   aida_okf_read_model -.->|forbidden| aida_document_ingestion_api
   aida_okf_read_model -.->|forbidden| aida_engine_capability_api
+  aida_okf_read_model -.->|forbidden| aida_external_mcp_api
   aida_okf_read_model -.->|forbidden| aida_footprint_gaps_api
   aida_okf_read_model -.->|forbidden| aida_glossary_api
   aida_okf_read_model -.->|forbidden| aida_ingestion_api
@@ -1286,6 +1295,7 @@ graph LR
   aida_okf_store -.->|forbidden| aida_detokenization_api
   aida_okf_store -.->|forbidden| aida_document_ingestion_api
   aida_okf_store -.->|forbidden| aida_engine_capability_api
+  aida_okf_store -.->|forbidden| aida_external_mcp_api
   aida_okf_store -.->|forbidden| aida_footprint_gaps_api
   aida_okf_store -.->|forbidden| aida_glossary_api
   aida_okf_store -.->|forbidden| aida_ingestion_api
@@ -1363,6 +1373,7 @@ graph LR
   aida_tool_execution -.->|forbidden| aida_detokenization_api
   aida_tool_execution -.->|forbidden| aida_document_ingestion_api
   aida_tool_execution -.->|forbidden| aida_engine_capability_api
+  aida_tool_execution -.->|forbidden| aida_external_mcp_api
   aida_tool_execution -.->|forbidden| aida_footprint_gaps_api
   aida_tool_execution -.->|forbidden| aida_glossary_api
   aida_tool_execution -.->|forbidden| aida_ingestion_api
@@ -1433,7 +1444,7 @@ a package's fan-in measures nothing but the size of the package.
 | `atlas.platform.config` | atlas.platform | 32 |
 | `aida.authorization_gate` | aida domain modules | 27 |
 | `aida.ingest_screening` | aida domain modules | 23 |
-| `aida.connectors.base` | aida.connectors | 20 |
+| `aida.connectors.base` | aida.connectors | 21 |
 | `aida.security_types` | aida domain modules | 20 |
 | `aida.procedure_lineage_models` | aida domain modules | 16 |
 | `aida.secrets` | aida domain modules | 15 |

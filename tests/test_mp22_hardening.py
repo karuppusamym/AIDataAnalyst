@@ -20,9 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import aida.mcp_server as mcp_server
 import aida.workflows.activities as activities
 from aida.config import Settings
-from aida.connectors.base import NOT_PROBED, WritePrivilegeProbe
-from aida.connectors.postgres import POSTGRES_WRITE_PROBE
-from aida.connectors.sqlserver import SQLSERVER_WRITE_PROBE, SqlServerConnector
+from aida.connectors.sqlserver import SqlServerConnector
+from aida.connectors.write_probe import (
+    NOT_PROBED,
+    POSTGRES_WRITE_PROBE,
+    SQLSERVER_WRITE_PROBE,
+    WritePrivilegeProbe,
+    probe_sqlserver_sync,
+    probe_write_privileges,
+)
 from aida.envelope_models import MetadataViewDefinition
 from aida.ingest_screening import CLEAN, QUARANTINED, SCREENING_VERSION
 from aida.mcp_server import UNTRUSTED_ROWS_META_KEY, UNTRUSTED_ROWS_NOTICE, _handle_tools_call
@@ -74,7 +80,7 @@ def test_sql_server_names_what_it_found(monkeypatch: pytest.MonkeyPatch) -> None
 
     connector = SqlServerConnector("mssql://u:p@host:1433/db")
     monkeypatch.setattr(connector, "_connect", lambda **_k: _Connection())
-    probe = connector._probe_write_privileges_sync()
+    probe = probe_sqlserver_sync(connector)
     assert probe == WritePrivilegeProbe(checked=True, can_write=True, detail="db_datawriter")
 
 
@@ -86,6 +92,21 @@ class _Connector:
         if isinstance(self.probe, Exception):
             raise self.probe
         return self.probe
+
+
+@pytest.fixture(autouse=True)
+def _probe_through_the_double(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real probe dispatches on the connector class; the double answers itself."""
+
+    async def _probe(connector: Any) -> WritePrivilegeProbe:
+        answer: WritePrivilegeProbe = await connector.probe_write_privileges()
+        return answer
+
+    monkeypatch.setattr(activities, "probe_write_privileges", _probe)
+
+
+async def test_an_engine_without_a_probe_is_not_probed() -> None:
+    assert await probe_write_privileges(object()) is NOT_PROBED  # type: ignore[arg-type]
 
 
 def _datasource_and_run(scenario: _Scenario) -> tuple[Any, Any]:

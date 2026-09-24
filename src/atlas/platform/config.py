@@ -638,7 +638,7 @@ class Settings(BaseSettings):
     question_value_redaction_enabled: bool = True
     question_obfuscation_screen_enabled: bool = True
     # R11-MP22: what discovery does when the source account can write
-    # (`Connector.probe_write_privileges`). WARN records it and carries on; REFUSE
+    # (`aida.connectors.write_probe`). WARN records it and carries on; REFUSE
     # stops the analysis, so a bank can require a read-only account per source.
     source_write_access_policy: Literal["WARN", "REFUSE"] = "WARN"
     # R11-MP17: a confirmed query becomes a template and few-shot example for

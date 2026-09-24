@@ -12,7 +12,6 @@ from aida.connectors.base import (
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
-    WritePrivilegeProbe,
     attach_native_objects,
     bounded_scan_scope,
     build_sequences,
@@ -945,29 +944,6 @@ async def _fetch_scalar_rows(connection: Any, sql: str) -> list[Any]:
     return [await connection.fetchval(sql)]
 
 
-#: R11-MP22: whether the connected role can change data or structure. A fixed catalog
-#: query with no parameters; `has_table_privilege` with several privileges is true if
-#: any one is held.
-POSTGRES_WRITE_PROBE = """
-SELECT
-    has_database_privilege(current_database(), 'CREATE') AS database_create,
-    EXISTS (
-        SELECT 1 FROM pg_namespace n
-        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND n.nspname NOT LIKE 'pg_toast%'
-          AND n.nspname NOT LIKE 'pg_temp%'
-          AND has_schema_privilege(n.oid, 'CREATE')
-    ) AS schema_create,
-    EXISTS (
-        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE c.relkind IN ('r', 'p')
-          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND n.nspname NOT LIKE 'pg_toast%'
-          AND has_table_privilege(c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE')
-    ) AS table_write
-"""
-
-
 class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
@@ -1029,23 +1005,6 @@ class PostgresConnector(SqlExecutor):
             await connection.fetchval("SELECT 1")
         finally:
             await connection.close()
-
-    async def probe_write_privileges(self) -> WritePrivilegeProbe:
-        """R11-MP22: database CREATE, CREATE on any user schema, or any of INSERT,
-        UPDATE, DELETE, TRUNCATE on any user table or partitioned table."""
-        connection = await asyncpg.connect(self._dsn, command_timeout=self._command_timeout)
-        try:
-            row = await connection.fetchrow(POSTGRES_WRITE_PROBE)
-        finally:
-            await connection.close()
-        if row is None:
-            return WritePrivilegeProbe(checked=True, can_write=None, detail="no answer")
-        found = [name for name in ("database_create", "schema_create", "table_write") if row[name]]
-        return WritePrivilegeProbe(
-            checked=True,
-            can_write=bool(found),
-            detail=", ".join(found) if found else "read-only",
-        )
 
     def scope_discovery(
         self,

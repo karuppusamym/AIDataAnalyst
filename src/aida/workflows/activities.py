@@ -43,7 +43,6 @@ from aida.classification_feed import (
 )
 from aida.config import Settings, get_settings
 from aida.connectors.base import (
-    NOT_PROBED,
     Connector,
     ConnectorValueProfilingUnsupported,
     DiscoveredCatalog,
@@ -53,7 +52,6 @@ from aida.connectors.base import (
     DiscoveredPartition,
     DiscoveredSchema,
     DiscoveredTable,
-    WritePrivilegeProbe,
 )
 from aida.connectors.discovery import (
     FACET_CONSTRAINTS,
@@ -68,6 +66,11 @@ from aida.connectors.discovery import (
     facet_read_scope,
 )
 from aida.connectors.registry import connector_registry
+from aida.connectors.write_probe import (
+    NOT_PROBED,
+    WritePrivilegeProbe,
+    probe_write_privileges,
+)
 from aida.db import session_factory
 from aida.discovery_receipt import (
     FACET_OBJECT_VISIBILITY,
@@ -1366,7 +1369,7 @@ async def check_source_write_access(
     stops. A probe that itself fails is logged and never stops discovery.
     """
     try:
-        probe = await connector.probe_write_privileges()
+        probe = await probe_write_privileges(connector)
     except Exception as exc:  # noqa: BLE001 -- a failed probe is not a finding
         logger.warning(
             "source_write_probe_failed",
