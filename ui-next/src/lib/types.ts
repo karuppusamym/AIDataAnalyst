@@ -2478,6 +2478,48 @@ export interface ExecutionRead {
   updated_at: string;
 }
 
+export interface ExternalMcpDiscoveryRead {
+  server_id: string;
+  listed: number;
+  new: number;
+  changed: number;
+  withdrawn: number;
+  quarantined: number;
+}
+
+export interface ExternalMcpServerCreate {
+  name: string;
+  base_url: string;
+  credential_reference?: string | null;
+}
+
+export interface ExternalMcpServerRead {
+  id: string;
+  organization_id: string;
+  name: string;
+  base_url: string;
+  uses_credential_reference: boolean;
+  status: string;
+  server_name: string | null;
+  protocol_version: string | null;
+  last_discovered_at: string | null;
+  last_discovery_error: string | null;
+  discovered_tool_count: number;
+}
+
+export interface ExternalMcpToolRead {
+  id: string;
+  server_id: string;
+  name: string;
+  description: string | null;
+  input_schema: Record<string, unknown>;
+  screening_status: string;
+  screening_reason_codes: string[];
+  status: string;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
 /** Normalized inbound envelope for a third-party detector quality signal. */
 export interface ExternalQualitySignalIngest {
   detector_vendor: string;

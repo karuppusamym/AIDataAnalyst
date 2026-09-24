@@ -45,6 +45,7 @@ from aida.description_withdrawal_api import router as description_withdrawal_rou
 from aida.detokenization_api import router as detokenization_router
 from aida.document_ingestion_api import router as document_ingestion_router
 from aida.engine_capability_api import router as engine_capability_router
+from aida.external_mcp_api import router as external_mcp_router
 from aida.footprint_gaps_api import router as footprint_gaps_router
 from aida.glossary_api import router as glossary_router
 from aida.graphql_api import router as graphql_router
@@ -453,6 +454,7 @@ app.include_router(okf_import_router)
 app.include_router(product_marketplace_router)
 app.include_router(marketplace_discovery_router)
 app.include_router(search_router)
+app.include_router(external_mcp_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
 app.include_router(studio_router)

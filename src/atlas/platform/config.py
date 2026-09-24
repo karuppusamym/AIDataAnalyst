@@ -658,6 +658,11 @@ class Settings(BaseSettings):
             return self.mcp_tool_certification_required
         return self.environment in {"staging", "production"}
 
+    # R11-MP10: hosts an upstream MCP server may be registered and discovered on.
+    # Empty (the default) means none: reading another server's tool list is an
+    # outbound connection, and the list of places it may go is a deployment decision.
+    mcp_client_allowed_hosts: list[str] = Field(default_factory=list)
+    mcp_client_timeout_seconds: int = Field(default=15, ge=1, le=120)
     # --- Ask rate budget (R11-MP14) ----------------------------------------------
     # Questions per caller per minute on the two Ask routes. Off by default, like
     # the MCP and GraphQL budgets, because it needs Redis; the per-call model-token

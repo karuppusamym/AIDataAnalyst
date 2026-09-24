@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **558**
-- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 462, SDK 1
+- Surfaces covered: **562**
+- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 466, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -255,6 +255,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/documents/{document_id}/sections` | REST | `aida.document_ingestion_api.list_document_sections` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/documents/{document_id}` | REST | `aida.document_ingestion_api.get_document` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/engines/capability-matrix` | REST | `aida.engine_capability_api.get_engine_capability_matrix` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
+| `GET /v1/external-mcp-servers/{server_id}/tools` | REST | `aida.external_mcp_api.list_external_mcp_tools` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/glossary-term-versions/{version_id}/consumers` | REST | `aida.glossary_api.get_glossary_term_version_consumers` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/glossary-terms/{term_id}/semantic-bindings` | REST | `aida.semantic_api.list_term_semantic_bindings` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/governance/review-batches/{batch_id}/items` | REST | `aida.review_batch_api.read_review_batch_items` | DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | read | no | not cancellable |
@@ -312,6 +313,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/datasources` | REST | `aida.operational_api.list_organization_datasources` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/delegations` | REST | `aida.delegation_api.list_delegations` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/enforcement-readiness` | REST | `atlas.modules.identity_tenancy.router.get_enforcement_readiness` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}/external-mcp-servers` | REST | `aida.external_mcp_api.list_external_mcp_servers` | AgentDeveloper, Auditor, DataSteward, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/fleet-health` | REST | `aida.operational_api.organization_fleet_health` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/fleet-summary` | REST | `aida.operational_api.fleet_summary` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/footprint-gaps` | REST | `aida.footprint_gaps_api.get_footprint_gaps` | Auditor, DataSteward, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin | yes | yes | read | no | not cancellable |
@@ -471,6 +473,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/descriptions/withdrawals` | REST | `aida.description_withdrawal_api.create_description_withdrawal` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/documents/{document_id}/extract-claims` | REST | `aida.document_ingestion_api.extract_claims` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/documents/{document_id}/map` | REST | `aida.document_ingestion_api.map_document` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/external-mcp-servers/{server_id}/discover` | REST | `aida.external_mcp_api.discover_external_mcp_tools` | AgentDeveloper, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/glossary-conflicts/{conflict_id}/resolution` | REST | `aida.stewardship_api.submit_conflict_resolution` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/glossary-link-proposals/{proposal_id}/submit` | REST | `aida.stewardship_api.submit_glossary_link_proposal` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/glossary-term-versions/{version_id}/submit` | REST | `aida.glossary_api.submit_glossary_term_version` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
@@ -517,6 +520,7 @@ graph. Nothing here is hand-maintained.
 | `POST /v1/organizations/{organization_id}/business-nodes` | REST | `atlas.modules.identity_tenancy.router.create_business_node` | DataAdmin, DataSteward, OrganizationAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/column-description-drafts/generate` | REST | `aida.column_description_api.generate_column_description_drafts` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | yes | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/delegations` | REST | `aida.delegation_api.grant_delegation` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |
+| `POST /v1/organizations/{organization_id}/external-mcp-servers` | REST | `aida.external_mcp_api.register_external_mcp_server` | PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-categories` | REST | `aida.stewardship_api.create_glossary_category` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-conflicts/detect` | REST | `aida.stewardship_api.detect_glossary_conflicts` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `POST /v1/organizations/{organization_id}/glossary-conflicts` | REST | `aida.stewardship_api.create_glossary_conflict` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
