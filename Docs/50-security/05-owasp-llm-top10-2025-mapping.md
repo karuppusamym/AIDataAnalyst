@@ -178,7 +178,7 @@ Status key. **Covered**: the risk has controls on every path that exists today, 
 
 - Tool certification (`run_certification_corpus` and `certification_is_active` in `src/aida/tool_certification.py`) is recorded and reported by `src/aida/tool_api.py`. I found no reference to it in the publish path or in MCP `tools/list`, so an uncertified PUBLISHED tool is callable.
 - Workspace authorization is observe-only by default (`unresolved_workspace_posture`, see LLM02). Agent identities are bounded by their envelopes, but an agent with the roles to call a tool is not stopped at the workspace level.
-- The reviewer agent does not meet the AR-03 adversarial bar. The benchmark pins 9 false approvals and 0 pairs told apart. It is safe only because it is off by default. Its abstention on model-drafted text rests on an optional `evidence["origin"]` key, and `test_the_model_origin_abstention_rests_on_one_unenforced_dict_key` shows it approving when that key is missing.
+- The reviewer agent does not meet the AR-03 adversarial bar. The benchmark pins 9 false approvals and 0 pairs told apart. It is safe only because it is off by default. Its abstention on model-drafted text rested on an optional `evidence["origin"]` key and approved a draft that lacked it; R11-MP19 made it fail closed after this snapshot, and `test_a_draft_with_no_recognised_origin_is_left_to_a_person` now pins the abstention.
 - Humans without an envelope reach the native MCP tools, including the one that writes (the marketplace access request), on their roles alone. This is by design, but external agents running under a human token inherit it.
 
 **Status: Partial.**
