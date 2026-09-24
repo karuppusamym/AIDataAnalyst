@@ -977,6 +977,25 @@ class ConnectorQueryHistoryUnsupported(NotImplementedError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class WritePrivilegeProbe:
+    """R11-MP22: whether the source account this platform connects as can write.
+
+    The query gateway refuses writes by parsing every statement, and PostgreSQL
+    also runs each read in a read-only transaction. Every other engine relies on
+    the parse and on the account's grants, so an account that can write is a
+    control resting on one layer. `checked` is False where the engine offers no
+    probe this connector implements; `detail` names what was found, never a value.
+    """
+
+    checked: bool
+    can_write: bool | None = None
+    detail: str = ""
+
+
+NOT_PROBED = WritePrivilegeProbe(checked=False, detail="no write-privilege probe for this engine")
+
+
 class Connector(ABC):
     """Source access with structured arguments only.
 
@@ -997,6 +1016,14 @@ class Connector(ABC):
     @abstractmethod
     async def test_connection(self) -> None:
         raise NotImplementedError
+
+    async def probe_write_privileges(self) -> WritePrivilegeProbe:
+        """Whether the connected account can change data or structure (R11-MP22).
+
+        A fixed, parameter-free catalog query, like `test_connection`'s `SELECT 1`;
+        it accepts no SQL. Engines without an implementation answer `NOT_PROBED`.
+        """
+        return NOT_PROBED
 
     @abstractmethod
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:

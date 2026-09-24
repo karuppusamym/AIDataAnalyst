@@ -41,8 +41,9 @@ from aida.classification_feed import (
     RuleClassificationResult,
     classify_column_name_with_evidence,
 )
-from aida.config import get_settings
+from aida.config import Settings, get_settings
 from aida.connectors.base import (
+    NOT_PROBED,
     Connector,
     ConnectorValueProfilingUnsupported,
     DiscoveredCatalog,
@@ -52,6 +53,7 @@ from aida.connectors.base import (
     DiscoveredPartition,
     DiscoveredSchema,
     DiscoveredTable,
+    WritePrivilegeProbe,
 )
 from aida.connectors.discovery import (
     FACET_CONSTRAINTS,
@@ -1343,6 +1345,73 @@ async def _emit_newly_created_table_events(
     )
 
 
+class SourceAccountCanWrite(RuntimeError):
+    """R11-MP22: the source account can write and the policy is REFUSE."""
+
+
+async def check_source_write_access(
+    connector: Connector,
+    *,
+    datasource: DataSource,
+    run: AnalysisRun,
+    settings: Settings,
+) -> WritePrivilegeProbe:
+    """Probe whether the account discovery connects as can write, and act on it.
+
+    Every write the platform could make is refused by the query gateway's parse;
+    a read-only account is the second layer, and on every engine but PostgreSQL
+    (which also runs reads in a read-only transaction) it is the only one. So an
+    account that can write is recorded -- an audit row an operator can find, and
+    a warning -- and, where `source_write_access_policy` is REFUSE, discovery
+    stops. A probe that itself fails is logged and never stops discovery.
+    """
+    try:
+        probe = await connector.probe_write_privileges()
+    except Exception as exc:  # noqa: BLE001 -- a failed probe is not a finding
+        logger.warning(
+            "source_write_probe_failed",
+            datasource_id=str(datasource.id),
+            error_type=type(exc).__name__,
+        )
+        return NOT_PROBED
+    if not probe.can_write:
+        return probe
+    logger.warning(
+        "source_account_can_write",
+        datasource_id=str(datasource.id),
+        connector_type=datasource.connector_type,
+        found=probe.detail,
+        policy=settings.source_write_access_policy,
+    )
+    async with session_factory() as session:
+        record_audit(
+            session,
+            SecurityContext(
+                principal_id="metadata-worker",
+                principal_type="WORKER",
+                organization_id=datasource.organization_id,
+                roles=frozenset({"MetadataWorker"}),
+            ),
+            action="datasource.source_account_can_write",
+            resource_type="datasource",
+            resource_id=str(datasource.id),
+            outcome="SUCCESS",
+            correlation_id=str(run.id),
+            details={
+                "connector_type": datasource.connector_type,
+                "found": probe.detail,
+                "policy": settings.source_write_access_policy,
+            },
+        )
+        await session.commit()
+    if settings.source_write_access_policy == "REFUSE":
+        raise SourceAccountCanWrite(
+            f"the source account can write ({probe.detail}); "
+            "source_write_access_policy is REFUSE"
+        )
+    return probe
+
+
 async def _mark_run_cancelled(run_uuid: UUID) -> None:
     async with session_factory() as session:
         run = await session.get(AnalysisRun, run_uuid)
@@ -1493,6 +1562,10 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         dsn = SecretResolver().resolve(datasource.credential_reference)
         connector = connector_registry.create(datasource.connector_type, dsn)
         await connector.test_connection()
+        # R11-MP22: a source account that can write is recorded, or refused.
+        await check_source_write_access(
+            connector, datasource=datasource, run=run, settings=get_settings()
+        )
         activity.heartbeat({"stage": "discovering"})
         await heartbeat_task(
             analysis_run_id=run_uuid,

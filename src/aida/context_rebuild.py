@@ -183,6 +183,7 @@ from aida.tool_source_binding import (
     REASON_SOURCE_RETIRED,
     source_binding_drift,
 )
+from aida.verdict_rescreen import requarantine_stale_verdicts
 from aida.view_tool_blueprint import (
     ViewNotEligibleError,
     ViewToolBlueprintError,
@@ -271,6 +272,8 @@ class RebuildOutcome:
     failed: int = 0
     #: R11-FP15: meaning retirements this pass swept into signals.
     meaning_signals_recorded: int = 0
+    #: R11-MP22: stale CLEAN screening verdicts the current rules now quarantine.
+    verdicts_requarantined: int = 0
     blocked: dict[str, int] = field(default_factory=dict)
     waiting: dict[str, int] = field(default_factory=dict)
 
@@ -297,6 +300,7 @@ class RebuildOutcome:
                 self.holds_released,
                 self.failed,
                 self.meaning_signals_recorded,
+                self.verdicts_requarantined,
                 self.blocked,
             )
         )
@@ -316,6 +320,7 @@ class RebuildOutcome:
             "holds_released": self.holds_released,
             "failed": self.failed,
             "meaning_signals_recorded": self.meaning_signals_recorded,
+            "verdicts_requarantined": self.verdicts_requarantined,
             "blocked": dict(sorted(self.blocked.items())),
             "waiting": dict(sorted(self.waiting.items())),
         }
@@ -2266,6 +2271,19 @@ async def run_context_rebuild(
     except Exception:  # noqa: BLE001 -- the sweep must not stop the pass
         logger.exception(
             "context_rebuild_meaning_sweep_failed", organization_id=str(organization_id)
+        )
+        outcome.failed += 1
+    # R11-MP22: quarantine what the current screening rules now fail, before any step
+    # below builds model context from it. Tighten-only; its own savepoint, like the
+    # meaning sweep, so a failure is counted and retried next pass.
+    try:
+        async with session.begin_nested():
+            outcome.verdicts_requarantined = await requarantine_stale_verdicts(
+                session, organization_id
+            )
+    except Exception:  # noqa: BLE001 -- the sweep must not stop the pass
+        logger.exception(
+            "context_rebuild_verdict_rescreen_failed", organization_id=str(organization_id)
         )
         outcome.failed += 1
     await _supersede_lineage(session, organization_id, outcome, effective_now)
