@@ -66,7 +66,7 @@ infra/monitoring/
   README.md                              # this file
   prometheus/
     prometheus.yml                       # plain-Prometheus scrape config, for the compose stack
-    rules/atlas.rules.yml                # 4 recording rules, 25 alerts -- THE SOURCE OF TRUTH
+    rules/atlas.rules.yml                # 4 recording rules, 26 alerts -- THE SOURCE OF TRUTH
   k8s/
     kustomization.yaml                   # kustomize base (needs Prometheus Operator CRDs)
     servicemonitor.yaml                  # scrapes the existing aida-api Service
@@ -197,7 +197,7 @@ The other sixteen are structural and can be trusted as shipped:
 | `atlas.footprint` | `AtlasLineageParseBacklogNotDraining`, `AtlasLineageReviewBacklogNotDraining`, `AtlasSourceChangeHoldsRising`, `AtlasChangeSignalQueueHeadNotMoving`, `AtlasQuarantinedCodeRising` |
 | `atlas.projection` | `AtlasProjectionStalled`, `AtlasProjectionBacklogGrowing` |
 | `atlas.retrieval` | `AtlasRetrievalChannelProviderUnavailable` |
-| `atlas.cost-and-quota` | `AtlasModelSpendEntirelyEstimated`, `AtlasUsageQuotaRefusals`, `AtlasParserFailures` |
+| `atlas.cost-and-quota` | `AtlasModelSpendEntirelyEstimated`, `AtlasModelStatedSpendHigh`, `AtlasUsageQuotaRefusals`, `AtlasParserFailures` |
 | `atlas.scheduler` | `AtlasSchedulerNoLeader` (the placeholder above is its group-mate) |
 | `atlas.drafter` | `AtlasNewlyCreatedTableDrafterConsumerDown` |
 
@@ -358,7 +358,7 @@ What that Prometheus (v3.5.0) reports about itself:
 Checked, against a working tree with no running stack:
 
 - `python scripts/generate_prometheus_rule.py --check` is current, and the rule
-  file has 4 recording rules and 25 alerts (`tests/test_monitoring_rules.py`,
+  file has 4 recording rules and 26 alerts (`tests/test_monitoring_rules.py`,
   13 tests).
 - The series exist under the names the rules read. A real HTTP scrape of
   `prometheus_client`'s exporter on an ephemeral loopback port, in a throwaway

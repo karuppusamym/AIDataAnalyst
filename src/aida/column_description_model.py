@@ -295,6 +295,8 @@ def _call_record(call: ModelCallEvidence) -> dict[str, Any]:
         "estimated_output_tokens": call.estimated_output_tokens,
         "provider_input_tokens": call.provider_input_tokens,
         "provider_output_tokens": call.provider_output_tokens,
+        "provider_cached_input_tokens": call.provider_cached_input_tokens,
+        "provider_reported_cost_usd": call.provider_reported_cost_usd,
     }
 
 

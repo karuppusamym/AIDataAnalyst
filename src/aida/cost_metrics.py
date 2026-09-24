@@ -22,8 +22,12 @@ comparable to itself* across connectors, let alone to a token.
 
 So:
 
-* **No series here is denominated in money.** There is no `aida_*_cost_dollars`
-  and there will not be one until something bills.
+* **No series here computes money.** Nothing multiplies tokens by a price, and
+  there is no price list to multiply by. The one money series,
+  `aida_model_stated_cost_usd_total` (R11-MP02), carries only what a provider
+  itself stated it charged for a call -- OpenRouter states it per response --
+  so it is billed money, not an estimate, and a provider that states nothing
+  contributes nothing to it rather than a zero-cost call.
 * **Provider-reported and estimated tokens are the same series with different
   `basis` labels, never one number.** `ModelCallEvidence` already keeps
   `provider_input_tokens` (what OpenAI or Gemini said it billed, or `None`) and
@@ -250,6 +254,27 @@ MODEL_TOKENS = Counter(
     ),
     labelnames=("provider_type", "direction", "basis"),
 )
+MODEL_STATED_COST = Counter(
+    "aida_model_stated_cost_usd_total",
+    (
+        "US dollars a model provider itself stated it charged, by provider "
+        "adapter (R11-MP02). Only providers that state a charge contribute; "
+        "nothing here multiplies tokens by a price, so a provider that states "
+        "none adds nothing -- read it beside aida_model_calls_total, not as "
+        "the whole spend."
+    ),
+    labelnames=("provider_type",),
+)
+MODEL_CACHED_INPUT_TOKENS = Counter(
+    "aida_model_cached_input_tokens_total",
+    (
+        "Of the REPORTED input tokens, those the provider served from its "
+        "prompt cache, by provider adapter (R11-MP02). A subset of "
+        "aida_model_call_tokens_total{direction=input,basis=REPORTED}, never "
+        "an addition to it."
+    ),
+    labelnames=("provider_type",),
+)
 MODEL_PAYLOAD_BYTES = Counter(
     "aida_model_call_bytes_total",
     (
@@ -370,7 +395,7 @@ class ModelSpendEvidence(Protocol):
 
     `aida.model_gateway` imports this module, so this module must not import it
     back -- and `import-linter`'s contracts would object if it did. Only the
-    seven members below are read, so they are declared as a `Protocol` and
+    members below are read, so they are declared as a `Protocol` and
     `ModelCallEvidence` satisfies it structurally without either module
     depending on the other's shape at runtime.
 
@@ -402,6 +427,12 @@ class ModelSpendEvidence(Protocol):
 
     @property
     def provider_output_tokens(self) -> int | None: ...
+
+    @property
+    def provider_cached_input_tokens(self) -> int | None: ...
+
+    @property
+    def provider_reported_cost_usd(self) -> float | None: ...
 
 
 def observe_model_call(evidence: ModelSpendEvidence) -> None:
@@ -445,6 +476,12 @@ def observe_model_call(evidence: ModelSpendEvidence) -> None:
             MODEL_TOKENS.labels(
                 provider_type=provider, direction=direction, basis=SpendBasis.REPORTED.value
             ).inc(reported)
+    cached = evidence.provider_cached_input_tokens
+    if cached is not None and cached > 0:
+        MODEL_CACHED_INPUT_TOKENS.labels(provider_type=provider).inc(cached)
+    stated = evidence.provider_reported_cost_usd
+    if stated is not None and stated > 0:
+        MODEL_STATED_COST.labels(provider_type=provider).inc(stated)
 
 
 def billable_tokens(evidence: ModelSpendEvidence) -> tuple[int, SpendBasis]:

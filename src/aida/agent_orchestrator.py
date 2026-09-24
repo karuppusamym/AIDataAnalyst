@@ -2096,6 +2096,9 @@ class GovernedAgentOrchestrator:
                 "estimated_output_tokens": model_evidence.estimated_output_tokens,
                 "provider_input_tokens": model_evidence.provider_input_tokens,
                 "provider_output_tokens": model_evidence.provider_output_tokens,
+                # R11-MP02: prompt-cache hits and the charge a provider stated, or None.
+                "provider_cached_input_tokens": model_evidence.provider_cached_input_tokens,
+                "provider_reported_cost_usd": model_evidence.provider_reported_cost_usd,
             }
             # AG-10 budget attribution. Every attempt in the chain sent the
             # same payload, so a fallback that fired after a 503 cost its input

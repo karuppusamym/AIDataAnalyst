@@ -69,6 +69,8 @@ def _evidence(
     estimated_output: int = 100,
     provider_input: int | None = None,
     provider_output: int | None = None,
+    provider_cached: int | None = None,
+    stated_cost: float | None = None,
 ) -> ModelCallEvidence:
     """A real `ModelCallEvidence`, not a stand-in.
 
@@ -91,6 +93,8 @@ def _evidence(
         estimated_output_tokens=estimated_output,
         provider_input_tokens=provider_input,
         provider_output_tokens=provider_output,
+        provider_cached_input_tokens=provider_cached,
+        provider_reported_cost_usd=stated_cost,
     )
 
 
@@ -211,12 +215,19 @@ def test_no_series_here_is_denominated_in_money() -> None:
     """There is no billing integration, so a `*_cost_dollars` or `*_cost_usd`
     series would be a fabricated number wearing a unit. `aida.cost_showback`'s
     COST_BASIS is the standing decision; this keeps it true of the metric
-    surface as well as of the report."""
+    surface as well as of the report.
+
+    One named exception (R11-MP02): `aida_model_stated_cost_usd` carries only the
+    charge a provider itself stated for a call, which is billed money rather
+    than a price-list estimate. It is named here, not pattern-matched, so a
+    second money series still fails."""
     forbidden = ("dollar", "usd", "_cost_", "_money", "_price", "_spend_amount")
+    stated_by_the_provider = {"aida_model_stated_cost_usd"}
     names = [
         metric.name
         for metric in REGISTRY.collect()
         if metric.name.startswith(("aida_parser", "aida_model", "aida_usage_quota"))
+        and metric.name not in stated_by_the_provider
     ]
 
     assert names, "no cost or quota series are registered; this test has stopped checking"
@@ -511,3 +522,46 @@ async def test_a_declined_parse_attributes_no_statements(session: AsyncSession) 
     )
 
     assert (await session.scalars(select(SourceUsageWindow))).all() == []
+
+
+def test_a_stated_charge_is_counted_as_dollars_and_nothing_else_is() -> None:
+    """R11-MP02. Only a charge the provider itself stated reaches the money
+    series; a call that states none adds nothing -- not a zero, not a price-list
+    estimate from its tokens."""
+    before = _value("aida_model_stated_cost_usd_total", provider_type="OPENROUTER")
+    observe_model_call(
+        _evidence(
+            provider_type="OPENROUTER", provider_input=900, provider_output=50, stated_cost=0.0125
+        )
+    )
+    observe_model_call(
+        _evidence(provider_type="OPENROUTER", provider_input=900, provider_output=50)
+    )
+    after = _value("aida_model_stated_cost_usd_total", provider_type="OPENROUTER")
+    assert after - before == pytest.approx(0.0125)
+
+
+def test_cached_input_is_a_subset_series_not_added_to_reported_input() -> None:
+    cached_before = _value("aida_model_cached_input_tokens_total", provider_type="ANTHROPIC")
+    reported_before = _value(
+        "aida_model_call_tokens_total",
+        provider_type="ANTHROPIC",
+        direction="input",
+        basis="REPORTED",
+    )
+    observe_model_call(
+        _evidence(
+            provider_type="ANTHROPIC", provider_input=1_000, provider_output=20, provider_cached=900
+        )
+    )
+    cached = _value("aida_model_cached_input_tokens_total", provider_type="ANTHROPIC")
+    reported = _value(
+        "aida_model_call_tokens_total",
+        provider_type="ANTHROPIC",
+        direction="input",
+        basis="REPORTED",
+    )
+    assert cached - cached_before == 900
+    # The reported input is the whole billed figure, cache included, once.
+    assert reported - reported_before == 1_000
+

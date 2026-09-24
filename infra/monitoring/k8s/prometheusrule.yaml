@@ -300,6 +300,20 @@ spec:
           heuristic, not a figure a provider billed. Expect this on a deployment using fixture providers
           or a provider that reports no usage; do not quote the period's spend as chargeback.
         runbook: infra/monitoring/README.md
+    - alert: AtlasModelStatedSpendHigh
+      expr: |
+        sum(increase(aida_model_stated_cost_usd_total[1d])) > 50
+      for: 15m
+      labels:
+        severity: warning
+        threshold_status: placeholder
+      annotations:
+        summary: Provider-stated model spend passed the placeholder daily figure
+        description: The dollars here are what model providers themselves stated they charged over the
+          last day, not an estimate. The 50 in this rule is a documented placeholder, not an approved
+          budget -- see the comment above this rule for how to set the estate's own figure. Engage the
+          model kill switch on the AI governance screen to stop spend at once.
+        runbook: infra/monitoring/README.md
     - alert: AtlasUsageQuotaRefusals
       expr: |
         sum by (dimension, scope) (

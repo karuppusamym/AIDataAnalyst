@@ -468,6 +468,32 @@ groups:
             reports no usage; do not quote the period's spend as chargeback.
           runbook: infra/monitoring/README.md
 
+      # PLACEHOLDER THRESHOLD -- 50 US dollars a day (R11-MP02).
+      #
+      # Reads only what providers stated they charged (OpenRouter states it per
+      # call), so on an estate whose routes are OpenAI or Gemini this series is
+      # empty and the rule can never fire; AtlasModelSpendEntirelyEstimated is
+      # the rule for that case. 50 is nobody's budget. How to replace it: take
+      # the monthly model budget the model governance lead approved for the
+      # estate, divide by 30, and alert at a fraction of it that leaves time to
+      # engage the kill switch before the month is spent.
+      - alert: AtlasModelStatedSpendHigh
+        expr: |
+          sum(increase(aida_model_stated_cost_usd_total[1d])) > 50
+        for: 15m
+        labels:
+          severity: warning
+          threshold_status: placeholder
+        annotations:
+          summary: "Provider-stated model spend passed the placeholder daily figure"
+          description: >-
+            The dollars here are what model providers themselves stated they
+            charged over the last day, not an estimate. The 50 in this rule is a
+            documented placeholder, not an approved budget -- see the comment
+            above this rule for how to set the estate's own figure. Engage the
+            model kill switch on the AI governance screen to stop spend at once.
+          runbook: infra/monitoring/README.md
+
       # Structural: a refused request is a tenant being told no. Whether that
       # is correct depends on the cap, but an operator should always know it is
       # happening, and the healthy value on a well-sized estate is zero.
