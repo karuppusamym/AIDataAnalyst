@@ -57,6 +57,16 @@ vi.mock("../lib/api", async (importOriginal) => {
   };
 });
 
+/* R11-MP26: the caller's own conversations. */
+const fetchConversations = vi.fn();
+const fetchConversation = vi.fn();
+const deleteConversation = vi.fn();
+vi.mock("../lib/api/conversations", () => ({
+  fetchConversations: (...args: unknown[]) => fetchConversations(...args),
+  fetchConversation: (...args: unknown[]) => fetchConversation(...args),
+  deleteConversation: (...args: unknown[]) => deleteConversation(...args),
+}));
+
 /** R11-FP12: one published product this project offers, as the list route returns it. */
 const PUBLISHED_PRODUCT = {
   id: "cp_1",
@@ -198,6 +208,10 @@ beforeEach(() => {
   });
   listOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchAgentRuns.mockResolvedValue(EMPTY_RUNS);
+  fetchConversations.mockReset();
+  fetchConversations.mockResolvedValue([]);
+  fetchConversation.mockReset();
+  deleteConversation.mockReset();
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -488,6 +502,51 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(3));
     expect(runAgentAnalysis.mock.calls[2]![1]).not.toHaveProperty("conversation_id");
+  });
+
+  it("lists your conversations, continues one and deletes one (R11-MP26)", async () => {
+    const summary = {
+      id: "conv_9",
+      datasource_id: "ds_1",
+      title: "deposits for account ATLAS_VALUE_1",
+      turn_count: 2,
+      created_at: "2026-09-25T08:00:00Z",
+      last_turn_at: "2026-09-25T08:05:00Z",
+    };
+    fetchConversations.mockResolvedValue([summary]);
+    fetchConversation.mockResolvedValue({
+      ...summary,
+      turns: [
+        { turn: 1, agent_run_id: "r1", question: "deposits for account ATLAS_VALUE_1", asked_at: summary.created_at },
+        { turn: 2, agent_run_id: "r2", question: "and last month", asked_at: summary.last_turn_at },
+      ],
+    });
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE, agent_run_id: "run_c9", conversation_id: "conv_9", conversation_turn: 3,
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_c9", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    const panel = await screen.findByRole("region", { name: "Your conversations" });
+    expect(await within(panel).findByText("deposits for account ATLAS_VALUE_1")).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: /Continue conversation/ }));
+    const thread = await screen.findByRole("region", { name: "Conversation" });
+    expect(within(thread).getByText("and last month")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "now by branch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(1));
+    expect(runAgentAnalysis.mock.calls[0]![1]).toMatchObject({ conversation_id: "conv_9" });
+
+    deleteConversation.mockResolvedValue(undefined);
+    fetchConversations.mockResolvedValue([]);
+    fireEvent.click(within(panel).getByRole("button", { name: /Delete conversation/ }));
+    await waitFor(() => expect(deleteConversation).toHaveBeenCalledWith("conv_9"));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Conversation" })).not.toBeInTheDocument(),
+    );
   });
 
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {

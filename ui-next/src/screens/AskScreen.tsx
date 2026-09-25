@@ -6,9 +6,11 @@ import type {
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
   ContextProductRead,
+  ConversationSummary,
   QueryLineageRead,
 } from "../lib/types";
 import type { AgentAskContextProductKind, AgentAskError, AgentAskErrorKind } from "../lib/api";
+import { deleteConversation, fetchConversation, fetchConversations } from "../lib/api/conversations";
 import {
   ApiError,
   classifyAgentAskError,
@@ -1161,6 +1163,53 @@ export function AskScreen() {
   const askInflight = useRef<AbortController | null>(null);
   const askSeq = useRef(0);
 
+  // R11-MP26: the caller's own conversations on this datasource, to pick one up again.
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationsError, setConversationsError] = useState<string | null>(null);
+  const [conversationBusy, setConversationBusy] = useState<string | null>(null);
+  const loadConversations = useCallback(async () => {
+    if (!dsId) {
+      setConversations([]);
+      return;
+    }
+    try {
+      setConversations(await fetchConversations(dsId));
+      setConversationsError(null);
+    } catch (e) {
+      setConversationsError((e as Error).message || "Conversations could not be listed.");
+    }
+  }, [dsId]);
+  useEffect(() => {
+    void loadConversations();
+  }, [loadConversations]);
+  const continueConversation = useCallback(async (conversationId: string) => {
+    setConversationBusy(conversationId);
+    try {
+      const found = await fetchConversation(conversationId);
+      setConversation({ id: found.id, turns: found.turns.map((turn) => turn.question) });
+      setConversationsError(null);
+    } catch (e) {
+      setConversationsError((e as Error).message || "The conversation could not be opened.");
+    } finally {
+      setConversationBusy(null);
+    }
+  }, []);
+  const removeConversation = useCallback(
+    async (conversationId: string) => {
+      setConversationBusy(conversationId);
+      try {
+        await deleteConversation(conversationId);
+        setConversation((current) => (current?.id === conversationId ? null : current));
+        await loadConversations();
+      } catch (e) {
+        setConversationsError((e as Error).message || "The conversation could not be deleted.");
+      } finally {
+        setConversationBusy(null);
+      }
+    },
+    [loadConversations],
+  );
+
   const submitQuestion = useCallback(
     async (
       clarification?: { toolParameters: Record<string, string>; toolVersionId: string | null },
@@ -1215,6 +1264,7 @@ export function AskScreen() {
             ? { id: current.id, turns: [...current.turns, trimmed] }
             : { id: conversationId, turns: [trimmed] },
         );
+        void loadConversations();
       }
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
@@ -1239,7 +1289,7 @@ export function AskScreen() {
       }
     }
   },
-    [dsId, askedThroughKey, conversation, question, setParams],
+    [dsId, askedThroughKey, conversation, question, setParams, loadConversations],
   );
 
   // Switching datasources leaves any open answer behind -- it belonged to
@@ -1614,6 +1664,63 @@ export function AskScreen() {
         )}
 
         <div id="ask-history" className="askscreen__history" hidden={!showHistory}>
+          {dsId ? (
+            <section className="askscreen__convs" aria-label="Your conversations">
+              <div className="askscreen__historyhead">
+                <h2 className="askscreen__h2">Conversations</h2>
+                <span className="askscreen__historycount">{conversations.length}</span>
+              </div>
+              {conversationsError ? (
+                <p className="askscreen__pickerr" role="alert">
+                  {conversationsError}
+                </p>
+              ) : null}
+              {conversations.length === 0 ? (
+                <p className="askscreen__hint">
+                  Each answered question starts a conversation you can follow up on. Only you can
+                  see yours.
+                </p>
+              ) : (
+                <ul className="askscreen__convlist">
+                  {conversations.map((item) => (
+                    <li
+                      key={item.id}
+                      className={
+                        item.id === conversation?.id
+                          ? "askscreen__conv askscreen__conv--active"
+                          : "askscreen__conv"
+                      }
+                    >
+                      <span className="askscreen__convtitle">{item.title}</span>
+                      <span className="askscreen__convmeta">
+                        {item.turn_count} {item.turn_count === 1 ? "question" : "questions"}
+                      </span>
+                      <span className="askscreen__convactions">
+                        <button
+                          type="button"
+                          className="btn btn--quiet"
+                          disabled={conversationBusy !== null || item.id === conversation?.id}
+                          onClick={() => void continueConversation(item.id)}
+                          aria-label={`Continue conversation: ${item.title}`}
+                        >
+                          {item.id === conversation?.id ? "Open" : "Continue"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--quiet"
+                          disabled={conversationBusy !== null}
+                          onClick={() => void removeConversation(item.id)}
+                          aria-label={`Delete conversation: ${item.title}`}
+                        >
+                          Delete
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          ) : null}
           <div className="askscreen__historyhead">
             <h2 className="askscreen__h2">History</h2>
             <span className="askscreen__historycount">

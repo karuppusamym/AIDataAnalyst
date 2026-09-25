@@ -91,3 +91,11 @@
 .askscreen__conversation{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:var(--radius);background:var(--surface);padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
 .askscreen__conversation_head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .askscreen__conversation_turns{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:2px;color:var(--ink);overflow-wrap:anywhere}
+/* R11-MP26: the caller's own conversations, above the run history. */
+.askscreen__convs{display:flex;flex-direction:column;gap:6px;margin:0 0 14px}
+.askscreen__convlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.askscreen__conv{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:6px 10px;font-size:12.5px}
+.askscreen__conv--active{border-left:3px solid var(--accent)}
+.askscreen__convtitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.askscreen__convmeta{color:var(--ink-3);font-size:11.5px}
+.askscreen__convactions{grid-column:1 / -1;display:flex;gap:6px;justify-content:flex-end}

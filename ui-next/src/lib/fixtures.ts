@@ -4,6 +4,8 @@ import type {
   ParsedLineageEdgeReviewQueueRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
+  ConversationRead,
+  ConversationSummary,
   AgentEvaluationRunRead,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
@@ -1313,7 +1315,97 @@ function buildAmbiguityDetail(term: string): string {
  *  `except` clauses (`api.py:2912`) status-for-status. Anything else
  *  succeeds and is appended to this datasource's history so the screen's
  *  own history list reflects what was just asked. */
+/* R11-MP26: conversations in fixture mode. Every answered question is a turn; a
+   `conversation_id` continues one this datasource holds, and an unknown one is the route's
+   404. Questions are stored as the server stores them: a long number becomes a token. */
+const FIXTURE_CONVERSATIONS: ConversationRead[] = [];
+
+function fixtureRedacted(question: string): string {
+  let n = 0;
+  return question.replace(/\b\d{9,}\b/g, () => `ATLAS_VALUE_${++n}`);
+}
+
+function recordFixtureTurn(
+  datasourceId: string,
+  conversationId: string | null,
+  agentRunId: string,
+  question: string,
+): [string, number] {
+  const now = new Date().toISOString();
+  let conversation = conversationId
+    ? FIXTURE_CONVERSATIONS.find((c) => c.id === conversationId)
+    : undefined;
+  if (!conversation) {
+    conversation = {
+      id: `conv_${FIXTURE_CONVERSATIONS.length + 1}`,
+      datasource_id: datasourceId,
+      title: fixtureRedacted(question).slice(0, 200),
+      turn_count: 0,
+      created_at: now,
+      last_turn_at: now,
+      turns: [],
+    };
+    FIXTURE_CONVERSATIONS.unshift(conversation);
+  }
+  const turn = conversation.turns.length + 1;
+  conversation.turns.push({
+    turn,
+    agent_run_id: agentRunId,
+    question: fixtureRedacted(question),
+    asked_at: now,
+  });
+  conversation.turn_count = turn;
+  conversation.last_turn_at = now;
+  return [conversation.id, turn];
+}
+
+/** `GET /v1/conversations?datasource_id=`. */
+export async function makeFixtureConversations(datasourceId: string): Promise<ConversationSummary[]> {
+  await wait(60);
+  return FIXTURE_CONVERSATIONS.filter((c) => c.datasource_id === datasourceId)
+    .sort((a, b) => b.last_turn_at.localeCompare(a.last_turn_at))
+    .map(({ turns: _turns, ...summary }) => summary);
+}
+
+/** `GET /v1/conversations/{id}`. */
+export async function makeFixtureConversation(conversationId: string): Promise<ConversationRead> {
+  await wait(60);
+  const found = FIXTURE_CONVERSATIONS.find((c) => c.id === conversationId);
+  if (!found) throw new ApiError(404, "conversation not found");
+  return { ...found, turns: [...found.turns] };
+}
+
+/** `DELETE /v1/conversations/{id}`. */
+export async function deleteFixtureConversation(conversationId: string): Promise<void> {
+  await wait(60);
+  const index = FIXTURE_CONVERSATIONS.findIndex((c) => c.id === conversationId);
+  if (index < 0) throw new ApiError(404, "conversation not found");
+  FIXTURE_CONVERSATIONS.splice(index, 1);
+}
+
 export async function makeFixtureAgentAnalysis(
+  datasourceId: string,
+  body: AgentAnalysisRequest,
+): Promise<AgentAnalysisResponse> {
+  const continuing = body.conversation_id ?? null;
+  if (continuing) {
+    const conversation = FIXTURE_CONVERSATIONS.find((c) => c.id === continuing);
+    if (!conversation) throw new ApiError(404, "conversation not found");
+    if (conversation.datasource_id !== datasourceId) {
+      throw new ApiError(409, "the conversation belongs to another datasource");
+    }
+  }
+  const response = await answerFixtureAgentAnalysis(datasourceId, body);
+  const [conversationId, turn] = recordFixtureTurn(
+    datasourceId,
+    continuing,
+    response.agent_run_id,
+    body.question,
+  );
+  return { ...response, conversation_id: conversationId, conversation_turn: turn };
+}
+
+async function answerFixtureAgentAnalysis(
   datasourceId: string,
   body: AgentAnalysisRequest,
 ): Promise<AgentAnalysisResponse> {
