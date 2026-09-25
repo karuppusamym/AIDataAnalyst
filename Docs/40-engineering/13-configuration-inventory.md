@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**317 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
+**318 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -184,6 +184,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `source_query_max_concurrent` | `int` | `4` | 1 |
 | `source_query_max_concurrent_overrides` | `dict[str, Annotated[int, Field(ge=1, le=1000)]]` | `dict` | 1 |
 | `source_query_queue_timeout_seconds` | `float` | `5.0` | 1 |
+| `source_connection_pooling_enabled` | `bool` | `True` | 1 |
 | `max_postgres_plan_cost` | `float` | `1000000.0` | 3 via `max_query_estimate_cost` |
 | `max_bigquery_dry_run_bytes` | `int` | `10000000000` | 3 via `max_query_estimate_bytes` |
 | `profile_sample_rows` | `int` | `10000` | 4 |

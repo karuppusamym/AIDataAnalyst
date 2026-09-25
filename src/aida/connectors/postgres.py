@@ -1,6 +1,7 @@
+import copy
 import json
-from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any, TypeVar
 
 import asyncpg
 
@@ -43,6 +44,7 @@ from aida.connectors.discovery import (
     build_table_map_from_column_rows,
     read_facet,
 )
+from aida.connectors.postgres_pool import borrow
 from aida.connectors.schema_scope import SchemaScope, schema_scope, scoped_postgres_query
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -944,6 +946,16 @@ async def _fetch_scalar_rows(connection: Any, sql: str) -> list[Any]:
     return [await connection.fetchval(sql)]
 
 
+_T = TypeVar("_T")
+
+#: A pooled connection the server has already closed (R11-MP24).
+_STALE_CONNECTION_ERRORS = (
+    asyncpg.exceptions.ConnectionDoesNotExistError,
+    asyncpg.exceptions.InterfaceError,
+    ConnectionResetError,
+)
+
+
 class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
@@ -987,10 +999,45 @@ class PostgresConnector(SqlExecutor):
         distribution_entropy_profiling=True,
     )
 
-    def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
+    def __init__(
+        self, dsn: str, *, command_timeout: float = 30.0, pooled_reads: bool = False
+    ) -> None:
         self._dsn = dsn
         self._command_timeout = command_timeout
         self._schema_scope = SchemaScope()
+        self._pooled_reads = pooled_reads
+
+    def with_pooled_reads(self) -> "PostgresConnector":
+        """R11-MP24: this source, with governed reads (the EXPLAIN gate and execution)
+        borrowing from a bounded pool (`aida.connectors.postgres_pool`)."""
+        pooled = copy.copy(self)
+        pooled._pooled_reads = True
+        return pooled
+
+    async def _with_read_connection(
+        self, timeout_seconds: int, work: Callable[[Any], Awaitable[_T]]
+    ) -> _T:
+        """Run `work` on a connection: its own one, or a pooled one.
+
+        A pooled connection can have been closed by the server since it was last
+        used (a restart, an idle timeout on the bank's side). That surfaces as a
+        connection error before any row comes back, and the statement is read-only,
+        so it is retried once on a fresh connection; any other error is not.
+        """
+        if not self._pooled_reads:
+            connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)
+            try:
+                return await work(connection)
+            finally:
+                await connection.close()
+        for attempt in range(2):
+            try:
+                async with borrow(self._dsn, command_timeout=timeout_seconds) as connection:
+                    return await work(connection)
+            except _STALE_CONNECTION_ERRORS:
+                if attempt:
+                    raise
+        raise AssertionError("unreachable")  # pragma: no cover
 
     @property
     def capabilities(self) -> ConnectorCapabilities:
@@ -1440,8 +1487,7 @@ class PostgresConnector(SqlExecutor):
             await connection.close()
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
-        connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)
-        try:
+        async def work(connection: Any) -> QueryEstimate:
             async with connection.transaction(readonly=True):
                 await connection.execute(f"SET LOCAL statement_timeout = {timeout_seconds * 1000}")
                 raw_plan = await connection.fetchval(f"EXPLAIN (FORMAT JSON) {sql}")
@@ -1449,12 +1495,11 @@ class PostgresConnector(SqlExecutor):
                 if not isinstance(parsed, list) or not parsed or not isinstance(parsed[0], dict):
                     raise RuntimeError("source returned an invalid EXPLAIN plan")
                 return _extract_explain_estimate(parsed[0])
-        finally:
-            await connection.close()
+
+        return await self._with_read_connection(timeout_seconds, work)
 
     async def execute_read_query(self, sql: str, *, timeout_seconds: int) -> QueryResult:
-        connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)
-        try:
+        async def work(connection: Any) -> QueryResult:
             async with connection.transaction(readonly=True):
                 await connection.execute(f"SET LOCAL statement_timeout = {timeout_seconds * 1000}")
                 backend_id = await connection.fetchval("SELECT pg_backend_pid()")
@@ -1463,8 +1508,8 @@ class PostgresConnector(SqlExecutor):
                     rows=tuple(dict(record) for record in records),
                     warehouse_query_id=f"postgres-backend:{backend_id}",
                 )
-        finally:
-            await connection.close()
+
+        return await self._with_read_connection(timeout_seconds, work)
 
     async def profile_table(
         self,

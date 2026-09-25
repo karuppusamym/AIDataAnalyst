@@ -14,7 +14,7 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
-from aida.connectors.execution_access import open_execution_session
+from aida.connectors.execution_access import open_execution_session, with_pooled_reads
 from aida.connectors.sql_execution import SqlExecutor
 from aida.context_product_execution_scope import (
     ContextProductExecutionScope,
@@ -538,7 +538,10 @@ class QueryExecutionGateway:
 
         if run_estimate and normalized_sql is not None and not blocked():
             dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
-            executor = open_execution_session(datasource.connector_type, dsn)
+            executor = with_pooled_reads(
+                open_execution_session(datasource.connector_type, dsn),
+                enabled=self.settings.source_connection_pooling_enabled,
+            )
             if not executor.capabilities.explain:
                 estimate_outcome = EstimateOutcome(supported=False)
             else:

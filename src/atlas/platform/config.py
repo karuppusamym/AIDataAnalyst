@@ -213,6 +213,10 @@ class Settings(BaseSettings):
         Field(default_factory=dict)
     )
     source_query_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    # R11-MP24: governed PostgreSQL reads (the EXPLAIN gate and execution) borrow
+    # from a bounded pool per source instead of opening two connections a query
+    # (`aida.connectors.postgres_pool`). Other engines are unaffected.
+    source_connection_pooling_enabled: bool = True
     max_postgres_plan_cost: float = Field(default=1_000_000.0, gt=0)
     # BigQuery bills by bytes scanned rather than exposing a comparable cost plan,
     # so the gateway gates dry-run byte estimates against this separate budget

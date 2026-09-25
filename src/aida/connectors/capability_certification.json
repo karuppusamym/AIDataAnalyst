@@ -1,5 +1,5 @@
 {
-  "certified_on": "2026-09-20",
+  "certified_on": "2026-09-24",
   "connectors": {
     "bigquery": {
       "claimed": {
@@ -755,12 +755,13 @@
         "server_version": "PostgreSQL 17.11"
       },
       "fingerprint": {
-        "digest": "68d471a76be6fdb70e90e52b08a3a1c506a095bcdb6d94c60b8ad0b886e3d2c0",
+        "digest": "eee937f3a99eaf513f53f222f4c2a5a922605b8a24eabab5a0b6b010babc7568",
         "files": {
           "aida/capability_states.py": "42368a5fd301c800609edad44ae3c955b7a9cadcf278877fb998695e4a6a8653",
           "aida/connectors/base.py": "649f391c4659632b29fcc472eda3d498af23320c659db6961145b2570f55e2d8",
           "aida/connectors/discovery.py": "9364b582b38af16093662b9abd0566b2ecffb1f13772faed7fd64b0c7e13ff33",
-          "aida/connectors/postgres.py": "e4ef3835ab336ea5492a1b109ef0f1e316fdcc22c0ebba75999ff34b3fa06358",
+          "aida/connectors/postgres.py": "5a2f08cf1c5eb823229de1f024848343e461edb24001f3e46bf32a283e47e6b0",
+          "aida/connectors/postgres_pool.py": "ba768b21d49d970a7cc205e16fd48a67b1e2fd91ce38e77633fee9de5f3dea21",
           "aida/connectors/schema_scope.py": "5619105b455243c06222f457d450841c8c9b89825d14b2c22d4bbdac7e97035a",
           "aida/connectors/sql_execution.py": "6a546e7d0f628dc2f39258af10de45c567429c6a541281cf94f282e31fb7adfa"
         }

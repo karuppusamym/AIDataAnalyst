@@ -11,7 +11,7 @@ only if the connector claims it (`DEFAULT_CAPABILITIES`) and its row here is CER
 the connector's own driver double; it says the connector's logic works and says nothing
 about a real engine. A fixture result is never labelled live.
 
-Suite `connector-capability-certification-v1`, produced 2026-09-20. Regenerating a connector's LIVE
+Suite `connector-capability-certification-v1`, produced 2026-09-24. Regenerating a connector's LIVE
 rows needs the sample containers running; `--check` needs nothing.
 
 ## Summary
@@ -136,12 +136,13 @@ Code fingerprint `d350b5a01f5bd60f` over:
 
 ## postgres
 
-Code fingerprint `68d471a76be6fdb7` over:
+Code fingerprint `eee937f3a99eaf51` over:
 
 - `aida/capability_states.py`
 - `aida/connectors/base.py`
 - `aida/connectors/discovery.py`
 - `aida/connectors/postgres.py`
+- `aida/connectors/postgres_pool.py`
 - `aida/connectors/schema_scope.py`
 - `aida/connectors/sql_execution.py`
 

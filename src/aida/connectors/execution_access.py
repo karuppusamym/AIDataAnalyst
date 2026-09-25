@@ -9,6 +9,7 @@ import somebody adds without noticing.
 See `aida.connectors.sql_execution` for the full enforcement argument.
 """
 
+from aida.connectors.postgres import PostgresConnector
 from aida.connectors.registry import connector_registry
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -23,3 +24,14 @@ def open_execution_session(connector_type: str, dsn: str) -> SqlExecutor:
     if not isinstance(connector, SqlExecutor):
         raise ValueError(f"connector does not support governed read execution: {connector_type}")
     return connector
+
+
+def with_pooled_reads(executor: SqlExecutor, *, enabled: bool) -> SqlExecutor:
+    """R11-MP24: the same executor with pooled governed reads, where its engine pools.
+
+    PostgreSQL only today (`aida.connectors.postgres_pool`); every other engine,
+    and any executor a test substitutes, is returned unchanged.
+    """
+    if enabled and isinstance(executor, PostgresConnector):
+        return executor.with_pooled_reads()
+    return executor
