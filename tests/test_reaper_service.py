@@ -795,6 +795,7 @@ def test_rules_registry_covers_expected_names() -> None:
         "stale_pending_description_drafts",
         "expired_token_revocations",
         "stale_playbook_dry_runs",
+        "stale_ask_conversations",
     }
 
 

@@ -76,6 +76,12 @@ from aida.context_product_execution_scope import (
     ContextProductExecutionScope,
     resolve_scope_names,
 )
+from aida.conversations import (
+    EARLIER_TURNS_INSTRUCTION,
+    EarlierTurn,
+    redact_with_earlier,
+    uses_an_earlier_value,
+)
 from aida.decision_model import (
     CANDIDATE,
     escalation_probability,
@@ -154,7 +160,6 @@ from aida.question_redaction import (
 )
 from aida.question_redaction import (
     RedactedQuestion,
-    redact_question,
     restore_values,
     tokenize_values,
 )
@@ -1267,6 +1272,7 @@ class GovernedAgentOrchestrator:
         context_product_key: str | None = None,
         context_product_version: ContextProductVersion | None = None,
         stage_listener: Callable[[str], None] | None = None,
+        earlier_turns: tuple[EarlierTurn, ...] = (),
     ) -> AgentOrchestrationResult:
         """Compose the six governed stages; hold no rule of its own.
 
@@ -1300,6 +1306,7 @@ class GovernedAgentOrchestrator:
             agent_asset_version_id=agent_asset_version_id,
             context_product_key=context_product_key,
             context_product_version=context_product_version,
+            earlier_turns=earlier_turns,
         )
         ledger = await self._open_run(session, request)
         if stage_listener is not None:
@@ -1633,7 +1640,9 @@ class GovernedAgentOrchestrator:
             session,
             datasource=datasource,
             # R11-MP21: the retriever embeds the question with a hosted provider.
-            question=self._question_for_providers(request).text,
+            # R11-MP26: a follow-up ("now by region") names too little to retrieve on
+            # alone, so the previous question goes with it.
+            question=self._retrieval_question(request),
             preferred_tool_version_id=request.preferred_tool_version_id,
         )
         scope: ContextProductScope | None = None
@@ -1764,7 +1773,9 @@ class GovernedAgentOrchestrator:
             prompt_risk=screened.prompt_risk,
             question=request.question,
         )
-        ledger.plan_evidence = plan.evidence()
+        # Merged, not replaced: the screen stage may already have recorded a
+        # clarification note (R11-MP27) that the answer must still carry.
+        ledger.plan_evidence = {**ledger.plan_evidence, **plan.evidence()}
         ledger.publish_plan_evidence()
         if plan.tool_decisions:
             record_decisions(
@@ -1860,6 +1871,16 @@ class GovernedAgentOrchestrator:
             statement = await self._repair_generated_statement(
                 session, request, ledger, screened, retrieved, statement
             )
+            # R11-MP26: a token only an earlier question held has no value here.
+            # Refused, so the asker restates it, rather than run with a guess.
+            if uses_an_earlier_value(statement.sql):
+                await self._persist_rejection(
+                    session, request, ledger, "FOLLOW_UP_NEEDS_AN_EARLIER_VALUE"
+                )
+                raise AgentPolicyRejected(
+                    "the follow-up needs a value from an earlier question; ask again with "
+                    "the value written out"
+                )
             await self._compare_second_candidate(session, request, ledger, screened, statement)
 
         if retrieved.context_product_scope is not None:
@@ -2123,6 +2144,14 @@ class GovernedAgentOrchestrator:
                 "retrieval_evidence": model_evidence_hits,
                 "metadata_context": model_context,
             }
+            # R11-MP26: a follow-up carries the conversation's earlier questions and
+            # the SQL that answered them, redacted with the question's own mapping.
+            if request.earlier_turns:
+                payload["earlier_turns"] = self._earlier_turns_for_providers(request)
+                system_instruction += EARLIER_TURNS_INSTRUCTION
+                ledger.plan_evidence["conversation"] = {
+                    "earlier_turns": [turn.turn for turn in request.earlier_turns]
+                }
             # R11-OKF02 (OKF-E): asked through a context product, the model also gets the
             # sections of that product's approved knowledge the question needs -- meaning,
             # approved column descriptions, concept aliases and mappings -- cut to a budget and
@@ -2402,7 +2431,23 @@ class GovernedAgentOrchestrator:
         (R11-MP21): identifying values tokenised, unless redaction is off."""
         if not self.settings.question_value_redaction_enabled:
             return RedactedQuestion(text=request.question)
-        return redact_question(request.question)
+        # R11-MP26: redacted together with the earlier turns' SQL, so a value
+        # both mention has one token and restores correctly.
+        return redact_with_earlier(request.question, request.earlier_turns)[0]
+
+    def _earlier_turns_for_providers(self, request: OrchestrationRequest) -> list[dict[str, str]]:
+        """The earlier turns as a model may be shown them (R11-MP26)."""
+        if not self.settings.question_value_redaction_enabled:
+            return [{"question": t.question, "sql": t.sql} for t in request.earlier_turns]
+        return redact_with_earlier(request.question, request.earlier_turns)[1]
+
+    def _retrieval_question(self, request: OrchestrationRequest) -> str:
+        """What retrieval searches on: the question, after the previous one when
+        this is a follow-up (R11-MP26)."""
+        text = self._question_for_providers(request).text
+        if request.earlier_turns:
+            return f"{request.earlier_turns[-1].question} {text}"
+        return text
 
     async def _repair_generated_statement(
         self,

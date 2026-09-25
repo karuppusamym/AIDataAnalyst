@@ -34,6 +34,7 @@ from aida.agent_runtime import RuntimeStage, RuntimeState
 if TYPE_CHECKING:
     from aida.agent_intelligence import AgentPlan, RetrievalHit
     from aida.agent_orchestrator import ContextProductScope
+    from aida.conversations import EarlierTurn
     from aida.model_gateway import ApprovedModelRoute
     from aida.models import (
         AgentContract,
@@ -96,6 +97,9 @@ class OrchestrationRequest:
     #: with the safety clause. Only `draft` sets it; `run` never does, so an answer
     #: a person receives always uses the approved instruction.
     sql_instruction_override: str | None = None
+    #: R11-MP26: the earlier turns of the conversation this question continues,
+    #: oldest first -- redacted questions and the SQL that answered them.
+    earlier_turns: tuple[EarlierTurn, ...] = ()
 
     @property
     def organization_id(self) -> UUID:

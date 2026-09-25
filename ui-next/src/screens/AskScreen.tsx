@@ -1153,6 +1153,10 @@ export function AskScreen() {
   // property of this session's in-memory result, like the rows themselves.
   const [askedAt, setAskedAt] = useState<Date | null>(null);
   const [askError, setAskError] = useState<AgentAskError | null>(null);
+  // R11-MP26: the conversation the next question continues. Its questions are this
+  // session's own text, shown back to the person who typed them; the server keeps
+  // only their redacted form.
+  const [conversation, setConversation] = useState<{ id: string; turns: string[] } | null>(null);
 
   const askInflight = useRef<AbortController | null>(null);
   const askSeq = useRef(0);
@@ -1179,7 +1183,10 @@ export function AskScreen() {
       // A retry after a clarification pins the tool the server already chose:
       // re-running retrieval could select a different one, and the answer would
       // then come from a tool the person never supplied inputs for.
-      const askedThrough = askedThroughKey ? { context_product_key: askedThroughKey } : {};
+      const askedThrough = {
+        ...(askedThroughKey ? { context_product_key: askedThroughKey } : {}),
+        ...(conversation ? { conversation_id: conversation.id } : {}),
+      };
       const response = await runAgentAnalysis(
         dsId,
         clarification
@@ -1201,6 +1208,14 @@ export function AskScreen() {
       setAskResult(response);
       setAskedAt(new Date());
       setParams({ run: response.agent_run_id });
+      const conversationId = response.conversation_id;
+      if (conversationId) {
+        setConversation((current) =>
+          current && current.id === conversationId
+            ? { id: current.id, turns: [...current.turns, trimmed] }
+            : { id: conversationId, turns: [trimmed] },
+        );
+      }
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
       if (seq !== askSeq.current) return;
@@ -1224,7 +1239,7 @@ export function AskScreen() {
       }
     }
   },
-    [dsId, askedThroughKey, question, setParams],
+    [dsId, askedThroughKey, conversation, question, setParams],
   );
 
   // Switching datasources leaves any open answer behind -- it belonged to
@@ -1234,6 +1249,8 @@ export function AskScreen() {
     setAskResult(null);
     setAskedAt(null);
     setAskError(null);
+    // A conversation belongs to one datasource.
+    setConversation(null);
   }, [dsId]);
 
   // History: independent from the ask flow above, its own in-flight request.
@@ -1471,6 +1488,27 @@ export function AskScreen() {
             eligible; anything else is refused rather than quietly used.
           </p>
         </Field>
+        {conversation ? (
+          <section className="askscreen__conversation" aria-label="Conversation">
+            <div className="askscreen__conversation_head">
+              <span>
+                Following up: the next question can refer to{" "}
+                {conversation.turns.length === 1
+                  ? "the earlier one"
+                  : `the ${conversation.turns.length} earlier ones`}
+                .
+              </span>
+              <Button type="button" onClick={() => setConversation(null)}>
+                New conversation
+              </Button>
+            </div>
+            <ol className="askscreen__conversation_turns">
+              {conversation.turns.map((turn, index) => (
+                <li key={index}>{turn}</li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
         <Field label="Question">
           <textarea
             className="askscreen__textarea"

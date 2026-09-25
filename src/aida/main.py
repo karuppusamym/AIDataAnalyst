@@ -38,6 +38,7 @@ from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
 from aida.context_compiler_api import router as context_compiler_router
 from aida.context_product_api import router as context_product_router
+from aida.conversation_api import router as conversation_router
 from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
 from aida.definition_history_api import router as definition_history_router
@@ -459,6 +460,7 @@ app.include_router(product_marketplace_router)
 app.include_router(marketplace_discovery_router)
 app.include_router(search_router)
 app.include_router(external_mcp_router)
+app.include_router(conversation_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
 app.include_router(studio_router)

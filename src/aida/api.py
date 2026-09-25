@@ -31,6 +31,15 @@ from aida.config import Settings, get_settings
 from aida.connectors.base import OBSERVATION_SCOPES, UNCOMPUTED_FACET_STATUS
 from aida.context import get_correlation_id
 from aida.context_product_execution_scope import load_execution_scope
+from aida.conversations import (
+    ConversationFull,
+    ConversationNotFound,
+    ConversationOnAnotherSource,
+    EarlierTurn,
+    conversation_for_follow_up,
+    earlier_turns,
+    record_turn,
+)
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
@@ -66,6 +75,7 @@ from aida.query_gateway import (
     QueryExecutionGateway,
     QueryRejected,
 )
+from aida.question_redaction import redact_question
 from aida.request_budget import budget_headers, consume_window_budget, principal_hash
 from aida.schemas import (
     AgentAnalysisRequest,
@@ -1783,6 +1793,30 @@ async def _orchestrate_agent_analysis(
 ) -> AgentAnalysisResponse:
     """Run the orchestrator for one Ask and map every refusal to its HTTP
     status -- the one mapping both Ask routes answer with."""
+    asker = replace(context, organization_id=datasource.organization_id)
+    earlier: tuple[EarlierTurn, ...] = ()
+    if body.conversation_id is not None:
+        # R11-MP26: checked before anything runs; another person's conversation
+        # answers exactly as one that does not exist.
+        try:
+            conversation = await conversation_for_follow_up(
+                session,
+                body.conversation_id,
+                context=asker,
+                datasource_id=datasource.id,
+                settings=settings,
+            )
+        except ConversationNotFound as exc:
+            raise HTTPException(status_code=404, detail="conversation not found") from exc
+        except ConversationOnAnotherSource as exc:
+            raise HTTPException(
+                status_code=409, detail="the conversation belongs to another datasource"
+            ) from exc
+        except ConversationFull as exc:
+            raise HTTPException(
+                status_code=409, detail="the conversation is full; start a new one"
+            ) from exc
+        earlier = await earlier_turns(session, conversation, settings)
     orchestrator = GovernedAgentOrchestrator(settings)
     try:
         result = await orchestrator.run(
@@ -1800,6 +1834,7 @@ async def _orchestrate_agent_analysis(
             ),
             context_product_key=body.context_product_key,
             stage_listener=stage_listener,
+            earlier_turns=earlier,
         )
     except AgentClarificationRequired as exc:
         # Structured, because the caller has to *act* on this one: it names the
@@ -1832,10 +1867,24 @@ async def _orchestrate_agent_analysis(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail="agent analysis execution failed") from exc
+    # R11-MP26: the answered question becomes a turn -- stored redacted whatever
+    # `question_value_redaction_enabled` says, since that setting governs what
+    # leaves the platform, not what it keeps.
+    conversation, turn = await record_turn(
+        session,
+        conversation_id=body.conversation_id,
+        context=asker,
+        datasource_id=datasource.id,
+        agent_run_id=result.agent_run.id,
+        redacted_question=redact_question(body.question).text,
+    )
+    await session.commit()
     return AgentAnalysisResponse(
         agent_run_id=result.agent_run.id,
         status=result.agent_run.status,
         generation_source=result.agent_run.generation_source,
+        conversation_id=conversation.id,
+        conversation_turn=turn,
         semantic_version=result.agent_run.semantic_version,
         policy_version=result.agent_run.policy_version,
         step_trace=result.agent_run.step_trace,

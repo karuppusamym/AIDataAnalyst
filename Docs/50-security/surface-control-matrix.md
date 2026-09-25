@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **562**
-- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 466, SDK 1
+- Surfaces covered: **565**
+- By family: BULK 11, EXPORT 8, GRAPHQL 37, JOB 30, MCP 9, REST 469, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -156,6 +156,7 @@ graph. Nothing here is hand-maintained.
 | `POST /mcp` | MCP | `aida.mcp_server.mcp_endpoint` | none declared | yes | yes | writes | yes | cooperative |
 | `DELETE /v1/asset-term-links/{link_id}` | REST | `aida.glossary_api.delete_asset_term_link` | DataSteward, MetadataAdmin, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/context-products/{product_id}/bindings/{consumer_principal_id}` | REST | `aida.context_product_api.delete_context_product_consumer_binding` | DataSteward, PlatformAdmin, SemanticAdmin | yes | no | writes | yes | not cancellable |
+| `DELETE /v1/conversations/{conversation_id}` | REST | `aida.conversation_api.delete_my_conversation` | AgentDeveloper, Analyst, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/notification-rules/{rule_id}` | REST | `aida.notification_api.delete_notification_rule` | DataAdmin, Operations, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.delete_playbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `DELETE /v1/quality-rule-packs/{rule_pack_id}` | REST | `aida.quality_api.delete_rule_pack` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
@@ -196,6 +197,8 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/context-product-versions/{version_id}` | REST | `aida.context_product_api.get_context_product_version` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-products/{product_id}/bindings` | REST | `aida.context_product_api.list_context_product_consumer_bindings` | Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin | yes | no | writes | yes | not cancellable |
 | `GET /v1/context-products/{product_id}/versions` | REST | `aida.context_product_api.list_context_product_versions` | Analyst, Auditor, DataSteward, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | writes | yes | not cancellable |
+| `GET /v1/conversations/{conversation_id}` | REST | `aida.conversation_api.read_my_conversation` | AgentDeveloper, Analyst, PlatformAdmin | yes | no | read | no | not cancellable |
+| `GET /v1/conversations` | REST | `aida.conversation_api.list_my_conversations` | AgentDeveloper, Analyst, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/data-contracts/{contract_id}/sla-status` | REST | `aida.runtime_contracts_api.get_sla_status` | DataSteward, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `GET /v1/data-contracts/{contract_id}/violations` | REST | `aida.runtime_contracts_api.list_contract_violations` | DataSteward, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/data-domains/{domain_id}/cross-boundary-grants` | REST | `atlas.modules.identity_tenancy.router.list_cross_boundary_grants` | DataAdmin, OrganizationAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |

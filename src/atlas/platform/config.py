@@ -1106,6 +1106,13 @@ class Settings(BaseSettings):
     decision_clarify_threshold: float = Field(default=0.7, ge=0.5, le=0.99)
     decision_dispute_threshold: float = Field(default=0.8, ge=0.5, le=0.99)
     decision_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    # R11-MP26: follow-up questions. A follow-up carries at most this many earlier
+    # turns, cut to this many characters (oldest dropped first); a conversation
+    # holds at most `conversation_max_turns`. Retention is the reaper rule
+    # `stale_ask_conversations` (30 days after the last turn, overridable).
+    conversation_context_turns: int = Field(default=3, ge=1, le=10)
+    conversation_context_max_chars: int = Field(default=6_000, ge=500, le=50_000)
+    conversation_max_turns: int = Field(default=50, ge=2, le=500)
     openrouter_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
 
     def model_route_for(self, purpose: Literal["SQL_GENERATION", "CLASSIFICATION"]) -> str | None:

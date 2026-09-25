@@ -72,12 +72,15 @@ export interface AgentAnalysisRequest {
   tool_parameters?: Record<string, unknown>;
   max_rows?: number | null;
   context_product_key?: string | null;
+  conversation_id?: string | null;
 }
 
 export interface AgentAnalysisResponse {
   agent_run_id: string;
   status: string;
   generation_source: string;
+  conversation_id?: string | null;
+  conversation_turn?: number | null;
   semantic_version: string | null;
   policy_version: string;
   step_trace: Record<string, unknown>[];
@@ -1671,6 +1674,32 @@ export interface ContractQualityRuleDefinition {
   field_name?: string | null;
   severity?: "INFO" | "WARNING" | "CRITICAL";
   parameters?: Record<string, unknown>;
+}
+
+export interface ConversationRead {
+  id: string;
+  datasource_id: string;
+  title: string;
+  turn_count: number;
+  created_at: string;
+  last_turn_at: string;
+  turns: ConversationTurnRead[];
+}
+
+export interface ConversationSummary {
+  id: string;
+  datasource_id: string;
+  title: string;
+  turn_count: number;
+  created_at: string;
+  last_turn_at: string;
+}
+
+export interface ConversationTurnRead {
+  turn: number;
+  agent_run_id: string | null;
+  question: string;
+  asked_at: string;
 }
 
 export interface CorrectionStateRead {

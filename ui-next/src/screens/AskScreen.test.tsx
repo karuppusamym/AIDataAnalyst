@@ -459,6 +459,37 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.queryByRole("list", { name: "Model review" })).not.toBeInTheDocument();
   });
 
+  it("carries a follow-up in the same conversation, and a new conversation drops it (R11-MP26)", async () => {
+    runAgentAnalysis
+      .mockResolvedValueOnce({ ...ANALYSIS_RESPONSE, agent_run_id: "run_c1", conversation_id: "conv_1", conversation_turn: 1 })
+      .mockResolvedValueOnce({ ...ANALYSIS_RESPONSE, agent_run_id: "run_c2", conversation_id: "conv_1", conversation_turn: 2 })
+      .mockResolvedValueOnce({ ...ANALYSIS_RESPONSE, agent_run_id: "run_c3", conversation_id: "conv_2", conversation_turn: 1 });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({ agent_run_id: "run_c1", fragment_count: 0, fragments: [] });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "net revenue last quarter" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    const thread = await screen.findByRole("region", { name: "Conversation" });
+    expect(within(thread).getByText("net revenue last quarter")).toBeInTheDocument();
+    expect(runAgentAnalysis.mock.calls[0]![1]).not.toHaveProperty("conversation_id");
+
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "now by region" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(2));
+    expect(runAgentAnalysis.mock.calls[1]![1]).toMatchObject({ question: "now by region", conversation_id: "conv_1" });
+    expect(await within(thread).findByText("now by region")).toBeInTheDocument();
+    expect(within(thread).getByText(/the 2 earlier ones/)).toBeInTheDocument();
+
+    fireEvent.click(within(thread).getByRole("button", { name: "New conversation" }));
+    expect(screen.queryByRole("region", { name: "Conversation" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "loans by branch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(runAgentAnalysis).toHaveBeenCalledTimes(3));
+    expect(runAgentAnalysis.mock.calls[2]![1]).not.toHaveProperty("conversation_id");
+  });
+
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {
     runAgentAnalysis.mockRejectedValue(
       new (await import("../lib/api")).ApiError(409, AMBIGUITY_DETAIL),

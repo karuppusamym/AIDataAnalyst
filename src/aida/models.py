@@ -504,6 +504,51 @@ class AgentRun(Base, TimestampMixin):
     estimated_output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
+class AskConversation(Base, TimestampMixin):
+    """R11-MP26: a thread of Ask turns one person owns, on one datasource.
+
+    `AgentRun` deliberately keeps no question text. A follow-up needs the earlier
+    questions, so a conversation keeps each one in its *redacted* form (R11-MP21:
+    identifying values already replaced by tokens) -- never the raw text, never a
+    value, never a row. The SQL an earlier turn ran is not copied here; it is read
+    from that turn's `QueryExecution` when a follow-up needs it. Only the owner can
+    read a conversation, and the reaper deletes one `conversation_retention_days`
+    after its last turn.
+
+    Turns are a bounded JSON list (`conversation_max_turns`) rather than a child
+    table: they are only ever read and written with their conversation.
+    """
+
+    __tablename__ = "ask_conversation"
+    __table_args__ = (
+        Index(
+            "ix_ask_conversation_owner",
+            "organization_id",
+            "principal_type",
+            "principal_id",
+            "last_turn_at",
+        ),
+        Index("ix_ask_conversation_last_turn", "last_turn_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    principal_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The first question, redacted and cut to 200 characters.
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    #: `[{turn, agent_run_id, question, asked_at}]`, oldest first; `question` redacted.
+    turns: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    last_turn_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class AgentEvaluationRun(Base, TimestampMixin):
     __tablename__ = "agent_evaluation_run"
     __table_args__ = (Index("ix_agent_evaluation_org_created", "organization_id", "created_at"),)

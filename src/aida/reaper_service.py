@@ -63,9 +63,11 @@ from sqlalchemy.exc import ResourceClosedError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
+from aida.conversations import stale_conversations_stmt
 from aida.db import session_factory
 from aida.events import record_audit
 from aida.models import (
+    AskConversation,
     AssetDescriptionDraft,
     AssetTermLink,
     GlossaryTerm,
@@ -375,6 +377,18 @@ RULES: list[ReaperRule] = [
         action="STATUS_FLIP",
         new_status="EXPIRED",
         candidates_stmt=_stale_pending_description_drafts_stmt,
+    ),
+    ReaperRule(
+        name="stale_ask_conversations",
+        model=AskConversation,
+        resource_type="ask_conversation",
+        audit_action="REAP_STALE_ASK_CONVERSATION",
+        # R11-MP26: a conversation keeps redacted question text, so it is bounded:
+        # deleted 30 days after its last turn. Its runs stay (they never held the
+        # question text); override per deployment like any other rule.
+        retention=timedelta(days=30),
+        action="DELETE",
+        candidates_stmt=stale_conversations_stmt,
     ),
     ReaperRule(
         name="stale_playbook_dry_runs",

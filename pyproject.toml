@@ -614,6 +614,7 @@ forbidden_modules = [
   "aida.consumption_lineage_api",
   "aida.context_compiler_api",
   "aida.context_product_api",
+  "aida.conversation_api",
   "aida.dbt_api",
   "aida.definition_history_api",
   "aida.delegation_api",

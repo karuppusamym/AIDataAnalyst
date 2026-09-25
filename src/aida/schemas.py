@@ -537,12 +537,18 @@ class AgentAnalysisRequest(ApiModel):
     #: names and the tool versions it declares eligible (R11-FP12), as MCP's `contextProductUri`
     #: already scopes an agent's tool list.
     context_product_key: str | None = Field(default=None, min_length=1, max_length=100)
+    #: R11-MP26: continue this conversation (the caller's own, on this datasource).
+    #: Absent, the question starts a new one.
+    conversation_id: UUID | None = None
 
 
 class AgentAnalysisResponse(ApiModel):
     agent_run_id: UUID
     status: str
     generation_source: str
+    #: R11-MP26: the conversation this answer is a turn of, and which turn.
+    conversation_id: UUID | None = None
+    conversation_turn: int | None = None
     semantic_version: str | None
     policy_version: str
     step_trace: list[dict[str, Any]]

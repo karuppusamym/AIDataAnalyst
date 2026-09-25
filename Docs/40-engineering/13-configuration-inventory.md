@@ -22,7 +22,7 @@ through `getattr(settings, f"{key}_suffix")` -- how the task agents read theirs 
 reads **dynamic**; one exposed by a property on `Settings` itself shows that
 member's count and `via`. Neither is a retirement candidate.
 
-**320 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
+**323 settings.** 0 are read nowhere. 74 more ship switched off, empty or zero.
 
 ## 1. Read by nothing
 
@@ -288,7 +288,7 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `mcp_consumer_requests_per_minute` | `int` | `30` | 1 |
 | `mcp_consumer_tool_calls_per_day` | `int` | `200` | 1 |
 | `mcp_consumer_context_reads_per_day` | `int` | `1000` | 1 |
-| `question_value_redaction_enabled` | `bool` | `True` | 1 |
+| `question_value_redaction_enabled` | `bool` | `True` | 2 |
 | `question_obfuscation_screen_enabled` | `bool` | `True` | 1 |
 | `source_write_access_policy` | `Literal['WARN', 'REFUSE']` | `'WARN'` | 3 |
 | `query_memory_requires_second_confirmation` | `bool` | `True` | 1 |
@@ -381,6 +381,9 @@ precondition an estate meets first; *Blocked* names the tracker row it waits on.
 | `decision_clarify_threshold` | `float` | `0.7` | 1 |
 | `decision_dispute_threshold` | `float` | `0.8` | 1 |
 | `decision_timeout_seconds` | `float` | `3.0` | 1 |
+| `conversation_context_turns` | `int` | `3` | 1 |
+| `conversation_context_max_chars` | `int` | `6000` | 1 |
+| `conversation_max_turns` | `int` | `50` | 1 |
 | `openrouter_decisions_url` | `str` | `'https://openrouter.ai/api/alpha/decisions'` | 1 |
 | `model_timeout_seconds` | `int` | `30` | 11 |
 | `model_max_input_tokens` | `int` | `8000` | 1 |
