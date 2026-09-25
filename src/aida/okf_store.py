@@ -185,6 +185,8 @@ BUNDLE_ROLE_CHANNELS: Final = {
     # Question-specific context: the REST route, the MCP knowledge tool and Ask generation.
     "context": "OKF_CONTEXT",
     "mcp_context": "MCP_OKF_CONTEXT",
+    # R11-OKF02: the Catalog's object read, through the MCP door.
+    "mcp_object": "MCP_OKF_OBJECT",
     "ask": "ASK_OKF_CONTEXT",
     # R11-GQL01: the GraphQL reads of a stored bundle (`aida.graphql_okf`) -- its manifest, one
     # document, its publication history.
@@ -208,6 +210,7 @@ SOURCE_BUNDLE_CHANNELS: Final = {
     "graphql_document": "GRAPHQL_OKF_SOURCE_DOCUMENT",
     "graphql_history": "GRAPHQL_OKF_SOURCE_HISTORY",
     "mcp_context": "MCP_OKF_SOURCE_CONTEXT",
+    "mcp_object": "MCP_OKF_SOURCE_OBJECT",
 }
 
 #: Findings that mean a document may carry code text. Never stored, whatever else is true.

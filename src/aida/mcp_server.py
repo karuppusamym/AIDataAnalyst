@@ -146,6 +146,7 @@ from aida.okf_context import (
     without_sections,
 )
 from aida.okf_export_api import OKF_ROLES, context_read, publication_read, source_context_read
+from aida.okf_read_model import object_source_read
 from aida.okf_store import (
     BUNDLE_ROLE_CHANNELS,
     MAX_AUDITED_SECTIONS,
@@ -153,6 +154,8 @@ from aida.okf_store import (
     OkfStoredContext,
     OkfStoredSourceContext,
     load_document,
+    read_object_knowledge,
+    read_object_source_knowledge,
     read_okf_context,
     read_okf_source_context,
     read_published_bundle,
@@ -512,12 +515,33 @@ NATIVE_KNOWLEDGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "slug": "get_object_knowledge",
+        "description": (
+            "Read the stored OKF knowledge document about one catalog object (a table, view, "
+            "routine or package): from each context product bundle the caller may read that "
+            "holds it, or -- when none does -- from the object's own data source bundle. Each "
+            "document comes with its publication, path and sha256 for citation. Holds no "
+            "source values: for a current figure, call an approved tool. A document the egress "
+            "screen refuses is withheld and counted, never returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "table_id": {"type": "string", "description": "Catalog object (table) UUID"},
+            },
+            "required": ["table_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 NATIVE_KNOWLEDGE_TOOL_SLUGS = frozenset(
     item["slug"] for item in NATIVE_KNOWLEDGE_TOOL_DEFINITIONS
 )
 #: The tool that reads a datasource's bundle rather than a context product's.
 SOURCE_KNOWLEDGE_TOOL_SLUG = "get_source_knowledge_context"
+#: R11-OKF02: the Catalog's object read (`GET /v1/metadata/tables/{id}/okf-knowledge`).
+OBJECT_KNOWLEDGE_TOOL_SLUG = "get_object_knowledge"
 
 #: Every tool `tools/call` serves without a `GovernedToolVersion` behind it.
 #: R11-C6: the three families were dispatched by three near-identical
@@ -1008,6 +1032,10 @@ async def _handle_native_knowledge_tool_call(
         return await _handle_native_source_knowledge_tool_call(
             arguments, session, context, settings
         )
+    if slug == OBJECT_KNOWLEDGE_TOOL_SLUG:
+        return await _handle_native_object_knowledge_tool_call(
+            arguments, session, context, settings
+        )
 
     def refuse(text: str) -> dict[str, Any]:
         return {"isError": True, "content": [{"type": "text", "text": text}]}
@@ -1199,6 +1227,128 @@ async def _handle_native_source_knowledge_tool_call(
     return {
         "content": [
             {"type": "text", "text": read.markdown},
+            {"type": "text", "text": "```json\n" + json.dumps(structured, indent=2) + "\n```"},
+        ]
+    }
+
+
+async def _handle_native_object_knowledge_tool_call(
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+) -> dict[str, Any]:
+    """`get_object_knowledge`: the Catalog's object read, as an MCP tool (R11-OKF02).
+
+    The same two store reads as `GET /v1/metadata/tables/{id}/okf-knowledge` -- the product
+    bundles the caller may read (`read_object_knowledge`), and only when none holds the object,
+    its own datasource's bundle (`read_object_source_knowledge`) -- so scope, admission, the
+    envelope and the datasource's `READ_METADATA` decision are exactly the route's. An unknown
+    object and another tenant's read the same: not found or not accessible.
+
+    Egress (INV-6, AR-10): every document handed out is screened live; one that fails is
+    withheld, counted and audited by path, never returned. Each read is recorded on the
+    `mcp_object` channel of the bundle it came from.
+    """
+
+    def refuse(text: str) -> dict[str, Any]:
+        return {"isError": True, "content": [{"type": "text", "text": text}]}
+
+    table_arg = arguments.get("table_id")
+    try:
+        table_id = UUID(table_arg) if isinstance(table_arg, str) else None
+    except ValueError:
+        table_id = None
+    if table_id is None:
+        return refuse("table_id must be a UUID string.")
+    try:
+        found = await read_object_knowledge(session, table_id, context, settings)
+    except HTTPException:
+        return refuse("Object not found or not accessible.")
+
+    def admitted(text: str, path: str) -> bool:
+        verdict = screen_text(text, content_origin=f"okf_object:{table_id}")
+        if is_eligible_for_model_context(verdict.status):
+            return True
+        withheld.append(path)
+        return False
+
+    withheld: list[str] = []
+    blocks: list[str] = []
+    items: list[dict[str, Any]] = []
+    for entry in found:
+        stored, document = entry.stored, entry.document
+        record_okf_read(
+            session,
+            context,
+            stored,
+            action="mcp.context_product.okf_object_read",
+            channel=BUNDLE_ROLE_CHANNELS["mcp_object"],
+            path=document.path,
+        )
+        if not admitted(document.content, document.path):
+            continue
+        items.append(
+            {
+                "product_key": stored.product.product_key,
+                "product_version": stored.version.version,
+                "publication_id": str(stored.publication.id),
+                "path": document.path,
+                "sha256": document.sha256,
+            }
+        )
+        blocks.append(
+            f"<!-- {stored.product.product_key} v{stored.version.version} "
+            f"{document.path} sha256:{document.sha256} -->\n{document.content}"
+        )
+    source: dict[str, Any] | None = None
+    if not found:
+        from_source = await read_object_source_knowledge(session, table_id, context, settings)
+        read = object_source_read(from_source)
+        if from_source.stored is not None:
+            record_okf_source_read(
+                session,
+                context,
+                from_source.stored,
+                action="mcp.datasource.okf_object_read",
+                channel=SOURCE_BUNDLE_CHANNELS["mcp_object"],
+                path=from_source.document.path if from_source.document is not None else None,
+            )
+        source = read.model_dump(mode="json", exclude={"document"})
+        document_read_ = read.document
+        if document_read_ is not None and admitted(document_read_.content, document_read_.path):
+            source["path"] = document_read_.path
+            source["sha256"] = document_read_.sha256
+            blocks.append(
+                f"<!-- source {document_read_.path} sha256:{document_read_.sha256} -->\n"
+                f"{document_read_.content}"
+            )
+    if withheld:
+        record_audit(
+            session,
+            context,
+            action="mcp.okf_object_egress_quarantined",
+            resource_type="metadata_table",
+            resource_id=str(table_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "withheld_count": len(withheld),
+                "withheld_paths": withheld[:MAX_AUDITED_SECTIONS],
+                "screening_version": SCREENING_VERSION,
+            },
+        )
+    await session.commit()
+    structured = {
+        "table_id": str(table_id),
+        "items": items,
+        "source": source,
+        "egress": {"screening_version": SCREENING_VERSION, "withheld_documents": len(withheld)},
+    }
+    markdown = "\n\n".join(blocks) if blocks else "No stored knowledge document for this object."
+    return {
+        "content": [
+            {"type": "text", "text": markdown},
             {"type": "text", "text": "```json\n" + json.dumps(structured, indent=2) + "\n```"},
         ]
     }
