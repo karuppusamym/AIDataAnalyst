@@ -22,9 +22,9 @@ from dataclasses import dataclass
 from typing import cast
 
 import structlog
-from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from aida.outbound_clients import shared_redis
 from aida.security_types import SecurityContext
 from atlas.platform.config import Settings
 
@@ -73,14 +73,8 @@ async def consume_window_budget(
         )
     window = int(time.time()) // window_seconds
     key = f"aida:{namespace}:{bucket}:{key_hash}:{window}"
-    client: Redis = Redis.from_url(
-        settings.redis_url,
-        encoding="utf-8",
-        decode_responses=True,
-        socket_connect_timeout=0.25,
-        socket_timeout=0.25,
-    )
     try:
+        client = shared_redis(settings.redis_url)
         raw = await cast(
             Awaitable[list[object]],
             client.eval(_INCREMENT_WITH_EXPIRY, 1, key, str(window_seconds)),
@@ -108,8 +102,6 @@ async def consume_window_budget(
             retry_after_seconds=30 if fail_closed else 0,
             degraded=True,
         )
-    finally:
-        await client.aclose()
 
 
 def budget_headers(decision: BudgetDecision) -> dict[str, str]:

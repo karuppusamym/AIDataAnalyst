@@ -841,7 +841,7 @@ class _FakeRedis:
 def budget_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     _FakeRedis.store = {}
     monkeypatch.setattr(
-        "aida.request_budget.Redis.from_url", lambda *args, **kwargs: _FakeRedis()
+        "aida.outbound_clients.Redis.from_url", lambda *args, **kwargs: _FakeRedis()
     )
     return _FakeRedis.store
 
@@ -861,7 +861,7 @@ async def test_the_budget_is_off_by_default_and_never_touches_the_store(
     def _no_store(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a disabled budget must not reach Redis")
 
-    monkeypatch.setattr("aida.request_budget.Redis.from_url", _no_store)
+    monkeypatch.setattr("aida.outbound_clients.Redis.from_url", _no_store)
     version = await _orders_tool(scenario)
 
     for index in range(3):
@@ -926,7 +926,7 @@ async def test_an_unreachable_store_fails_closed_only_where_it_must(
     from aida.request_budget import consume_window_budget
 
     monkeypatch.setattr(
-        "aida.request_budget.Redis.from_url", lambda *args, **kwargs: _FakeRedis(fail=True)
+        "aida.outbound_clients.Redis.from_url", lambda *args, **kwargs: _FakeRedis(fail=True)
     )
     settings = SimpleNamespace(redis_url="redis://unused", environment=environment)
 
@@ -990,9 +990,9 @@ async def test_receipts_list_newest_first_and_page_by_cursor(
         ids.append(outcome["receipt"]["id"])
 
     first = (await _receipts(http, scenario, first=2))["data"]["governedExecutions"]
-    rest = (
-        await _receipts(http, scenario, first=2, after=first["pageInfo"]["endCursor"])
-    )["data"]["governedExecutions"]
+    rest = (await _receipts(http, scenario, first=2, after=first["pageInfo"]["endCursor"]))["data"][
+        "governedExecutions"
+    ]
 
     assert first["totalCount"] == 3
     assert [node["id"] for node in first["nodes"] + rest["nodes"]] == list(reversed(ids))

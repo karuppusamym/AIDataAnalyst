@@ -76,6 +76,7 @@ from aida.okf_import_api import router as okf_import_router
 from aida.ontology_api import router as ontology_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
+from aida.outbound_clients import close_outbound_clients
 from aida.parsed_lineage_review_api import router as parsed_lineage_review_router
 from aida.persona_api import router as persona_router
 from aida.playbooks_api import router as playbooks_router
@@ -403,6 +404,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         temporal_reconnect_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await temporal_reconnect_task
+    await close_outbound_clients()
     logger.info("service_stopped", service=settings.service_name)
 
 

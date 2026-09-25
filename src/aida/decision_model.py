@@ -39,6 +39,7 @@ from aida.model_gateway import (
     kill_switch_blocking_state,
 )
 from aida.models import ModelRouteConfiguration
+from aida.outbound_clients import shared_http_client
 from aida.secrets import SecretResolutionError, SecretResolver
 from aida.usage_quotas import QuotaRefused, UsageDimension, consume_quota, settle_quota
 
@@ -142,10 +143,7 @@ async def escalation_probability(
     except QuotaRefused:
         return None
     started = time.perf_counter()
-    owned = client is None
-    http = client or httpx.AsyncClient(
-        timeout=settings.decision_timeout_seconds, follow_redirects=False
-    )
+    http = client or shared_http_client(timeout=settings.decision_timeout_seconds)
     outcome: DecisionOutcome
     try:
         response = await http.post(
@@ -194,8 +192,6 @@ async def escalation_probability(
             error=type(exc).__name__,
         )
     finally:
-        if owned:
-            await http.aclose()
         await settle_quota(
             session,
             settings,

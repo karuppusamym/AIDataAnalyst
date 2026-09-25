@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings
 from aida.cost_metrics import observe_model_call, record_model_spend
 from aida.models import KillSwitchState
+from aida.outbound_clients import shared_http_client
 from aida.secrets import SecretResolutionError, SecretResolver
 from aida.usage_quotas import QuotaRefused, UsageDimension, consume_quota, settle_quota
 
@@ -126,9 +127,7 @@ def estimate_payload_tokens(payload: dict[str, Any]) -> int:
     """Estimated input tokens for a request payload, serialized exactly as
     `structured_completion` serializes it -- same `sort_keys`/`separators`, so
     the pre-flight estimate and the recorded one cannot disagree."""
-    return estimate_serialized_tokens(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    )
+    return estimate_serialized_tokens(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,22 +430,17 @@ class OpenAIResponsesProvider:
             },
         }
         base_url = _resolve_endpoint_base_url(route, self.settings, self.settings.openai_base_url)
-        owned_client = self.client is None
-        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
-        try:
-            response = await post_with_retry(
-                client=client,
-                url=f"{base_url.rstrip('/')}/responses",
-                headers={
-                    "Authorization": f"Bearer {credential}",
-                    "Content-Type": "application/json",
-                },
-                body=body,
-                attempts=self.settings.model_provider_max_attempts,
-            )
-        finally:
-            if owned_client:
-                await client.aclose()
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/responses",
+            headers={
+                "Authorization": f"Bearer {credential}",
+                "Content-Type": "application/json",
+            },
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
         for output in response.get("output", []):
             if not isinstance(output, dict):
                 continue
@@ -496,19 +490,14 @@ class GeminiGenerateContentProvider:
         }
         model_id = quote(route.model_id.removeprefix("models/"), safe="-_.")
         base_url = _resolve_endpoint_base_url(route, self.settings, self.settings.gemini_base_url)
-        owned_client = self.client is None
-        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
-        try:
-            response = await post_with_retry(
-                client=client,
-                url=f"{base_url.rstrip('/')}/models/{model_id}:generateContent",
-                headers={"x-goog-api-key": credential, "Content-Type": "application/json"},
-                body=body,
-                attempts=self.settings.model_provider_max_attempts,
-            )
-        finally:
-            if owned_client:
-                await client.aclose()
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/models/{model_id}:generateContent",
+            headers={"x-goog-api-key": credential, "Content-Type": "application/json"},
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
         try:
             text = response["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(text)
@@ -582,23 +571,18 @@ class AnthropicMessagesProvider:
         base_url = _resolve_endpoint_base_url(
             route, self.settings, self.settings.anthropic_base_url
         )
-        owned_client = self.client is None
-        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
-        try:
-            response = await post_with_retry(
-                client=client,
-                url=f"{base_url.rstrip('/')}/messages",
-                headers={
-                    "x-api-key": credential,
-                    "anthropic-version": ANTHROPIC_API_VERSION,
-                    "Content-Type": "application/json",
-                },
-                body=body,
-                attempts=self.settings.model_provider_max_attempts,
-            )
-        finally:
-            if owned_client:
-                await client.aclose()
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/messages",
+            headers={
+                "x-api-key": credential,
+                "anthropic-version": ANTHROPIC_API_VERSION,
+                "Content-Type": "application/json",
+            },
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
         if response.get("stop_reason") == "max_tokens":
             raise ModelOutputInvalid("Anthropic output was cut off at the output token cap")
         for block in response.get("content", []):
@@ -705,22 +689,17 @@ class OpenAICompatibleChatProvider:
         if self.provider_type == "OPENROUTER":
             body["provider"] = openrouter_provider_preferences(route, self.settings)
             body["usage"] = {"include": True}
-        owned_client = self.client is None
-        client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
-        try:
-            response = await post_with_retry(
-                client=client,
-                url=f"{base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {credential}",
-                    "Content-Type": "application/json",
-                },
-                body=body,
-                attempts=self.settings.model_provider_max_attempts,
-            )
-        finally:
-            if owned_client:
-                await client.aclose()
+        client = self.client or shared_http_client(timeout=self.settings.model_timeout_seconds)
+        response = await post_with_retry(
+            client=client,
+            url=f"{base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {credential}",
+                "Content-Type": "application/json",
+            },
+            body=body,
+            attempts=self.settings.model_provider_max_attempts,
+        )
         try:
             choice = response["choices"][0]
             message = choice["message"]
@@ -934,9 +913,7 @@ class ProviderNeutralModelGateway:
         if not self.settings.model_generation_enabled or not allowed_routes:
             raise ModelRouteNotApproved("no policy-approved model route is configured")
         if route is None or route.route_key not in allowed_routes:
-            raise ModelRouteNotApproved(
-                "selected model route is not approved for this deployment"
-            )
+            raise ModelRouteNotApproved("selected model route is not approved for this deployment")
         provider = self.providers.get(route.provider_type)
         if provider is None:
             raise ModelRouteNotApproved("approved model route has no registered provider adapter")
@@ -1000,9 +977,7 @@ class ProviderNeutralModelGateway:
             if isinstance(failure, TimeoutError):
                 raise ModelGatewayError("model route timed out") from failure
             if isinstance(failure, ValidationError):
-                raise ModelOutputInvalid(
-                    "model output failed its structured contract"
-                ) from failure
+                raise ModelOutputInvalid("model output failed its structured contract") from failure
             raise
         serialized_output = json.dumps(output.model_dump(mode="json"), sort_keys=True)
         usage = completion.usage
@@ -1020,9 +995,7 @@ class ProviderNeutralModelGateway:
             estimated_output_tokens=estimate_serialized_tokens(serialized_output),
             provider_input_tokens=usage.input_tokens if usage is not None else None,
             provider_output_tokens=usage.output_tokens if usage is not None else None,
-            provider_cached_input_tokens=(
-                usage.cached_input_tokens if usage is not None else None
-            ),
+            provider_cached_input_tokens=(usage.cached_input_tokens if usage is not None else None),
             provider_reported_cost_usd=usage.reported_cost_usd if usage is not None else None,
         )
         # R11-FP17: one place, so every caller of this gateway is counted once and
