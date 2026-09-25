@@ -94,3 +94,17 @@
 .agdiag__status{font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
 .agdiag__detail{margin:0;font-size:12.5px;color:var(--ink-2);line-height:1.55}
 .agcopy__fail{margin:0 0 6px;font-size:12px;color:var(--bad)}
+/* R11-MP10: upstream MCP servers. */
+.agupstream{display:flex;flex-direction:column;gap:16px}
+.agupstream__servers,.agupstream__tools{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.agupstream__server{border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.agupstream__serverhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.agupstream__servername{font-weight:600;color:var(--ink)}
+.agupstream__url{font-size:12px;color:var(--ink-2);overflow-wrap:anywhere}
+.agupstream__actions{display:flex;gap:8px;flex-wrap:wrap}
+.agupstream__tool{display:grid;grid-template-columns:auto auto 1fr;gap:4px 8px;align-items:center;font-size:12.5px}
+.agupstream__toolname{font-family:var(--mono, monospace);color:var(--ink)}
+.agupstream__tooldesc{grid-column:1 / -1;color:var(--ink-2);line-height:1.45}
+.agupstream__muted{color:var(--ink-3);font-size:12px;margin:0}
+.agupstream__err{color:var(--bad);font-size:12.5px;margin:0}
+.agupstream__notice{font-size:12.5px;margin:0 0 8px;color:var(--ink)}

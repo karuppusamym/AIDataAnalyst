@@ -25,6 +25,7 @@ import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import { ConnectTab } from "./AgentGatewayConnect";
+import { UpstreamTab } from "./AgentGatewayUpstream";
 import {
   ChangedSincePublishedPill,
   MeaningMovedPill,
@@ -60,13 +61,15 @@ import "./AgentGatewayScreen.css";
    from read endpoints the caller is already entitled to.
 --------------------------------------------------------------------------- */
 
-type TabId = "connect" | "exposure" | "register" | "consumption";
+type TabId = "connect" | "exposure" | "register" | "consumption" | "upstream";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "connect", label: "Connect" },
   { id: "exposure", label: "What agents see" },
   { id: "register", label: "Register" },
   { id: "consumption", label: "Consumption" },
+  // R11-MP10: the other direction -- upstream servers Atlas reads tool lists from.
+  { id: "upstream", label: "Upstream servers" },
 ];
 
 const AUTONOMY_TIERS = ["T0", "T1", "T2", "T3"] as const;
@@ -723,6 +726,7 @@ export function AgentGatewayScreen() {
           onConsumerFilterChange={setConsumerFilter}
         />
       ) : null}
+      {tab === "upstream" ? <UpstreamTab organizationId={ORG} /> : null}
     </div>
   );
 }
