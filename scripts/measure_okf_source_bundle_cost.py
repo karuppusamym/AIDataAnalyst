@@ -6,11 +6,12 @@ anyone opens an object no product holds and no stored bundle exists (`read_objec
 knowledge`). This measures that first open, and the second (served from the store), on a
 synthetic estate of N tables with C columns each, against the database `--database-url` names.
 
-Point it at a throwaway server -- it creates the schema with `create_all` and fills it:
+Point it at a throwaway database -- it creates the schema with `create_all` and fills it
+from the OKF test estate, which leans on SQLite not enforcing foreign keys, so use SQLite:
 
-    AIDA_ENVIRONMENT=development .venv/Scripts/python.exe scripts/measure_okf_source_bundle_cost.py \
-        --database-url postgresql+asyncpg://aida:aida-local-only@localhost:55433/aida \
-        --tables 200 1000 5000 --columns 12
+    AIDA_ENVIRONMENT=development .venv/Scripts/python.exe \
+        scripts/measure_okf_source_bundle_cost.py \
+        --database-url sqlite+aiosqlite:///okf-cost.db --tables 200 1000 2000 --columns 12
 
 Nothing here calls a model or a source database. Each size runs in a fresh organization.
 """
@@ -38,7 +39,9 @@ from aida.okf_store import read_object_source_knowledge  # noqa: E402
 from tests.test_okf_export import _context, _estate  # noqa: E402
 
 
-async def _grow(session: AsyncSession, estate: dict[str, object], tables: int, columns: int) -> None:
+async def _grow(
+    session: AsyncSession, estate: dict[str, object], tables: int, columns: int
+) -> None:
     datasource, _catalog, schema = estate["datasources"]["people"]  # type: ignore[index]
     org_id = estate["organization"].id  # type: ignore[attr-defined]
     batch_tables: list[MetadataTable] = []
