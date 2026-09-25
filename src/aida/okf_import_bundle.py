@@ -197,7 +197,6 @@ CLAIM_NOT_AUTHORITY: Final = "CLAIM_NOT_AUTHORITY"
 SCHEMA_ROW_UNMATCHED: Final = "SCHEMA_ROW_UNMATCHED"
 SCHEMA_ROW_MALFORMED: Final = "SCHEMA_ROW_MALFORMED"
 SCHEMA_ROW_DUPLICATE: Final = "SCHEMA_ROW_DUPLICATE"
-REMOVAL_NOT_SUPPORTED: Final = "REMOVAL_NOT_SUPPORTED"
 BLANK_IS_NOT_A_DELETION: Final = "BLANK_IS_NOT_A_DELETION"
 BASE_TEXT_WITHHELD: Final = "BASE_TEXT_WITHHELD"
 OS_METADATA_IGNORED: Final = "OS_METADATA_IGNORED"
@@ -821,8 +820,12 @@ class OkfImportEdit:
     #: version a proposal expects to replace: a different current version is a conflict.
     base_text: str | None = None
     base_version: int | None = None
-    #: Aliases added to a concept; the edit never removes one.
+    #: Aliases added to a concept.
     added_aliases: tuple[str, ...] = ()
+    #: R11-OKF03, decided 2026-09-25: aliases the editor struck from a list that still has
+    #: entries, spelled as Atlas holds them. They become a removal in the same pending ontology
+    #: version a reviewer approves; an emptied list is blank and removes nothing.
+    removed_aliases: tuple[str, ...] = ()
     #: A routine's captured-definition version as the export showed it (`None`: none captured).
     #: Read from Atlas's stored snapshot, never from the upload, so an editor cannot vouch for
     #: a body they never saw by rewriting a frontmatter number.
@@ -1231,15 +1234,19 @@ def _concept_edits(
                 item.casefold() for item in added
             }:
                 added.append(alias)
-        removed = base_aliases - {alias.casefold() for alias in upload_aliases}
-        if removed:
-            document.note(
-                OUTCOME_UNSUPPORTED,
-                REMOVAL_NOT_SUPPORTED,
-                "# Also called",
-                f"{len(removed)} alias(es) removed; retire an alias through ontology authoring",
-            )
-        if added:
+        kept = {alias.casefold() for alias in upload_aliases}
+        removed: tuple[str, ...] = ()
+        if base_aliases - kept:
+            if not upload_aliases:
+                # Every item struck: the list is blank, and blank never means delete.
+                document.note(OUTCOME_IGNORED, BLANK_IS_NOT_A_DELETION, "# Also called")
+            else:
+                removed = tuple(
+                    alias
+                    for alias in concept.aliases
+                    if _collapsed(alias).casefold() not in kept
+                )
+        if added or removed:
             document.edits.append(
                 OkfImportEdit(
                     path=document.path,
@@ -1248,6 +1255,7 @@ def _concept_edits(
                     field="aliases",
                     proposed="\n".join(added),
                     added_aliases=tuple(added),
+                    removed_aliases=removed,
                     base_version=concept.ontology_version,
                 )
             )

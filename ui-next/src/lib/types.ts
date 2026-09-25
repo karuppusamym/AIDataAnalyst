@@ -3815,6 +3815,7 @@ export interface OkfImportItemRead {
   current_value?: string | null;
   proposed_value?: string | null;
   added_aliases: string[];
+  removed_aliases?: string[];
   detail?: string | null;
 }
 

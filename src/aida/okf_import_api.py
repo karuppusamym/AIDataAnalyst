@@ -33,6 +33,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
@@ -106,6 +107,8 @@ class OkfImportItemRead(ApiModel):
     current_value: str | None = None
     proposed_value: str | None = None
     added_aliases: list[str]
+    #: R11-OKF03: aliases the edit strikes, as Atlas holds them.
+    removed_aliases: list[str] = Field(default_factory=list)
     detail: str | None = None
 
 
@@ -291,6 +294,7 @@ def _preview_read(preview: OkfImportPreview) -> OkfImportPreviewRead:
                 current_value=item.current_value,
                 proposed_value=item.proposed_value,
                 added_aliases=list(item.added_aliases),
+                removed_aliases=list(item.removed_aliases),
                 detail=item.detail,
             )
             for item in preview.items

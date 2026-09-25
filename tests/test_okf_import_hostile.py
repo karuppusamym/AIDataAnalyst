@@ -89,7 +89,6 @@ from aida.okf_import_bundle import (
     PATH_ABSOLUTE,
     PATH_TRAVERSAL,
     PATH_UNSAFE,
-    REMOVAL_NOT_SUPPORTED,
     SCHEMA_ROW_UNMATCHED,
     SECTION_DERIVED,
     SECTION_UNKNOWN,
@@ -526,9 +525,7 @@ def test_executable_fields_refuse_the_document_and_run_nothing(
 
 def test_an_attested_computation_at_a_new_path_is_refused() -> None:
     new = "tools/tool-version-" + "0" * 32 + ".md"
-    analysis = _analyze(
-        {new: "---\ntype: Attested Computation\nexecutor: python\n---\n\n# Run\n"}
-    )
+    analysis = _analyze({new: "---\ntype: Attested Computation\nexecutor: python\n---\n\n# Run\n"})
     assert _document_refusals(analysis)[new] == EXECUTABLE_FIELD_REFUSED
 
 
@@ -544,8 +541,10 @@ def test_a_changed_identity_refuses_the_document(old: str, new: str) -> None:
     _snapshot_value, _bundle, texts = _base()
     table = _path(texts, "/tables/")
     assert old in texts[table]
-    edited = texts[table].replace(old, new, 1).replace(
-        "One row per completed order.[^approved-description]", "Something else."
+    edited = (
+        texts[table]
+        .replace(old, new, 1)
+        .replace("One row per completed order.[^approved-description]", "Something else.")
     )
     analysis = _analyze({table: edited})
     assert _document_refusals(analysis)[table] == IDENTITY_MISMATCH
@@ -751,7 +750,9 @@ def test_unsupported_and_derived_changes_are_listed_not_dropped() -> None:
     assert analysis.edits == ()
 
 
-def test_a_schema_row_nobody_exported_and_a_removed_alias_are_listed() -> None:
+def test_a_schema_row_nobody_exported_is_listed_and_a_struck_alias_is_proposed() -> None:
+    """R11-OKF03, decided 2026-09-25: striking an alias from a list that keeps entries is a
+    removal proposed for review; the unmatched schema row is still only listed."""
     snapshot, _bundle, _texts = _base()
     concept = replace(snapshot.concepts[0], aliases=("deal", "purchase"))
     snapshot = replace(snapshot, concepts=(concept,))
@@ -775,7 +776,28 @@ def test_a_schema_row_nobody_exported_and_a_removed_alias_are_listed() -> None:
         read_import_archive(_zip(members)), snapshot=snapshot, base_documents=texts
     )
     codes = _codes(analysis)
-    assert SCHEMA_ROW_UNMATCHED in codes and REMOVAL_NOT_SUPPORTED in codes
+    assert SCHEMA_ROW_UNMATCHED in codes
+    [edit] = analysis.edits
+    assert edit.kind == EDIT_CONCEPT_ALIASES
+    assert edit.removed_aliases == ("purchase",) and edit.added_aliases == ()
+
+
+def test_an_emptied_alias_list_is_blank_and_removes_nothing() -> None:
+    snapshot, _bundle, _texts = _base()
+    concept = replace(snapshot.concepts[0], aliases=("deal", "purchase"))
+    snapshot = replace(snapshot, concepts=(concept,))
+    bundle = export_okf_bundle(snapshot)
+    texts = {document.path: document.text for document in bundle.documents}
+    concept_path = _path(texts, "concepts/concept-")
+    edited = {concept_path: texts[concept_path].replace("* deal\n", "").replace("* purchase\n", "")}
+    members: list[tuple[str | zipfile.ZipInfo, bytes]] = [
+        (f"bundle/{path}", text.encode()) for path, text in {**texts, **edited}.items()
+    ]
+    members.append((MANIFEST_FILENAME, bundle.manifest_json().encode()))
+    analysis = analyze_bundle_edits(
+        read_import_archive(_zip(members)), snapshot=snapshot, base_documents=texts
+    )
+    assert BLANK_IS_NOT_A_DELETION in _codes(analysis)
     assert analysis.edits == ()
 
 
@@ -804,7 +826,6 @@ def test_an_edit_to_withheld_text_is_not_proposed() -> None:
     )
     assert BASE_TEXT_WITHHELD in _codes(analysis)
     assert analysis.edits == ()
-
 
 
 def _routine_analysis(
@@ -894,6 +915,7 @@ def test_a_routine_without_approved_text_or_with_withheld_text() -> None:
 
     analysis, _path, _texts = _routine_analysis(snapshot, blind)
     assert analysis.edits == () and BASE_TEXT_WITHHELD in _codes(analysis)
+
 
 def test_a_document_without_frontmatter_is_refused() -> None:
     _snapshot_value, _bundle, texts = _base()

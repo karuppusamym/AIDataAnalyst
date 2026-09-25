@@ -240,6 +240,7 @@ class OkfImportItem:
     current_value: str | None = None
     proposed_value: str | None = None
     added_aliases: tuple[str, ...] = ()
+    removed_aliases: tuple[str, ...] = ()
     detail: str | None = None
 
 
@@ -708,6 +709,7 @@ async def _meaning_items(
             outcome=OUTCOME_UNSUPPORTED,
             expected_version=edit.base_version,
             added_aliases=edit.added_aliases,
+            removed_aliases=edit.removed_aliases,
         )
         facts = concepts.get(edit.subject_key)
         if facts is None:
@@ -782,6 +784,10 @@ async def _meaning_items(
         else:
             present = {alias.casefold() for alias in concept.aliases}
             added = [alias for alias in edit.added_aliases if alias.casefold() not in present]
+            # R11-OKF03: only an alias the concept still holds can be removed; one already
+            # gone is simply not there, and the removal of it is no change.
+            striking = {alias.casefold() for alias in edit.removed_aliases}
+            removed = [alias for alias in concept.aliases if alias.casefold() in striking]
             item = _with(
                 item,
                 current_value="\n".join(
@@ -790,9 +796,17 @@ async def _meaning_items(
                 or None,
                 proposed_value="\n".join(added) or None,
                 added_aliases=tuple(added),
+                removed_aliases=tuple(removed),
             )
-            already = not added
-            updated = concept.model_copy(update={"aliases": [*concept.aliases, *added]})
+            already = not added and not removed
+            updated = concept.model_copy(
+                update={
+                    "aliases": [
+                        *(a for a in concept.aliases if a.casefold() not in striking),
+                        *added,
+                    ]
+                }
+            )
         if ontology.head.published_version != facts.ontology_version:
             items.append(
                 _with(item, outcome=OUTCOME_CONFLICT, reason_code=SOURCE_CHANGED_SINCE_EXPORT)
@@ -1108,6 +1122,7 @@ def _preview_digest(
                 item.expected_version,
                 item.current_version,
                 hashlib.sha256((item.proposed_value or "").encode("utf-8")).hexdigest(),
+                sorted(alias.casefold() for alias in item.removed_aliases),
             ]
             for item in items
         ],

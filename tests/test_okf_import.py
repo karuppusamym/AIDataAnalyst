@@ -803,3 +803,49 @@ def test_the_round_trip_contract_document_matches_the_code() -> None:
         "SKIPPED_MISSING",
     }
     assert sorted(codes_in_tables - allowed) == []
+
+
+async def test_a_struck_alias_is_proposed_as_a_removal_in_the_pending_ontology_version(
+    session: AsyncSession, settings: Settings
+) -> None:
+    """R11-OKF03, decided 2026-09-25: an alias struck from a list that keeps entries is a
+    removal a reviewer approves in the new pending ontology version -- never applied by the
+    import itself, and the approved meaning is untouched until then."""
+    estate = await _estate(session)
+    version, ontology = await _meaningful_product(session, estate)
+    definition = dict(ontology.definition)
+    concepts = [dict(concept) for concept in definition["concepts"]]
+    concepts[0]["aliases"] = ["closed deal", "won deal"]
+    definition["concepts"] = concepts
+    ontology.definition = definition
+    await session.flush()
+    exported = await _export(session, settings, version)
+    paths = _paths(estate, exported)
+    texts = {document.path: document.text for document in exported.documents}
+    upload = _edited(
+        exported, {paths["concept"]: _rewrite(texts[paths["concept"]], ("* won deal\n", ""))}
+    )
+    importer = _context(estate["organization"].id)
+
+    preview = await preview_okf_bundle_import(
+        version.id, _request(upload), context=importer, session=session, settings=settings
+    )
+    [item] = [item for item in preview.items if item.outcome == OUTCOME_PROPOSE]
+    assert (item.family, item.field) == (FAMILY_ONTOLOGY_MEANING, "aliases")
+    assert item.removed_aliases == ["won deal"] and item.added_aliases == []
+
+    applied = await apply_okf_bundle_import(
+        version.id,
+        _request(upload),
+        preview_digest=preview.preview_digest,
+        context=importer,
+        session=session,
+        settings=settings,
+    )
+    [meaning_ref] = applied.meaning_versions
+    meaning = await session.get(OntologyVersion, meaning_ref.ontology_version_id)
+    assert meaning is not None and meaning.status == "PENDING_APPROVAL"
+    assert meaning.definition["concepts"][0]["aliases"] == ["closed deal"]
+    # The approved version still holds both until a reviewer decides.
+    await session.refresh(ontology)
+    assert ontology.definition["concepts"][0]["aliases"] == ["closed deal", "won deal"]

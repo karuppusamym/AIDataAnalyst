@@ -71,7 +71,7 @@ Only an archive Atlas exported is imported, because the manifest is what names i
 | `Atlas Table`, `Atlas View`, `Atlas Materialized View` | `# Schema`, Description column | `COLUMN_DESCRIPTION` | a `business_description` change in a pending batch |
 | `Atlas Column Set` | `# Schema`, Description column | `COLUMN_DESCRIPTION` | a `business_description` change in a pending batch |
 | `Atlas Business Concept` | `# Definition` | `ONTOLOGY_MEANING` | the concept's description in a new pending ontology version |
-| `Atlas Business Concept` | `# Also called`, items added | `ONTOLOGY_MEANING` | the added aliases in a new pending ontology version |
+| `Atlas Business Concept` | `# Also called`, items added, or items struck from a list that keeps at least one | `ONTOLOGY_MEANING` | the added aliases, and the struck ones removed, in a new pending ontology version |
 | `Atlas Routine` | `# Purpose` | `ROUTINE_DESCRIPTION` | a routine description draft pending review |
 
 Asset documentation and column descriptions go to the description family's own batch store:
@@ -198,9 +198,8 @@ forbids. They survive only in the editor's own copy of the file.
 |---|---|
 | `Atlas Routine Package` and `Atlas Tool Version` documents (why, below) | `FAMILY_NOT_SUPPORTED` |
 | A document at a path the source publication never held (import creates no object or concept) | `DOCUMENT_NOT_IN_SOURCE_BUNDLE` |
-| A blank description, definition or section: blank never means delete | `BLANK_IS_NOT_A_DELETION` |
+| A blank description, definition or section, or an alias list with every item struck: blank never means delete | `BLANK_IS_NOT_A_DELETION` |
 | A removed key, section or alias list (absence never deletes) | `FIELD_REMOVAL_IGNORED` |
-| An alias removed from a list that still exists (retire aliases through ontology authoring) | `REMOVAL_NOT_SUPPORTED` |
 | An edit to text export screening withheld: nobody can show it was made against what they read | `BASE_TEXT_WITHHELD` |
 | A schema row naming no exported column, a malformed row, or one column twice | `SCHEMA_ROW_UNMATCHED`, `SCHEMA_ROW_MALFORMED`, `SCHEMA_ROW_DUPLICATE` |
 | A document whose sections cannot be matched to what the renderer wrote | `DOCUMENT_STRUCTURE_AMBIGUOUS` |

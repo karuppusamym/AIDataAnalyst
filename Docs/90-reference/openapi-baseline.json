@@ -22894,6 +22894,13 @@
             ],
             "title": "Reason Code"
           },
+          "removed_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed Aliases",
+            "type": "array"
+          },
           "target_id": {
             "anyOf": [
               {
